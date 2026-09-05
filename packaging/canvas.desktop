@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Nova Canvas Studio
+GenericName=Video Editor
+Comment=Nonlinear video editor
+Exec=canvas %F
+Icon=canvas
+Terminal=false
+Categories=AudioVideo;AudioVideoEditing;
+Keywords=video;editor;nonlinear;timeline;ffmpeg;nle;
+StartupNotify=true
+StartupWMClass=canvas
