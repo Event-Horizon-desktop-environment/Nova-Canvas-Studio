@@ -154,10 +154,9 @@ void ViewerGL::set_frame(canvas::core::RenderFramePtr frame) {
                  << "progress=" << frame->progress
                  << "ctx_valid=" << (QOpenGLContext::currentContext() != nullptr);
 
-    // Always-on viewer diagnostic (qWarning so the default handler keeps it).
-    // Reports what the scrubbing preview is doing: the frame's pixel size vs the
-    // widget size, which display path (RGBA vs GPU NV12), and whether a small
-    // preview frame needs the software upscale to fill the media window.
+    // Always-on viewer diagnostic (qWarning so the default handler keeps it):
+    // frame pixel size vs widget size, which display path (RGBA vs GPU NV12),
+    // and whether a small preview frame needs the software upscale.
     static int64_t viewer_log_ = 0;
     if ((viewer_log_++ % 16) == 0) {
         const int fw = (frame->a ? frame->a->width
@@ -216,14 +215,14 @@ void ViewerGL::initializeGL() {
     uni_aspect_ = program_->uniformLocation("u_aspect");
 
     // NV12 (GPU composite fast path) needs its own program: two samplers (Y +
-    // interleaved CbCr) instead of a single RGBA texture.
+    // interleaved CbCr) instead of one RGBA texture.
     program_nv12_ = std::make_unique<QOpenGLShaderProgram>();
     program_nv12_->addShaderFromSourceCode(QOpenGLShader::Vertex, kVertexSrc);
     program_nv12_->addShaderFromSourceCode(QOpenGLShader::Fragment, kFragNv12Src);
     program_nv12_->link();
 
     // Unit quad covering NDC in [-1,1]; aspect/letterboxing is handled by
-    // adjusting the quad positions each frame based on the texture aspect.
+    // adjusting the quad positions each frame from the texture aspect.
     static const float kQuad[] = {
         // x     y     u     v
         -1.f, -1.f, 0.f, 1.f,
@@ -235,8 +234,8 @@ void ViewerGL::initializeGL() {
     vbo_.bind();
     vbo_.allocate(kQuad, sizeof(kQuad));
 
-    // Attribute setup is identical for both programs (same vertex layout), and
-    // VAO state is shared; we just bind the appropriate program on draw.
+    // Attribute layout is identical for both programs (same vertex layout and
+    // shared VAO); we just bind the appropriate program on draw.
     vao_.create();
     vao_.bind();
     program_->enableAttributeArray(attr_pos_);
@@ -284,10 +283,10 @@ void ViewerGL::upload_frame() {
         const int w = n->width;
         const int h = n->height;
 
-        // Small previews (scrub) don't magnify reliably in GL on some drivers,
-        // so when the NV12 plane is smaller than the player, convert to CPU RGBA
-        // and fall through to the RGBA+software-upscale path below. Full-res
-        // playback keeps the fast NV12 texture path.
+        // Small previews (scrub) don't magnify reliably in GL on some drivers, so
+        // when the NV12 plane is smaller than the player, convert to CPU RGBA
+        // and fall through to the RGBA path below. Full-res playback keeps the
+        // fast NV12 texture path.
         if (w > 0 && h > 0 && (w < width() || h < height())) {
             static int64_t nv12cvt_log_ = 0;
             if ((nv12cvt_log_++ % 16) == 0)
@@ -342,8 +341,8 @@ void ViewerGL::upload_frame() {
             tex_w_ = w;
             tex_h_ = h;
         }
-        // Pitch: y_pitch is the tightly-packed stride; GL texture rows are
-        // tightly packed, so upload row by row only if pitch differs.
+        // y_pitch is the tightly-packed stride; GL texture rows are also tightly
+        // packed, so upload row by row only if the pitch differs.
         const int y_pitch = static_cast<int>(n->y_pitch);
         const int uv_pitch = static_cast<int>(n->uv_pitch);
         if (y_pitch == w && uv_pitch == w) {
@@ -388,10 +387,10 @@ void ViewerGL::upload_frame() {
         QImage upscaled;
 
         // The scrub-preview texture is decoded small (640px) for speed; if the
-        // player widget is larger, upscale the pixel data here in software so the
-        // frame fills the media window even on drivers whose GL texture
-        // magnification misbehaves. Aspect is preserved; the letterbox quad in
-        // paintGL then leaves, at most, thin symmetrical black bars.
+        // player widget is larger, upscale in software so the frame fills the
+        // media window even on drivers whose GL magnification misbehaves.
+        // Aspect is preserved; the letterbox quad in paintGL then leaves at
+        // most thin symmetrical black bars.
         const int vw = std::max(1, width());
         const int vh = std::max(1, height());
         if (w > 0 && h > 0 && (vw > w || vh > h) &&
@@ -462,9 +461,8 @@ void ViewerGL::upload_frame() {
 void ViewerGL::paintGL() {
     // Ensure the GL viewport tracks the widget's current logical size. Qt
     // normally calls resizeGL() on widget resize, but on some platforms the
-    // buffer can lag behind the widget (especially when frames are pushed in
-    // rapid succession from a scrub) and content would render into a small
-    // top-left box. Re-asserting the viewport here is idempotent and cheap.
+    // buffer can lag behind (especially with rapid scrub updates) and content
+    // would render into a small top-left box. Re-asserting here is idempotent.
     glViewport(0, 0, std::max(1, width()), std::max(1, height()));
 
     const QColor bg(10, 10, 12);
@@ -478,7 +476,7 @@ void ViewerGL::paintGL() {
 
     const bool has_frame_texture = texture_valid_ || nv12_valid_;
     if (!has_frame_texture) {
-        // Upload a pending frame here, on the context thread, so the first
+        // Upload a pending frame here, on the context thread, so the very first
         // frame also shows without prior GL calls from outside paintGL.
         if (texture_dirty_) upload_frame();
         if (!(texture_valid_ || nv12_valid_)) {
@@ -489,21 +487,19 @@ void ViewerGL::paintGL() {
         upload_frame();
     }
 
-    // Letterbox into the viewport keeping aspect ratio.
-    // Log the exact projected draw-size so we can see the real fill of the
-    // media window: qw/qh cover the widget area (1.0 = full row/col). Always-on
-    // (qWarning) so a default session captures it; throttled to ~1 line/sec.
+    // Letterbox into the viewport keeping the aspect ratio. Log the exact
+    // projected draw-size (1.0 = full media window) so a default session
+    // captures the real fill; always-on (qWarning), throttled to ~1 line/sec.
     const float vw = static_cast<float>(width());
     const float vh = static_cast<float>(height());
     const float aspect = tex_h_ > 0 ? static_cast<float>(tex_w_) / tex_h_ : 1.0f;
     const float va = vw / vh;
 
-    // Letterbox into the viewport. Fit (default) shows the whole frame with
-    // letterbox bars on the odd axis; Fill covers the window edge-to-edge by
-    // cropping the overflow axis. Both preserve pixel aspect (qw/qh = aspect/va)
-    // and scale the quad as a whole, so neither distorts the picture:
+    // Letterbox: Fit (default) shows the whole frame with bars on the odd axis;
+    // Fill covers the window edge-to-edge by cropping the overflow axis. Both
+    // preserve pixel aspect (qw/qh scale the quad as a whole):
     //   Fit : qw,qh <= 1  (quad inside screen)
-    //   Fill: qw,qh >= 1  (quad covers screen, texture cropped at the screen edge)
+    //   Fill: qw,qh >= 1  (quad covers screen, texture cropped at the edge)
     const float qw = (scale_mode_ == ScaleMode::Fill)
                          ? std::max(aspect / va, 1.0f)
                          : std::min(aspect / va, 1.0f);
@@ -523,12 +519,10 @@ void ViewerGL::paintGL() {
                        << "path=" << (nv12_valid_ ? "nv12" : "rgba");
     }
 
-    // NV12 GPU fast path: two samplers, pure YUV->RGB (no transitions on this
-    // path — those fall back to RGBA).
-    // A single-clip edge fade (fade-in-from-black at the clip's head, or
-    // fade-out-to-black at its tail when there is no incoming clip) blends the
-    // A texture against black via u_mode/u_progress. It must use the RGBA path
-    // (the GPU NV12 fast path cannot apply the fade) and needs no B texture.
+    // Single-clip edge fade (fade-in-from-black at the clip's head, or
+    // fade-out-to-black at its tail) blends the A texture against black via
+    // u_mode/u_progress. It must use the RGBA path (the NV12 fast path can't
+    // apply the fade) and needs no B texture.
     const bool single_fade = frame_ && (frame_->fade_from_black || frame_->fade_to_black);
 
     const bool use_nv12 = !single_fade && nv12_valid_ && frame_ && frame_->nv12;
@@ -546,10 +540,8 @@ void ViewerGL::paintGL() {
         program_->setUniformValue("u_tex", 0);
 
         if (single_fade) {
-            // Fade the A texture against black. Bind A to both slots so the
-            // shader's texture() for B is valid even though it is unused by the
-            // fade modes. MODE_FADEIN_A ramps A in (a*t); MODE_FADEOUT ramps A
-            // out (a*(1-t)).
+            // Fade the A texture against black. Bind A to both slots so the shader's B
+            // texture() is valid even though the fade modes don't use it.
             texture_->bind(1);
             program_->setUniformValue("u_tex_b", 1);
             const int fade_mode = frame_->fade_from_black ? 9 /*MODE_FADEIN_A*/
@@ -569,7 +561,7 @@ void ViewerGL::paintGL() {
     }
 
     // Scale the unit quad's X/Y by the letterbox factor by re-buffering the
-    // quad positions (UVs unchanged). GPU scales the texture during raster.
+    // quad positions (UVs unchanged); the GPU scales during raster.
     static const std::array<float, 16> s_src = {
         -1.f, -1.f, 0.f, 1.f,
          1.f, -1.f, 1.f, 1.f,

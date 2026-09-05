@@ -17,7 +17,7 @@ void MainWindow::build_ui() {
     // bottom). Everything below populates those widgets with app chrome.
     ui = new Ui::MainWindow;
     // Claim the four corners BEFORE setupUi so the .ui's addDockWidget calls
-    // lay the docks out as a DaVinci-style column: the media pool owns the full
+    // lay the docks out the proven way: the media pool owns the full
     // left edge (extending all the way down to the page foundation bar) and the
     // timeline docks into the bottom-center — starting at the media pool's right
     // edge — instead of spanning underneath it.

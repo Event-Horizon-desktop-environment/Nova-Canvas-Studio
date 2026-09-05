@@ -12,7 +12,7 @@
 namespace canvas::gui {
 
 void build_app_menus(MainWindow& mw) {
-    // 1. MENU BAR — full Resolve-style row (File/Edit/Trim/Timeline/Clip/
+    // 1. MENU BAR — the full editor-standard row (File/Edit/Trim/Timeline/Clip/
     //    Mark/View/Playback/Fusion/Color/Fairlight/Workspace/Help). Only
     //    File/Edit/Playback/View/Timeline/Mark are wired for v1; the rest
     //    are present with stub items so the chrome matches the reference.

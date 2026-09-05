@@ -15,8 +15,8 @@ void TimelineDecoder::add_media(const canvas::core::MediaEntry& entry) {
     std::string error;
     if (slot->decoder.open(entry.path, &error, hw_.device_ctx())) slot->loaded = true;
     // Always-on stream census: how many streams the container holds, which one
-    // the decoder picked for playback, and every video stream present (so a file
-    // with TWO video streams is visible in the log instead of silently ignored).
+    // the decoder picked, and every video stream present (so two video streams
+    // show up instead of silently being ignored).
     if (slot->loaded) {
         ::canvas::core::log::log_warning(
             "[media] open id=%d hw=%s %s path=%s", entry.id,
@@ -90,10 +90,8 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
     // Fast low-res preview path with its own LRU so a reduced frame never
     // displaces (or is returned as) a full-res playback frame.
     if (max_dim > 0) {
-        // Build the keyframe index once, lazily, so random scrub seeks jump
-        // straight to the owning I-frame instead of doing a per-seek container
-        // search. The walk happens on first scrub of this media and is a single
-        // packet pass; subsequent scrubs reuse the indexed seeks.
+        // Build the I-frame index lazily so random scrub seeks jump straight to
+        // the owning keyframe instead of searching the container per seek.
         if (!slot->decoder.has_iframe_index()) slot->decoder.build_iframe_index();
         const PreviewKey key{clip.media, src_frame};
         auto cit = preview_cache_.find(key);
@@ -133,12 +131,12 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
     auto frame = slot->cache.get(src_frame);
     if (!frame) {
         frame = slot->decoder.decode_to_frame(src_frame);
-        // The decoder labels a frame with its *decoded* PTS-derived number,
-        // which can differ from the requested target (a forward-walk holding the
-        // first frame at/after the target, or PTS/rate skew). Cache only when the
-        // numbers agree: keying the LRU by a wrong number aliases the frame (the
-        // playhead would later receive frame N when src_frame M was asked for).
-        // Missed caching is harmless — the next request just re-decodes.
+        // The decoder labels a frame with its *decoded* PTS-derived number, which can
+        // differ from the requested target (a forward-walk holding the first frame
+        // at/after the target, or PTS/rate skew). Cache only when the numbers
+        // agree: keying the LRU by a wrong number aliases the frame (the playhead
+        // would later get frame N when src_frame M was asked for). A miss just
+        // re-decodes.
         if (frame && frame->frame_number == src_frame) slot->cache.put(frame);
     }
     return frame;
@@ -182,36 +180,34 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
     auto it = slots_.find(clip.media);
     if (it == slots_.end() || !it->second->loaded) return nullptr;
     auto* slot = it->second.get();
-    // decode_to_hw serves only the CUDA device; the composite kernel consumes
-    // CUDA device pointers, so gate on hardware decode + a CUDA device.
+    // decode_to_hw serves only the CUDA device and the composite kernel consumes
+    // CUDA device pointers, so require hardware decode + a CUDA device.
     if (!slot->decoder.is_hardware() || hw_.device_name() != "cuda") return nullptr;
 
     const int64_t src_frame = clip.src_in + (seq_frame - clip.tl_in);
-    // Two distinct GPU decode strategies, chosen by path:
+    // Two GPU decode strategies, chosen by path:
     //
     //  Prepared playback (max_dim == 0): sequential-forward when the target is
-    //  at-or-ahead of the decoder, so steady-state frames decode cheaply without
-    //  a per-frame container seek + codec flush. Random/backward access falls
-    //  back to the keyframe-anchored indexed seek (one GOP).
+    //  at-or-ahead of the decoder, so steady frames decode cheaply with no
+    //  per-frame container seek + codec flush. Random/backward access falls back
+    //  to the keyframe-anchored indexed seek (one GOP).
     //
-    //  Scrub preview (max_dim > 0): ALWAYS keyframe-anchored. The caps make the
-    //  sparse-GOP walk cheap and exact-feeling (measured ~17ms), and anchoring
-    //  keeps every scrub move (forward or backward) landing on a real frame near
-    //  the requested target. Never blends sequential mode into a preview-drag:
-    //  a capped sequential walk parks the decoder far behind the playhead and
-    //  leaves the preview pointing at the wrong (stale) picture.
+    //  Scrub preview (max_dim > 0): always keyframe-anchored. The caps keep the
+    //  sparse-GOP walk cheap (~17ms measured) and every move — forward or
+    //  backward — lands near the target. Never blend sequential mode into a
+    //  preview drag: a capped sequential walk parks the decoder behind the
+    //  playhead and leaves the preview on the wrong (stale) picture.
     const AVFrame* hw;
     if (max_dim > 0) {
         hw = slot->decoder.decode_to_hw_indexed(
             src_frame, ::canvas::core::VideoDecoder::kPreviewMaxOver);
     } else {
         // Prepared playback: keep the cheap sequential HW walk for small forward
-        // deltas (steady-state warming advances frame-by-frame; scrub resumes
-        // park the decoder at the target). Large forward jumps must NOT walk
-        // sequentially from wherever the decoder sits — a far release-commit then
-        // decodes every frame between, stalling the worker for seconds and
-        // freezing every drag preview queued behind it. Anchor those on the
-        // owning I-frame instead so the walk is bounded by a single GOP.
+        // deltas (steady-state warming advances frame-by-frame). A large forward
+        // jump must NOT walk sequentially from wherever the decoder sits — a far
+        // release-commit would decode every frame between, stalling the worker
+        // for seconds and freezing every drag preview queued behind it. Anchor
+        // those on the owning I-frame so the walk is bounded by one GOP.
         const int64_t dec_pos = slot->decoder.current_frame();
         if (src_frame >= dec_pos && src_frame - dec_pos <= kCommitSeqMaxDelta) {
             hw = slot->decoder.decode_to_hw(src_frame);
@@ -230,8 +226,8 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
     if (!hw || !hw->data[0] || !hw->data[1]) return nullptr;
 
     // Same reduce rule as decode_to_frame: cap the longest edge at max_dim
-    // (0 = native resolution), preserving aspect. The viewer letterboxes the
-    // quad to the widget, so the composite needs no bars (dst == full canvas).
+    // (0 = native), preserving aspect. The viewer letterboxes the quad, so the
+    // composite needs no bars (dst == full canvas).
     int out_w = hw->width;
     int out_h = hw->height;
     if (max_dim > 0 && (out_w > max_dim || out_h > max_dim)) {
@@ -270,8 +266,8 @@ double media_fps_of(const canvas::core::Project& project, const canvas::core::Cl
 }
 
 // Maps a core transition kind to the renderable viewer mode. Audio-only
-// transitions (constant gain/power/exponential) carry no video image and are
-// mapped to None here — they only drive audio mixing.
+// transitions (constant gain/power/exponential) carry no image and map to None
+// here — they only drive audio mixing.
 canvas::core::TransitionRenderMode to_render_mode(const canvas::core::TransitionType t) {
     using TT = canvas::core::TransitionType;
     using RM = canvas::core::TransitionRenderMode;
@@ -316,7 +312,7 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                               seq_frame >= tr_out_start && seq_frame < a->tl_out;
 
     // Single-clip fade at A's IN (leading) boundary: over the first
-    // `transition_in_duration` frames the clip fades in from black, no
+    // `transition_in_duration` frames the clip fades in from black; no
     // preceding clip required. Independent of any OUT transition.
     const int64_t dur_in = a->transition_in_duration;
     const bool in_in_trans = a->has_transition_in() &&
@@ -324,13 +320,13 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                              seq_frame >= a->tl_in && seq_frame < a->tl_in + dur_in;
 
     // A single-clip fade must go through the RGBA path (the viewer alpha-blends
-    // `a` against black); the raw GPU NV12 fast path cannot express it.
+    // `a` against black); the raw GPU NV12 fast path can't express it.
     const bool need_rgba = in_out_trans || in_in_trans;
 
     if (!need_rgba) {
-        // GPU fast path: hardware decode + CUDA composite straight into a small
-        // NV12 the viewer uploads as Y/UV textures (no full-res CPU RGBA). Falls
-        // back to the RGBA path below when unavailable (software decode, non-CUDA
+        // GPU fast path: HW decode + CUDA composite straight into a small NV12
+        // the viewer uploads as Y/UV textures (no full-res CPU RGBA). Falls back
+        // to the RGBA path below when unavailable (software decode, non-CUDA
         // device, backward scrub where decode_to_hw can't rewind).
         if (auto nv12 = decode_nv12(project, *a, seq_frame, 0)) {
             out->nv12 = std::move(nv12);
@@ -365,14 +361,22 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
             if (b) break;
         }
         if (b && b != a) {
-            out->b = decode(project, *b, a->tl_out);
+            // The incoming clip plays BEHIND the transition: advance B through its
+            // pre-roll handle (media frames before its timeline IN) so the dissolve
+            // reveals live footage instead of a frozen first frame, and B keeps
+            // playing seamlessly once the cut lands. Clamp to source 0 when the
+            // head was trimmed tight against the media start (no handle to show).
+            int64_t b_src = b->src_in + (seq_frame - tr_out_start) - dur_out;
+            if (b_src < 0) b_src = 0;
+            const int64_t b_seq = b->tl_in + (b_src - b->src_in);
+            out->b = decode(project, *b, b_seq);
             if (dur_out > 0)
                 out->progress = static_cast<float>(seq_frame - tr_out_start) /
                                 static_cast<float>(dur_out);
             out->mode = to_render_mode(a->transition_out);
         } else {
-            // No incoming clip at the cut (e.g. the last clip on the track):
-            // fade A itself out to black over the transition window.
+            // No incoming clip at the cut (e.g. the last clip on the track): fade A
+            // itself out to black over the transition window.
             if (dur_out > 0) {
                 out->progress = static_cast<float>(seq_frame - tr_out_start) /
                                 static_cast<float>(dur_out);
@@ -384,16 +388,16 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
     return out;
 }
 
-// Low-resolution variant used only for scrubbing. Bypasses the full-res cache on
-// the READ side but crucially does NOT put the reduced frame back into it, so a
-// preview does not displace (or get returned as) a full-res playback frame.
+// Low-res variant used only for scrubbing. Bypasses the full-res cache on read
+// but does NOT put the reduced frame back into it, so a preview never displaces
+// (or gets returned as) a full-res playback frame.
 canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Project& project,
                                                   std::int64_t seq_frame,
                                                   int max_dim) {
     auto out = std::make_shared<canvas::core::RenderFrame>();
-    // DECISIVE branch trace (always-on): report exactly which early
-    // return the scrub preview takes, so a decode that "runs but yields nothing"
-    // can never silently evade the [scrub:BAD] fallback path.
+    // DECISIVE branch trace (always-on): report exactly which early return the
+    // scrub preview takes, so a decode that "runs but yields nothing" can't
+    // silently evade the [scrub:BAD] fallback path.
     static unsigned trace_ = 0;
     if ((++trace_ & 15u) == 0u)
         ::canvas::core::log::log_warning(
@@ -454,7 +458,10 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
             if (b) break;
         }
         if (b && b != a) {
-            out->b = decode(project, *b, a->tl_out, max_dim);
+            int64_t b_src = b->src_in + (seq_frame - tr_out_start) - dur_out;
+            if (b_src < 0) b_src = 0;
+            const int64_t b_seq = b->tl_in + (b_src - b->src_in);
+            out->b = decode(project, *b, b_seq, max_dim);
             if (dur_out > 0) out->progress = static_cast<float>(seq_frame - tr_out_start) /
                                              static_cast<float>(dur_out);
             out->mode = to_render_mode(a->transition_out);
@@ -466,16 +473,11 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
     }
 
     // The viewer can only paint a frame that carries pixels. If neither the GPU
-    // NV12 plane (decode_nv12) nor the CPU RGBA (decode) came
-    // back with content — e.g. a cold seek, a not-yet-loaded slot, or a decode
-    // that failed mid-scrub — fall back to a real black frame so the monitor
-    // shows black instead of holding a stale picture / going blank. A guaranteed
-    // frame is also what keeps scrub `hit=` accurate and the viewer glitch-free.
-    // Diagnose which decode path produced a pixel: nv12 (GPU hardware-decode +
-    // GPU composite) vs rgba (CPU). Emitted on EVERY scrub preview that had to
-    // fall through to the fallback with no pixels, so we can see exactly which
-    // path is failing and whether it's a slow-but-empty decode (slot loaded,
-    // decoder run late in a scrub-interleaved worker) vs a hard miss.
+    // NV12 plane nor the CPU RGBA came back with content (cold seek, not-yet-
+    // loaded slot, failed mid-scrub decode), fall back to a real black frame so
+    // the monitor shows black instead of holding a stale picture. The [scrub:BAD]
+    // log says exactly which decode path produced nothing, and whether it was a
+    // loaded-slot-but-slow decode vs a hard miss.
     if (!out->nv12 && !out->a) {
         ::canvas::core::log::log_warning(
             "[scrub:BAD] seq=%lld media=%d src=%lld gpu_path=%d nv12_ok=%d rgba_ok=%d "

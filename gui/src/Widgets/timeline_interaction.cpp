@@ -15,6 +15,7 @@
 #include <QGraphicsTextItem>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsPathItem>
+#include <QGraphicsBlurEffect>
 #include <QScrollBar>
 #include <QPainterPath>
 #include <QPainter>
@@ -73,12 +74,10 @@ void TimelineWidget::position_clip_at(ClipItem& item, int64_t tl_in) {
     const double top = static_cast<double>(track_top(item.track_index, v_count));
     const double cy = top + (item.track_kind == canvas::core::Track::Kind::Video ? 2 : 3);
 
-    // Move the clip's paint-clip group (and with it every child: filmstrip
-    // cells, waveform, shell, outline, label) as one unit. Translating only the
-    // children with the group left behind would let the thumbnails wander out
-    // of the clip's own rect (ItemClipsChildrenToShape clips to a fixed local
-    // box), so the delta is applied as a scene-space translation of the group
-    // itself, keeping each child's local offset intact.
+    // Move the clip's paint-clip group (and with it every child: filmstrip, shell,
+    // outline, label) as one unit. Translating only the children would let the
+    // thumbnails wander out of the clip's rect (ItemClipsChildrenToShape clips
+    // to a fixed local box), so apply the delta to the group itself.
     QGraphicsItem* group = item.rect->parentItem();
     if (!group) return;
     const QPointF new_base(left, cy);
@@ -96,9 +95,8 @@ bool TimelineWidget::reacquire_dragged_clip(const canvas::core::ClipId id,
         original_track_index_ = it.track_index;
         drag_ctrl_.begin(pointer_frame, it.clip->tl_in, it.track_index);
         drag_mate_ = find_linked_mate(&it);
-        // Fallback: if the move severed the link (fresh track, mate not linked
-        // back yet), re-attach the press-time mate by id so it keeps riding
-        // along visually.
+        // Fallback: if the move severed the link (fresh track, mate not linked back
+        // yet), re-attach the press-time mate by id so it keeps riding along.
         if (!drag_mate_ && mate_id != 0) {
             for (auto& other : clip_items_) {
                 if (&other == &it || !other.clip || other.clip->id != mate_id) continue;
@@ -196,8 +194,7 @@ TimelineWidget::CutTarget TimelineWidget::cut_at_scene_pos(const QPointF& p) con
 
     const double px = p.x();
     double best_dist = 1e18;
-    // First: genuine cuts (two adjacent clips sharing a boundary). The cut is at
-    // A.tl_out == B.tl_in.
+    // First: genuine cuts (two adjacent clips sharing A.tl_out == B.tl_in).
     for (const auto& a : track.clips) {
         for (const auto& b : track.clips) {
             if (&a == &b) continue;
@@ -217,10 +214,9 @@ TimelineWidget::CutTarget TimelineWidget::cut_at_scene_pos(const QPointF& p) con
         }
     }
 
-    // If no cut is under the pointer, offer a single-clip edge transition handle:
-    // the clip's leading edge (IN fade) at its tl_in, or its trailing edge (OUT
-    // fade, no incoming clip) at its tl_out. Skip an edge already shared with a
-    // cut (handled above), i.e. when another clip begins exactly at tl_out.
+    // With no cut under the pointer, offer a single-clip edge handle: the clip's
+    // leading edge (IN fade) at tl_in, or its trailing edge (OUT fade) at tl_out.
+    // Skip an edge already shared with a cut (handled above).
     if (!t.valid()) {
         for (const auto& c : track.clips) {
             auto consider = [&](int64_t frame, Edge edge, const canvas::core::Clip* prime) {
@@ -236,11 +232,10 @@ TimelineWidget::CutTarget TimelineWidget::cut_at_scene_pos(const QPointF& p) con
                     t.edge = edge;
                 }
             };
-            // Leading edge (fade in) — always offered; it has no left neighbour
-            // to steal from.
+            // Leading edge (fade in) — always offered; it has no left neighbour.
             consider(c.tl_in, Edge::Start, &c);
             // Trailing edge (fade out) — only when nothing starts exactly here
-            // (that case is a cut handled above or a real overlap).
+            // (that case is a cut handled above).
             bool has_right_neighbour = false;
             for (const auto& o : track.clips)
                 if (o.tl_in == c.tl_out) { has_right_neighbour = true; break; }
@@ -250,9 +245,8 @@ TimelineWidget::CutTarget TimelineWidget::cut_at_scene_pos(const QPointF& p) con
     return t;
 }
 
-// Largest legal transition duration for the target. For a cut this is bounded
-// by the shorter of the two neighbouring clips; for a single-clip start/end
-// edge it is bounded by that clip's own duration.
+// Largest legal transition duration: on a cut, bounded by the shorter of the
+// two neighbouring clips; on a single-clip edge, by that clip's own duration.
 int64_t TimelineWidget::transition_max_duration(const CutTarget& t) {
     if (!t.valid()) return kMinTransitionFrames;
     if (t.is_cut()) {
@@ -318,7 +312,6 @@ void TimelineWidget::hide_transition_handle() {
     transition_items_.clear();
     transition_overlay_ = nullptr;
     transition_icon_ = nullptr;
-    transition_dur_label_ = nullptr;
 }
 
 void TimelineWidget::rebuild_transition_handle() {
@@ -332,7 +325,6 @@ void TimelineWidget::rebuild_transition_handle() {
     transition_items_.clear();
     transition_overlay_ = nullptr;
     transition_icon_ = nullptr;
-    transition_dur_label_ = nullptr;
 
     const int v_count = static_cast<int>(sequence_ ? sequence_->video_tracks.size() : 1);
     const double track_top_y =
@@ -344,9 +336,8 @@ void TimelineWidget::rebuild_transition_handle() {
         return kSceneMargin + kTrackHeaderWidth + frame / frames_per_pixel_;
     };
     const double cut_x = scene_x(transition_target_.cut_frame);
-    // For a single-clip edge the overlay extends into the clip from the
-    // boundary (Start: rightward from tl_in; End: leftward from tl_out). For a
-    // cut it is centered on the edit point.
+    // For a single-clip edge the overlay extends into the clip from the boundary
+    // (Start: rightward from tl_in; End: leftward from tl_out); a cut centers it.
     const bool is_edge = !transition_target_.is_cut();
     double left_x, right_x;
     if (is_edge && transition_target_.edge == Edge::Start) {
@@ -362,18 +353,21 @@ void TimelineWidget::rebuild_transition_handle() {
     const double overlay_w = std::max(2.0, right_x - left_x);
 
     // Semi-rounded, semi-transparent overlay marking the transition span. No
-    // outline — just the soft tint so the SVG glyph stays the visual focus.
+    // outline — the SVG glyph is the visual focus. A tiny blur frosts the tint
+    // so the preview matches the persistent glass bubbles.
     const QRectF ovr(left_x, row_y, overlay_w, row_h);
     transition_overlay_ =
         scene_.addPath(canvas_rounded_rect_path(ovr, 7.0), QPen(Qt::NoPen),
                        QBrush(QColor(64, 160, 255, 60)));
+    auto* frost = new QGraphicsBlurEffect;
+    frost->setBlurRadius(1.2);
+    transition_overlay_->setGraphicsEffect(frost);
     transition_overlay_->setZValue(60);
     transition_items_.push_back(transition_overlay_);
 
     // Directional indicator at the boundary, drawn from the bundled SVG glyphs:
-    // a cut uses `<[]>` (centred arrows), a single-clip Start edge `<[` (fade-in),
-    // an End edge `]>` (fade-out). The icon always sits at the boundary (edit
-    // point) even when the overlay extends into the clip.
+    // a cut uses `<[]>` (centred arrows), a Start edge `<[` (fade-in), an End
+    // edge `]>` (fade-out). The icon always sits at the boundary (edit point).
     const double icx = cut_x;
     const double icy = row_y + row_h / 2.0;
     const QString icon_name =
@@ -404,28 +398,18 @@ void TimelineWidget::rebuild_transition_handle() {
     transition_icon_ = icon;
     transition_items_.push_back(icon);
 
-    // Duration label centred on the overlay.
-    transition_dur_label_ = scene_.addText(
-        tr("%1f").arg(transition_handle_duration_));
-    QFont df = transition_dur_label_->font();
-    df.setPointSizeF(8);
-    df.setBold(true);
-    transition_dur_label_->setFont(df);
-    // Duration label centred on the overlay, near its top edge (the icon sits
-    // at the vertical centre, so the two don't collide except on very short cuts).
-    double cdur_x = (left_x + right_x) / 2.0 - 12.0;
-    const double cdur_y = row_y + 2.0;
-    transition_dur_label_->setPos(QPointF(cdur_x, cdur_y));
-    transition_dur_label_->setDefaultTextColor(QColor(255, 255, 255));
-    transition_dur_label_->setZValue(62);
-    transition_items_.push_back(transition_dur_label_);
+    // Duration label intentionally omitted: the hover overlay shows only the
+    // shape + icon (no frame-count text on the canvas — read it in the context
+    // menu instead).
+    transition_items_.push_back(transition_overlay_);
+    transition_items_.push_back(icon);
 }
 
 void TimelineWidget::press_transition_handle(const QPointF& p) {
     if (!transition_handle_visible_ || !transition_target_.valid()) return;
-    // The hover preview must never create a transition on a bare cut or edge:
-    // only targets that ALREADY carry a transition can be grabbed for a resize
-    // (transitions are added exclusively via the right-click context menu).
+    // The hover preview must never create a transition: only targets that ALREADY
+    // carry one can be grabbed for a resize (transitions are added exclusively
+    // via the right-click context menu).
     const bool has_transition =
         transition_target_.is_cut()
             ? (transition_target_.a->has_transition_out() ||
@@ -463,8 +447,8 @@ void TimelineWidget::move_transition_handle(const QPointF& p) {
                                 : transition_drag_anchor_frame_ - edge_frame;
     int64_t dur = std::clamp(rawsize, kMinTransitionFrames, maxd);
     if (transition_snap_presets_) {
-        // Bubble drags snap to the favourite presets so the live label settles
-        // on a clean duration instead of a free-form frame count.
+        // Bubble drags snap to the favourite presets so the live label settles on a
+        // clean duration instead of a free-form frame count.
         static constexpr int64_t kFavoritePresets[] = {14, 30, 60, 120};
         int64_t best = dur;
         for (const int64_t preset : kFavoritePresets) {
@@ -486,8 +470,7 @@ void TimelineWidget::move_transition_handle(const QPointF& p) {
     }
     rebuild_transition_handle();
 
-    // Keep the persistent bubble live-synced to the dragged duration (geometry +
-    // label both track the "Nf" fade region).
+    // Keep the persistent bubble live-synced to the dragged duration.
     if (transition_snap_presets_ && transition_target_.valid()) {
         const bool in_edge = transition_target_.edge == Edge::Start;
         for (auto& b : transition_bubbles_) {
@@ -504,10 +487,9 @@ void TimelineWidget::release_transition_handle() {
     transition_snap_presets_ = false;
     unsetCursor();
     // A plain bubble click (no drag) must NOT commit an edit: on a one-sided
-    // cut the previous code re-emitted into the complementary clip and
-    // materialised a fresh transition where none existed ("left-click created a
-    // transition"). Only resize when the duration actually differs from what is
-    // already stored at the edit point.
+    // cut the old code re-emitted into the complementary clip and materialised
+    // a fresh transition where none existed. Only resize when the duration
+    // actually differs from what is already stored at the edit point.
     if (transition_target_.valid()) {
         const int64_t stored = transition_target_.is_cut()
                                    ? std::max(transition_target_.a->transition_out_duration,
@@ -522,8 +504,8 @@ void TimelineWidget::release_transition_handle() {
                 emit transition_resized(transition_target_.a, transition_handle_duration_);
         }
     }
-    // With the hover editor removed, the resize overlay opened by a bubble drag
-    // would otherwise linger on screen; tear it down now that the edit commits.
+    // With the hover editor removed, the overlay opened by a bubble drag would
+    // otherwise linger on screen; tear it down now the edit commits.
     hide_transition_handle();
 }
 
@@ -616,8 +598,7 @@ void TimelineWidget::engage_transition_drag(const QPointF& scene_pos) {
                                         transition_press_in_edge_);
 
     // Grabbing anywhere on the bubble behaves like grabbing the overlay's
-    // resize handle nearest to the pointer, and keeps snapping the duration
-    // to the favourite presets for the whole drag.
+    // resize handle nearest to the pointer, snapping to the presets all drag.
     const double lx = kSceneMargin + kTrackHeaderWidth +
                       transition_handle_left_frame_ / frames_per_pixel_;
     const double rx = kSceneMargin + kTrackHeaderWidth +
@@ -693,9 +674,8 @@ bool TimelineWidget::delete_selected_transition() {
 void TimelineWidget::open_transition_editor_for_cut(const canvas::core::Clip* a,
                                                     const canvas::core::Clip* b,
                                                     int64_t cut_frame) {
-    // Cut transition spanning two abutting clips: a single bubble centered on
-    // the edit point (half over each clip). Seeded from whichever side carries
-    // the transition (left OUT, else right IN).
+    // Cut transition spanning two abutting clips: a single bubble centered on the
+    // edit point, seeded from whichever side carries the transition.
     if (!a || !b || !sequence_) return;
     const int v_count = static_cast<int>(sequence_->video_tracks.size());
     int flat = -1;
@@ -745,7 +725,7 @@ void TimelineWidget::apply_selection_highlight() {
                                  : QPen(QColor(0x4C, 0x92, 0xFF), w));
         // Keep the stroke's outer edge exactly on the clip's own boundary by
         // re-insetting the path as the pen width changes; a centred pen would
-        // otherwise overhang into an abutting neighbour clip.
+        // otherwise overhang into an abutting neighbour.
         const QRectF r = item.rect->rect();
         item.outline->setPath(rounded_rect_path(
             QRectF(w / 2.0, w / 2.0, r.width() - w, r.height() - w), 6));
@@ -782,19 +762,18 @@ void TimelineWidget::clear_selection() {
 void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     const QPointF scene_pos = mapToScene(event->pos());
 
-    // The playhead follows clicks/drags on the time ruler (ticks/numbers), the
-    // minimap, and the playhead line itself. Clicking clips/footage must not
-    // move it. The ruler + minimap are PINNED to the top of the viewport (they
-    // no longer live at a fixed scene Y), so these tests use viewport coords.
+    // The playhead follows clicks/drags on the time ruler, the minimap, and the
+    // playhead line itself; clicking clips must not move it. The ruler + minimap
+    // are PINNED to the top of the viewport, so these tests use viewport coords.
     const double ruler_top = kMinimapHeight + kSceneMargin + kTimecodeBarHeight;
     const int vy = event->pos().y();
     // The whole pinned strip (timecode bar + minimap + ruler) seeks on a click,
     // so any press above the ruler's bottom edge counts as a ruler scrub.
     const bool in_ruler = vy < ruler_top + kRulerHeight;
 
-    // Grabbing the playhead line itself (anywhere along its height, ignoring the
-    // pinned strips at the very top) lets you drag it to scrub. The line is
-    // unpinned (full-height scene item), so its X stays compared in scene coords.
+    // Grabbing the playhead line itself (anywhere along its height, below the
+    // pinned strips) lets you drag to scrub. The line is a full-height scene
+    // item, so its X stays compared in scene coords.
     const double playhead_x = kSceneMargin + kTrackHeaderWidth + playhead_frame_ / frames_per_pixel_;
     constexpr double kPlayheadGrabPx = 5.0;
     const bool on_playhead =
@@ -831,25 +810,23 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
-    // Track-header row edges are live resize handles (Resolve-style): each
-    // boundary between two rows reallocates those rows (the grabbed divider
-    // follows the cursor), while the spacer dividers above the top-most and
-    // below the bottom-most row grow/shrink the empty padding strips. This must
-    // beat the header-strip marquee, so it runs before range-select arming.
+    // Track-header row edges are live resize handles: each boundary reallocates
+    // the rows it separates, while the spacer dividers above/below the stack
+    // grow/shrink the empty padding. This must beat the header-strip marquee,
+    // so it runs before range-select arming.
     //
-    // The Video/Audio divider is its OWN fixed band fully separated from V1
-    // above and A1 below. Its top edge resizes V1, its bottom edge resizes A1
-    // (both in the header column), and the band's interior is a grab-and-scroll
-    // pan handle that scrolls the ENTIRE timeline (rows + header column) up and
-    // down as one unit — never resizing anything.
+    // The Video/Audio divider is its OWN fixed band, separated from V1 above
+    // and A1 below: its top edge resizes V1, its bottom edge resizes A1, and
+    // the band's interior is a grab-and-scroll pan handle that moves the ENTIRE
+    // timeline as one unit — never resizing anything.
     if (sequence_ && has_timeline_content()) {
         const int v_count = static_cast<int>(sequence_->video_tracks.size());
         const int a_count = static_cast<int>(sequence_->audio_tracks.size());
         const bool in_header_strip = scene_pos.x() < kSceneMargin + kTrackHeaderWidth;
         const int edge = header_resize_target(scene_pos.y(), v_count, a_count);
         // The divider band's flanking edges (V1's bottom, A1's top) act as row
-        // resize handles along their ENTIRE width, so they work from the timeline
-        // body too (not just the header column). The band's interior is pan.
+        // resize handles along their ENTIRE width, so they work from the
+        // timeline body too. The band's interior is pan.
         const bool on_band_edge = edge == v_count || edge == v_count + 1;
         const bool grab_pan = in_section_divider_band(scene_pos.y(), v_count, a_count) && edge < 0;
         const bool grab_row = !grab_pan && edge >= 0 && (in_header_strip || on_band_edge);
@@ -859,8 +836,8 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
                      << "v=" << v_count << "a=" << a_count
                      << "grab_pan=" << grab_pan << "grab_row=" << grab_row;
         if (grab_pan) {
-            // Divider band interior = vertical pan handle: dragging drags the
-            // whole timeline (rows + header column) with the cursor, no resizing.
+            // Divider band interior = vertical pan handle: drags the whole timeline
+            // (rows + header column) with the cursor, no resizing.
             pan_dragging_ = true;
             pan_anchor_viewport_y_ = event->pos().y();
             pan_start_scroll_ = verticalScrollBar() ? verticalScrollBar()->value() : 0;
@@ -899,8 +876,8 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     }
 
     // Transition cut-handle: grabbing a resize edge takes priority over a normal
-    // clip drag. A persistent glass bubble grab works the same way (and snaps
-    // to the favourite presets while dragging).
+    // clip drag. A persistent bubble grab works the same way (and snaps to the
+    // preset durations while dragging).
     if (maybe_press_transition_bubble(scene_pos)) {
         event->accept();
         return;
@@ -925,11 +902,10 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         }
     }
 
-    // Exact-rect hit-test can miss clicks in the thin sliver left uncovered at
-    // the bottom of each track (clip rects are row-height-6 tall on variable-
-    // height tracks) and in the kTrackGap between tracks. Treat the whole track row
-    // as clickable: if the direct test found nothing, pick the top-most clip
-    // whose frame range contains the click, on the track under the cursor.
+    // Direct hit-tests can miss the thin sliver at the bottom of each track and
+    // the kTrackGap between tracks. Treat the whole row as clickable: if the
+    // direct test found nothing, pick the top-most clip whose frame range
+    // contains the click, on the track under the cursor.
     bool fallback_attempted = false;
     bool fallback_hit = false;
     if (!hit && sequence_ && scene_pos.x() >= kSceneMargin + kTrackHeaderWidth) {
@@ -985,10 +961,9 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     }
 
     // The track-header strip is chrome: a plain click must never clear the clip
-    // selection or start a drag. Dragging FROM the strip, however, starts a
-    // marquee — the strip is always empty, so it serves as a reliable handle for
-    // sweeping a selection across the clips (a click that never travels emits no
-    // range, so it stays inert).
+    // selection or start a drag. Dragging FROM the strip starts a marquee — the
+    // strip is always empty, so it is a reliable handle for sweeping a selection
+    // (a click that never travels emits no range, so it stays inert).
     if (scene_pos.x() < kSceneMargin + kTrackHeaderWidth) {
         if (!in_ruler && !on_playhead) {
             is_selecting_range_ = true;
@@ -1013,8 +988,8 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
             qDebug() << "timeline: select: NO CLIP HIT at frame"
                      << frame_at_x(event->pos().x()) << "scene_y=" << scene_pos.y()
                      << "(starts range-select/scrub, did not select a clip)";
-        // Clicking/dragging on the ruler, or grabbing the playhead line itself,
-        // scrubs through the footage instead of starting a range select.
+        // Clicking/dragging on the ruler, or grabbing the playhead line, scrubs
+        // through the footage instead of starting a range select.
         if (in_ruler || on_playhead) {
             is_scrubbing_ = true;
             drag_start_pos_ = event->pos();
@@ -1086,27 +1061,23 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     drag_start_frame_ = frame_at_x(event->pos().x());
     drag_grab_offset_px_ = scene_pos.x() - hit->rect->rect().left();
     drag_ctrl_.begin(frame_at_x(event->pos().x()), hit->clip->tl_in, hit->track_index);
-    // Selection happens right here on press; the move only engages once the
-    // pointer actually travels past the drag threshold, so a plain click can
-    // never nudge the clip (grab_frames stays anchored to the press frame).
+    // Selection happens on press; the move only engages once the pointer actually
+    // travels past the drag threshold, so a plain click can never nudge the clip.
     is_dragging_ = false;
     event->accept();
 }
 
 void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
-    // Video/Audio section-divider PAN (grab-and-follow, like dragging a filmstrip):
-    // the rows move WITH the hand. Pulling the divider up brings the video and
-    // audio channels up to their normal seat right under the ruler strip, where
-    // they stop Nailed -- that is the limit. Pulling it down sinks the channels
-    // down with the cursor into the big dark room below, which reads as an
-    // endless void. Pure scroll, no resizing.
+    // Video/Audio section-divider PAN (grab-and-follow): the rows move WITH the
+    // hand, up to their normal seat under the ruler strip (the UP limit) or
+    // down into the empty room below — pure scroll, no resizing.
     if (pan_dragging_) {
         const double dy = event->pos().y() - pan_anchor_viewport_y_;
         if (auto* bar = verticalScrollBar()) {
             const int before = bar->value();
             const int target = static_cast<int>(lround(pan_start_scroll_ - dy));
-            // Clamp between the top of the scene (fully sunk into the void) and
-            // the parked position (channels seated under the ruler strip).
+            // Clamp between the top of the scene (fully sunk) and the parked position
+            // (channels seated under the ruler strip).
             bar->setValue(std::clamp(target, 0, bar->maximum()));
             if (debug_enabled())
                 qDebug() << "timeline: pan move dy=" << dy << "scroll" << before << "->"
@@ -1116,11 +1087,9 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
-    // Live track-row resize drag (pressed on a header boundary). The grabbed
-    // divider follows the cursor: an interior edge reallocates the two rows it
-    // separates (above grows, below shrinks on a downward drag; clamped), while
-    // the stack's outer edges grow/shrink the empty top/bottom padding. Every
-    // move re-lays the rows out through track_top() and rebuilds the scene.
+    // Live track-row resize drag (pressed on a header boundary): the grabbed
+    // divider follows the cursor — an interior edge reallocates the two rows it
+    // separates, while the stack's outer edges grow/shrink the empty padding.
     if (resizing_track_) {
         const int v_count = sequence_ ? static_cast<int>(sequence_->video_tracks.size()) : 0;
         const int a_count = sequence_ ? static_cast<int>(sequence_->audio_tracks.size()) : 0;
@@ -1133,14 +1102,12 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
             track_v_pad_bottom_ =
                 std::clamp(resize_above_start_ + dy, kMinTrackVPad, kMaxTrackVPad);
         } else {
-            // Interior edge: the boundary sits at the bottom of the row above
-            // (origin + above_height), so the boundary follows the cursor only
-            // when the ABOVE row grows on a downward drag (pushing the divider
-            // down) and the BELOW row shrinks to hand back the same space. The
-            // divider band's own edges resize only the row on one side of the
-            // band (top edge = V1 grows/shrinks, bottom edge = A1 grows/shrinks);
-            // the other side maps to the fixed band (flat_of_screen_row -1) and
-            // is skipped so the band always keeps its full height.
+            // Interior edge: the boundary sits at the bottom of the row above, so it
+            // follows the cursor only when the ABOVE row grows on a downward
+            // drag and the BELOW row shrinks by the same space. The divider
+            // band's own edges resize only the row on one side of the band
+            // (top edge = V1, bottom edge = A1); the other side maps to the
+            // fixed band (flat_of_screen_row -1) and is skipped.
             const int up_flat = flat_of_screen_row(resize_edge_ - 1, v_count);
             const int dn_flat = flat_of_screen_row(resize_edge_, v_count);
             if (up_flat >= 0) set_track_height(up_flat, v_count, resize_above_start_ + dy);
@@ -1170,8 +1137,8 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         }
     }
 
-    // Transition cut-handle resize drag in progress: update it and bail out so
-    // it never competes with clip/scrub drags.
+    // Transition resize drag in progress: update it and bail so it never
+    // competes with clip/scrub drags.
     if (transition_handle_dragging_) {
         move_transition_handle(mapToScene(event->pos()));
         event->accept();
@@ -1188,9 +1155,9 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
             const int v_count = static_cast<int>(sequence_->video_tracks.size());
             const int a_count = static_cast<int>(sequence_->audio_tracks.size());
             const int edge = header_resize_target(sp.y(), v_count, a_count);
-            // The divider band's interior (pan handle) and its two flanking
-            // edges (V1 / A1 resize handles) are all vertical-drag targets, in
-            // the header column and across the whole timeline body.
+            // The divider band's interior (pan handle) and its two flanking edges
+            // (V1 / A1 resize handles) are all vertical-drag targets, in the
+            // header column and across the whole timeline body.
             const bool in_band =
                 in_section_divider_band(sp.y(), v_count, a_count);
             if (sp.x() < kSceneMargin + kTrackHeaderWidth) {
@@ -1214,8 +1181,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     }
 
     // A clip was pressed but the move hasn't engaged yet: absorb wiggles under
-    // the platform drag threshold so a plain click can never turn into a move,
-    // and arm the drag the moment the pointer actually travels.
+    // the platform drag threshold so a plain click never turns into a move.
     if (dragged_clip_ && !is_dragging_ && !is_selecting_range_) {
         if ((event->pos() - drag_press_pos_).manhattanLength() >= QApplication::startDragDistance()) {
             is_dragging_ = true;
@@ -1226,11 +1192,9 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     }
 
     // Instant hover preview of a cut / single-clip edge: a ghost overlay shows
-    // the would-be transition region. It is visual ONLY — press_transition_handle
-    // refuses to start an edit unless a transition ALREADY exists at the target,
-    // so a stray press+drag can never create one (adding is right-click only).
-    // Existing transitions can still be resized by dragging the overlay or the
-    // persistent glass bubble.
+    // the would-be transition region. Visual ONLY — press_transition_handle
+    // refuses to start an edit unless a transition ALREADY exists, so a stray
+    // press+drag can never create one (adding is right-click only).
     if (current_tool_ == Tool::Select && !is_dragging_ && !is_selecting_range_ &&
         !transition_press_armed_ && !transition_handle_dragging_) {
         update_transition_hover(mapToScene(event->pos()));
@@ -1265,9 +1229,9 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         const double scene_y = mapToScene(event->pos()).y();
         const int candidate = track_at_y(scene_y, v_count);
 
-        // Dragged a video clip up past the top video track: auto-create a new
-        // upper video channel (plus an audio channel for a linked mate) and
-        // hand the clip over to it, all in one undoable model edit.
+        // Dragged a video clip up past the top video track: auto-create a new upper
+        // video channel (plus an audio channel for a linked mate) and hand the
+        // clip over to it, in one undoable model edit.
         if (dragged_clip_->track_kind == canvas::core::Track::Kind::Video && !promote_latched_ &&
             sequence_ && candidate < 0 &&
             scene_y < static_cast<double>(track_top(0, v_count))) {
@@ -1280,9 +1244,9 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
             const canvas::core::ClipId mate_id =
                 drag_mate_ && drag_mate_->clip ? drag_mate_->clip->id : 0;
             emit new_upper_track_requested(dragged_clip_->clip->id, snap_tl);
-            // The handler did a synchronous rebuild; re-acquire the clip (and
-            // its mate) by id and resume dragging on the new track. If the
-            // clip vanished from the model, abandon the drag cleanly.
+            // The handler did a synchronous rebuild; re-acquire the clip (and its mate)
+            // by id and resume dragging on the new track. If the clip vanished
+            // from the model, abandon the drag cleanly.
             if (!reacquire_dragged_clip(dragged_clip_->clip->id, mate_id,
                                         frame_at_x(event->pos().x()))) {
                 is_dragging_ = false;
@@ -1299,8 +1263,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
             snap_enabled_ && fps_ > 0.0, frames_per_pixel_);
 
         // The controller resolved the same-kind target track under the cursor;
-        // paint the clip (and only the primary — the mate keeps its own lane)
-        // on it.
+        // paint the primary clip on it (the mate keeps its own lane).
         const int target = drag_ctrl_.target_track_index();
         if (target >= 0) {
             dragged_clip_->track_kind =

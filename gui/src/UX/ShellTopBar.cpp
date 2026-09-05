@@ -1,5 +1,7 @@
 #include "UX/MainWindow.hpp"
 
+#include <QAction>
+#include <QDockWidget>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -60,6 +62,16 @@ QWidget* build_top_bar(MainWindow& mw) {
     inspector_top_btn->setText(MainWindow::tr("Inspector"));
     inspector_top_btn->setCheckable(true);
     mw.inspector_top_btn_ = inspector_top_btn;
+    // Wire the button back to the Inspector action + dock: both were built
+    // earlier (menu action / InspDock), so all three objects are alive here.
+    // (Connecting in build_inspector_dock used to hit a still-null button.)
+    QObject::connect(mw.inspector_toggle_action_, &QAction::toggled, mw.inspector_top_btn_,
+                     &QToolButton::setChecked);
+    QObject::connect(mw.inspector_top_btn_, &QToolButton::toggled, &mw,
+            [&mw](bool on) {
+                mw.inspector_toggle_action_->setChecked(on);
+                if (mw.inspector_dock_) mw.inspector_dock_->setVisible(on);
+            });
     for (auto* b : {quick_export_btn, fullscreen_top_btn, mixer_btn, metadata_btn, inspector_top_btn}) {
         b->setAutoRaise(true);
         top_bar_layout->addWidget(b);
@@ -215,7 +227,7 @@ QWidget* build_transport_bar(MainWindow& mw) {
     });
     QObject::connect(mw.play_button_, &QPushButton::clicked, &mw, [&mw] { mw.controller_.toggle_play_pause(); });
     QObject::connect(stop_btn, &QToolButton::clicked, &mw, [&mw] {
-        // Stop = pause with the playhead left in place (Premiere/Resolve-style).
+        // Stop = pause with the playhead left in place (the standard transport stop).
         mw.controller_.pause();
     });
     QObject::connect(next_frame, &QToolButton::clicked, &mw, [&mw] {

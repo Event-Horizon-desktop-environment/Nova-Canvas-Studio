@@ -118,7 +118,7 @@ enum class TransitionEdge { Out, In };
 // or it is inert: the video renderer ignores AudioFade* and the audio mixers
 // ignore CrossDissolve/Fade/Wipe. Mapping the mate into its own domain means one
 // edit puts BOTH a visual transition on the video clip AND an audible fade on
-// the audio clip (Resolve-style linked-pair behavior).
+// the audio clip (standard linked-pair behavior).
 TransitionType audio_transition_from_video(const TransitionType t) {
     switch (t) {
         case TransitionType::CrossDissolve:

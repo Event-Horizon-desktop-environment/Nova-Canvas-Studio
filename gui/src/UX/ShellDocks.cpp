@@ -36,8 +36,8 @@ namespace canvas::gui {
 namespace {
 
 // ------------------------------------------------------------------------
-// InspectorCategory — one collapsible property group, matching the Resolve
-// Inspector convention (ux.md §3): enable dot | title | chevron | reset icon
+// InspectorCategory — one collapsible property group, matching the standard
+// inspector convention: enable dot | title | chevron | reset icon
 // in the header, individual property rows in the body.
 // ------------------------------------------------------------------------
 class InspectorCategory : public QWidget {
@@ -94,7 +94,7 @@ private:
     QVBoxLayout* body_layout_ = nullptr;
 };
 
-// One property row: label | field | optional per-property reset icon (ux.md §3, §13).
+// One property row: label | field | optional per-property reset icon.
 void add_property_row(QVBoxLayout* body, const QString& label, QWidget* field, bool with_reset = true) {
     auto* row = new QHBoxLayout;
     row->setSpacing(6);
@@ -449,12 +449,8 @@ void build_inspector_dock(MainWindow& mw) {
     mw.inspector_dock_->setWidget(inspector_body);
     mw.inspector_dock_->hide();
     QObject::connect(mw.inspector_toggle_action_, &QAction::toggled, mw.inspector_dock_, &QDockWidget::setVisible);
-    QObject::connect(mw.inspector_toggle_action_, &QAction::toggled, mw.inspector_top_btn_, &QToolButton::setChecked);
-    QObject::connect(mw.inspector_top_btn_, &QToolButton::toggled, &mw,
-            [&mw](bool on) {
-                mw.inspector_toggle_action_->setChecked(on);
-                if (mw.inspector_dock_) mw.inspector_dock_->setVisible(on);
-            });
+    // The top-bar Inspector button is created later (build_top_bar) — it connects
+    // back to this action/dock there, where all three objects are already alive.
 }
 
 }  // namespace canvas::gui

@@ -90,9 +90,7 @@ std::string video_encoder_name(VideoCodec codec, EncoderBackend backend,
             if (backend == EncoderBackend::AMD) return "h264_vaapi";
             if (backend == EncoderBackend::Intel) return "h264_qsv";
             if (backend == EncoderBackend::Auto) {
-                // Auto: prefer hardware if present, but keep it simple: NVIDIA
-                // NVENC is the default when available. The GUI probes and can
-                // pass Backend::NVIDIA explicitly; here we default to CPU-safe.
+                // CPU-safe default; the GUI can probe and pass NVIDIA explicitly.
                 if (sw_fallback) *sw_fallback = true;
                 return "libx264";
             }
@@ -157,8 +155,8 @@ ExportSettings to_export_settings(const DeliverSettings& ds) {
     es.audio_channels = ds.audio.channels;
     es.remove_audio = !ds.audio.export_audio;
 
-    // Width/height from resolution choice (FPS/resolution resolved by the GUI
-    // before calling; defaults are applied here as a fallback).
+    // Width/height/fps from the resolution choice (the GUI resolves before
+    // calling; defaults here are a fallback).
     es.width = ds.video.custom_width;
     es.height = ds.video.custom_height;
     es.fps = ds.video.custom_fps;
@@ -168,20 +166,16 @@ ExportSettings to_export_settings(const DeliverSettings& ds) {
     VideoCodec vc = video_codec_from_string(ds.video.codec);
     EncoderBackend backend = ds.video.encoder;
     if (backend == EncoderBackend::Auto) {
-        // If the codec supports a hardware encoder on this machine, prefer it;
-        // otherwise the CPU is used. We choose NVIDIA when present (common case).
-        // The GUI passes the resolved backend after probing; here we keep CPU.
+        // Prefer a hardware encoder when the codec supports one on this machine;
+        // the GUI passes the resolved backend after probing, CPU here.
         backend = EncoderBackend::CPU;
     }
     es.video_codec = video_encoder_name(vc, backend, es.format, &sw_fallback);
 
-    // Preset values are codec-specific. x264/x265 and the hardware families
-    // (nvenc/qsv/vaapi/amf) share a compatible set of speed names; AV1 software
-    // encoders (SVT-AV1/libaom) use a numeric scale. The exporter translates the
-    // UI's x264-style name to the right per-family preset via nv_preset_for(), so
-    // forward it verbatim here and let the exporter map it. Other encoders
-    // (ProRes, FFV1, JPEG 2000, rawvideo, ...) either reject them or use a
-    // completely different scale, so skip the preset there.
+    // Preset names are codec-specific. x264/x265 and the hardware families
+    // (nvenc/qsv/vaapi/amf) share x264-style speed names, and the exporter maps
+    // them per-family via nv_preset_for(); forward verbatim. ProRes/FFV1/JPEG
+    // 2000/rawvideo reject them outright, so skip the preset there.
     const std::string& encn = es.video_codec;
     const bool has_preset = encn.find("x264") != std::string::npos ||
                             encn.find("x265") != std::string::npos ||
@@ -216,28 +210,25 @@ ExportSettings to_export_settings(const DeliverSettings& ds) {
             es.vid_rc_mode = "cbr";
             break;
     }
-    // The max bitrate ceiling (VBV buffer bound) applies to every bitrate-driven
-    // mode. It is what constrains each frame's size so the stream actually lands
-    // near the target instead of running away in hard-to-encode regions. When it
-    // equals the target (the UI default) this yields true CBR. Not applied to
-    // quality-driven modes, which ignore bitrate entirely.
+    // Max bitrate ceiling (VBV buffer bound) applies to every bitrate-driven
+    // mode, constraining per-frame size so the stream lands near target; equal
+    // to the target (the UI default) it yields true CBR. Quality-driven modes
+    // ignore bitrate entirely.
     if (ds.video.rate_control == RateControl::VBRTargetKbps ||
         ds.video.rate_control == RateControl::ConstantBitrate)
         es.video_max_bitrate_kbps = ds.video.max_bitrate_kbps;
 
-    // Tuning / quality knobs pushed through as extra options for encoders that
-    // expose them (best-effort; unknown opts are ignored by libav).
+    // Tuning/quality knobs pushed through as extra options for encoders that
+    // expose them (unknown opts are ignored by libav).
     std::ostringstream extra;
     if (ds.video.aq_strength > 0)
         extra << "aq-strength=" << ds.video.aq_strength << "\n";
     if (ds.video.lookahead_frames > 0)
         extra << "rc-lookahead=" << ds.video.lookahead_frames << "\n";
     if (ds.video.enable_b_frames()) {
-        // Resolve sends `b_adapt=1` (adaptive B-frame decision) here, NOT `bf=N`.
-        // Our exporter keeps AVCodecContext.max_b_frames = 0 (the frame pipeline
-        // feeds frames in display order, so reordering is disabled); pushing `bf=2`
-        // against that makes NVENC fail with "invalid param (8)". Emit Resolve's
-        // b_adapt option instead, which is a no-op when the encoder has no B-frames.
+        // Send `b_adapt=1`, NOT `bf=N`: the frame pipeline feeds display order
+        // with max_b_frames=0, and pushing bf=2 makes NVENC fail with "invalid
+        // param (8)". b_adapt is a no-op without B-frames.
         extra << "b_adapt=1\n";
     }
     if (ds.video.two_pass) {
@@ -246,13 +237,9 @@ ExportSettings to_export_settings(const DeliverSettings& ds) {
     }
     if (ds.video.tuning == EncoderTuning::Lossless)
         extra << "lossless=1\n";
-    // Note: Resolve renders with NVENC tuning "ultra_quality" (-tune uhq), but
-    // through FFmpeg's option surface `tune=uhq` combined with CBR rate control,
-    // rc-lookahead and split-encode makes the encoder reject the config
-    // (InitializeEncoder failed: invalid param). The FFmpeg NVENC wrapper can't
-    // reproduce the exact SDL-level `ultra_quality` tuning Resolve drives, so we
-    // intentionally don't emit `tune=uhq`; the speed-preset parity (faster->p2)
-    // is what actually reproduces Resolve's render throughput.
+    // Not emitted: NVENC `tune=uhq` rejects the config through FFmpeg's option
+    // surface ("InitializeEncoder failed: invalid param"). Speed-preset parity
+    // (faster->p2) is what reproduces the reference render throughput.
     extra << ds.advanced.extra_options;
     es.extra = extra.str();
 

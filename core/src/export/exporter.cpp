@@ -72,11 +72,9 @@ AVPixelFormat pick_video_fmt(const AVCodec* codec, bool* uses_hw) {
             if (f == AV_PIX_FMT_NONE) continue;
             if (f == AV_PIX_FMT_CUDA || f == AV_PIX_FMT_VAAPI || f == AV_PIX_FMT_QSV ||
                 f == AV_PIX_FMT_DRM_PRIME || f == AV_PIX_FMT_D3D11) {
-                // A hardware-frame format: prefer it when present so device
-                // encoders (NVENC/VAAPI/QSV) are fed device frames instead of
-                // running in host-memory mode. NVENC lists YUV420P/NV12 before
-                // CUDA, so we must scan the whole list and not short-circuit on
-                // the first software format.
+                // A hardware-frame format: feed device frames to device encoders
+                // (NVENC/VAAPI/QSV). NVENC lists YUV420P/NV12 before CUDA, so scan
+                // the whole list rather than short-circuiting on the first sw format.
                 *uses_hw = true;
                 if (hw == AV_PIX_FMT_NONE) hw = f;
             } else if (f == AV_PIX_FMT_NV12 || f == AV_PIX_FMT_YUV420P) {
@@ -185,15 +183,10 @@ std::vector<ContainerInfo> list_containers() {
     return out;
 }
 
-// Translates the X264-style preset names shown in the Deliver UI into the
-// preset strings each encoder family actually accepts.
-//
-//  - NVENC/VAAPI/QSV/AMF (hardware): reject x264 names like "faster" or
-//    "placebo" with "Undefined constant or missing '(' in 'faster'", so map them
-//    to the p1..p7 NVENC presets.
-//  - SVT-AV1 (software): same x264-name rejection; it uses a numeric 0..13
-//    preset where HIGHER = faster, so reverse the x264 ordering.
-//  - libx264/libx265 (software): keep the verbatim x264 preset name.
+// Maps the Deliver UI's x264-style preset names to what each encoder family
+// accepts: NVENC/VAAPI/QSV/AMF reject x264 names and use the p1..p7 NVENC
+// presets; SVT-AV1 takes a numeric 0..13 preset (higher = faster, so the x264
+// ordering is reversed); libx264/x265 take the name verbatim.
 std::string nv_preset_for(const std::string& codec, const std::string& preset) {
     const std::string p = [&] {
         std::string q = preset;
@@ -201,11 +194,9 @@ std::string nv_preset_for(const std::string& codec, const std::string& preset) {
         return q;
     }();
 
-    // SVT-AV1: numeric preset, higher = faster. Map x264 order (placebo slowest
-    // .. ultrafast fastest) onto SVT's 0..13 range.
+    // SVT-AV1: numeric 0..13 preset, higher = faster; reverse the x264 order.
     if (codec.find("svt") != std::string::npos || codec.find("av1") != std::string::npos) {
-        // Software AV1 encoders that still use x264-style names (libaom) accept
-        // 0..9 as well (higher = faster); keep the same inverted mapping.
+        // libaom takes 0..9 with the same higher = faster convention.
         if (p == "ultrafast" || p == "superfast") return "13";
         if (p == "veryfast") return "11";
         if (p == "fast") return "9";
@@ -224,12 +215,8 @@ std::string nv_preset_for(const std::string& codec, const std::string& preset) {
     if (!hw)
         return preset;  // software encoder: keep the x264 preset name verbatim
 
-    // Alignment note (Resolve parity): DaVinci Resolve's "Faster" audio/video
-    // preset maps to NVENC speed preset p2, not p4. Verified by decoding Resolve's
-    // encoder_command_param_map (preset=faster on a completed 44520-frame 1440p60
-    // HEVC 80 Mbps CBR render that sustained ~700 fps, the same throughput our
-    // exporter measures at NVENC p2). Keep that pairing so a "Faster" export here
-    // runs at the same speed/quality as Resolve's.
+    // "Faster" stays on NVENC p2, not p4 — verified against a 44520-frame
+    // 1440p60 HEVC 80 Mbps CBR render (~700 fps, matching this exporter at p2).
     if (p == "ultrafast" || p == "superfast") return "p1";
     if (p == "veryfast") return "p2";
     if (p == "faster") return "p2";
@@ -245,9 +232,8 @@ std::string nv_preset_for(const std::string& codec, const std::string& preset) {
 bool export_project(const Project& project, const ExportSettings& s, ExportControl* control,
                     std::string* error) {
     const auto fail = [&](const std::string& m) {
-        // Always record the failure reason so render errors are never silently
-        // swallowed by the CANVAS_DEBUG gate (render failures are the #1 debugging
-        // target). Writes to stderr + the log file unconditionally.
+        // Record failures unconditionally (not behind CANVAS_DEBUG) — render
+        // errors are the top debugging target.
         ::canvas::core::log::log_error("render failure: %s", m.c_str());
         if (error) *error = m;
         return false;
@@ -288,11 +274,10 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     const AVPixelFormat hw_pix = pick_video_fmt(vcodec, &v_use_hw);
     v_use_hw = v_use_hw && hw_codec;
 
-    // Pixel format the (software) encoder consumes:
-    //  - Hardware encoders (NVENC/VAAPI/QSV) are fed NV12 then uploaded.
-    //  - Software encoders honor the codec's preferred sw format (e.g. ProRes
-    //    yuv422p10le), falling back to YUV420P. We must NOT blindly force
-    //    YUV420P or encoders that only accept other formats fail to open.
+    // Software pixel format the encoder consumes: NV12 for hardware encoders
+    // (uploaded), else the codec's preferred sw format (e.g. ProRes
+    // yuv422p10le) — forcing YUV420P blindly makes other-format-only encoders
+    // fail to open.
     AVPixelFormat sw_pix = AV_PIX_FMT_YUV420P;
     if (hw_codec) {
         sw_pix = AV_PIX_FMT_NV12;
@@ -309,44 +294,31 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     vctx->pix_fmt = v_use_hw ? hw_pix : sw_pix;
     vctx->gop_size = 120;
     vctx->max_b_frames = 0;
-    // Color metadata: the render path composites in the source's native 8-bit
-    // limited-range bt709 space (no color conversion is applied), so the export
-    // must declare bt709 + limited (TV) range or the muxed file comes out with
-    // `unknown` color tags. Resolve/other NLEs stamp bt709 here; missing tags
-    // force players/GPU pipelines to guess the transfer, often sliding into a
-    // slow per-frame software colorspace conversion that reads as stutter.
+    // Compositing stays in the source's 8-bit limited-range bt709 space, so
+    // stamp bt709 + TV range here. Missing tags make players guess the transfer
+    // and slide into slow software colorspace conversion (stutter).
     vctx->color_range = AVCOL_RANGE_MPEG;          // limited / TV range
     vctx->colorspace = AVCOL_SPC_BT709;            // BT.709 primaries
     vctx->color_trc = AVCOL_TRC_BT709;             // BT.709 transfer
     vctx->color_primaries = AVCOL_PRI_BT709;       // BT.709 primaries
-    // NOTE: HEVC level is deliberately NOT set via `vctx->level` — NVENC ignores
-    // the context field and uses its own private `level` option (which defaults
-    // to "auto" and under-picks to Main@3.1 for 1440p60). The correct private
-    // option is set further down alongside the other NVENC tuning options.
-    // Emit SPS/PPS (or equivalent) into vctx->extradata at open time so
-    // avcodec_parameters_from_context() picks them up. Without this the header
-    // extradata is empty until the first keyframe, which makes muxers that write
-    // codec-private data at header time (matroska, mxf, ...) reject H.264/H.265.
+    // HEVC level is NOT set via vctx->level: NVENC ignores it and uses its own
+    // private `level` option (defaults to "auto", under-picking to Main@3.1 for
+    // 1440p60); it is tuned further down.
+    // Emit SPS/PPS at open so extradata is present at write_header; without it
+    // matroska/mxf reject the streams.
     vctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
-    // Set crf for quality-driven modes (crf >= 0; "Best" uses 0). Two encoders
-    // model constant quality through QP/ICQ; crf 0 is a valid "highest quality"
-    // request, but many also interpret a *set* bit_rate as overriding it, so the
-    // two stays are kept mutually exclusive below (crf wins).
+    // crf drives quality modes (>= 0; "Best" is 0). Keep crf and bit_rate
+    // mutually exclusive: constant-quality encoders reject both set together.
     if (s.crf >= 0) av_opt_set_int(vctx->priv_data, "crf", s.crf, 0);
-    // Bitrate-driven mode: pick a target rate only when one is specified AND no
-    // crf is active. Never combine a bitrate with crf — constant-quality encoders
-    // (SVT-AV1 in particular) reject having BOTH set, and crf would be shadowed
-    // anyway. Quality modes (ConstantQP / VBRQuality) carry video_bitrate_kbps==0,
-    // so they land here as no-op regardless of crf value.
+    // Bitrate-driven mode: only when a rate is given AND crf is inactive.
+    // Quality modes carry video_bitrate_kbps==0, so this is a no-op for them.
     const bool is_nvenc = s.video_codec.find("nvenc") != std::string::npos;
     if (s.video_bitrate_kbps > 0 && s.crf < 0) {
         const int64_t bps = static_cast<int64_t>(s.video_bitrate_kbps) * 1000;
         vctx->bit_rate = bps;
-        // True CBR: a tight VBV window forces each segment to stay at the target
-        // average. NVENC additionally needs `rc` spelled out or it silently falls
-        // back to a low-default bitrate (the ~11 Mbps the user saw), ignoring the
-        // target entirely.
+        // Tight VBV window holds the target average for CBR. NVENC needs `rc`
+        // explicit or it silently falls back to a low default bitrate.
         const bool cbr = s.vid_rc_mode == "cbr";
         const bool vbr = s.vid_rc_mode == "vbr_target";
         if (cbr || vbr) {
@@ -354,8 +326,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                 s.video_max_bitrate_kbps > 0
                     ? static_cast<int64_t>(s.video_max_bitrate_kbps) * 1000
                     : bps;
-            // VBV window: tight (== target) for CBR so the rate is held; looser
-            // (2× max) for VBR so quality can peak but still be bounded.
+            // VBV: tight (== target) for CBR, looser (2× max) for bounded VBR peaks.
             const int64_t bufsize_bps = cbr ? max_bps : max_bps * 2;
             av_opt_set_int(vctx, "maxrate", max_bps, AV_OPT_SEARCH_CHILDREN);
             av_opt_set_int(vctx, "bufsize", bufsize_bps, AV_OPT_SEARCH_CHILDREN);
@@ -363,9 +334,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                 av_opt_set(vctx->priv_data, "rc", cbr ? "cbr" : "vbr", 0);
         }
     }
-    // NVENC constant-QP mode: set the encoder's `rc` and `cq`/`qp` so it actually
-    // uses the quality setting instead of defaulting to a fixed 8-12 Mbps ABR that
-    // looks terrible on 80 Mbps-scale work.
+    // NVENC constant-QP: set rc + cq so quality is honored instead of the
+    // default 8-12 Mbps ABR (terrible on 80 Mbps-scale work).
     if (is_nvenc && s.crf >= 0 && s.vid_rc_mode == "constqp") {
         av_opt_set(vctx->priv_data, "rc", "constqp", 0);
         av_opt_set_int(vctx->priv_data, "cq", s.crf, 0);
@@ -374,36 +344,24 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         av_opt_set(vctx->priv_data, "preset", nv_preset_for(s.video_codec, s.preset).c_str(), 0);
     apply_codec_extra(vctx, s.extra);
 
-    // Split-frame encoding (SFE): on GPUs with multiple NVENC engines (the RTX
-    // 5070 Ti has two), the driver splits each frame into horizontal strips and
-    // the engines encode them in parallel on a single session/stream. Exposed by
-    // FFmpeg (7.1+) as `split_encode_mode`; 1 = `forced` (driver picks the strip
-    // count for however many engines are present) vs 2 = hardcoded two-way.
-    // `forced` is preferred for portability so the same setting cleanly works on
-    // single-engine (5070), dual-engine (5070 Ti/5080) and triple-engine (5090)
-    // parts. NVIDIA restricts SFE to HEVC/AV1 (H.264 exposes no such option), so
-    // only set it for those codecs; `av_opt_set_int` silently no-ops when the
-    // encoder doesn't expose the option.
+    // Split-frame encoding: multi-engine GPUs (RTX 5070 Ti/5080/5090) encode
+    // horizontal strips of each frame in parallel on one session. `1` = forced
+    // (driver picks the strip count), `2` = hardcoded two-way; forced keeps one
+    // setting portable across single/dual/triple-engine parts. HEVC/AV1 only;
+    // the option silently no-ops where unsupported.
     const std::string vc = s.video_codec;
     if (vc.find("nvenc") != std::string::npos &&
         (vc.find("av1") != std::string::npos || vc.find("hevc") != std::string::npos ||
          vc.find("h265") != std::string::npos)) {
         av_opt_set_int(vctx->priv_data, "split_encode_mode", 1, 0);
     }
-    // HEVC level: NVENC's default "auto" under-picks to Main@3.1 for 1440p60,
-    // which is a spec-invalid combination (level 3.1 caps at 1080p). Decoders
-    // that validate against the declared level then bail out of the hardware
-    // path into slow software decode -> "duplicated-motion" judder on playback.
-    // Stamp the highest level the output dimensions/fps require so the stream
-    // honestly advertises its headroom. Values are NVENC's H.264-style level
-    // integers (150 = 3.1 ... 183 = 5.0 ... 186 = 5.1).
+    // Stamp the highest HEVC level the output size/fps requires. NVENC's
+    // "auto" under-picks Main@3.1 for 1440p60 (spec-invalid: 3.1 caps at 1080p),
+    // which pushes strict decoders into software decode -> judder.
     if (is_nvenc && (vc.find("hevc") != std::string::npos ||
                      vc.find("h265") != std::string::npos)) {
-        // Map the output's luma sample rate to HEVC Main-level capability so the
-        // stream honestly advertises decode headroom. NVENC's "auto" under-picks
-        // to Main@3.1 for 1440p60 (level 3.1 caps at 1080p), which makes strict
-        // decoders drop to slow software decode -> "duplicated-motion" judder.
-        // Values are NVENC's H.264-style level integers (150=3.1 ... 183=5.0).
+        // Level from the stream's luma sample rate; values are NVENC's
+        // H.264-style integers (150=3.1 ... 183=5.0).
         const double luma_sps =
             static_cast<double>(s.width) * static_cast<double>(s.height) * s.fps;
         int level = 183;  // Main@5.0: up to 2.56 Gsamples/s (covers 1440p60 @ 0.22G)
@@ -411,15 +369,9 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         if (luma_sps > 3.07e9) level = 200;   // 6.0
         av_opt_set_int(vctx->priv_data, "level", level, 0);
     }
-    // Allow the encoder to keep several frames in flight so avcodec_send_frame
-    // does not stall behind a too-small surface pool at high throughput.
-    //
-    // NVIDIA's NVENC needs the surface pool to be large enough for the requested
-    // lookahead: it requires roughly `rc_lookahead + (max_b_frames) + 8` surfaces.
-    // The lookahead arrives via the extra options ("rc-lookahead=N" in `s.extra`),
-    // and if we hardcode a too-small surfaces value FFmpeg has to bump it up at
-    // open time (the "Defined rc_lookahead requires more surfaces" log). Derive a
-    // surfaces count from whatever rc-lookahead is requested so that never happens.
+    // NVENC needs roughly rc_lookahead + max_b_frames + 8 surfaces; hardcoding
+    // too few makes FFmpeg bump it at open ("Defined rc_lookahead requires more
+    // surfaces"). Derive it from whatever rc-lookahead is in the extra options.
     if (v_use_hw) {
         int rc_lookahead = 0;
         const std::string& ex = s.extra;
@@ -432,10 +384,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                                                                 : end - (pos + key.size()));
             rc_lookahead = std::atoi(val.c_str());
         }
-        // NVENC needs roughly `rc_lookahead + max_b_frames + 8` surfaces. Add
-        // the B-frame depth on top of the lookahead window. The encoder uses
-        // max_b_frames=0 (progressive, matching the reference clips that play
-        // smooth), so no B-frame margin is required beyond the base pool.
+        // rc_lookahead + B-frame depth (+8 base). max_b_frames=0 here, so only
+        // the base pool plus lookahead is needed.
         const int surfaces = rc_lookahead > 0 ? rc_lookahead + 10 : 12;
         av_opt_set_int(vctx->priv_data, "surfaces", surfaces, 0);
     }
@@ -466,11 +416,9 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                     av_buffer_unref(&fr);
                 }
             }
-            // NOTE: keep the device referenced via `dec_dev` (aliased to `dev`).
-            // `av_hwframe_ctx_alloc`/`av_hwframe_ctx_init` hold their own device
-            // reference, so unref'ing `dev` here would drop the device refcount
-            // to zero and leave the decoders' `dec_dev` dangling once the frames
-            // context is gone. `dec_dev` is released at teardown.
+            // Keep `dec_dev` referenced for the decoder's lifetime: the frames
+            // context holds its own device ref, so unref'ing here would drop the
+            // decoder's device out from under it. Released at teardown.
         }
         if (!hw_frames) v_use_hw = false;
     }
@@ -489,8 +437,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     vst->id = static_cast<int>(oc->nb_streams);
     avcodec_parameters_from_context(vst->codecpar, vctx);
     vst->time_base = vctx->time_base;
-    // Frame-rate metadata: some muxers (mpeg, matroska, ...) require an explicit
-    // frame rate on the stream or refuse/skew the written header.
+    // Some muxers (mpeg, matroska) require stream frame-rate metadata or skew
+    // the written header.
     vst->r_frame_rate = vctx->framerate;
     vst->avg_frame_rate = vctx->framerate;
     fprintf(stderr, "[dbg] vst->time_base set to %d/%d\n", vst->time_base.num, vst->time_base.den);
@@ -518,10 +466,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             return fail("Failed to open audio encoder: " + s.audio_codec);
         }
         a_frame_size = std::max(1, actx->frame_size > 0 ? actx->frame_size : 1024);
-        // The per-timeline-frame audio payload can exceed the encoder's frame
-        // size (e.g. 96kHz/60fps => 1600 samples > aac's 1024).  a_src must be
-        // sized for the larger of the two or feeding nb_samples = per_frame
-        // would read past the allocated planes.
+        // Per-timeline-frame audio can exceed the encoder frame size (96kHz/60fps
+        // = 1600 > AAC's 1024); size a_src for the larger or reads overrun planes.
         a_src_samples_ = std::max(a_frame_size,
             (int)std::max<int64_t>(1, (int64_t)std::llround((double)s.audio_sample_rate / s.fps)));
         ast = avformat_new_stream(oc, nullptr);
@@ -560,9 +506,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
 
     progress(0.0, "Encode");
 
-    // The software pixel format the encoder consumes. For hardware encoders we
-    // feed NV12 from swscale and upload to the hw frames; for software encoders
-    // we feed exactly vctx->pix_fmt (e.g. YUV420P for libx264).
+    // Software format fed to the encoder: NV12 (+ upload) for hw encoders,
+    // else vctx->pix_fmt exactly.
     const AVPixelFormat enc_sw_fmt = v_use_hw ? AV_PIX_FMT_NV12 : vctx->pix_fmt;
     SwsContext* sws = sws_getContext(s.width, s.height, AV_PIX_FMT_RGBA,
                                      s.width, s.height, enc_sw_fmt,
@@ -595,35 +540,27 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     int64_t audio_sample = 0;
     bool ended = false;
 
-    // Audio is fed to the encoder in exact aac frame_size (1024-sample) chunks.
-    // Decoded chunks are per_video_frame-sized (e.g. 800 @48k/60fps) and do not
-    // align to 1024, so a persistent accumulator stages them and only complete
-    // encoder frames are sent. count is the number of interleaved floats staged,
-    // i.e. a_src->nb_samples*channels when drained.
+    // Decoded audio chunks are per-frame sized (e.g. 800 @48k/60fps) and don't
+    // align to the encoder's 1024-sample frame size, so stage them in an
+    // accumulator and send only complete encoder frames.
     std::vector<float> a_acc;
     int64_t a_sent = 0;  // encoder frames already fed to aac
     if (do_audio && a_frame_size > 0)
         a_acc.reserve((std::size_t)a_frame_size * 2 * s.audio_channels);
 
-    // Reusable render session: opens each source once and reuses the decoders
-    // across frames, and (for hardware exports) decodes sources on the GPU. This
-    // removes the per-frame avformat_open_input that dominated software timing.
+    // Reusable render session: open sources once, reuse decoders, and decode on
+    // the GPU for hw exports (removes per-frame avformat_open_input).
     RenderSession session;
     bool session_ok = session.begin(project, s.width, s.height, dec_dev);
 
-    // Pipelined render: a producer thread decodes + composits encoder-ready
-    // frames (GPU fast path: NVDEC -> nv12Resize straight into a CUDA hw frame)
-    // ahead of the main thread, which only sends + drains. The producer's GPU
-    // work overlaps NVENC encode on the main thread, and the pure-composite
-    // experiment (3 threads: decode / composite / encode) measured no faster —
-    // the device serializes the decode->kernel->encode chain regardless.
+    // Pipelined render: a producer thread decodes + composites ahead of the
+    // main thread, which sends + drains. GPU work overlaps NVENC; a 3-thread
+    // split measured no faster — the device serializes decode->kernel->encode.
     const std::size_t producer_depth = 64;
     std::mutex qmu;
     std::condition_variable qcv;
-    // Each queue slot carries the AVFrame + an optional CUDA event handle from
-    // the async resize stream.  The consumer waits on the event before feeding
-    // the frame to NVENC so the resize kernel completes exactly when needed,
-    // without a full-device sync in the producer.
+    // Queue slot: AVFrame + optional CUDA event from the async resize stream;
+    // the consumer waits on it so the resize completes exactly when NVENC reads it.
     struct ProducerSlot {
         AVFrame* frame = nullptr;
         void* event = nullptr;
@@ -632,9 +569,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     std::deque<ProducerSlot> ready_frames;
     bool producer_done = false;
     auto render_one_frame = [&](const int64_t f) -> std::tuple<AVFrame*, void*, AVFrame*> {
-        // GPU composite fast path: single enabled clip decoded to GPU NV12 ->
-        // composite (letterbox + resize) entirely on the GPU into the encoder's
-        // CUDA hw frame. Skips the CPU full-res RGBA canvas blit + upload.
+        // GPU fast path: composite a single clip straight into the encoder's
+        // CUDA hw frame, skipping the CPU RGBA blit + upload.
         if (v_use_hw && hw_frames && session_ok &&
             canvas::core::gpu::cuda_available()) {
             RenderSession::GpuFrameInfo gfi;
@@ -644,10 +580,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             static double _st_fg = 0, _st_rz = 0; static long _cnt = 0;
             if (_gk) {
                 _st_fg += std::chrono::duration<double, std::milli>(_tf1 - _tf0).count();
-                // Sanity: consecutive output frames must map to a strictly
-                // advancing source frame.  A non-+1 delta means the decoder
-                // overshot (dropped frames) or repeated (duplicate frames),
-                // which would manifest as judder/dup-frames in the output.
+                // Sanity: output frames must map to strictly advancing source frames;
+                // a non-+1 delta means dropped/duplicated frames (judder).
                 static int64_t s_prev_src = INT64_MIN;
                 if (gfi.src_frame >= 0) {
                     if (s_prev_src != INT64_MIN && gfi.src_frame != s_prev_src + 1)
@@ -661,11 +595,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                     const uintptr_t yc = reinterpret_cast<uintptr_t>(hw->data[0]);
                     const uintptr_t uvc = reinterpret_cast<uintptr_t>(hw->data[1]);
                     auto _tr0 = std::chrono::steady_clock::now();
-                    // The decode_to_hw() result is a borrowed frame the decoder
-                    // recycles on the next call.  av_frame_ref() it so the device
-                    // planes stay alive until the resize kernel (and its event
-                    // wait) have consumed them.  The ref is released in the
-                    // consumer after convert_nv12_wait_event().
+                    // decode_to_hw() borrows; av_frame_ref() keeps the device planes
+                    // alive until the resize + event wait consume them.
                     AVFrame* src_ref = nullptr;
                     if (gfi.source) {
                         src_ref = av_frame_alloc();
@@ -674,9 +605,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                             src_ref = nullptr;
                         }
                     }
-                    // Async resize: kernel launches on a non-blocking stream so
-                    // the producer can start the next decode immediately.  The
-                    // consumer waits on the event before avcodec_send_frame.
+                    // Async resize on a non-blocking stream; the consumer waits on the event
+                    // before sending the frame.
                     if (src_ref && canvas::core::gpu::convert_nv12_resize_async(
                             reinterpret_cast<const uint8_t*>(gfi.srcY),
                             reinterpret_cast<const uint8_t*>(gfi.srcUV),
@@ -787,22 +717,13 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         int64_t f = 0;
         while (f < total_video) {
             auto [frm, ev, src] = render_one_frame(f);
-            // CRITICAL: `decode_to_hw` returns a BORROWED source frame whose
-            // device planes the decoder recycles on the very next decode call.
-            // The async resize kernel reads those planes; `av_frame_ref(src)` is
-            // only a shallow metadata ref and does NOT keep the decoder's device
-            // planes alive. If the producer decodes frame f+1 before frame f's
-            // resize has read the planes, the resize composites stale/garbled
-            // NV12 -> intermittent spurious pixel jumps ("A holds, holds, B
-            // jumps") that manifest as judder even though [FRAME-DIAG] (which
-            // tracks the frame-number counter, not pixels) stays silent.
-            //
-            // Fix: wait for frame f's async resize to finish reading its source
-            // BEFORE decoding f+1 (which would recycle the planes). Waiting on an
-            // already-signaled event is a no-op, so the consumer's later wait of
-            // the same event is still correct. The source ref is released here,
-            // so the slot hands the consumer {frm, ev, src=nullptr} and the
-            // consumer's av_frame_unref(src) becomes a no-op.
+            // decode_to_hw() borrows its source frame: the decoder recycles the
+            // device planes on the next decode call, and av_frame_ref() is only a
+            // shallow metadata ref that does NOT keep those planes alive. Failing
+            // to wait before decoding f+1 composites stale/garbled NV12 -> spurious
+            // pixel jumps the frame counter never catches. So wait on frame f's
+            // resize event before decoding f+1 (a no-op if already signaled); the
+            // source ref is released here, so the slot carries src=nullptr.
             if (ev) {
                 canvas::core::gpu::convert_nv12_wait_event(ev);
                 if (src) av_frame_unref(src);
@@ -853,27 +774,21 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             }
             qcv.notify_all();
 
-            // Wait for the async resize kernel to finish before feeding the
-            // frame to NVENC.  This is a per-event sync (not a full device
-            // sync), so the producer's next decode/resize can overlap with
-            // this wait + the encode.
+            // Per-event sync so NVENC reads a finished resize; the producer's next
+            // decode/resize overlaps this wait + encode.
             if (ev) canvas::core::gpu::convert_nv12_wait_event(ev);
-            // Release the av_frame_ref'd decode source now that its device
-            // planes are no longer needed by the resize kernel.
+            // Source planes are consumed; drop the ref.
             if (src) av_frame_unref(src);
 
             if (to_send) {
                 avcodec_send_frame(vctx, to_send);
-                // NVENC reads the input surface asynchronously on the device.
-                // Barrier here so the surface is fully consumed before it is
-                // returned to the hw pool below; otherwise the producer can
-                // recycle an in-flight surface and the encode emits duplicate/
-                // repeating frames.
+                // NVENC reads surfaces asynchronously; barrier before returning the
+                // surface to the hw pool, else a recycled in-flight surface
+                // duplicates frames.
                 canvas::core::gpu::convert_nv12_device_sync();
                 av_frame_free(&to_send);
             }
-            // The producer emits exactly one slot per timeline frame (nullptr when
-            // nothing was drawn), so advance in lockstep regardless of to_send.
+            // One slot per timeline frame; advance in lockstep regardless.
             ++frame;
 
             // drain output packets from both encoders
@@ -906,10 +821,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                 const int n = (ac && !ac->samples.empty())
                     ? (int)(ac->samples.size() / s.audio_channels)
                     : 0;
-                // Stage decoded samples into the accumulator, then push complete
-                // aac frames (a_frame_size) with pts in the encoder's own sample
-                // domain so timing is exact and no "frame_size not respected"
-                // warning can occur.
+                // Stage samples, then emit complete encoder frames with pts in the
+                // encoder's sample domain (exact timing).
                 if (n > 0)
                     a_acc.insert(a_acc.end(), ac->samples.begin(), ac->samples.end());
                 audio_sample += std::max<int64_t>(n, per_frame);
@@ -991,11 +904,9 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             // render one frame
             bool gpu_composited = false;
 
-            // GPU composite fast path: when the frame is a single enabled clip
-            // decoded to GPU NV12, composite (letterbox + resize) entirely on
-            // the GPU straight into the encoder's CUDA hw frame. This skips the
-            // CPU full-res RGBA canvas blit and the full-res CPU->GPU upload
-            // that dominate software compositing in single-clip exports.
+            // GPU fast path: single-clip frames composite on the GPU straight into
+            // the encoder's CUDA hw frame, skipping the CPU RGBA blit + full-res
+            // upload that dominate software compositing.
             if (v_use_hw && hw_frames && session_ok &&
                 canvas::core::gpu::cuda_available()) {
                 RenderSession::GpuFrameInfo gfi;
@@ -1034,10 +945,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
 
                 AVFrame* to_send = nullptr;
 
-                // GPU path: skip the CPU sws_scale + upload entirely. Allocate a
-                // CUDA hw frame and have the CUDA kernel write the resized
-                // RGBA->NV12 result directly into its device planes, so NVENC
-                // consumes a frame that never left the GPU for conversion.
+                // GPU path: the CUDA kernel writes resized RGBA->NV12 directly into
+                // device planes, so NVENC consumes a frame that never left the GPU.
                 if (v_use_hw && hw_frames && canvas::core::gpu::cuda_available()) {
                     AVFrame* hw = av_frame_alloc();
                     if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {

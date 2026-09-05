@@ -95,11 +95,12 @@ void TimelineWidget::zoom_in() { set_zoom_percent(zoom_percent() * 1.2); }
 void TimelineWidget::zoom_out() { set_zoom_percent(zoom_percent() / 1.2); }
 
 double TimelineWidget::tracks_origin_y() const {
-    // pan_down_room_ is the deep "sink room" below the parked seat of the
-    // channels: it pushes the track area far down the scene so grab-and-follow
-    // panning can sink the rows into the void, while the parked scroll value
+    // pan_down_room_ is the small "sink room" below the parked seat of the
+    // channels: it offsets the track area down the scene so grab-and-follow
+    // panning can dip the rows briefly, while the parked scroll value
     // (pan_down_room_ + top pad) is the up limit that seats them under the ruler
-    // strip.
+    // strip. The room is fixed and modest (kPanDownRoomMin), so the timeline
+    // never opens with a huge empty band under the last track.
     return static_cast<double>(kRulerHeight + kMinimapHeight + kSceneMargin)
            + kTimecodeBarHeight + pan_down_room_ + track_v_pad_top_;
 }

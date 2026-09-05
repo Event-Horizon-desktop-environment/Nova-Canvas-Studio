@@ -267,11 +267,9 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
                   (width_ - dst_w) / 2, (height_ - dst_h) / 2);
     }
 
-    // Per-clip edge fades applied to the composited canvas. These are the
-    // single-clip IN/OUT transitions (no adjacent clip): fade-in from black at
-    // the top clip's head, and fade-out to black at its tail when there is no
-    // incoming clip at the cut. Both blend the whole frame toward black by a
-    // factor derived from the transition window.
+    // Per-clip edge fades applied to the composited canvas: fade-in from black at
+    // the top clip's head, fade-out to black at its tail when no clip follows the
+    // cut. Both blend the whole frame toward black by a factor from the window.
     float fade = 1.0f;
     const Sequence& seq_ = project_ ? project_->sequence : Sequence{};
     const Clip* a_ = nullptr;
@@ -324,9 +322,9 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
         return false;
     }
 
-    // Engage only when exactly one video clip is enabled at this frame (the
-    // common no-overlap export case). Any overlapping/transform case falls back
-    // to the CPU compositor to guarantee identical semantics.
+    // Engage only when exactly one video clip is enabled at this frame (the common
+    // no-overlap export case); any overlap/transform falls back to the CPU
+    // compositor to guarantee identical semantics.
     const Clip* the_clip = nullptr;
     {
         int found = 0;
@@ -346,10 +344,9 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
         }
     }
 
-    // Single-clip edge fades (IN fade-in-from-black, OUT fade-to-black with no
-    // incoming clip) must go through the CPU compositor (RenderSession::frame),
-    // which applies the black-factor blend. The raw GPU NV12 path cannot express
-    // the fade, so bail to the CPU path whenever tl_frame is inside such a window.
+    // Single-clip edge fades must go through the CPU compositor, which applies
+    // the black-factor blend; the raw GPU NV12 path cannot express it, so bail
+    // whenever tl_frame is inside such a window.
     {
         const Clip* f = the_clip;
         const bool in_in = f->has_transition_in() && !is_audio_transition(f->transition_in) &&
@@ -413,13 +410,12 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
                hw ? hw->width : 0, hw ? hw->height : 0);
         return false;
     }
-    // The frame actually returned may overshoot src_frame (>= matching). Record
-    // the true decoded frame number so the caller can detect duplicate/out-of-
-    // order emissions across consecutive timeline frames.
+    // The frame returned may overshoot src_frame (>= matching); record the true
+    // decoded number so the caller can detect duplicate/out-of-order emissions.
     out->src_frame = td->dec->current_frame() - 1;
 
     // Letterbox the source into the canvas preserving its aspect (same rule as
-    // the CPU compositor) so the GPU result matches blit_rgba's framing.
+    // blit_rgba) so the GPU result matches the CPU framing.
     const double dar = static_cast<double>(hw->width) / hw->height;
     int dst_w = width_, dst_h = height_;
     if (dar > 0.0) {
@@ -559,19 +555,16 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
     CANVAS_LOG("RenderSession::audio_chunk tl_sample=%lld frames=%d rate=%d ch=%d",
            (long long)tl_sample, num_frames, out_sample_rate, out_channels);
 
-    // The timeline frame at the start of this chunk (used to pick the clip).
-    // Round to nearest instead of flooring: the float product at an exact frame
-    // boundary can evaluate a hair below the integer (e.g. 122.9999998 for
-    // 98400 samples @60fps), and flooring that would systematically request the
-    // previous frame every chunk -> a persistent 1-frame backward drift against
-    // the continuity-kept AudioDecoder -> constant re-seeks -> repeated audio.
+    // Round to nearest, not floor: the float product at an exact frame boundary
+    // can evaluate a hair below the integer (98400 samples @60fps -> 122.9999998),
+    // and flooring that systematically requests the previous frame every chunk ->
+    // a persistent 1-frame backward drift that force-re-seeks -> repeated audio.
     const int64_t start_tl_frame = std::llround(
         (static_cast<double>(tl_sample) / out_sample_rate) * fps);
 
-    // Decode each enabled audio track and mix (sum) its samples in place,
-    // reusing the persistent per-track AudioDecoder so sequential chunks
-    // advance the same decode stream continuously (no re-open/resampler re-prime
-    // per chunk, which produced repeated/garbled audio).
+    // Mix each enabled audio track in place, reusing the persistent per-track
+    // AudioDecoder so sequential chunks advance one continuous decode stream
+    // (no re-open/resampler re-prime per chunk — that produced repeated audio).
     for (AudioTrackDecoder& atd : audio_tracks_) {
         const Track& track = *atd.track;
         const Clip* clip = track.clip_at(start_tl_frame);
@@ -617,15 +610,12 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
             continue;
         }
 
-        // [AUDIO-DIAG] unconditional trace (mirrors the [dbg]/[FRAME-DIAG] hooks).
-        // Prints the first 60 chunks plus any condition that can cause audio to
-        // loop in the output:
-        //   - <SHORTFALL>         decoded fewer frames than requested (got < req).
-        //                         The exporter advances its position by max(got,req),
-        //                         so a shortfall makes it run AHEAD of real audio; if
-        //                         it later exceeds the decoder's forward tolerance it
-        //                         hard-seeks, and Matroska-PCM far-seek repeats audio.
-        //   - <BACKJUMP>          media_sample went backward/stalled (a true loop).
+        // [AUDIO-DIAG] unconditional trace (mirrors the [dbg]/[FRAME-DIAG] hooks):
+//   - <SHORTFALL> decoded fewer samples than requested. The exporter advances
+//                 by max(got,req), so a shortfall runs AHEAD of real audio; a
+//                 later hard-seek past the decoder's forward tolerance repeats
+//                 audio (Matroska-PCM far-seek).
+//   - <BACKJUMP>  media_sample went backward/stalled (a true loop).
         const std::size_t _src_ch = static_cast<std::size_t>(chunk->channels);
         const std::size_t _n = chunk->samples.size();
         const int _got = (int)(_n / _src_ch);

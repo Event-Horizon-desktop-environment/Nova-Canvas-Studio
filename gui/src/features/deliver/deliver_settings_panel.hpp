@@ -15,7 +15,7 @@ class QLabel;
 
 namespace canvas::gui {
 
-// Left-hand render settings panel for the Deliver page (Resolve-style). Builds
+// Left-hand render settings panel for the Deliver page. Builds
 // controls over canvas::core::DeliverSettings and emits readiness changes. The
 // caller reads settings() after any change to build an export job.
 class DeliverSettingsPanel : public QWidget {

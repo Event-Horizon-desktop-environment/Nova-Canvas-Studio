@@ -18,7 +18,7 @@
 // Media pool grid. Subclasses QListWidget (IconMode) so the rest of the app can
 // keep using addItem()/item()/clear() unchanged, but overlays a Material 3
 // "empty state" (title + subtitle + blue accent CTA) whenever the pool has no
-// clips, mirroring the DaVinci Resolve / Fluent "No clips in media pool" screen.
+// clips, the familiar "no clips in media pool" empty state, so nobody's
 class MediaPoolWidget : public QListWidget {
     Q_OBJECT
 public:

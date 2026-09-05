@@ -33,8 +33,8 @@ void build_center_workspace(MainWindow& mw) {
     // ---- 6. CENTER — the viewer with its contextual toolbar ----
     mw.viewer_ = new ViewerGL(&mw);
 
-    // Fit/Fill monitor scaling, available via right-click on the viewer
-    // (Kdenlive-style): Fit shows the whole frame with letterbox bars (default),
+    // Fit/Fill monitor scaling, available via right-click on the viewer:
+    // Fit shows the whole frame with letterbox bars (default),
     // Fill crops to cover the media window edge-to-edge.
     mw.viewer_->setContextMenuPolicy(Qt::CustomContextMenu);
     const bool saved_scale = QSettings().value(QStringLiteral("viewerScaleFill"), false).toBool();
@@ -64,7 +64,7 @@ void build_center_workspace(MainWindow& mw) {
             });
 
     // Contextual editing toolbar — sits directly under the viewer, matching
-    // the timeline toolbar icon row (ux.md §5): tool cluster, marker
+    // the timeline toolbar icon row: tool cluster, marker
     // cluster, then a right-aligned zoom cluster.
     auto* contextual_bar = new QToolBar(MainWindow::tr("Editing Tools"), &mw);
     contextual_bar->setMovable(false);
@@ -379,6 +379,11 @@ void build_center_workspace(MainWindow& mw) {
     timeline_dock->setWidget(timeline_frame);
     timeline_dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
     timeline_dock->setMinimumHeight(140);
+    // Open compact: Qt's default dock height lands the timeline tall on every
+    // first launch (the user has to shrink it each time). Pin an explicit
+    // initial height so the media space above keeps most of the window. (There
+    // is no saveState/restoreState yet, so this is the standing default.)
+    mw.resizeDocks({timeline_dock}, {265}, Qt::Vertical);
 
     // Central workspace = the viewer column (regions lock into place around it).
     if (QWidget* vf = mw.ui->viewerFrame) {

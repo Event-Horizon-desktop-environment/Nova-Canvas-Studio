@@ -13,9 +13,6 @@
 
 namespace canvas::core {
 
-// (Cap on decode-forward fast-overs for scrub previews now lives on
-//  VideoDecoder::kPreviewMaxOver in the header.)
-
 VideoDecoder::~VideoDecoder() { close(); }
 
 bool VideoDecoder::open(const std::string& path, std::string* error,
@@ -46,14 +43,12 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
     const AVStream* stream = fmt_ctx_->streams[video_stream_];
     const AVCodecID codec_id = stream->codecpar->codec_id;
 
-    // Choose the decoder. When a hardware device is provided, prefer a decoder
-    // that exposes an AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX config for that
-    // device type. avcodec_find_decoder() alone can return a pure-software
-    // decoder (e.g. libdav1d for AV1) that exposes no hw config at all, which
-    // would silently disable NVDEC and cap export/scrub throughput at CPU
-    // decode speed even though a hardware decoder (e.g. the native av1 /
-    // *_cuvid) exists. Fall back to the default software decoder when no hw
-    // decoder is found or no device was supplied.
+    // Choose the decoder. With a hardware device supplied, prefer a decoder that
+    // exposes an AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX config for that device
+    // type. avcodec_find_decoder() alone can return a pure-software decoder
+    // (e.g. libdav1d for AV1) exposing no hw config, which would silently cap
+    // export/scrub at CPU speed despite a hardware decoder existing. Fall back
+    // to the default software decoder when no hw decoder or device is found.
     const AVHWDeviceType dev_type = hw_device_ctx
         ? reinterpret_cast<const AVHWDeviceContext*>(hw_device_ctx->data)->type
         : AV_HWDEVICE_TYPE_NONE;
@@ -91,9 +86,9 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
         return false;
     }
 
-    // If a shared hardware device is available and this codec supports it,
-    // enable hardware decode. We remember the hw pixel format so the frame
-    // download path (make_rgba_frame) knows how to pull data back to the CPU.
+    // If a shared hardware device is available and this codec supports it, enable
+    // hardware decode. The hw pixel format is remembered so the download path
+    // (make_rgba_frame) knows how to pull data back to the CPU.
     hw_pix_fmt_ = AV_PIX_FMT_NONE;
     hw_avail_ = false;
     if (hw_device_ctx) {
@@ -131,11 +126,10 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
     }
     codec_ctx_->thread_count = 0;
 
-    // Hardware decode is configured when we found an AVCodecHWConfig for the
-    // shared device (hw_pix_fmt_ set). Frames decoded on it will carry an
-    // hw_frames_ctx and be downloaded to RGBA in make_rgba_frame. If the codec
-    // or stream can't actually decode in hardware, FFmpeg transparently emits
-    // software frames instead.
+    // Hardware decode is on when we found an AVCodecHWConfig for the shared device
+    // (hw_pix_fmt_ set). Hardware frames carry a hw_frames_ctx and get
+    // downloaded in make_rgba_frame; if the codec can't actually decode in
+    // hardware, FFmpeg transparently emits software frames instead.
     hw_avail_ = hw_pix_fmt_ != AV_PIX_FMT_NONE;
 
     av_frame_ = av_frame_alloc();
@@ -168,9 +162,8 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
     audio_channels_ = 0;
     audio_samples_total_ = 0;
     // Open a *separate* demuxer for audio. Video lookahead advances the shared
-    // fmt_ctx_ and discards non-video packets, so audio must have its own
-    // container (and thus its own seek position) to avoid a reseek storm that
-    // dragged video down to a fraction of a frame per second.
+    // fmt_ctx_ and discards non-video packets, so audio needs its own container
+    // (and seek position) or the mutual seeks drag video below a frame per second.
     AVFormatContext* actx = nullptr;
     if (avformat_open_input(&actx, path.c_str(), nullptr, nullptr) == 0) {
         if (avformat_find_stream_info(actx, nullptr) >= 0) {
@@ -309,18 +302,16 @@ VideoFramePtr VideoDecoder::decode_next() {
 
 // Decodes forward from the current position until the target frame, fast-overs
 // every intermediate frame (no RGBA conversion, no GPU->CPU copy) and converts
-// only the target to RGBA. Hardware decode of the intervening frames is
-// unavoidable for HEVC (no decode-time lowres), but skipping the per-frame sws +
-// 14MB RX traffic for the other GOP frames is most of the scrub win.
+// only the target to RGBA. The intervening decodes are unavoidable for HEVC (no
+// decode-time lowres), but skipping per-frame sws + ~14MB of copy traffic for
+// the other GOP frames is most of the scrub win.
 //
-// `max_over` caps the number of fast-overs. It exists for scrub previews on
-// very sparse-keyframe media (multi-second GOPs): decoding ~2850 frames to
-// reach a far target makes a single preview drag 2-5s, which stalls the worker
-// and starves audio. When the cap is hit, the most recently decoded frame is
-// converted to RGBA anyway and returned as an *approximate* preview (scrub is
-// showing a low-res tease, not a frame-accurate export), so preview latency is
-// bounded to roughly `max_over` decode steps regardless of GOP density. A
-// subsequent yonder-target preview continues from here, so it never regresses.
+// `max_over` caps the fast-overs for sparse-keyframe media (multi-second GOPs):
+// walking ~2850 frames to a far target stalls the worker for seconds and starves
+// audio. On the cap, the most recently decoded frame is converted to RGBA and
+// returned as an *approximate* preview — a low-res tease, not a frame-accurate
+// export — so preview latency stays bounded regardless of GOP density. A later
+// yonder-target preview resumes from here, so it never regresses.
 std::string VideoDecoder::video_stream_summary() const {
     std::string s = "streams=" + std::to_string(nb_streams()) +
                     " video_stream=" + std::to_string(video_stream_);
@@ -345,8 +336,8 @@ VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int ma
     if (!codec_ctx_ || frame_rate_ <= 0.0) return nullptr;
     const auto df_t0 = std::chrono::steady_clock::now();
     int fast_over = 0;
-    // Most recently decoded frame, kept so we can fall back to an approaching
-    // representative frame if we hit the fast-over cap before reaching target.
+    // Most recently decoded frame, kept so we can fall back to a representative
+    // frame if we hit the fast-over cap before reaching target.
     int64_t last_number = -1;
     int64_t last_ticks = AV_NOPTS_VALUE;
     double last_secs = 0.0;
@@ -369,9 +360,9 @@ VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int ma
                 av_frame_unref(av_frame_);
                 next_frame_ = number + 1;
                 if (max_over > 0 && fast_over >= max_over) {
-                    // Too far from the keyframe to reach target at preview cost.
-                    // Return the nearest frame we already have anyway (fast_overs
-                    // unref'd it, so we must re-decode - but only this one).
+                    // Too far from the keyframe at preview cost: return the
+                    // nearest frame we already have (re-decoding it — the fast-over
+                    // unref'd it).
                     auto ap0 = std::chrono::steady_clock::now();
                     if (!draining_) {
                         for (;;) {
@@ -453,16 +444,12 @@ VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int ma
 
 const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_over) {
     if (!codec_ctx_ || frame_rate_ <= 0.0) return nullptr;
-    // This path only serves hardware-decoded frames (device NV12 on CUDA).
-    // Software decode must use the CPU RGBA path instead.
-    //
-    // hw_pix_fmt_ holds the *hwaccel* pixel format negotiated in open()
-    // (config->pix_fmt for the "cuda" device type), which is AV_PIX_FMT_CUDA
-    // — the tag AVFrame::format carries for a frame whose planes live in
-    // device memory. AV_PIX_FMT_NV12 is the *sw_format* nested one level
-    // down inside the frame's hw_frames_ctx, never the frame's own format,
-    // so comparing hw_pix_fmt_ against it here always failed and this
-    // function returned null before ever attempting to decode.
+    // This path only serves hardware-decoded frames (device NV12 on CUDA); software
+    // decode must use the CPU RGBA path. hw_pix_fmt_ is the *hwaccel* format
+    // negotiated in open() (AV_PIX_FMT_CUDA) — the tag AVFrame::format carries
+    // for device-memory frames. AV_PIX_FMT_NV12 is the nested sw_format inside
+    // hw_frames_ctx, never the frame's own format, so comparing against it here
+    // used to fail and this function returned null before decoding at all.
     if (!hw_avail_ || hw_pix_fmt_ != AV_PIX_FMT_CUDA) return nullptr;
     CANVAS_LOG("video_decoder: decode_to_hw target=%lld max_over=%d", (long long)target, max_over);
     int fast_over = 0;
@@ -479,16 +466,14 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
                 std::max<int64_t>(static_cast<int64_t>(std::llround(secs * frame_rate_)), 0);
 
             if (number < target) {
-                // Fast-over this intermediate GPU frame WITHOUT downloading it.
-                // `av_frame_` is a single reused buffer, so we count the tendency
-                // first and only unref if we are actually going to continue.
+                // Fast-over this intermediate GPU frame without downloading it. `av_frame_` is
+                // a single reused buffer, so count first and only unref if continuing.
                 ++fast_over;
                 if (max_over > 0 && fast_over >= max_over) {
-                    // Too far from the decoder's position to reach target at
-                    // preview cost (sparse-keyframe GOP). Return the frame we
-                    // just reached on the device as an approximate teaser; the
-                    // next move resumes from here. Kept borrowed like the exact
-                    // target path below (caller must consume before next decode).
+                    // Too far at preview cost (sparse-keyframe GOP): return the
+                    // frame just reached on the device as an approximate teaser;
+                    // the next move resumes from here. Borrowed like the exact
+                    // target path (caller must consume before the next decode).
                     ::canvas::core::log::log_error(
                         "vdecode hw-forward target=%lld got=%lld CAPPED fast_over_frames=%d max=%d",
                         (long long)target, (long long)number, fast_over, max_over);
@@ -540,12 +525,10 @@ const AVFrame* VideoDecoder::decode_to_hw_indexed(const int64_t target, const in
     if (total_frames_ > 0) t = std::clamp(t, int64_t{0}, total_frames_ - 1);
     if (t < 0) t = 0;
 
-    // Jump the demuxer to the I-frame that owns this target so the forward walk
-    // below only traverses that single Group of Pictures (not the whole span
-    // from the decoder's current position). Uses the built keyframe index when
-    // available; otherwise falls back to a plain container seek to the target's
-    // presentation time (avformat_seek_file lands on the keyframe at-or-before),
-    // which also correctly anchors backward scrubs when no index exists yet.
+    // Jump to the keyframe that owns this target so the forward walk only
+    // traverses one Group of Pictures. Uses the built keyframe index; without
+    // one, a plain container seek to the target's presentation time lands on
+    // the keyframe at-or-before, which also anchors backward scrubs.
     const IframeEntry* entry = iframe_at_or_before(t);
     if (entry) {
         container_seek_seconds(entry->pts_seconds);
@@ -563,9 +546,8 @@ VideoFramePtr VideoDecoder::make_rgba_frame(const AVFrame* src, const int64_t ti
                                             const double seconds, const int64_t number) {
     auto out = std::make_shared<VideoFrame>();
 
-    // Hardware-decoded frames live on the GPU. Pull a CPU-readable copy back
-    // (NV12 typically) into `sw`, then convert that to RGBA below. This keeps
-    // the rest of the pipeline (caching, viewer) unchanged.
+    // Hardware frames live on the GPU. Pull a CPU-readable copy back (NV12
+    // typically) into `sw`, then convert that to RGBA below.
     const AVFrame* cvt = src;
     AVFrame* sw = nullptr;
     if (src->hw_frames_ctx) {
@@ -579,9 +561,9 @@ VideoFramePtr VideoDecoder::make_rgba_frame(const AVFrame* src, const int64_t ti
         cvt = sw;
     }
 
-    // Target output size. When a low-res preview cap is set (see
-    // set_output_dim), scale during the single sws conversion so scrubbing a
-    // GOP doesn't build full-res RGBA for every frame.
+    // Target output size. With a low-res preview cap set (see set_output_dim),
+    // scale during the single sws conversion so scrubbing a GOP doesn't build
+    // full-res RGBA for every frame.
     int out_w = cvt->width;
     int out_h = cvt->height;
     if (out_max_dim_ > 0 && out_max_dim_ < std::max(cvt->width, cvt->height)) {
@@ -664,19 +646,17 @@ VideoFramePtr VideoDecoder::decode_to_frame(int64_t target, int max_output_dim) 
     VideoFramePtr dbg_out = nullptr;
 
     // Give sequential decode a small window of forward progress to avoid a
-    // costly random seek (keyframe + decode-forward) on the common playback
-    // path. If we've already moved past the target or it's far ahead, seek.
-    // The window stays small: a large forward jump decoded sequentially would
-    // block for (distance * ~ms/frame) in one call and stall scrubbing. For big
-    // forward jumps a keyframe seek bounds decode-forward to a single GOP.
+    // random seek on the common playback path. If we've already moved past the
+    // target or it's far ahead, seek — a big sequential forward jump would block
+    // for (distance * ~ms/frame) and stall scrubbing, while a keyframe seek
+    // bounds decode-forward to a single GOP.
     if (target >= next_frame_ && target - next_frame_ < 64) {
         VideoFramePtr frame = decode_forward_to(target);
         if (frame) {
             next_frame_ = frame->frame_number + 1;
             dbg_out = std::move(frame);
         } else {
-            // Fall through to a (re)seek if sequential decode stalled (e.g.
-            // EOF then wrapped, or decoder got into a bad state).
+            // Fall through to a (re)seek if sequential decode stalled.
         }
     }
     if (!dbg_out) dbg_out = seek_to_frame_indexed(target, max_output_dim);
@@ -705,12 +685,9 @@ void VideoDecoder::container_seek_seconds(const double target_seconds) {
 }
 
 // Process-wide I-frame index cache, keyed by media path. Backing storage is
-// declared as inline in the header (`s_iframe_cache`/`s_iframe_inflight`/
-// `s_iframe_mtx`); the builder below populates it on a detached thread.
-
-// Background: walks `path`'s container, records every keyframe. Returns the
-// built index (possibly empty if unsupported / no keyframes), or nullptr on
-// open failure. Independent context: safe to run concurrently with any decoder.
+// declared as inline in the header; the builder below populates it on a
+// detached thread. Walks the container recording every keyframe, and is safe
+// to run concurrently with any decoder.
 static std::shared_ptr<const std::vector<IframeEntry>> build_iframe_sync(const std::string& path,
                                                                          const AVRational stream_tb,
                                                                          const double fps,
@@ -746,9 +723,9 @@ static std::shared_ptr<const std::vector<IframeEntry>> build_iframe_sync(const s
     return out;
 }
 
-// Walks the container packet stream once (in the background) recording every
-// keyframe (I-frame) video packet. Callers never block: seeks fall back to
-// plain container access until the index is ready. Returns immediately.
+// Walks the container packet stream in the background recording every
+// keyframe. Callers never block: seeks fall back to plain container access
+// until the index is ready.
 void VideoDecoder::build_iframe_index() {
     const std::string path = path_;
     if (path.empty() || video_stream_ < 0 || frame_rate_ <= 0.0) return;
@@ -799,8 +776,8 @@ VideoFramePtr VideoDecoder::seek_to_frame_indexed(int64_t target, int max_output
         return seek_to_frame(target, max_output_dim);
     }
 
-    // Jump the container to the keyframe's presentation time, decode-forward to
-    // `target` within this single GOP, and re-sync state.
+    // Jump to the keyframe's presentation time, decode-forward to `target` within
+    // this single GOP, and re-sync state.
     // Preview path (max_output_dim > 0) caps decode-forward so a scrub never
     // stalls on sparse-keyframe GOPs: it decodes at most ~kPreviewMaxOver frames
     // past the keyframe and returns the nearest frame reached (an approximate
@@ -866,14 +843,12 @@ bool ensure_audio_swr(SwrContext*& swr, const AVCodecContext* c, const int out_r
 }  // namespace
 
 // Decodes interleaved float PCM at `out_sample_rate`. `start_sample` is in
-// *output* sample units (i.e. seconds * out_sample_rate), so a sample's time is
-// unambiguously `sample / out_sample_rate` seconds.
-//
-// Every resampled block is positioned using its source frame's
-// best_effort_timestamp mapped into output-sample units, so positioning stays
-// exact regardless of seek history or resampler delay. Sequential decode is
-// used when the caller advances monotonically; backward/far-forward targets
-// trigger a reseek, and any samples preceding the target are discarded.
+// output sample units (i.e. seconds * out_sample_rate). Each resampled block
+// is positioned by its source frame's best_effort_timestamp mapped into
+// output-sample units, so positioning stays exact regardless of seek history or
+// resampler delay. Sequential decode is used when the caller advances
+// monotonically; backward/far-forward targets trigger a reseek and any samples
+// preceding the target are discarded.
 AudioChunkPtr VideoDecoder::decode_audio(const int64_t start_sample, const int max_frames,
                                          const int out_sample_rate) {
     if (!audio_codec_ || !audio_fmt_ctx_ || audio_stream_ < 0 || out_sample_rate <= 0 ||
@@ -885,7 +860,7 @@ AudioChunkPtr VideoDecoder::decode_audio(const int64_t start_sample, const int m
     }
     const int64_t target = std::max<int64_t>(0, start_sample);
 
-    // Reseek only on backward jumps or large forward jumps. Sequential calls
+    // Reseek only on backward jumps or large forward jumps; sequential calls
     // (the common playback path) continue decoding and discard passed samples.
     if (target < audio_next_sample_ ||
         target - audio_next_sample_ > 2 * static_cast<int64_t>(out_sample_rate)) {

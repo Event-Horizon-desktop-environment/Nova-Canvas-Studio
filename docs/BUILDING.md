@@ -126,7 +126,7 @@ build:
 
 ## Launching and what to expect
 
-`./build/gui/canvas` opens the Resolve-style dark UI: a Viewer dock, an Edit
+`./build/gui/canvas` opens the dark, tool-grade UI: a Viewer dock, an Edit
 page with a media pool, the Deliver page for export, and the timeline with its
 pinned ruler/minimap/timecode strip, linked A/V clips, transitions, snapping,
 undo, and the divider band that pans the channels (pull up to the limit, pull

@@ -30,13 +30,9 @@ double media_fps_of(const canvas::core::Project& project, const canvas::core::Cl
     return (it != project.media.end() && it->fps > 0.0) ? it->fps : 0.0;
 }
 
-// Applies a clip's audio IN/OUT transition envelopes to decoded PCM before it
-// reaches the output device, so linked-pair transitions (video type translated
-// to an AudioFade* on the audio mate) and manually-added audio fades are
-// actually AUDIBLE in playback — matching what the exporter's audio mix does.
-// Returns the chunk's own samples when no audio fade touches the written
-// tl-frame range (the common case: zero copies); otherwise a per-frame gain-
-// scaled copy in `scratch`.
+// Applies a clip's IN/OUT transition envelopes to decoded PCM before it
+    // reaches the device, matching the exporter's audio mix. Returns the chunk
+    // itself when no fade touches this range, else a gain-scaled copy in scratch.
 const std::vector<float>* apply_audio_fades(const canvas::core::Clip& clip,
                                             const canvas::core::AudioChunkPtr& c,
                                             const int64_t first_media_sample, const int out_rate,
@@ -55,10 +51,8 @@ const std::vector<float>* apply_audio_fades(const canvas::core::Clip& clip,
     std::vector<float> gains(static_cast<std::size_t>(frames));
     bool touched = false;
     for (int k = 0; k < frames; ++k) {
-        // Frame-granular tl mapping (floor, NOT llround): a sample's timeline
-        // frame is floor(sample / out_rate * fps), so the gains land on the same
-        // whole frames the renderer's audio_chunk uses (llround would shift the
-        // second half of every frame onto the NEXT tl frame).
+        // Floor, not llround: the gains land on the same whole frames the
+        // renderer's audio_chunk uses (llround shifts frame boundaries).
         const int64_t tl = clip.tl_in + (static_cast<int64_t>(std::floor(
             static_cast<double>(first_media_sample + k) / out_rate * fps_v)) -
                                          clip.src_in);
@@ -147,31 +141,26 @@ void AudioPipeline::rewind(int64_t seq_frame, bool playing) {
     if (::canvas::core::log::enabled())
         ::canvas::core::log::log_warning("audio: pipeline rewind active=%d playing=%d", (int)active_,
                                      (int)playing);
-    // Mark a new audio run so the sync log can compare A/V offset before vs
-    // after the re-anchor (this is the boundary the user wants to see).
+    // New run: the sync log compares A/V offset before vs after the re-anchor.
     ++run_id_;
     ::canvas::core::log::log_warning("[avsync] RE-ANCHOR run=%llu at_seq_frame=%lld device_written=%llu",
                                  static_cast<unsigned long long>(run_id_),
                                  static_cast<long long>(seq_frame),
                                  static_cast<unsigned long long>(sink_.stat_written_frames()));
-    // Remember the media sample the next audio run starts writing from, and the
-    // device's written-frame counter at this instant, so we can later derive the
-    // audible position within this run for A/V sync diagnostics.
+    // Remember anchor media sample + device-written counter so the audible
+    // position within this run can be derived for A/V sync diagnostics.
     written_at_anchor_ = sink_.stat_written_frames();
     anchor_media_sample_ = playhead_to_audio_sample(seq_frame);
-    // A fresh play run: nothing has been fed to the device yet, so the feed
-    // watermark starts empty and the next (pre)roll/(play)step starts at the
-    // anchor. Prevents pre-rolled audio from being handed to the driver twice.
+    // Fresh run: nothing fed yet, so the feed watermark starts empty and the
+    // next preroll/play_step starts at the anchor (no double-handoff).
     feed_sample_ = -1;
     feed_media_ = -1;
     if (::canvas::core::log::enabled())
         ::canvas::core::log::log_warning("audio: rewind reset feed, anchor_media_sample=%lld rate=%d",
                                      static_cast<long long>(anchor_media_sample_), rate_);
     for (auto& [id, adec] : decoders_) adec->reset();
-    // Re-arm the output device on every seek so playback restarts from the new
-    // playhead position. If we leave the device holding samples decoded at the
-    // old position, a subsequent Play resumes stale/misaligned audio instead of
-    // the fresh position. flush() drains, prepares and restarts the writer.
+    // Re-arm the device on every seek so playback restarts from the new
+    // playhead; without this, resume would play stale audio from the old spot.
     if (active_) {
         sink_.log_pipeline_stats("rewind-pre");
         sink_.flush();
@@ -179,12 +168,10 @@ void AudioPipeline::rewind(int64_t seq_frame, bool playing) {
     }
 }
 
-// Write `lead_ms` of audio for the current playhead into the output before any
-// video frame is presented. The ALSA device holds a fixed buffer latency (here
-// ~50ms buffer plus writer headroom, observed ~70ms), so audio written at the
-// same moment a frame is shown is HEARD ~70ms later — audio lags video by that
-// constant. Pre-filling the device with leading audio puts the AUDIBLE cursor
-// (written minus latency) on the picture, so sync lands at ~0 instead of ~70ms.
+// Write `lead_ms` of audio into the output before the first video frame is
+// presented. The device holds fixed buffer latency (~70ms observed), so audio
+// written when a frame shows is HEARD ~70ms later. Pre-filling with leading
+// audio puts the audible cursor (~written minus latency) on the picture.
 void AudioPipeline::preroll(int64_t seq_frame, int lead_ms, bool playing) {
     std::lock_guard lock(mutex_);
     if (!active_ || !sink_.is_open() || lead_ms <= 0) return;
@@ -199,9 +186,9 @@ void AudioPipeline::preroll(int64_t seq_frame, int lead_ms, bool playing) {
         std::max<int64_t>(1, static_cast<int64_t>(std::llround(step_s * rate_)));
     const int64_t base_sample = playhead_to_audio_sample(seq_frame);
     const int64_t total = static_cast<int64_t>(static_cast<double>(lead_ms) / 1000.0 * rate_);
-    // The pre-roll writes the first `total` media samples at the anchor. Advance
-    // the feed watermark so play_step() starts AFTER this leading audio instead
-    // of re-writing it (which pulled the audible cursor ahead of video).
+    // Pre-roll writes the first `total` media samples at the anchor. Advance the
+    // feed watermark so play_step() continues after this lead-in instead of
+    // re-writing it (which pulls the audible cursor ahead of video).
     feed_media_ = clip->media;
     feed_sample_ = std::max(feed_sample_, base_sample);
     int64_t written = 0;
@@ -231,12 +218,10 @@ void AudioPipeline::preroll(int64_t seq_frame, int lead_ms, bool playing) {
         static_cast<unsigned long long>(sink_.audible_position_frames()), (int)playing);
 }
 
-// Audible scrub: decode a short PCM grain from the media at `seq_frame` and write
-// it to the already-open output device. A short (~40ms) slice keeps each grain
-// distinct and cheap; best-effort (returns on any missing component). Mirrors
-// preroll's decode+write pattern but for a discrete scrub "blip" rather than a
-// continuous run. The device stays open across the whole drag so we never pay a
-// per-move open/flush (the reported stutter source).
+// Audible scrub: decode a short (~40ms) PCM grain at `seq_frame` and write it
+// to the already-open device, keeping each grain distinct and cheap. Best-effort;
+// mirrors preroll's decode+write pattern for a discrete scrub blip. The device
+// stays open across the drag so no per-move open/flush (the reported stutter).
 void AudioPipeline::play_scrub_grain(int64_t seq_frame) {
     std::lock_guard lock(mutex_);
     if (!project_ || !active_ || !sink_.is_open()) return;
@@ -281,11 +266,10 @@ const canvas::core::Clip* AudioPipeline::audio_clip_at(int64_t seq_frame) const 
     if (!project_ || seq_frame < 0 || seq_frame >= project_->sequence.duration_frames())
         return nullptr;
     const canvas::core::Sequence& seq = project_->sequence;
-    // An audio-track clip that covers the playhead decides the output for this
-    // frame: if enabled it plays, if disabled it is an intentional mute. In
-    // either case we must NOT fall through to the video track — otherwise a
-    // disabled (e.g. unlinked-then-muted) audio clip would be overridden by the
-    // movie's embedded audio on the video track and Ctrl+D would appear broken.
+    // An audio-track clip covering the playhead decides this frame's output: if
+    // enabled it plays, if disabled it's an intentional mute. Either way do NOT
+    // fall through to the video track — that would let a disabled audio clip be
+    // overridden by the movie's embedded audio (breaking Ctrl+D mute).
     for (std::size_t i = seq.audio_tracks.size(); i-- > 0;) {
         const auto& track = seq.audio_tracks[i];
         if (track.locked) continue;
@@ -310,8 +294,8 @@ const canvas::core::Clip* AudioPipeline::clip_at_any_track(int64_t seq_frame) co
     return nullptr;
 }
 
-// Media-time audio sample index for a timeline frame. Matches the computation in
-// play_step() so diagnostics and playback agree.
+// Media-time audio sample index for a timeline frame. Matches play_step()'s
+    // computation so diagnostics and playback agree.
 int64_t AudioPipeline::playhead_to_audio_sample(int64_t seq_frame) const {
     if (!project_ || seq_frame < 0) return 0;
     const canvas::core::Clip* clip = audio_clip_at(seq_frame);
@@ -324,23 +308,16 @@ int64_t AudioPipeline::playhead_to_audio_sample(int64_t seq_frame) const {
 
 int64_t AudioPipeline::audio_sample_to_seq_frame(int64_t media_sample) const {
     if (!project_ || media_sample < 0) return -1;
-    // Find an audio clip whose [src_in, src_out) media-frame range covers
-    // media_sample and map back to its timeline placement. Audio tracks are few;
-    // a linear scan over audio tracks/clips only happens on drop-ahead (once per
-    // slow present).
+    // Find the audio clip whose [src_in, src_out) covers this sample and map it
+    // back to its timeline placement. Audio tracks are few; a linear scan on
+    // drop-ahead (once per slow present) is fine.
     //
-    // Inverts playhead_to_audio_sample(): that computes
-    //   src_frame = c.src_in + (seq_frame - c.tl_in)
-    //   media_sample = round(src_frame / fps_v * audio_rate_)
-    // so here we must first convert media_sample back to src_frame (an ABSOLUTE
-    // media-frame position that already includes c.src_in), then subtract
-    // c.src_in before adding c.tl_in. The previous version compared media_sample
-    // (sample-rate domain) directly against c.src_in (frame-rate domain, a unit
-    // mismatch) and then added c.src_in a second time when forming
-    // src_frame/seq_frame, so for any trimmed clip (c.src_in > 0 — the normal
-    // case) the returned seq_frame was too high by c.src_in frames. That inflated
-    // the "audible" frame fed into SonicSync::reconcile's master-clock cap in the
-    // drop-to-realtime catch-up — the observed forward-scrub A/V desync.
+    // Inverts playhead_to_audio_sample(): first convert the sample back to an
+    // absolute media-frame position (src_frame) that already includes src_in,
+    // then subtract src_in before adding tl_in. The old version compared the
+    // sample-domain value directly against src_in (frame domain, unit mismatch)
+    // and added src_in twice, so trimmed clips inflated the audible frame fed to
+    // SonicSync's master-clock cap — the observed forward-scrub desync.
     const canvas::core::Sequence& seq = project_->sequence;
     for (const canvas::core::Track& t : seq.audio_tracks) {
         for (const canvas::core::Clip& c : t.clips) {
@@ -357,22 +334,20 @@ int64_t AudioPipeline::audio_sample_to_seq_frame(int64_t media_sample) const {
     return -1;
 }
 
-// Debug output for A/V sync: for the frame being presented NOW, report the
-// video's media position (frame/fps) versus the audio position that is CURRENTLY
-// AUDIBLE at the speaker (anchored to the last rewind so seeks/scrubs do not
-// corrupt the comparison). Logs once per second.
+// Debug output for A/V sync, logged ~1/s: the frame being presented now versus
+// the audio position currently AUDIBLE (anchored to the last rewind so seeks/
+// scrubs don't corrupt the comparison).
 //
 //   video_ms     = media time of the picture on screen
-//   audible_ms   = media time of the sound coming out of the speaker
+//   audible_ms   = media time of the sound at the speaker
 //   av_offset_ms = video_ms - audible_ms  (>0: audio heard is BEHIND the picture)
 //
-// Steady play: a small, roughly constant positive offset (~device buffer latency)
-// is expected. A value that GROWS over a segment means real drift. A jump (e.g.
-// offset swings massively negative) right after a scrub means the audio wasn't
-// re-anchored to the new playhead.
+// Steady play: a small, roughly constant positive offset (~buffer latency) is
+// expected. Offsets that GROW mean real drift; a jump right after a scrub means
+// audio wasn't re-anchored to the new playhead.
 //
 // NOTE: does NOT lock mutex_ — the caller (play_step) already holds it, and
-// taking it here deadlocks the worker thread on the very first frame.
+// taking it here deadlocks the worker on the first frame.
 void AudioPipeline::log_av_sync(int64_t seq_frame, double video_fps, double step_seconds) {
     static auto last_av = Clock::now();
     const auto now = Clock::now();
@@ -395,11 +370,9 @@ void AudioPipeline::log_av_sync(int64_t seq_frame, double video_fps, double step
                             static_cast<int64_t>(written_at_anchor_)) /
         static_cast<double>(rate_) * 1000.0;
 
-    // AUDIO SPEED within this run: ratio of audible-media-time advance to
-    // video-media-time advance over the last ~1s. 1.00 = correct pace; >1.00 =
-    // audio running FAST (further into the media than the picture); <1.00 =
-    // audio running slow. Only meaningful while contiguous in the same run
-    // (reset on a re-anchor so before/after scrub speed is cleanly separated).
+    // AUDIO SPEED within this run: audible-media-time advance vs video-media-time
+    // over the last ~1s. 1.00 = correct pace; >1.00 = audio running fast. Only
+    // meaningful while contiguous in one run (reset on re-anchor).
     double speed_ratio = 0.0;
     if (speed_run_ == run_id_ && speed_video_ms_ > 0.0) {
         const double dv = video_ms - speed_video_ms_;
@@ -419,7 +392,7 @@ void AudioPipeline::log_av_sync(int64_t seq_frame, double video_fps, double step
 
 void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_hold_active) {
     std::lock_guard lock(mutex_);
-    // Throttle failure warnings to ~1/second since this runs every frame.
+    // Throttle failure warnings to ~1/s since this runs every frame.
     static auto last_warn = Clock::now();
     const auto warn = [&](const char* why) {
         const auto now = Clock::now();
@@ -433,30 +406,27 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
         warn("not playing / output closed");
         return;
     }
-    // SonicSync seek-hold: while a seek-while-playing is still decoding/presenting
-    // its target frame, do not feed per-frame audio for the (old) playhead — it
-    // would stream ahead of the frozen picture. handle_seek closes the hold at the
-    // atomic re-anchor (frame presented) and re-anchors audio to the target itself.
+    // SonicSync seek-hold: while a seek-while-playing is still decoding its target,
+    // do not feed audio for the (old) playhead — it would stream ahead of the
+    // frozen picture. handle_seek closes the hold at the re-anchor and re-anchors
+    // audio to the target itself.
     if (seek_hold_active) {
         warn("seek-hold active (audio waits for its frame)");
         return;
     }
-    // Suppressed during a playing scrub? No — for the Premiere-style model the
-    // forward program audio IS the scrub audio: the drag streams play_step from
-    // whatever position the playhead is at (see the playing branch in
-    // handle_seek_preview), so this must NOT early-return while scrubbing. The
-    // old MLT-blip feed (feed_scrub_audio) is gone.
+    // Not suppressed during a playing scrub: the drag streams play_step from
+    // wherever the playhead is (see the playing branch in handle_seek_preview),
+    // so the forward program audio IS the scrub audio. The old blip feed is gone.
     const canvas::core::Clip* clip = audio_clip_at(seq_frame);
     if (!clip || clip->media < 0) {
-        // Ghost-audio diagnostic: distinguish "clip present but DISABLED" from
-        // "no clip at all". If a disabled clip is hit here while the user still
-        // hears audio, the pipeline's project is stale (disable never landed).
+        // Ghost-audio diagnostic: tell a clip that's present but DISABLED apart from
+    // no clip at all. Hitting this while the user still hears audio means the
+    // pipeline's project is stale (disable never landed).
         const canvas::core::Clip* present = clip_at_any_track(seq_frame);
         if (present && present->media >= 0) {
-            // Fires every frame while playing over a disabled clip (~60/s of
-            // identical lines) or video-only media with no audio track. Throttle
-            // to ~1/s with a suppressed counter so the log stays readable while
-            // still proving how often the guard fired.
+            // Fires every frame while playing over a disabled clip or video-only
+            // media. Throttle to ~1/s so the log stays readable while still
+            // proving how often the guard fired.
             static auto last_gg = Clock::now();
             static int gg_ = 0, gg_suppressed_ = 0;
             if ((++gg_) == 1 || Clock::now() - last_gg >= std::chrono::seconds(1)) {
@@ -504,11 +474,10 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
     // audio-vs-video offset and let us compare run N (before scrub) vs N+1.
     log_av_sync(seq_frame, fps_v, step_seconds);
 
-    // Skip any leading media samples this play run already fed to the device
-    // (from preroll's pre-roll), so a present never re-writes pre-rolled audio
-    // and drives the audible cursor ahead of the picture. The feed watermark
-    // lives in this clip's audio domain (per media) and is reset each rewind; it
-    // is ignored if the playhead has crossed to another clip.
+    // Skip leading media samples this run already fed to the device (from preroll),
+    // so a present never re-writes pre-rolled audio and pulls the audible cursor
+    // ahead of the picture. The watermark lives per media, is reset on rewind,
+    // and is ignored once the playhead crosses to another clip.
     const int64_t from =
         clip->media == feed_media_ ? std::max(start_sample, feed_sample_) : start_sample;
     const int64_t span = start_sample + want - from;
@@ -532,10 +501,9 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
         const std::vector<float>* data =
             apply_audio_fades(*clip, chunk, from, rate_, fps_v, &fade_scratch);
         if (playback_dbg()) {
-            // Diagnostic: report the actual signal level of what we hand to the
-            // output device so "no sound" can be told apart from "silence". A
-            // chunk full of near-zero samples reaching a RUNNING ALSA device
-            // means the decode produced silence, not a delivery problem.
+            // Diagnostic: actual signal level of what reaches the device, so "no sound"
+            // can be told apart from "silence". Near-zero samples into a RUNNING
+            // device means the decode produced silence, not a delivery problem.
             float peak = 0.0f, sum_sq = 0.0f;
             int nonzero = 0;
             for (const float s : chunk->samples) {
@@ -560,17 +528,16 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
         warn("decode produced no samples");
     }
 
-    // ALWAYS-ON audio feed health (~1/s via log_warning): what media position we
-    // just handed to the device, how many frames, and the offset between the
-    // media time we're WRITING now vs the video frame being presented now.
-    // churn / gaps here are what the listener hears as audio artifacts.
+    // Always-on audio feed health (~1/s): media position just handed to the device,
+    // how many frames, and the offset vs the frame being presented. Churn/gaps
+    // are what the listener hears as artifacts.
     static auto last_afe_log = Clock::now();
     static int afe_ = 0;
     if ((++afe_) == 1 || Clock::now() - last_afe_log >= std::chrono::seconds(1)) {
         last_afe_log = Clock::now();
         static int64_t last_start = 0;
-        // Samples actually handed to the device on this call (NOT the seek-jump
-        // media delta): a value far above the ~per-frame `want` means a burst.
+        // Samples handled to the device on this call (not the seek-jump media delta):
+        // a value far above the per-frame `want` means a burst.
         const int64_t written_now =
             chunk ? static_cast<int64_t>(chunk->samples.size()) /
                         (chunk->channels ? chunk->channels : 1)
@@ -579,10 +546,9 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
         const bool burst = written_now > want * 4;
         last_start = from;
         // True audible-vs-picture offset via the device's measured audible position
-        // (written minus device buffer) ANCHORED to this run, so the reported
-        // audible media-time matches the timeline the way the [avsync] line does.
-        // (The raw device counter is cumulative across all runs since open, so
-        // using it directly would be misleading after any seek/scrub.)
+        // (written minus device buffer), anchored to this run so it matches the
+        // timeline the way the [avsync] line does. (The raw device counter spans
+        // all runs since open, so using it directly misleads after any seek.)
         const uint64_t audible_frames = sink_.audible_position_frames();
         const int64_t run_audible =
             static_cast<int64_t>(audible_frames) - static_cast<int64_t>(written_at_anchor_);
@@ -598,21 +564,20 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
     }
 }
 
-// Playing-scrub audio feed (MLT model). Called from the UI thread by the
+// Playing-scrub audio feed (MLT model), called from the UI thread by the
 // controller's seek_preview() on each mouse move while a playback drag is active
-// (the worker is saturated decoding video previews during a drag and cannot feed
-// in time). Each landed position is reposition_enqueue()'d: the device is DROPPED
-// + re-prepared and the new position's chunk becomes the next thing the device
-// plays. This makes the AUDIBLE position jump with the drag (an enqueue-only FIFO
-// feed can never advance the audible faster than realtime). No thread stop/join,
-// no teardown gaps; the writer discards stale in-flight batches via the
+// (the worker is busy decoding previews and can't feed in time). Each landed
+// position is reposition_enqueue()'d: the device is dropped + re-prepared and the
+// new chunk becomes the next thing it plays, so the AUDIBLE position jumps with
+// the drag (an enqueue-only FIFO can never advance audibly faster than realtime).
+// No thread stop/join, no teardown gaps; the writer drops stale batches via the
 // generation counter. Throttled to ~45ms so the audible "ladder" tracks the drag
 // without device chop.
 void AudioPipeline::feed_scrub_audio(int64_t target) {
-    // Throttle to ~every 45ms: each reposition gives the device ~45ms of the new
-    // position to actually play before the next reposition replaces it. A shorter
-    // gap chops every blip into inaudible fragments; a longer one makes the ladder
-    // feel sparse. Chunk is 120ms so the device never STARVES between repositions.
+    // Throttle to ~45ms: each reposition gives the device ~45ms of the new
+    // position before the next one replaces it. Shorter chops every blip into
+    // inaudible fragments; longer makes the ladder feel sparse. Chunk is 120ms
+    // so the device never starves between repositions.
     const auto now = Clock::now();
     if (target == last_scrub_audio_target_ ||
         now - last_scrub_audio_at_ < std::chrono::milliseconds(45))
@@ -631,13 +596,10 @@ void AudioPipeline::feed_scrub_audio(int64_t target) {
     const int64_t base_sample =
         static_cast<int64_t>(std::llround(src_frame / fps_v * rate_));
     // AUDIBLE-following reposition: each landed scrub position supplies a ~120ms
-    // chunk and we DROP the device + repoint it at this chunk, so the audible
-    // position jumps with the drag instead of only advancing at realtime through
-    // a FIFO (the enqueue-only feed never moved audibly). The next reposition
-    // (~45ms later) drops and replaces this chunk, so during a fast drag you hear
-    // the classic positional-blip ladder; on a slow drag each position gets a
-    // full audible blip. No writer stop/join — the writer discards stale batches
-    // via the generation counter.
+    // chunk and the device is dropped + repointed at it, so the audible position
+    // jumps with the drag. The next reposition (~45ms later) replaces it, so a
+    // fast drag gives the classic blip ladder and a slow drag full audible blips.
+    // No writer stop/join — the generation counter drops any stale batch.
     const int64_t chunk_frames =
         static_cast<int64_t>(static_cast<double>(120) / 1000.0 * rate_);
     auto s = ait->second->decode(base_sample, static_cast<int>(chunk_frames), rate_);
@@ -666,8 +628,7 @@ void AudioPipeline::feed_scrub_audio(int64_t target) {
 
 void AudioPipeline::begin_scrub() {
     std::lock_guard lock(mutex_);
-    // Fresh drag: forget the previous drag's scrub-audio feed state so the first
-    // move always feeds.
+    // Fresh drag: forget the previous drag's scrub-audio state so the first move always feeds.
     last_scrub_audio_target_ = -1;
     last_scrub_audio_at_ = {};
     scrub_repositions_ = 0;
@@ -675,8 +636,8 @@ void AudioPipeline::begin_scrub() {
 
 int64_t AudioPipeline::audible_seq_frame(int64_t playhead_seq) const {
     std::lock_guard lock(mutex_);
-    // Without a live, ENABLED audio clip under the playhead nothing is audible,
-    // so there is no master clock to trust this run (see present_next notes).
+    // Without a live, ENABLED audio clip under the playhead nothing is audible, so
+    // there is no master clock to trust this run (see present_next notes).
     if (!active_ || !audio_clip_at(playhead_seq)) return -1;
     const uint64_t aud_frames = sink_.audible_position_frames();
     const int64_t run_aud =

@@ -15,19 +15,18 @@
 namespace canvas::gui {
 
 // Hardware-accelerated video viewer. Frames arrive as CPU-side RGBA buffers
-// (downloaded from the GPU by VideoDecoder) and are uploaded into a single
-// reused OpenGL texture, then drawn as a textured quad with GPU scaling. This
-// removes the per-frame CPU QImage copy + software scaling that caused frame
-// drops at high resolutions, leaving scaling to the GPU.
+// (or NV12 planes) and are uploaded into reused OpenGL textures, then drawn
+// as a textured quad with GPU scaling (avoids per-frame CPU QImage copy +
+// software scaling).
 class ViewerGL final : public QOpenGLWidget, protected QOpenGLFunctions {
     Q_OBJECT
 
 public:
     enum class ViewerMode { Source, Program };
 
-    // How the frame is scaled into the media window. Fit shows the whole frame
-    // (letterbox bars on the odd axis, Kdenlive/Resolve default). Fill covers the
-    // window edge-to-edge, cropping the overflow axis of the source.
+    // How the frame is scaled into the media window: Fit shows the whole frame
+    // (letterbox bars on the odd axis), Fill covers the window edge-to-edge by
+    // cropping the overflow axis.
     enum class ScaleMode { Fit, Fill };
 
     explicit ViewerGL(QWidget* parent = nullptr);

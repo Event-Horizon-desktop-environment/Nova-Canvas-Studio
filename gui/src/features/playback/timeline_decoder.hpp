@@ -1,25 +1,24 @@
 #pragma once
 
-// TimelineDecoder — the Qt-free video decode/element front-end for playback and
-// scrub. Extracted from SequenceController so the decode path itself has no Qt
+// TimelineDecoder — the Qt-free video decode front-end for playback and scrub.
+// Extracted from SequenceController so the decode path itself has no Qt
 // dependency and can run in headless unit tests (links only canvas_core).
 //
 // WHAT IT OWNS
-//   * One DecoderSlot (VideoDecoder + byte-budgeted FrameCache) per media id.
-//     add_media() opens the decoder (hardware when available); clear() drops all
-//     slots on a project swap.
+//   * One DecoderSlot (VideoDecoder + byte-budgeted FrameCache) per media id;
+//     add_media() opens the decoder (hardware when available), close() drops all.
 //   * The low-res scrub-preview LRU (PreviewKey/preview_cache_/preview_lru_),
 //     separate from the full-res caches so a preview never displaces (or is
 //     returned as) a crisp playback frame.
 //   * The shared hardware-decode device (HwDeviceManager), probed once and
 //     reused by every slot + the GPU NV12 composite path.
 //
-// INVARIANT: this header/source are HEADLESS — they may include only <system>,
-// <canvas/core/...> and other headless modules, never <Q...>.
+// INVARIANT: headless — may include only <system>, <canvas/core/...> and other
+// headless modules, never <Q...>.
 //
-// FROZEN API (splitplan Phase 22): this public surface is the stable playback
-// seam. Changes to existing signatures require the refactor plan's sign-off;
-// new additive methods are fine.
+// FROZEN API: this public surface is the stable playback seam. Changes to
+// existing signatures require the refactor plan's sign-off; additive methods
+// are fine.
 
 #include <cstdint>
 #include <cstddef>
@@ -57,7 +56,7 @@ public:
     // (resize) on the GPU, download only the small NV12 planes for the viewer's
     // YUV shader. Engages only when CUDA is available AND this slot is hardware-
     // decoding; returns nullptr (caller falls back to decode / RGBA) on any
-    // failure — including backward scrubs (decode_to_hw only decodes forward).
+    // failure, including backward scrubs (decode_to_hw only decodes forward).
     canvas::core::Nv12FramePtr decode_nv12(const canvas::core::Project& project,
                                        const canvas::core::Clip& clip,
                                        std::int64_t seq_frame, int max_dim);
@@ -66,16 +65,16 @@ public:
     canvas::core::VideoFramePtr make_black_frame(const canvas::core::Clip& clip,
                                              int max_dim = 0) const;
 
-    // Full-res timeline → frame assembly: builds the RenderFrame for `seq_frame`
-    // (top clip + transition a/b handling + single-clip fades).
+    // Full-res timeline assembly: builds the RenderFrame for `seq_frame` (top
+    // clip + transition a/b handling + single-clip fades).
     canvas::core::RenderFramePtr frame(const canvas::core::Project& project,
                                    std::int64_t seq_frame);
     // Reduced-resolution variant used only for scrubbing; never writes the
     // reduced frame into the full-res cache.
     canvas::core::RenderFramePtr preview(const canvas::core::Project& project,
                                      std::int64_t seq_frame, int max_dim);
-    // Media frame rate at `seq_frame` for pacing (what frame interval the
-    // playhead should advance at), or `fallback_fps` when nothing covers it.
+    // Media frame rate at `seq_frame` (what frame interval the playhead advances
+    // at), or `fallback_fps` when nothing covers it.
     double media_rate_at(const canvas::core::Project& project, std::int64_t seq_frame,
                          double fallback_fps) const;
 
@@ -93,8 +92,8 @@ private:
         bool loaded = false;
     };
 
-    // (media, source frame) → reduced preview frame. LRU-bounded (32 entries)
-    // so repeated scrubbing across the same frames is instant.
+    // (media, source frame) → reduced preview frame. LRU-bounded (32) so repeated
+    // scrubbing across the same frames is instant.
     struct PreviewKey {
         canvas::core::MediaId media = 0;
         std::int64_t frame = 0;

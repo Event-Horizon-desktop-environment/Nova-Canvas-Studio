@@ -8,7 +8,7 @@
 namespace canvas::core {
 
 // ---------------------------------------------------------------------------
-// Deliver page settings — a Resolve-style, high-level model that maps onto the
+// Deliver page settings — a high-level model that maps onto the
 // lower-level FFmpeg ExportSettings used by export_project(). It captures every
 // option shown in the Deliver settings panel (Video/Audio/File tabs, plus the
 // advanced render options) so the GUI can build controls over it and translate

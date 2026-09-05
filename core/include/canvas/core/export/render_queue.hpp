@@ -42,16 +42,15 @@ public:
 
     void enqueue(RenderJob job);
     // Add one job per timeline clip (IndividualClips scope); each gets its own
-    // clip-range ExportSettings via `per_clip` mapper.
+    // clip-range ExportSettings via `per_clip`.
     void enqueue_individual(const DeliverSettings& base,
                             const std::function<bool(int index, ExportSettings& out)>& per_clip);
-    // Begin draining all currently-Queued jobs. Enqueued jobs do NOT start until
-    // start() is called (so "Add to Render Queue" only stages work and the user
-    // explicitly triggers rendering). After the batch is drained the queue goes
-    // back to waiting for a fresh start().
+    // Begin draining all currently-Queued jobs. Jobs do NOT start until start()
+    // is called ("Add to Render Queue" only stages work); after the batch drains
+    // the queue waits for the next start().
     void start();
-    // Provide the active project + an optional resolver so jobs render the right
-    // timeline (e.g. one job per clip). `project` is the default fallback.
+    // Provide the active project + an optional per-job resolver; `project` is the
+    // default fallback.
     void set_active_project(std::shared_ptr<const canvas::core::Project> project,
                             std::function<bool(const ExportSettings&,
                                                std::shared_ptr<const canvas::core::Project>&)>
@@ -68,8 +67,8 @@ public:
     // Snapshot copy of all jobs (thread-safe).
     std::vector<RenderJob> jobs() const;
 
-    // Raised by the worker thread on any change; connect these to refresh the
-    // GUI. (Qt code wraps these in queued connections.)
+    // Raised by the worker on any change; connect to refresh the GUI (wrapped in
+    // queued connections upstream).
     std::function<void()> on_changed;
     std::function<void(uint64_t)> on_job_started;
     std::function<void(uint64_t)> on_job_finished;

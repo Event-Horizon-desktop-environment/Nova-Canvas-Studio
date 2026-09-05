@@ -1,6 +1,6 @@
 # AGENTS.md — Nova Canvas Studio
 
-C++20 / Qt6 / FFmpeg **nonlinear video editor** (DaVinci-Resolve-style dark UI). Linux-only. The GUI shell lives in `gui/`, the headless editor/export engine in `core/` (`canvas_core` static lib). Namespaces: everything is `canvas::core` / `canvas::gui` (GPU code is `canvas::core::gpu`).
+C++20 / Qt6 / FFmpeg **nonlinear video editor** (dark, editor-grade UI). Linux-only. The GUI shell lives in `gui/`, the headless editor/export engine in `core/` (`canvas_core` static lib). Namespaces: everything is `canvas::core` / `canvas::gui` (GPU code is `canvas::core::gpu`).
 
 ## Build, run, test
 
@@ -46,7 +46,7 @@ roadmap.md / ux.md / "plan .md" / n.md   design docs (out of date, skim)
 - `project.hpp/.cpp` — `Project { name, Sequence, media[], bins }`, `MediaEntry { id, path, fps, dims, total_frames, bin }`. JSON save/load, versioned (`kProjectVersion=2`), nlohmann/json.
 
 ### Export (`export/`)
-- `deliver_preset.hpp/.cpp` — Resolve-style high-level Deliver settings (`DeliverSettings` backward/forward compatible). `to_export_settings()` → low-level `ExportSettings`.
+- `deliver_preset.hpp/.cpp` — high-level Deliver settings (`DeliverSettings` backward/forward compatible). `to_export_settings()` → low-level `ExportSettings`.
 - `exporter.hpp/.cpp` — `export_project()`: the full FFmpeg mux+encode (NVENC/VAAPI/QSV hw encoders, CPU fallback, progress/cancel). `list_video_codecs/list_containers/list_audio_codecs/available_hw_devices`.
 - `renderer.hpp/.cpp` — timeline→frames. `render_video_frame` (single), `RenderSession` (reusable across export, persistent decoders), compositing top-down, GPU single-clip fast path (`frame_gpu`, returns borrowed NV12 plane), `render_audio_chunk` mixing.
 - `render_queue.hpp/.cpp` — thread-safe background `RenderQueue` (own worker thread) draining `RenderJob`s via `export_project`.

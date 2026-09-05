@@ -23,7 +23,7 @@ with clear explanations.
 - Timeline model (de)serialization to `.ehproj` (JSON), versioned
 
 **The timeline UI**
-- Resolve-style dark UI with pinned top strip: live timecode readout,
+- Dark, tool-grade UI with pinned top strip: live timecode readout,
   minimap, ruler with tick labels
 - Playhead drawn over the ruler/grid; ruler-click seek and playhead drag
 - Divider band between the channel groups: grab it to pan the channels —

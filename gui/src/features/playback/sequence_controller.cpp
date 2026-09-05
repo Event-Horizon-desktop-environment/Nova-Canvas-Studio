@@ -32,11 +32,11 @@ SequenceController::~SequenceController() {
 void SequenceController::push(Request request) {
     {
         const std::lock_guard lock(mutex_);
-        // Coalesce rapid commands so the queue does not build a backlog of
-        // stale positions. A new Seek supersedes any queued Seek (only the
-        // latest position matters), and a Pause supersedes any queued Play.
-        // Without this, every scrub mouse-move enqueues a Seek whose blocking
-        // decode keeps executing after the mouse is released.
+        // Coalesce rapid commands so the queue can't build a backlog of stale
+        // positions: a new Seek supersedes any queued Seek (only the latest
+        // position matters) and a Pause supersedes any queued Play. Without this,
+        // every scrub mouse-move queues a Seek whose blocking decode keeps
+        // executing after the mouse is released.
         const auto is_seek_cmd = [](Command c) {
             return c == Command::Seek || c == Command::SeekPreview;
         };
@@ -86,12 +86,10 @@ void SequenceController::seek(const int64_t frame_number) {
     push({Command::Seek, frame_number, {}, {}});
 }
 void SequenceController::seek_preview(const int64_t frame_number) {
-    // Premiere-style audible scrub while playing: normal forward program audio is
-    // streamed by the worker from the dragged position (see handle_seek_preview's
-    // audio_.play_step call). No per-move device reposition here — the realtime
-    // sink can't hard-cut sub-100ms blips cleanly (old server-buffered audio keeps
-    // playing ~100ms past each drop), so the abandoned reposition/feed approach
-    // was removed. The commit seek on release does the precise final re-anchor.
+    // Audible scrub while playing: normal forward program audio is
+    // streamed from the dragged position by the worker (see handle_seek_preview's
+    // audio_.play_step call). No per-move device reposition here — the sink can't
+    // hard-cut sub-100ms blips cleanly. The commit seek on release re-anchors.
     push({Command::SeekPreview, frame_number, {}, {}});
 }
 
@@ -101,8 +99,8 @@ void SequenceController::begin_scrub() {
         scrub_drag_active_ = true;
         scrub_start_ = Clock::now();
         scrub_first_ = current_frame_.load();
-        // Fresh drag: reset the pipeline's scrub-audio feed state so the first
-        // move always feeds.
+        // Fresh drag: reset the pipeline's scrub-audio state so the first move
+        // always feeds.
         audio_.begin_scrub();
         qWarning() << "[scrub] BEGIN playing=" << playing_.load()
                    << "enabled=" << scrub_audio_enabled_.load() << "frame=" << current_frame_.load();
@@ -123,10 +121,9 @@ void SequenceController::end_scrub() {
                << "repositions=" << audio_.repositions_since_begin()
                << "pending=" << audio_out_.pending_frames();
     scrub_drag_active_ = false;
-    // Resolve the scrub-audio device. If we opened the output for audible
-    // scrubbing while paused, drop it so the next Play opens unconditionally and
-    // re-anchors from the new position. If we were playing and the drag left the
-    // output alive, it is re-anchored by the release seek/Play path.
+    // Resolve the scrub-audio device: drop it if we opened it for audible
+    // scrubbing while paused, so the next Play opens and re-anchors fresh. If we
+    // were playing, the release seek/Play path re-anchors it.
     scrub_audio_open_ = false;
     if (audio_.is_active() && !playing_.load()) audio_.close_output();
 }
@@ -187,7 +184,7 @@ void SequenceController::worker_loop() {
                 playing_.store(false);
                 play_pause_intent_.store(false);
                 if (audio_.is_active()) {
-                    // Allow the device to idle; the writer stops feeding silence.
+                    // Let the device idle; the writer stops feeding silence.
                     audio_out_.set_hold_active(false);
                     audio_out_.log_pipeline_stats("pause-flush-pre");
                     audio_out_.flush();
@@ -277,10 +274,9 @@ void SequenceController::handle_set_project(std::shared_ptr<const canvas::core::
     total_frames_.store(project_->sequence.duration_frames());
     for (const auto& m : project_->media) handle_add_media(m);
     // Preserve the playhead across edit snapshots (initial_frame < 0) so
-    // unlink/blade/move/etc. do not reset the timeline to the start; only a
-    // fresh open/new project requests an explicit anchor (0). handle_seek
-    // clamps into range, so a stale playhead past a shrunk sequence lands at
-    // the last frame rather than wrapping.
+    // unlink/blade/move/etc. don't reset the timeline to the start; only a fresh
+    // open/new project requests an explicit anchor. handle_seek clamps into
+    // range, so a stale playhead past a shrunk sequence lands on the last frame.
     const int64_t cur = current_frame_.load();
     const int64_t anchor = initial_frame >= 0 ? initial_frame : (cur >= 0 ? cur : 0);
     qWarning().nospace()
@@ -294,11 +290,11 @@ void SequenceController::handle_set_project(std::shared_ptr<const canvas::core::
 }
 
 void SequenceController::handle_add_media(const canvas::core::MediaEntry& entry) {
-    // Video decode slots (VideoDecoder + FrameCache + HW device) live in the
-    // Qt-free TimelineDecoder; the controller only forwards the media entry.
+    // Decode slots (VideoDecoder + FrameCache + HW device) live in the Qt-free
+    // TimelineDecoder; the controller just forwards the media entry.
     decoder_.add_media(entry);
-    // Audio decode/feed (per-media decoders, feed watermark, audible scrub
-    // grains, A/V sync anchors) lives in the Qt-free AudioPipeline.
+    // Audio decode/feed lives in the Qt-free AudioPipeline (per-media decoders,
+    // feed watermark, audible scrub grains, A/V sync anchors).
     audio_.add_media(entry);
 }
 
@@ -310,33 +306,25 @@ void SequenceController::handle_play() {
     reset_ready();
     audio_.open_output();
     // Always re-arm audio from the current playhead before playback starts.
-    // Paused scrubbing uses seek_preview(), which deliberately skips the
-    // per-move audio-rewind flush for speed; the writer/decoder can therefore
-    // be left stale (or never opened) when we arrive here, so a Play must
-    // reset+flush itself to guarantee audio resumes from the right sample.
+    // Paused scrubbing skips the per-move audio-rewind flush for speed, so the
+    // writer/decoder can be left stale (or never opened) when we arrive here; a
+    // Play must reset+flush itself to guarantee audio resumes from the right
+    // sample.
     //
-// audio_.rewind() calls AudioOutput::flush(), which stops+joins the ALSA
-    // writer thread, drops/re-prepares the device, and starts a FRESH writer
-    // thread. That fresh thread's very first loop iteration checks
-    // hold_active: if it were already true (as it used to be, set below
-    // *before* this call), it finds the queue still empty -- audio_.preroll()
-    // hasn't run yet -- and immediately writes a silence-hold chunk to the
-    // just-prepared device. Depending on how long preroll's decode takes to
-    // catch up, several such chunks can land before the real preroll audio
-    // does, so every Resume opened with a stray blip of silence spliced in
-    // ahead of the actual audio -- audible as a click/stutter ("garbled")
-    // right at the start of playback. Rewind+preroll first (queuing the real
-    // lead-in audio while the writer thread is not yet holding), THEN arm the
-    // hold so the writer's first real work is playing that audio, not padding
-    // silence in front of it. The hold is still needed afterward, for
-    // in-flight decode stalls during steady playback.
+    // Order matters: rewind()+preroll() FIRST, then arm the hold. rewind()
+    // restarts the ALSA writer thread, and its first loop iteration checks
+    // hold_active — if the hold were already armed (the old order), the queue is
+    // still empty because preroll() hasn't run, so the writer pads silence in
+    // front of the real audio → the start-of-playback click/stutter. Queuing the
+    // lead-in audio before arming the hold makes the writer's first real work the
+    // audio itself; the hold is still needed afterward for in-flight decode
+    // stalls during steady playback.
     audio_.rewind(current_frame_.load(), false);
-    // Pre-fill the device with leading audio so the AUDIBLE position (written
-    // minus device latency) starts aligned with the picture. Without this, audio
+    // Pre-fill the device with leading audio so the audible position starts
+    // aligned with the picture (written minus device latency). Otherwise audio
     // is heard a constant device-buffer latency (~70ms) behind the video.
     audio_.preroll(current_frame_.load(), kAudioLeadMs, playing_.load());
-    // Live playback: keep the ALSA device topped up so it never underruns/XRUNs
-    // (an XRUN-recover re-anchors the device arbitrarily → the sync drift).
+    // Live playback: keep the ALSA device topped up so it never underruns/XRUNs.
     if (audio_.is_active()) audio_out_.set_hold_active(true);
     playing_.store(true);
     next_present_ = Clock::now();
@@ -354,35 +342,31 @@ void SequenceController::handle_seek(const int64_t frame_number) {
     if (target < 0) target = 0;
 
     reset_ready();
-    // SonicSync (MLT "audio rides with its frame" model): the seek-hold gate
-    // marks the window — from now until the newly decoded target frame is handed
-    // to the display — during which new-position audio MUST NOT be fed. Feeding
-    // it during the (slow) full-res decode below lets audio stream ahead at
-    // realtime while the picture is still frozen on the old frame, leaving audio
-    // hundreds of ms ahead of the new frame (the persistent offset we observed).
-    // We instead: cut the old audio, decode the new frame, and only when the new
-    // frame is actually presented do we close the hold and re-anchor audio to the
-    // target. Audio and picture re-anchor together, exactly like MLT's purge +
-    // atomic re-production.
+    // SonicSync (MLT "audio rides with its frame" model): the seek-hold gate marks
+    // the window — from now until the decoded target frame reaches the display —
+    // during which new-position audio must NOT be fed. Feeding it during the
+    // slow full-res decode would let audio stream ahead at realtime while the
+    // picture is still frozen on the old frame (the persistent offset we saw).
+    // Cut the old audio, decode the new frame, and only when the new frame is
+    // presented do we close the hold and re-anchor audio to the target — audio
+    // and picture re-anchor together.
     const bool was_playing = playing_.load();
     sonicsync_.begin_seek_hold(target);
-    // current_frame_ is updated first so the audio rewind anchors the sync
-    // diagnostic to the new playhead.
+    // Update the playhead first so the audio rewind anchors the sync
+    // diagnostic to the new position.
     current_frame_.store(target);
-    // Re-anchor the pacing clock to the seek time so a subsequent present starts
-    // FROM here at realtime rather than "catching up" by dropping frames owed
-    // from before the seek (which would overshoot the scrub-release position).
+    // Re-anchor the pacing clock to now so presenting resumes from here at
+    // realtime instead of "catching up" by dropping frames owed from before the
+    // seek (which would overshoot the scrub-release position).
     next_present_ = Clock::now();
-    // Always-on commit diagnostics: a scrub release (or transport seek) that
-    // re-anchors audio and decodes the crisp frame.
     qWarning() << "[scrub] COMMIT seek_to=" << target
                << "playing=" << was_playing
                << "scrubbing=" << scrubbing_.load();
     const auto commit_t0 = Clock::now();
-    // Cut old-position audio NOW so it doesn't race forward during the decode;
-    // this plays out the residual device buffer (brief, matches the still-shown
-    // old frame — the MLT prefill analog) and leaves the device silent waiting on
-    // the target. The per-frame feed is held by the seek-hold gate meanwhile.
+    // Cut old-position audio now so it can't race forward during the decode;
+    // the residual device buffer plays out briefly (matches the still-shown old
+    // frame) and the device waits silent on the target. The per-frame feed is
+    // held by the seek-hold gate meanwhile.
     audio_.rewind(target, playing_.load());
     const double rewind_ms = std::chrono::duration<double, std::milli>(Clock::now() - commit_t0).count();
     const auto dec_t0 = Clock::now();
@@ -390,20 +374,17 @@ void SequenceController::handle_seek(const int64_t frame_number) {
     const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - dec_t0).count();
     if (debug_enabled())
         qDebug() << "playback: SEEK to frame" << target << "got_frame=" << (frame != nullptr);
-    // --- ATOMIC RE-ANCHOR: the new frame is presented now. Audio for the target
-    // may begin (and must re-anchor to the target), so close the seek-hold and
-    // re-establish the audio lead so the device latency doesn't reintroduce lag.
-    // This is the moment audio "rides with" the just-shown target frame (MLT).
+    // ATOMIC RE-ANCHOR: the new frame is presented now, so close the seek-hold
+    // and restore the audio lead (device latency must not reintroduce lag). This
+    // is the moment audio "rides with" the just-shown target frame (MLT).
     sonicsync_.end_seek_hold();
     emit frame_ready(std::move(frame));
     emit position_changed(target);
     const auto preroll_t0 = Clock::now();
     if (was_playing) audio_.preroll(target, kAudioLeadMs, was_playing);
     const double preroll_ms = std::chrono::duration<double, std::milli>(Clock::now() - preroll_t0).count();
-    // Warm the decoded-frame cache for the frames just ahead of the playhead so
-    // playback resumes instantly after a scrub (no decode-forward stall on the
-    // first present). frame_for_playhead() advances the decoder and caches, so
-    // re-running it for a short window makes the next fill_lookahead a cache hit.
+    // Warm the decoded-frame cache just ahead of the playhead so playback resumes
+    // instantly after a scrub (no decode-forward stall on the first present).
     const auto warm_t0 = Clock::now();
     if (was_playing) warm_lookahead(target + 1);
     const double warm_ms = std::chrono::duration<double, std::milli>(Clock::now() - warm_t0).count();
@@ -416,38 +397,35 @@ void SequenceController::handle_seek(const int64_t frame_number) {
 }
 
 // Fast scrub preview. Decodes only the target frame at reduced resolution (a
-// tiny RGBA, ~16x cheaper per GOP frame than full-res) and does not write it to
-// the full-res frame cache, so it never poisons playback. Skips the expensive
-// audio-rewind flush: we are paused/scrubbing, nothing is being played. The
-// committed full-res frame + audio re-arm come from a later handle_seek on
-// release/play.
+// tiny RGBA, ~16x cheaper per GOP frame than full-res) without touching the
+// full-res frame cache, so it never poisons playback. Skips the audio-rewind
+// flush: nothing is being played while paused/scrubbing. The committed full-res
+// frame + audio re-arm come from a later handle_seek on release/play.
 void SequenceController::handle_seek_preview(const int64_t frame_number) {
     if (!project_) return;
-    // While actually playing and NOT mid-scrub, a grab means the user repositioned
-    // the playhead mid-playback; jump to the full-res, audio-aligned seek so the
-    // running stream stays in step with the picture.
+    // Not mid-scrub: a grab while playing means the user repositioned mid-
+    // playback, so take the full-res, audio-aligned seek to keep the stream in
+    // step with the picture.
     if (playing_.load() && !scrubbing_.load()) {
         handle_seek(frame_number);
         return;
     }
-    // Mid-scrub (playing or paused): take the fast preview path. While PLAYING the
-    // audible scrub position is fed synchronously on the UI thread by seek_preview()
-    // (feed_scrub_audio) — NOT here: this worker is saturated decoding preview
-    // frames during a drag and would feed too late (measured scrub_audio_ms=0 on
-    // every preview) or double-feed. Paused scrubbing writes grains below.
+    // Mid-scrub (playing or paused): fast preview path. While PLAYING the
+    // audible scrub position is fed on the UI thread by seek_preview() via
+    // feed_scrub_audio — not here, where the worker is saturated decoding
+    // previews and would feed too late (measured scrub_audio_ms=0) or double-feed.
     int64_t target = frame_number;
     const int64_t last = total_frames_.load();
     if (last > 0) target = std::clamp(target, int64_t{0}, last - 1);
     if (target < 0) target = 0;
     current_frame_.store(target);
 
-    // A newer scrub position may already be queued (the worker decodes this one
-    // serially while the mouse keeps moving). If so, this request is stale: skip
-    // the decode/present entirely so the playhead never shows an OLDER frame
-    // AFTER a newer one (the "push forward, playhead jumps back" bug). The newer
-    // queued request will present the correct latest position when it runs. (The
-    // audible scrub position is not affected either way: the worker streams audio
-    // for each landed position regardless of whether this video decode is skipped.)
+    // A newer scrub position may already be queued (this worker decodes serially
+    // while the mouse keeps moving). If so this request is stale: skip the
+    // decode/present entirely so the playhead never shows an OLDER frame after a
+    // newer one (the "push forward, playhead jumps back" bug). The audible scrub
+    // position is unaffected either way — the worker streams audio for each
+    // landed position regardless of whether this video decode is skipped.
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const Request& r : queue_) {
@@ -460,8 +438,8 @@ void SequenceController::handle_seek_preview(const int64_t frame_number) {
     auto frame = frame_for_playhead_preview(target, kPreviewMaxDim);
     const double preview_ms = std::chrono::duration<double, std::milli>(Clock::now() - preview_t0).count();
     const bool got = frame != nullptr && (frame->nv12 || frame->a || frame->b);
-    // Re-check AFTER the decode: while we were decoding, an even newer target may
-    // have queued. Do not present (or move the playhead to) a frame that is no
+    // Re-check AFTER the decode: an even newer target may have queued while we
+    // were decoding. Don't present (or move the playhead to) a frame that is no
     // longer the latest requested scrub position.
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -473,8 +451,8 @@ void SequenceController::handle_seek_preview(const int64_t frame_number) {
     if (debug_enabled())
         qDebug() << "playback: PREVIEW to frame" << target
                  << "got_frame=" << got;
-    // MUST read pixel presence BEFORE std::move below: a moved-from RenderFramePtr
-    // is null, so logging `frame->nv12/a` afterward always reports BLACK. Capture
+    // Read pixel presence BEFORE the std::move below: a moved-from RenderFramePtr
+    // is null, so checking frame->nv12/a afterward always reports BLACK. Capture
     // the real hit now so the diagnostic is truthful.
     const int diag_nv12w = frame && frame->nv12 ? frame->nv12->width : 0;
     const int diag_aw = frame && frame->a ? std::max(frame->a->width, frame->a->height) : 0;
@@ -499,8 +477,8 @@ void SequenceController::handle_seek_preview(const int64_t frame_number) {
         << " decode_ms=" << QString::number(preview_ms, 'f', 1)
         << " playing=" << playing_.load();
 
-    // Paused scrub: open + re-anchor the output on the first move, then write
-    // a short grain for each settled position. No competing live stream here.
+    // Paused scrub: open + re-anchor the output on the first move, then write a
+    // short grain for each settled position (no competing live stream here).
     double grain_ms = 0.0;
     if (scrub_audio_enabled_.load() && !playing_.load() && !scrub_audio_open_) {
         audio_.open_output();
@@ -512,13 +490,12 @@ void SequenceController::handle_seek_preview(const int64_t frame_number) {
         audio_.play_scrub_grain(target);
         grain_ms = std::chrono::duration<double, std::milli>(Clock::now() - g0).count();
     }
-    // Premiere-style audible scrub while PLAYING: stream normal forward program
-    // audio from the CURRENT dragged position. Letting audio_.play_step decode a
-    // frame's worth at `target` means the audible content follows the scrub (audio
-    // advances at decode/present rate, which during a fast drag is slower than the
-    // video — so audio trails the picture, exactly Premiere's speed-scrub feel).
-    // The commit seek on release re-anchors precisely. (No per-move device
-    // reposition — the sink can't hard-cut sub-100ms blips; see seek_preview.)
+    // Audible scrub while PLAYING: stream normal forward program
+    // audio from the dragged position. play_step decodes a frame's worth at
+    // `target`, so the audible content follows the scrub (audio advances at
+    // decode/present rate — slower than the video during a fast drag, so audio
+    // trails the picture: the classic speed-scrub feel). The commit seek on
+    // release re-anchors precisely.
     double scrub_audio_ms = 0.0;
     if (playing_.load() && audio_.is_active()) {
         const auto s0 = Clock::now();
@@ -527,11 +504,11 @@ void SequenceController::handle_seek_preview(const int64_t frame_number) {
             std::chrono::duration<double, std::milli>(Clock::now() - s0).count();
     }
 
-    // Precache during the drag: while still playing, if the playhead has
-    // settled on the same frame (moves paused between mouse-moves, or the user
-    // parks it), warm a short run of full-res frames just ahead of the target
-    // so Play resumes from the ready buffer instead of a cold GOP seek. Only do
-    // this when stationary — per-move warming would stall the scrub.
+    // Precache during the drag: if the playhead has settled on the same frame
+    // (paused between mouse-moves, or parked), warm a short run of full-res
+    // frames just ahead of the target so Play resumes from the ready buffer
+    // instead of a cold GOP seek. Only when stationary — per-move warming stalls
+    // the scrub.
     double precache_ms = 0.0;
     if (playing_.load() && last_scrub_target_ == target) {
         const auto p0 = Clock::now();
@@ -554,17 +531,15 @@ void SequenceController::handle_seek_preview(const int64_t frame_number) {
                    << "last_target=" << last_scrub_target_;
 }
 
-// Decodes up to kLookahead frames starting at `start_frame` and caches them,
-// leaving the decoder positioned so immediate playback pops from cache. This
-// runs on the worker thread after a seek to hide the decode-forward latency of
-// resuming playback from a freshly seeked position.
+// Decodes up to kLookahead frames from `start_frame` and caches them so
+// immediate playback pops from cache. Runs on the worker after a seek to hide
+// decode-forward latency.
 //
-// It is BOUNDED BY BUDGET: the worker must not linger decoding full-res frames
-// here, because every millisecond blocks present_next() and starves the ALSA
-// device — which is exactly what desyncs audio-video after a scrub release (the
-// device runs dry / misaligns while the warm loop runs). We warm a short run but
-// bail out as soon as we've spent roughly one frame interval, leaving the rest
-// to be filled lazily by fill_lookahead() once playback presentation resumes.
+// BOUNDED BY BUDGET: the worker must not linger decoding full-res frames here —
+// every millisecond blocks present_next() and starves the ALSA device, which is
+// exactly what desyncs audio-video after a scrub release. Warm a short run but
+// bail once we've spent ~one frame interval; the rest gets filled lazily by
+// fill_lookahead() once presentation resumes.
 void SequenceController::warm_lookahead(const int64_t start_frame) {
     if (!project_ || start_frame < 0) return;
     const int64_t last = total_frames_.load();
@@ -598,15 +573,13 @@ void SequenceController::present_next() {
     }
 
     // === DROP-TO-REALTIME ===
-    // If the worker fell far behind wall-clock (a long scrub stall, a slow
-    // catch-up decode burst, or a seek/commit that re-stamped next_present_ into
-    // the past), do NOT try to catch up by presenting every queued frame back to
-    // back. That burst also feeds `audio_.play_step` a huge span of audio at once
-    // (observed as [audio] step_ms_gap of >1e6 samples in a single ~1s log tick),
-    // which the ALSA device then plays as a garbled/chopped burst -- the audible
-    // "artifact / faster audio". Instead, skip the playhead forward to the frame
-    // realtime expects right now and re-anchor the pacing clock, so both video
-    // and audio resume at realtime with, at most, one frame/interval of delivery.
+    // If the worker fell far behind wall-clock (long scrub stall, slow catch-up
+    // decode, or a seek that re-stamped next_present_ into the past), don't try
+    // to catch up by presenting every queued frame back to back. That burst also
+    // feeds audio_.play_step a huge span at once (observed step_ms_gap > 1e6
+    // samples in one log tick), which the device plays as a chopped/garbled
+    // burst. Instead skip the playhead forward to the frame realtime expects and
+    // re-anchor the pacing clock.
     const double rate_at_want = media_rate_at(want);
     if (rate_at_want > 0.0) {
         const auto intv_us =
@@ -621,20 +594,17 @@ void SequenceController::present_next() {
             const int64_t owed = static_cast<int64_t>((lateness + intv_us / 2) / intv_us);
             int64_t target_catch = current_frame_.load() + owed;
 
-            // === MASTER-CLOCK CAP (SonicSync, fixes runaway drop) ===
+            // === MASTER-CLOCK CAP (SonicSync) ===
             // Advancing the playhead ahead of what the speaker has actually
             // consumed makes video race far ahead of what you hear (observed:
             // playhead at 376s of media while audio was still at 37s). The
             // audible position is the true realtime clock, so never let a
-            // catch-up drop land more than kLookahead frames past it. When
-            // decode is throughput-bound (full-res < realtime), the playhead is
-            // held at audio+lead and video simply presents as fast as it decodes
-            // instead of teleporting minutes ahead. SonicSync owns this policy.
-            // Only trust the audible position as a master clock while there is
-            // actually a live, ENABLED audio clip under the playhead. If the
-            // clip is disabled/muted (no audio clip there), nothing is being
-            // written to the device this run and the AudioPipeline anchor math
-            // returns -1, so the playhead runs at realtime unclamped.
+            // catch-up drop land more than kLookahead frames past it. When decode
+            // is throughput-bound, the playhead is held at audio+lead and video
+            // presents as fast as it decodes instead of teleporting minutes
+            // ahead. Only trust the audible clock while a live, ENABLED audio
+            // clip is under the playhead — otherwise audible_seq_frame() returns
+            // -1 and the playhead runs at realtime unclamped.
             int64_t aud_seq = audio_.audible_seq_frame(current_frame_.load());
             {
                 const int64_t capped = sonicsync_.reconcile(
@@ -721,12 +691,12 @@ void SequenceController::present_next() {
         qDebug() << "playback: present frame" << want << "ready=" << (frame != nullptr)
                  << "audio_active=" << audio_.is_active();
 
-    // ALWAYS-ON playback health (~1/s via qWarning so default runs capture it).
-    // `cadence_ms` is the true present-to-present interval; above `target_ms`,
-    // video is stalling behind realtime (what makes audio run ahead / artifact).
-    // `fps_window` counts actual contiguous frame-walks in the last second (seeks
-    // and drop-to-realtime jumps are excluded), so a value far below the rate
-    // implies bursty present that is also audible as chopped audio.
+    // ALWAYS-ON playback health (~1/s via qWarning). `cadence_ms` is the
+    // true present-to-present interval; above `target_ms`, video is stalling
+    // behind realtime (what makes audio run ahead). `fps_window` counts actual
+    // contiguous frame-walks in the last second (seeks and drop-to-realtime
+    // jumps excluded), so a value far below the rate implies bursty presents
+    // that are also audible as chopped audio.
     static auto last_health_log = Clock::now();
     static int health_log_ = 0;
     static int64_t last_health_frame = 0;   // updated EVERY present (for cadence/fps)
@@ -737,9 +707,8 @@ void SequenceController::present_next() {
     last_present_ts_ = now;
     cadence_ms = first_cadence ? 0.0 : ms_since_present;
     first_cadence = false;
-    // Track the walked frame on every present so contiguity is judged against the
-    // immediately preceding frame (not last second's sample, which made it ~60
-    // frames stale and thus always "(non-contiguous)").
+    // Track the walked frame on every present so contiguity is judged against
+    // the immediately preceding frame, not last second's sample.
     bool contiguous_this = false;
     if (!first_cadence || last_health_frame != 0)
         contiguous_this = want == last_health_frame + 1;
@@ -747,8 +716,8 @@ void SequenceController::present_next() {
     contig_delta_ += contiguous_this ? 1 : 0;   // contiguous walks since last log
     if (++health_log_ == 1 || now - last_health_log >= std::chrono::seconds(1)) {
         // Only count contiguous same-rate presents toward fps_window; a seek or
-        // drop-to-realtime jump carries the playhead forward without walking frames,
-        // which would otherwise inflate (or distort) the presented-frames-per-sec.
+        // drop-to-realtime jump advances the playhead without walking frames,
+        // which would inflate the presented-frames-per-sec.
         const double win_s = std::chrono::duration<double>(now - last_health_log).count();
         last_health_log = now;
         const int64_t walk = contig_delta_;
@@ -789,9 +758,9 @@ canvas::core::RenderFramePtr SequenceController::frame_for_playhead(int64_t seq_
     return decoder_.frame(*project_, seq_frame);
 }
 
-// Low-resolution variant used only for scrubbing. Bypasses the full-res cache on
-// the READ side but crucially does NOT put the reduced frame back into it, so a
-// preview does not displace (or get returned as) a full-res playback frame.
+// Low-resolution variant used only for scrubbing. Bypasses the full-res cache
+// on read but does NOT put the reduced frame back into it, so a preview never
+// displaces (or gets returned as) a full-res playback frame.
 canvas::core::RenderFramePtr SequenceController::frame_for_playhead_preview(int64_t seq_frame,
                                                                         int max_dim) {
     auto out = std::make_shared<canvas::core::RenderFrame>();
