@@ -61,14 +61,6 @@ CUDA the exporter gracefully falls back to CPU encoding.
 fallback. Both are `pkg_check_modules(… QUIET)` in the GUI CMakeLists, so a
 machine with neither simply has no audio while video still works.
 
-## Vendored, but not used
-
-`third_party/qlementine/` is a vendored Qt style library that used to be a
-candidate for the UI theme. The project now themes itself with a custom
-`HorizonStyle` (`QProxyStyle`) plus hand-written QSS, so **qlementine is never
-compiled, linked, or included**. It's kept around only as a reference. Adding
-it back to the build would be a deliberate decision, not an accident.
-
 ## Package lists by distribution
 
 `build.sh -d` installs exactly these (after asking for confirmation and

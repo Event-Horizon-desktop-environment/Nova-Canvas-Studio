@@ -24,7 +24,6 @@ gui/     Qt6 app
   src/core/timecode.hpp
   ui/MainWindow.ui   designer shell (docks only; rest is programmatic)
   resources.qrc + resources/icons/   SVG icons
-third_party/qlementine/   vendored QStyle lib — NOT compiled or included
 roadmap.md / ux.md / "plan .md" / n.md   design docs (out of date, skim)
 ```
 `build/`, `*.log` (`canvas_debug.log`, `run_*.log`), `n.md` are transient/disposable.
@@ -63,7 +62,7 @@ roadmap.md / ux.md / "plan .md" / n.md   design docs (out of date, skim)
 - `src/main.cpp` — logging → `QApplication` → theme → `MainWindow`; `window.open_file(argv[1])`.
 - `src/UX/MainWindow.hpp/.cpp` — view-controller root class. Owns `SequenceController`, `ThumbnailService`, `ViewerGL`, `TimelineWidget`, docks, `RenderQueue`, `UndoStack`, `Project`. Bridges timeline signals → core edit ops → snapshot → controller.
 - `src/UX/MainWindowShell.cpp` (~1100 lines) — ALL programmatic UI chrome (menus, top bar, dock contents, page bar). `ui/MainWindow.ui` only supplies the QMainWindow + 3 docks; shell claims dock corners then populates.
-- `src/UX/theme.hpp/.cpp` — dark QSS + palette token set + `SvgIconEngine`. `src/UX/horizon_style.hpp/.cpp` — `HorizonStyle : QProxyStyle` (glassy button/toolbar paint). **qlementine is vendored but unused** — theming is all HorizonStyle + QSS.
+- `src/UX/theme.hpp/.cpp` — dark QSS + palette token set + `SvgIconEngine`. `src/UX/horizon_style.hpp/.cpp` — `HorizonStyle : QProxyStyle` (glassy button/toolbar paint). Theming is all HorizonStyle + QSS (custom, no third-party style lib).
 - `src/features/` — MainWindow methods split by domain (one class, multiple .cpp):
   - `app/AppActions.cpp` — keyboard, close-event unsaved prompt, clip enable/transition toggles, media placement.
   - `project/ProjectActions.cpp` — import/new/open/save (`*.ehproj`), recent files (QSettings `"recentProjects"`, 10).

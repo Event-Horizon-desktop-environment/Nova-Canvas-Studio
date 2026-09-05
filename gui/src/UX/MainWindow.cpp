@@ -106,8 +106,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     status_->showMessage(tr("Import media with File > Import Media (Ctrl+I)"));
 
     // Keep the dock chrome (separators, drop-shadows, dock title areas) dark.
-    // Scoped to this window only; a blanket app-level sheet would override
-    // qlementine.
+    // Scoped to this window only; a blanket app-level sheet would be too broad.
     setStyleSheet(QStringLiteral(
         "QMainWindow { background: #11131A; }"
         "QMainWindow::separator { background: #2A2F3C; width: 2px; height: 2px; }"

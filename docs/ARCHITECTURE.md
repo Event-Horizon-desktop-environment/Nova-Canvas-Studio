@@ -20,7 +20,6 @@ gui/                      Qt 6 application
   src/core/timecode.hpp   frame → HH:MM:SS:FF
   ui/MainWindow.ui        designer shell (docks only; rest programmatic)
   resources.qrc           SVG icon set
-third_party/qlementine/   vendored style lib — not compiled or used
 ```
 
 No exceptions in the editing path — errors travel through `std::optional`.
@@ -129,8 +128,7 @@ down into the scroll room; pulling up clamps at the limit.
 
 `theme.*` provides the dark QSS palette + an `SvgIconEngine`;
 `horizon_style.*` (`HorizonStyle : QProxyStyle`) paints the glassy
-buttons/toolbars. Despite the vendored qlementine, all theming is custom —
-qlementine is unused.
+buttons/toolbars. All theming is custom — no third-party style library.
 
 ## Key flows end to end
 
