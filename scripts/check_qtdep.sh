@@ -48,6 +48,8 @@ HEADLESS=(
     "gui/src/Widgets/timeline_selection.cpp"
     "gui/src/Widgets/timeline_drag.hpp"
     "gui/src/Widgets/timeline_drag.cpp"
+    "gui/src/Widgets/transition_handle_editor.hpp"
+    "gui/src/Widgets/transition_handle_editor.cpp"
     "gui/tests"
 )
 

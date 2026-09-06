@@ -24,6 +24,7 @@
 #include "canvas/core/timeline/model.hpp"
 #include "Widgets/timeline_selection.hpp"
 #include "Widgets/timeline_drag.hpp"
+#include "Widgets/transition_handle_editor.hpp"
 
 class QGraphicsRectItem;
 class QGraphicsLineItem;
@@ -301,17 +302,10 @@ private:
     // A cut (edit point) is where two adjacent clips touch on the same track; a
     // single-clip edge (IN fade at clip start, OUT fade at clip end) is also a
     // target so the same hover editor works there.
-    enum class Edge { Cut, Start, End };
-    struct CutTarget {
-        const canvas::core::Clip* a = nullptr;  // outgoing (left) / primary clip
-        const canvas::core::Clip* b = nullptr;  // incoming (right) clip; null for single edges
-        canvas::core::Track::Kind kind = canvas::core::Track::Kind::Video;
-        int track_index = 0;                // flat track index
-        int64_t cut_frame = 0;              // edit point frame (A.tl_out, B.tl_in, or tl boundary)
-        Edge edge = Edge::Cut;
-        [[nodiscard]] bool valid() const noexcept { return a != nullptr; }
-        [[nodiscard]] bool is_cut() const noexcept { return b != nullptr; }
-    };
+    // Qt-free editor types (transition_handle_editor module): the boundary
+    // kinds and the cut target descriptor the handle offers to resize.
+    using Edge = transition_editor::Edge;
+    using CutTarget = transition_editor::CutTarget;
     // Finds the cut (and its two neighbouring clips) near `scene_pos` within a
     // horizontal tolerance band; invalid when the pointer is not near a cut.
     CutTarget cut_at_scene_pos(const QPointF& scene_pos) const;
@@ -327,9 +321,6 @@ private:
     // Engage a bubble-initiated resize drag once the pointer passes the platform
     // drag threshold (a plain bubble click only selects).
     void engage_transition_drag(const QPointF& scene_pos);
-    // Largest legal transition duration for the target (bounded by the shorter
-    // of the two neighbouring clips).
-    static int64_t transition_max_duration(const CutTarget& t);
     // Persistent glass bubbles drawn on every clip edge that carries a transition
     // (video + linked audio mates); pressing one opens the editor and starts a
     // resize drag with preset snapping kept active.
@@ -350,13 +341,13 @@ private:
                                         const canvas::core::Clip* b, int64_t cut_frame);
 
     // Which overlay edge the pointer is over (index into the two resize edges).
-    static constexpr int kTransitionEdgeNone = -1;
-    static constexpr int kTransitionEdgeLeft = 0;
-    static constexpr int kTransitionEdgeRight = 1;
+    // Drag-edge indices + minimum duration live in the Qt-free editor module.
+    static constexpr int kTransitionEdgeNone = transition_editor::kDragEdgeNone;
+    static constexpr int kTransitionEdgeLeft = transition_editor::kDragEdgeLeft;
+    static constexpr int kTransitionEdgeRight = transition_editor::kDragEdgeRight;
     // Horizontal tolerance (px) around the cut for hover detection.
     static constexpr double kCutHoverTolerancePx = 8.0;
-    // Minimum transition duration in frames.
-    static constexpr int64_t kMinTransitionFrames = 1;
+    static constexpr int64_t kMinTransitionFrames = transition_editor::kMinTransitionFrames;
 
     const canvas::core::Sequence* sequence_ = nullptr;
     double fps_ = 30.0;
@@ -483,20 +474,15 @@ private:
     // re-paints the scene from it via apply_selection_highlight().
     timeline_selection::SelectionState selection_;
 
-    // Transition cut-handle editor state (see update_transition_hover).
-    bool transition_handle_visible_ = false;
-    bool transition_handle_dragging_ = false;
-    int transition_drag_edge_ = kTransitionEdgeNone;
-    int64_t transition_handle_duration_ = 0;  // active/final duration in frames
+    // Transition cut-handle editor state + math — Qt-free
+    // (transition_handle_editor module, splitplan Phase 30); the widget keeps
+    // the QGraphicsView plumbing (hover hit-testing, cursor, overlay/icon
+    // painting, signal emission, bubble refresh) and delegates the session +
+    // frame math to the editor.
+    transition_editor::Editor transition_editor_;
     // Deliberately no on-canvas duration text: the bubble/hover overlay shows only
     // its shape + icon, so the timeline never reads as a spreadsheet. Duration is
     // shown in the right-click context menu instead.
-    int64_t transition_drag_anchor_frame_ = 0;
-    // The overlay's current span across the cut, symmetric by default; one edge
-    // moves during a resize drag.
-    int64_t transition_handle_left_frame_ = 0;
-    int64_t transition_handle_right_frame_ = 0;
-    CutTarget transition_target_;
     QGraphicsPathItem* transition_overlay_ = nullptr;
     QGraphicsItem* transition_icon_ = nullptr;
     // Every scene item currently created by the transition handle, removed
@@ -516,9 +502,6 @@ private:
     };
     // Persistent glass bubbles owned by rebuild(); cleared with the scene.
     std::vector<TransitionBubble> transition_bubbles_;
-    // Active only while dragging via a bubble: each move snaps the duration to a
-    // favourite preset so the live label settles on a clean value.
-    bool transition_snap_presets_ = false;
     // A bubble press is "armed": selection is immediate, but the resize editor +
     // drag only engage once the pointer travels (a plain click must only select,
     // so Delete can remove the transition).

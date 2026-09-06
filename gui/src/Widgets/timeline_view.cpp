@@ -58,14 +58,7 @@ void TimelineWidget::rebuild_timeline() {
     transition_bubbles_.clear();
     transition_overlay_ = nullptr;
     transition_icon_ = nullptr;
-    transition_handle_visible_ = false;
-    transition_handle_dragging_ = false;
-    transition_drag_edge_ = kTransitionEdgeNone;
-    transition_drag_anchor_frame_ = 0;
-    transition_handle_duration_ = 0;
-    transition_handle_left_frame_ = 0;
-    transition_handle_right_frame_ = 0;
-    transition_target_ = CutTarget{};
+    transition_editor_.close();
 
     sync_track_heights();
 

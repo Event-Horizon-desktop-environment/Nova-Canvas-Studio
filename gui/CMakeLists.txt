@@ -27,6 +27,7 @@ qt_add_executable(canvas
     src/Widgets/timeline_snap.cpp
     src/Widgets/timeline_selection.cpp
     src/Widgets/timeline_drag.cpp
+    src/Widgets/transition_handle_editor.cpp
     src/UX/theme.cpp
     src/UX/horizon_style.cpp
     ui/MainWindow.ui

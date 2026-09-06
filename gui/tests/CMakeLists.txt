@@ -85,3 +85,12 @@ canvas_add_headless_test(timeline_drag_test
     ../src/Widgets/timeline_drag.cpp
     ../src/Widgets/timeline_snap.cpp
 )
+
+# transition_handle_editor_test: transition cut-handle session math (duration
+# bounds, edge seeding + left/right derivation, drag anchors/clamps, the press/
+# commit helpers). Compiles transition_handle_editor.cpp directly (Qt-free seam
+# enforced by the build).
+canvas_add_headless_test(transition_handle_editor_test
+    transition_handle_editor_test.cpp
+    ../src/Widgets/transition_handle_editor.cpp
+)

@@ -245,21 +245,13 @@ TimelineWidget::CutTarget TimelineWidget::cut_at_scene_pos(const QPointF& p) con
     return t;
 }
 
-// Largest legal transition duration: on a cut, bounded by the shorter of the
-// two neighbouring clips; on a single-clip edge, by that clip's own duration.
-int64_t TimelineWidget::transition_max_duration(const CutTarget& t) {
-    if (!t.valid()) return kMinTransitionFrames;
-    if (t.is_cut()) {
-        const int64_t maxd = std::min<int64_t>(t.a->duration(), t.b->duration());
-        return std::max<int64_t>(kMinTransitionFrames, maxd);
-    }
-    return std::max<int64_t>(kMinTransitionFrames, t.a->duration());
-}
+// Largest legal transition duration + the seed/left-right math now live in the
+// Qt-free transition_handle_editor module (splitplan Phase 30).
 
 void TimelineWidget::update_transition_hover(const QPointF& p) {
     // While actively dragging a resize edge, keep the current editor alive and
     // update it from move_transition_handle instead.
-    if (transition_handle_dragging_) return;
+    if (transition_editor_.dragging()) return;
 
     const CutTarget t = cut_at_scene_pos(p);
     if (!t.valid()) {
@@ -267,44 +259,23 @@ void TimelineWidget::update_transition_hover(const QPointF& p) {
         return;
     }
 
-    if (!transition_handle_visible_ || transition_target_.cut_frame != t.cut_frame ||
-        transition_target_.track_index != t.track_index || transition_target_.a != t.a ||
-        transition_target_.b != t.b || transition_target_.edge != t.edge) {
-        // (Re)open the editor for this target.
-        transition_target_ = t;
-        // For a single-clip Start (IN) edge, seed from the clip's IN duration;
-        // otherwise (Cut / End) from its OUT duration.
-        int64_t init = t.edge == Edge::Start ? t.a->transition_in_duration
-                                                        : t.a->transition_out_duration;
-        if (init < kMinTransitionFrames) init = 6;
-        init = std::clamp(init, kMinTransitionFrames, transition_max_duration(t));
-        transition_handle_duration_ = init;
-        transition_handle_left_frame_ =
-            t.edge == Edge::Start ? t.cut_frame
-            : t.edge == Edge::End ? t.cut_frame - init
-                                  : t.cut_frame - init / 2;
-        transition_handle_right_frame_ =
-            t.edge == Edge::Start ? t.cut_frame + init
-            : t.edge == Edge::End ? t.cut_frame
-                                  : t.cut_frame + (init - init / 2);
-        transition_handle_visible_ = true;
-        rebuild_transition_handle();
-    }
+    // (Re)open the editor for this target; it only reports a change when the
+    // target actually differs, so a pointer move over the same cut does not
+    // churn the painted handle. For a single-clip Start (IN) edge we seed from
+    // the clip's IN duration; otherwise (Cut / End) from its OUT duration.
+    const int64_t seeded = t.edge == Edge::Start ? t.a->transition_in_duration
+                                                 : t.a->transition_out_duration;
+    if (transition_editor_.open(t, seeded)) rebuild_transition_handle();
 
-    if (transition_handle_visible_ &&
-        p.x() <= kSceneMargin + kTrackHeaderWidth) {
+    if (transition_editor_.visible() && p.x() <= kSceneMargin + kTrackHeaderWidth) {
         hide_transition_handle();
     }
 }
 
 void TimelineWidget::hide_transition_handle() {
-    if (transition_handle_visible_) unsetCursor();
-    transition_handle_visible_ = false;
-    transition_handle_dragging_ = false;
-    transition_drag_edge_ = kTransitionEdgeNone;
-    transition_snap_presets_ = false;
+    if (transition_editor_.visible()) unsetCursor();
+    transition_editor_.close();
     transition_press_armed_ = false;
-    transition_target_ = CutTarget{};
     for (QGraphicsItem* item : transition_items_) {
         if (item->scene() == &scene_) scene_.removeItem(item);
         delete item;
@@ -315,7 +286,11 @@ void TimelineWidget::hide_transition_handle() {
 }
 
 void TimelineWidget::rebuild_transition_handle() {
-    if (!transition_target_.valid() || !transition_handle_visible_) return;
+    const CutTarget& target = transition_editor_.target();
+    const int64_t dur = transition_editor_.duration();
+    const int64_t left_frame = transition_editor_.left();
+    const int64_t right_frame = transition_editor_.right();
+    if (!target.valid() || !transition_editor_.visible()) return;
 
     // Tear down the previous handle items.
     for (QGraphicsItem* item : transition_items_) {
@@ -328,27 +303,27 @@ void TimelineWidget::rebuild_transition_handle() {
 
     const int v_count = static_cast<int>(sequence_ ? sequence_->video_tracks.size() : 1);
     const double track_top_y =
-        static_cast<double>(track_top(transition_target_.track_index, v_count));
+        static_cast<double>(track_top(target.track_index, v_count));
     const double row_y = track_top_y + 3;
-    const double row_h = track_height(transition_target_.track_index, v_count) - 8.0;
+    const double row_h = track_height(target.track_index, v_count) - 8.0;
 
     auto scene_x = [this](int64_t frame) {
         return kSceneMargin + kTrackHeaderWidth + frame / frames_per_pixel_;
     };
-    const double cut_x = scene_x(transition_target_.cut_frame);
+    const double cut_x = scene_x(target.cut_frame);
     // For a single-clip edge the overlay extends into the clip from the boundary
     // (Start: rightward from tl_in; End: leftward from tl_out); a cut centers it.
-    const bool is_edge = !transition_target_.is_cut();
+    const bool is_edge = !target.is_cut();
     double left_x, right_x;
-    if (is_edge && transition_target_.edge == Edge::Start) {
+    if (is_edge && target.edge == Edge::Start) {
         left_x = cut_x;
-        right_x = cut_x + transition_handle_duration_ / frames_per_pixel_;
-    } else if (is_edge && transition_target_.edge == Edge::End) {
-        left_x = cut_x - transition_handle_duration_ / frames_per_pixel_;
+        right_x = cut_x + dur / frames_per_pixel_;
+    } else if (is_edge && target.edge == Edge::End) {
+        left_x = cut_x - dur / frames_per_pixel_;
         right_x = cut_x;
     } else {
-        left_x = scene_x(transition_handle_left_frame_);
-        right_x = scene_x(transition_handle_right_frame_);
+        left_x = scene_x(left_frame);
+        right_x = scene_x(right_frame);
     }
     const double overlay_w = std::max(2.0, right_x - left_x);
 
@@ -371,9 +346,9 @@ void TimelineWidget::rebuild_transition_handle() {
     const double icx = cut_x;
     const double icy = row_y + row_h / 2.0;
     const QString icon_name =
-        transition_target_.edge == Edge::Start   ? QStringLiteral("transition_in")
-        : transition_target_.edge == Edge::End   ? QStringLiteral("transition_out")
-                                                 : QStringLiteral("transition");
+        target.edge == Edge::Start   ? QStringLiteral("transition_in")
+        : target.edge == Edge::End   ? QStringLiteral("transition_out")
+                                     : QStringLiteral("transition");
     constexpr int kIconPx = 48;
     QPixmap glyph(kIconPx, kIconPx);
     glyph.fill(Qt::transparent);
@@ -401,25 +376,16 @@ void TimelineWidget::rebuild_transition_handle() {
     // Duration label intentionally omitted: the hover overlay shows only the
     // shape + icon (no frame-count text on the canvas — read it in the context
     // menu instead).
-    transition_items_.push_back(transition_overlay_);
-    transition_items_.push_back(icon);
 }
 
 void TimelineWidget::press_transition_handle(const QPointF& p) {
-    if (!transition_handle_visible_ || !transition_target_.valid()) return;
+    if (!transition_editor_.visible() || !transition_editor_.target().valid()) return;
     // The hover preview must never create a transition: only targets that ALREADY
     // carry one can be grabbed for a resize (transitions are added exclusively
     // via the right-click context menu).
-    const bool has_transition =
-        transition_target_.is_cut()
-            ? (transition_target_.a->has_transition_out() ||
-               transition_target_.b->has_transition_in())
-            : (transition_target_.edge == Edge::Start
-                   ? transition_target_.a->has_transition_in()
-                   : transition_target_.a->has_transition_out());
-    if (!has_transition) return;
-    const int64_t left = transition_handle_left_frame_;
-    const int64_t right = transition_handle_right_frame_;
+    if (!transition_editor_.has_transition()) return;
+    const int64_t left = transition_editor_.left();
+    const int64_t right = transition_editor_.right();
     const double lx = kSceneMargin + kTrackHeaderWidth + left / frames_per_pixel_;
     const double rx = kSceneMargin + kTrackHeaderWidth + right / frames_per_pixel_;
     constexpr double kEdgeGrab = 7.0;
@@ -429,80 +395,43 @@ void TimelineWidget::press_transition_handle(const QPointF& p) {
     else if (std::abs(p.x() - rx) <= kEdgeGrab) edge = kTransitionEdgeRight;
     if (edge < 0) return;
 
-    transition_handle_dragging_ = true;
-    transition_drag_edge_ = edge;
-    // The opposite edge stays fixed while the grabbed edge moves.
-    transition_drag_anchor_frame_ =
-        edge == kTransitionEdgeLeft ? right : left;
+    transition_editor_.begin_drag(edge, /*snap=*/false);
     setCursor(Qt::SizeHorCursor);
 }
 
 void TimelineWidget::move_transition_handle(const QPointF& p) {
-    if (!transition_handle_dragging_) return;
+    if (!transition_editor_.dragging()) return;
     const int64_t edge_frame = static_cast<int64_t>(
         (p.x() - kSceneMargin - kTrackHeaderWidth) * frames_per_pixel_);
-    const int64_t maxd = transition_max_duration(transition_target_);
-    const int64_t rawsize = edge_frame > transition_drag_anchor_frame_
-                                ? edge_frame - transition_drag_anchor_frame_
-                                : transition_drag_anchor_frame_ - edge_frame;
-    int64_t dur = std::clamp(rawsize, kMinTransitionFrames, maxd);
-    if (transition_snap_presets_) {
-        // Bubble drags snap to the favourite presets so the live label settles on a
-        // clean duration instead of a free-form frame count.
-        static constexpr int64_t kFavoritePresets[] = {14, 30, 60, 120};
-        int64_t best = dur;
-        for (const int64_t preset : kFavoritePresets) {
-            if (preset < kMinTransitionFrames || preset > maxd) continue;
-            if (std::llabs(preset - dur) < std::llabs(best - dur)) best = preset;
-        }
-        dur = best;
-    }
-    transition_handle_duration_ = dur;
-    if (transition_drag_edge_ == kTransitionEdgeLeft) {
-        // Anchor is the (right) edge that doesn't move.
-        const int64_t right = transition_drag_anchor_frame_;
-        transition_handle_left_frame_ = right - dur;
-        transition_handle_right_frame_ = right;
-    } else {
-        const int64_t left = transition_drag_anchor_frame_;
-        transition_handle_left_frame_ = left;
-        transition_handle_right_frame_ = left + dur;
-    }
+    transition_editor_.move_to(edge_frame);
     rebuild_transition_handle();
 
     // Keep the persistent bubble live-synced to the dragged duration.
-    if (transition_snap_presets_ && transition_target_.valid()) {
-        const bool in_edge = transition_target_.edge == Edge::Start;
+    if (transition_editor_.snap() && transition_editor_.target().valid()) {
+        const bool in_edge = transition_editor_.target().edge == Edge::Start;
         for (auto& b : transition_bubbles_) {
-            if (b.pill && b.in_edge == in_edge && b.clip_id == transition_target_.a->id)
-                refresh_transition_bubble(b, transition_handle_duration_);
+            if (b.pill && b.in_edge == in_edge &&
+                b.clip_id == transition_editor_.target().a->id)
+                refresh_transition_bubble(b, transition_editor_.duration());
         }
     }
 }
 
 void TimelineWidget::release_transition_handle() {
-    if (!transition_handle_dragging_) return;
-    transition_handle_dragging_ = false;
-    transition_drag_edge_ = kTransitionEdgeNone;
-    transition_snap_presets_ = false;
+    if (!transition_editor_.dragging()) return;
+    transition_editor_.end_drag();
     unsetCursor();
     // A plain bubble click (no drag) must NOT commit an edit: on a one-sided
     // cut the old code re-emitted into the complementary clip and materialised
     // a fresh transition where none existed. Only resize when the duration
     // actually differs from what is already stored at the edit point.
-    if (transition_target_.valid()) {
-        const int64_t stored = transition_target_.is_cut()
-                                   ? std::max(transition_target_.a->transition_out_duration,
-                                              transition_target_.b->transition_in_duration)
-                                   : (transition_target_.edge == Edge::Start
-                                          ? transition_target_.a->transition_in_duration
-                                          : transition_target_.a->transition_out_duration);
-        if (transition_handle_duration_ != stored) {
-            if (transition_target_.edge == Edge::Start)
-                emit transition_in_resized(transition_target_.a, transition_handle_duration_);
-            else
-                emit transition_resized(transition_target_.a, transition_handle_duration_);
-        }
+    const CutTarget& target = transition_editor_.target();
+    if (target.valid() &&
+        transition_editor_.duration() != transition_editor_.stored_duration()) {
+        if (target.edge == Edge::Start)
+            emit transition_in_resized(target.a, transition_editor_.duration());
+        else
+            emit transition_resized(target.a, transition_editor_.duration());
     }
     // With the hover editor removed, the overlay opened by a bubble drag would
     // otherwise linger on screen; tear it down now the edit commits.
@@ -533,17 +462,11 @@ void TimelineWidget::open_transition_editor_for_clip(const canvas::core::Clip* c
     }
     if (flat < 0) return;
 
-    transition_target_ = CutTarget{clip, nullptr, kind, flat, frame,
-                                   in_edge ? Edge::Start : Edge::End};
-    const int64_t seeded = in_edge ? clip->transition_in_duration : clip->transition_out_duration;
-    const int64_t init = std::clamp(seeded >= kMinTransitionFrames ? seeded : 6,
-                                    kMinTransitionFrames, transition_max_duration(transition_target_));
-    transition_handle_duration_ = init;
-    transition_handle_left_frame_ = in_edge ? frame : frame - init;
-    transition_handle_right_frame_ = in_edge ? frame + init : frame;
-    transition_handle_visible_ = true;
-    transition_snap_presets_ = false;
-    rebuild_transition_handle();
+    const CutTarget target{clip, nullptr, kind, flat, frame,
+                           in_edge ? Edge::Start : Edge::End};
+    const int64_t seeded = in_edge ? clip->transition_in_duration
+                                   : clip->transition_out_duration;
+    if (transition_editor_.open(target, seeded)) rebuild_transition_handle();
 }
 
 bool TimelineWidget::maybe_press_transition_bubble(const QPointF& p) {
@@ -600,17 +523,13 @@ void TimelineWidget::engage_transition_drag(const QPointF& scene_pos) {
     // Grabbing anywhere on the bubble behaves like grabbing the overlay's
     // resize handle nearest to the pointer, snapping to the presets all drag.
     const double lx = kSceneMargin + kTrackHeaderWidth +
-                      transition_handle_left_frame_ / frames_per_pixel_;
+                      transition_editor_.left() / frames_per_pixel_;
     const double rx = kSceneMargin + kTrackHeaderWidth +
-                      transition_handle_right_frame_ / frames_per_pixel_;
+                      transition_editor_.right() / frames_per_pixel_;
     const double dl = std::abs(scene_pos.x() - lx);
     const double dr = std::abs(scene_pos.x() - rx);
-    transition_handle_dragging_ = true;
-    transition_drag_edge_ = dr < dl ? kTransitionEdgeRight : kTransitionEdgeLeft;
-    transition_drag_anchor_frame_ =
-        transition_drag_edge_ == kTransitionEdgeLeft ? transition_handle_right_frame_
-                                                     : transition_handle_left_frame_;
-    transition_snap_presets_ = true;
+    const int edge = dr < dl ? kTransitionEdgeRight : kTransitionEdgeLeft;
+    transition_editor_.begin_drag(edge, /*snap=*/true);
     setCursor(Qt::SizeHorCursor);
     transition_press_armed_ = false;
 }
@@ -698,21 +617,14 @@ void TimelineWidget::open_transition_editor_for_cut(const canvas::core::Clip* a,
     }
     if (flat < 0) return;
 
-    transition_target_ = CutTarget{a, b, kind, flat, cut_frame, Edge::Cut};
+    const CutTarget target{a, b, kind, flat, cut_frame, Edge::Cut};
     const int64_t seeded =
         a->transition_out_duration >= kMinTransitionFrames
             ? a->transition_out_duration
             : (b->transition_in_duration >= kMinTransitionFrames
                    ? b->transition_in_duration
                    : 6);
-    const int64_t init = std::clamp(seeded, kMinTransitionFrames,
-                                    transition_max_duration(transition_target_));
-    transition_handle_duration_ = init;
-    transition_handle_left_frame_ = cut_frame - init / 2;
-    transition_handle_right_frame_ = cut_frame + (init - init / 2);
-    transition_handle_visible_ = true;
-    transition_snap_presets_ = false;
-    rebuild_transition_handle();
+    if (transition_editor_.open(target, seeded)) rebuild_transition_handle();
 }
 
 void TimelineWidget::apply_selection_highlight() {
@@ -883,7 +795,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         return;
     }
     press_transition_handle(scene_pos);
-    if (transition_handle_dragging_) {
+    if (transition_editor_.dragging()) {
         event->accept();
         return;
     }
@@ -1139,7 +1051,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
 
     // Transition resize drag in progress: update it and bail so it never
     // competes with clip/scrub drags.
-    if (transition_handle_dragging_) {
+    if (transition_editor_.dragging()) {
         move_transition_handle(mapToScene(event->pos()));
         event->accept();
         return;
@@ -1196,7 +1108,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     // refuses to start an edit unless a transition ALREADY exists, so a stray
     // press+drag can never create one (adding is right-click only).
     if (current_tool_ == Tool::Select && !is_dragging_ && !is_selecting_range_ &&
-        !transition_press_armed_ && !transition_handle_dragging_) {
+        !transition_press_armed_ && !transition_editor_.dragging()) {
         update_transition_hover(mapToScene(event->pos()));
     }
 
@@ -1307,7 +1219,7 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
     }
 
     // Finish a transition resize drag, committing the new duration.
-    if (transition_handle_dragging_) {
+    if (transition_editor_.dragging()) {
         release_transition_handle();
         event->accept();
         return;
