@@ -17,6 +17,9 @@
 
 #include <chrono>
 
+#include <algorithm>
+#include <cmath>
+
 #include "canvas/core/media/audio_waveform.hpp"
 #include "canvas/core/media/hw_device.hpp"
 #include "canvas/core/media/video_decoder.hpp"
@@ -70,11 +73,11 @@ QString ThumbnailService::disk_path_thumbnail(const std::string& path, int64_t f
 }
 
 QString ThumbnailService::disk_path_waveform(const std::string& path, int width, int height,
-                                             float src_lo, float src_hi) const {
+                                             float src_lo, float src_hi, int gain_pct) const {
     if (cache_dir_.isEmpty()) return QString();
     const std::string seed = "wf|" + path + "|" + std::to_string(width) + "|" +
                              std::to_string(height) + "|" + std::to_string(src_lo) + "|" +
-                             std::to_string(src_hi);
+                             std::to_string(src_hi) + "|g" + std::to_string(gain_pct);
     return cache_dir_ + QLatin1Char('/') + cache_file_name(seed, "png");
 }
 
@@ -166,7 +169,7 @@ void ThumbnailService::request(ThumbRequest req) {
 }
 
 void ThumbnailService::request_waveform(uint64_t id, std::string path, int width, int height,
-                                        float src_lo, float src_hi) {
+                                        float src_lo, float src_hi, float gain) {
     if (path.empty() || width <= 0 || height <= 0) return;
     if (!(src_lo < src_hi) || src_lo >= 1.0f || src_hi <= 0.0f) { src_lo = 0.0f; src_hi = 1.0f; }
     ThumbRequest req;
@@ -178,14 +181,22 @@ void ThumbnailService::request_waveform(uint64_t id, std::string path, int width
     req.is_audio = true;
     req.src_lo = src_lo;
     req.src_hi = src_hi;
+    req.gain = std::clamp(gain, 0.0f, 1.0f);
     submit(std::move(req));
 }
 
 void ThumbnailService::submit(ThumbRequest req) {
     const bool audio = req.is_audio;
+    // Volume gain quantized to whole percents: bounds the cache/disk space a
+    // handful of volume variants takes while staying visually granular.
+    const int gain_pct = audio
+                             ? std::clamp(static_cast<int>(std::lround(req.gain * 100.0f)), 0, 100)
+                             : 100;
+    req.gain = static_cast<float>(gain_pct) / 100.0f;
     {
         QMutexLocker lock(&mutex_);
-        const CacheKey key{req.path, req.frame, req.target_width, audio, req.src_lo, req.src_hi};
+        const CacheKey key{req.path, req.frame, req.target_width, audio, req.src_lo, req.src_hi,
+                           gain_pct};
         const auto it = cache_.find(key);
         if (it != cache_.end()) {
             const QImage img = it->second;
@@ -204,7 +215,7 @@ void ThumbnailService::submit(ThumbRequest req) {
         // the tiny PNG/binary instead of re-decoding the source video/audio.
         if (audio) {
             const QString file = disk_path_waveform(req.path, req.target_width, req.max_height,
-                                                    req.src_lo, req.src_hi);
+                                                    req.src_lo, req.src_hi, gain_pct);
             QImage img = load_from_disk(file);
             if (!img.isNull()) {
                 cache_[key] = img;
@@ -362,7 +373,11 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
         img.fill(Qt::transparent);
         QPainter p(&img);
         const double cy = img.height() / 2.0;
-        const double amp = std::max(1.0, cy - 2.0);
+        // Height scale = half the row; volume gain (0..1, quantized to percent
+        // in submit) shrinks every bar so the timeline waveform visibly reflects
+        // the clip's volume_dB.
+        const double gain = static_cast<double>(req.gain);
+        const double amp = std::max(1.0, cy - 2.0) * gain;
         p.setPen(QPen(QColor(240, 244, 238, 220), 1));
         const std::size_t n = std::min(wf.peak.size(), static_cast<std::size_t>(req.target_width));
         for (std::size_t i = 0; i < n; ++i) {
@@ -371,7 +386,9 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
         }
         p.end();
         save_to_disk(disk_path_waveform(req.path, req.target_width, req.max_height,
-                                        req.src_lo, req.src_hi),
+                                        req.src_lo, req.src_hi,
+                                        std::clamp(static_cast<int>(std::lround(req.gain * 100.0f)),
+                                                   0, 100)),
                      img);
         return img;
     }

@@ -61,6 +61,12 @@ void SequenceController::set_project(std::shared_ptr<const canvas::core::Project
     push({Command::SetProject, initial_frame, std::move(project), {}});
 }
 
+void SequenceController::update_audio_mix(std::shared_ptr<const canvas::core::Project> project) {
+    // Never replaced by the seek/pause coalescing below (none of those match
+    // UpdateAudioMix), so a burst of live mix edits each land in order.
+    push({Command::UpdateAudioMix, 0, std::move(project), {}});
+}
+
 void SequenceController::add_media(const canvas::core::MediaEntry& entry) {
     push({Command::AddMedia, 0, {}, entry});
 }
@@ -172,6 +178,9 @@ void SequenceController::worker_loop() {
                 return;
             case Command::SetProject:
                 handle_set_project(std::move(req.project), req.arg);
+                break;
+            case Command::UpdateAudioMix:
+                handle_update_audio_mix(std::move(req.project));
                 break;
             case Command::AddMedia:
                 handle_add_media(req.media);
@@ -287,6 +296,19 @@ void SequenceController::handle_set_project(std::shared_ptr<const canvas::core::
         << " audio_tracks=" << project_->sequence.audio_tracks.size()
         << " media=" << project_->media.size();
     handle_seek(anchor);
+}
+
+void SequenceController::handle_update_audio_mix(
+    std::shared_ptr<const canvas::core::Project> project) {
+    if (!project) return;
+    // Point the audio pipeline at the new project first (it borrows the raw
+    // pointer, so the shared_ptr below must already own it).
+    audio_.update_project(project.get());
+    project_ = std::move(project);
+    // No decoder reset, no audio flush, no playing-state change: video keeps
+    // presenting and the next mixed buffer uses the new per-clip mix params.
+    if (debug_enabled())
+        qDebug() << "playback: LIVE audio mix swap (playing=" << playing_.load() << ")";
 }
 
 void SequenceController::handle_add_media(const canvas::core::MediaEntry& entry) {

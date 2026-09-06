@@ -114,6 +114,11 @@ void AudioPipeline::set_project(const canvas::core::Project* project) {
     project_ = project;
 }
 
+void AudioPipeline::update_project(const canvas::core::Project* project) {
+    std::lock_guard lock(mutex_);
+    project_ = project;
+}
+
 void AudioPipeline::add_media(const canvas::core::MediaEntry& entry) {
     auto adec = std::make_unique<canvas::core::AudioDecoder>();
     if (adec->open(entry.path) && adec->has_audio()) {

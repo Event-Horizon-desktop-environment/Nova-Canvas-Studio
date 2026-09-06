@@ -22,6 +22,7 @@
 #include <algorithm>
 
 #include "canvas/core/timeline/model.hpp"
+#include "canvas/core/timeline/audio_mix.hpp"
 #include "Widgets/timeline_selection.hpp"
 #include "Widgets/timeline_drag.hpp"
 #include "Widgets/transition_handle_editor.hpp"
@@ -162,6 +163,12 @@ public:
     // True when a transition bubble is selected, so Delete/Backspace clears the
     // transition instead of deleting a clip.
     [[nodiscard]] bool has_selected_transition() const { return selected_transition_.valid; }
+    // Outgoing clip id of the selected transition bubble (0 when none selected).
+    [[nodiscard]] canvas::core::ClipId selected_transition_a() const { return selected_transition_.a; }
+    // Incoming clip id of a cut bubble; 0 for a single-clip edge bubble.
+    [[nodiscard]] canvas::core::ClipId selected_transition_b() const { return selected_transition_.b; }
+    // True when the bubble selects the IN edge, false for the OUT edge.
+    [[nodiscard]] bool selected_transition_in_edge() const { return selected_transition_.in_edge; }
     // Clears the selected transition by emitting delete_transition_requested.
     // Returns true when a transition was selected (and the signal emitted).
     bool delete_selected_transition();
@@ -223,6 +230,13 @@ signals:
     // single-clip edge bubble `b` is null and `in_edge` selects the IN edge.
     void delete_transition_requested(const canvas::core::Clip* a, const canvas::core::Clip* b,
                                      bool in_edge);
+    // Emitted when a transition bubble is selected, so the inspector can switch
+    // to the Transition page. For a cut bubble `b` is the incoming clip; for a
+    // single-clip edge bubble `b` is null and `in_edge` selects the IN edge.
+    void transition_selected(canvas::core::ClipId a, canvas::core::ClipId b, bool in_edge);
+    // Emitted when the selected transition bubble is cleared (click dodge,
+    // deletion, timeline rebuild).
+    void transition_selection_cleared();
 
 protected:
     void wheelEvent(QWheelEvent* event) override;

@@ -69,7 +69,11 @@ void TimelineWidget::request_clip_thumbnails() {
                 hi = static_cast<float>(std::clamp(static_cast<double>(item.clip->src_out) * inv, 0.0, 1.0));
             }
             thumbnail_service_->request_waveform(id, it->second.path, static_cast<int>(cw), clip_h,
-                                                 lo, hi);
+                                                 lo, hi,
+                                                 std::clamp(
+                                                     canvas::core::audio_mix::db_to_gain(
+                                                         item.clip->volume_db),
+                                                     0.0f, 1.0f));
             total_requests++;
             continue;
         }

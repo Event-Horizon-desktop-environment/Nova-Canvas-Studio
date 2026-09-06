@@ -16,11 +16,17 @@
 namespace canvas::core {
 
 namespace audio_mix {
-// Clinically-safe clip volume range; everything below the floor is silenced by
-// db_to_gain, while the slider stays linear in dB so users can reach exact
-// silence by dragging to the floor.
+// Audible gain law: everything at/below the floor is silenced by db_to_gain and
+// the ceiling caps the boost, so a clip can never leave the clinically-safe
+// band during playback/export no matter what the control stores.
 constexpr float kMinVolumeDb = -60.0f;
 constexpr float kMaxVolumeDb = 24.0f;
+// The Inspector's volume control range, wider than the law on purpose: a
+// symmetric [-100, +100] dB slider puts 0 dB exactly at center. Values outside
+// [-60, +24] are accepted by edit_ops and stored on the clip (no UI snap-back),
+// but db_to_gain clamps them into the law band on render.
+constexpr float kVolumeDbSliderMin = -100.0f;
+constexpr float kVolumeDbSliderMax = 100.0f;
 constexpr float kPanMin = -1.0f;
 constexpr float kPanMax = 1.0f;
 

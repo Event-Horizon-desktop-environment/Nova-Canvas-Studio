@@ -65,6 +65,23 @@ void attach_inspector_visual(MainWindow& main_window, TimelineWidget* timeline);
 void update_inspector_visual(MainWindow& main_window);
 void apply_inspector_visual(MainWindow& main_window);
 
+// Audio, Transition, and File inspector pages (InspectorAudio.cpp /
+// InspectorTransition.cpp / InspectorFile.cpp, splitplan refactor). Friended so
+// the page builders can drive the chrome members and read the selection state.
+void build_inspector_audio(MainWindow& main_window, QVBoxLayout* audio_layout,
+                           QToolButton* audio_mode_button);
+void attach_inspector_audio(MainWindow& main_window, TimelineWidget* timeline);
+void update_inspector_audio_full(MainWindow& main_window);
+void apply_inspector_audio_processing(MainWindow& main_window);
+void build_inspector_transition(MainWindow& main_window, QVBoxLayout* transition_layout);
+void attach_inspector_transition(MainWindow& main_window, TimelineWidget* timeline);
+void update_inspector_transition(MainWindow& main_window);
+void apply_inspector_transition(MainWindow& main_window);
+void build_inspector_file(MainWindow& main_window, QVBoxLayout* file_layout);
+void attach_inspector_file(MainWindow& main_window, TimelineWidget* timeline);
+void update_inspector_file(MainWindow& main_window);
+void apply_inspector_file(MainWindow& main_window);
+
 // The center workspace (viewer column + contextual/toolbar chrome), the
 // timeline dock, and the Deliver page docks live in ShellCenter.cpp (splitplan
 // refactor). Declared here and friended so it can touch the chrome members it
@@ -114,6 +131,10 @@ private:
     void update_fps_label();
     bool save_project_to(const QString& path);
     void push_snapshot(int64_t initial_frame = -1);
+    // Live audio-mix snapshot: pushes the project to the playback worker WITHOUT
+    // stopping playback or tearing down decoders, so volume/pan/pitch/EQ edits
+    // land in the next mixed buffer as video keeps playing.
+    void push_audio_mix_snapshot();
     void delete_selected_clip(bool ripple);
     void toggle_disable_selected_clip();
     void toggle_transition_on_selected();
@@ -139,6 +160,11 @@ private:
     // Locates the selected clip in the sequence; returns its kind/index.
     bool find_selected_clip(canvas::core::Track::Kind& out_kind, std::size_t& out_index,
                             canvas::core::Clip& out_clip) const;
+    // Locates the audio clip an audio edit should target: the selected audio
+    // clip itself, or the linked audio mate of a selected video clip. False when
+    // the selection has no audio to edit.
+    bool find_audio_target(canvas::core::Track::Kind& out_kind, std::size_t& out_index,
+                           canvas::core::Clip& out_clip) const;
 
     Ui::MainWindow* ui = nullptr;
     QMenu* open_recent_menu_ = nullptr;
@@ -182,6 +208,19 @@ private:
     friend void update_inspector_visual(MainWindow& main_window);
     friend void apply_inspector_visual(MainWindow& main_window, unsigned parts);
     friend void apply_inspector_visual(MainWindow& main_window);
+    friend void build_inspector_audio(MainWindow& main_window, QVBoxLayout* audio_layout,
+                                      QToolButton* audio_mode_button);
+    friend void attach_inspector_audio(MainWindow& main_window, TimelineWidget* timeline);
+    friend void update_inspector_audio_full(MainWindow& main_window);
+    friend void apply_inspector_audio_processing(MainWindow& main_window);
+    friend void build_inspector_transition(MainWindow& main_window, QVBoxLayout* transition_layout);
+    friend void attach_inspector_transition(MainWindow& main_window, TimelineWidget* timeline);
+    friend void update_inspector_transition(MainWindow& main_window);
+    friend void apply_inspector_transition(MainWindow& main_window);
+    friend void build_inspector_file(MainWindow& main_window, QVBoxLayout* file_layout);
+    friend void attach_inspector_file(MainWindow& main_window, TimelineWidget* timeline);
+    friend void update_inspector_file(MainWindow& main_window);
+    friend void apply_inspector_file(MainWindow& main_window);
     friend void build_center_workspace(MainWindow& main_window);
 
     std::unique_ptr<canvas::core::Project> project_;

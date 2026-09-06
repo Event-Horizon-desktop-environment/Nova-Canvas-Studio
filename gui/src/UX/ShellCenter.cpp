@@ -1,4 +1,7 @@
 #include "UX/MainWindow.hpp"
+#include "UX/InspectorAudio.hpp"
+#include "UX/InspectorFile.hpp"
+#include "UX/InspectorTransition.hpp"
 #include "UX/InspectorVisual.hpp"
 #include "ui_MainWindow.h"
 
@@ -482,8 +485,12 @@ void build_center_workspace(MainWindow& mw) {
     mw.connect_timeline();
 
     // The inspector's Transform/Composite categories subscribe to selection
-    // changes here (timeline_ exists only after build_center_workspace).
+    // changes here (timeline_ exists only after build_center_workspace); the
+    // Audio/Transition/File pages attach the same way.
     attach_inspector_visual(mw, mw.timeline_);
+    attach_inspector_audio(mw, mw.timeline_);
+    attach_inspector_transition(mw, mw.timeline_);
+    attach_inspector_file(mw, mw.timeline_);
 }
 
 }  // namespace canvas::gui

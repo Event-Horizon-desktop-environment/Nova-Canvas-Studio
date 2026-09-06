@@ -218,9 +218,11 @@ void blit_rgba_transformed(const VideoFrame& src, std::vector<uint8_t>& canvas,
     for (int oy = ylo; oy <= yhi; ++oy) {
         const std::size_t drow = static_cast<std::size_t>(oy) * dst_stride;
         for (int ox = xlo; ox <= xhi; ++ox) {
-            // Inverse map (reverse of scale -> flip -> rotate -> position).
-            const double ux = ox - pxx - px;
-            const double uy = oy - pyy - py;
+            // Inverse map (reverse of scale -> flip -> rotate -> position) at
+            // the destination pixel CENTRE so a pure flip/identity reaches the
+            // exact source pixel and stays byte-identical to blit_rgba.
+            const double ux = ox + 0.5 - pxx - px;
+            const double uy = oy + 0.5 - pyy - py;
             const double vx = ux * cs + uy * sn;
             const double vy = -ux * sn + uy * cs;
             const double wx = vx * fx;
@@ -229,11 +231,15 @@ void blit_rgba_transformed(const VideoFrame& src, std::vector<uint8_t>& canvas,
             const double zy = wy / sy_;
             const double param_x = zx + px;
             const double param_y = zy + py;
-            const double nx = (param_x - bx) / base_w;
-            const double ny = (param_y - by) / base_h;
-            if (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0) continue;
-            const int sy = std::clamp(static_cast<int>(ny * src.height), 0, src.height - 1);
-            const int sx = std::clamp(static_cast<int>(nx * src.width), 0, src.width - 1);
+            // Nearest sample in pixel-centre coordinates (matching blit_rgba and
+            // the GPU nv12Resize kernel).
+            const double u =
+                (param_x - bx) * static_cast<double>(src.width) / base_w - 0.5;
+            const double v =
+                (param_y - by) * static_cast<double>(src.height) / base_h - 0.5;
+            if (u < -0.5 || u >= src.width - 0.5 || v < -0.5 || v >= src.height - 0.5) continue;
+            const int sy = std::clamp(static_cast<int>(std::lround(v)), 0, src.height - 1);
+            const int sx = std::clamp(static_cast<int>(std::lround(u)), 0, src.width - 1);
             const std::size_t so =
                 static_cast<std::size_t>(sy) * src.stride + static_cast<std::size_t>(sx) * 4u;
             std::size_t dpo = drow + static_cast<std::size_t>(ox) * 4u;

@@ -137,6 +137,12 @@ void MainWindow::push_snapshot(const int64_t initial_frame) {
     controller_.set_project(std::move(snapshot), initial_frame);
 }
 
+void MainWindow::push_audio_mix_snapshot() {
+    if (!project_) return;
+    auto snapshot = std::make_shared<canvas::core::Project>(*project_);
+    controller_.update_audio_mix(std::move(snapshot));
+}
+
 void MainWindow::on_position_changed(const int64_t frame_number) {
     current_frame_ = frame_number;
     viewer_->set_mode(ViewerGL::ViewerMode::Program);

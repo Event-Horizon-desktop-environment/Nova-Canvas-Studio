@@ -2,6 +2,7 @@
 
 #include "canvas/core/timeline/model.hpp"
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -126,6 +127,15 @@ std::unique_ptr<ICommand> delete_through_edit(Sequence& seq, Track::Kind kind,
 std::unique_ptr<ICommand> set_clip_audio(Sequence& seq, Track::Kind kind,
                                          std::size_t track_index, ClipId id,
                                          float volume_db, float pan);
+// Sets audio processing parameters (pitch, speed, EQ) on a clip. If the clip is
+// linked, the mate inherits the same values. Returns nullptr if the clip is not
+// found.
+std::unique_ptr<ICommand> set_clip_audio_processing(Sequence& seq, Track::Kind kind,
+                                                    std::size_t track_index, ClipId id,
+                                                    float pitch_semitones, float pitch_cents,
+                                                    float speed_factor, bool speed_enabled,
+                                                    bool eq_enabled,
+                                                    const std::array<Clip::EqBand, 6>& eq_bands);
 // Sets a video clip's visual transform (Zoom scale_x/scale_y, pixel Position
 // pos_x/pos_y, Rotation in degrees, Anchor offsets in pixels, and the flips).
 // If the clip is linked, its mate inherits the same values (an A/V pair shares
@@ -144,6 +154,21 @@ std::unique_ptr<ICommand> set_clip_transform(Sequence& seq, Track::Kind kind,
 std::unique_ptr<ICommand> set_clip_composite(Sequence& seq, Track::Kind kind,
                                              std::size_t track_index, ClipId id,
                                              float opacity, BlendMode blend_mode);
+// Sets transition curve/ease parameters on a clip's IN or OUT edge. If the clip
+// is linked, the mate's corresponding edge inherits the values. Returns nullptr
+// if the clip is not found.
+std::unique_ptr<ICommand> set_clip_transition_curve(Sequence& seq, Track::Kind kind,
+                                                    std::size_t track_index, ClipId id,
+                                                    bool in_edge, float ease_amount,
+                                                    float curve_value);
+// Sets clip metadata (tag, colour, comments, name). If the clip is linked, the
+// mate inherits tag/colour/comments (name is per-clip). Returns nullptr if the
+// clip is not found.
+std::unique_ptr<ICommand> set_clip_metadata(Sequence& seq, Track::Kind kind,
+                                            std::size_t track_index, ClipId id,
+                                            Clip::ClipTag tag, uint8_t color,
+                                            const std::string& comments,
+                                            const std::string& name);
 // Toggles a track's audio mixing flags. Each returns nullptr if the track
 // index is out of range. These are discrete per-track settings; the model's
 // `locked` flag (also toggled here) makes the track read-only in the timeline.

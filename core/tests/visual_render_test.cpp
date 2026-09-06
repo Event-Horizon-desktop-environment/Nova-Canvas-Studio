@@ -31,6 +31,8 @@ extern "C" {
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
+
 using namespace canvas::core;
 
 static int32_t g_failures = 0;
@@ -58,13 +60,23 @@ static bool make_source(const std::string& path, int w, int h, int fps, int fram
     enc->height = h;
     enc->time_base = {1, fps};
     enc->framerate = {fps, 1};
+    st->time_base = enc->time_base;
     enc->pix_fmt = AV_PIX_FMT_YUV420P;
     enc->gop_size = 8;
     enc->max_b_frames = 0;
     if (avcodec_open2(enc, codec, nullptr) < 0) return false;
     st->id = 0;
-    avcodec_parameters_from_context(st->codecpar, enc);
+    if (avcodec_parameters_from_context(st->codecpar, enc) < 0) return false;
+    {
+        // Ensure the output directory exists (the test has no fixture files).
+        const std::string::size_type slash = path.find_last_of('/');
+        if (slash != std::string::npos) {
+            const std::string dir = path.substr(0, slash);
+            if (!dir.empty()) ::mkdir(dir.c_str(), 0755);
+        }
+    }
     if (avio_open(&oc->pb, path.c_str(), AVIO_FLAG_WRITE) < 0) return false;
+    if (avformat_write_header(oc, nullptr) < 0) return false;
 
     auto* frame = av_frame_alloc();
     std::vector<uint8_t> buf(static_cast<std::size_t>(w) * h * 3 / 2);
@@ -72,7 +84,6 @@ static bool make_source(const std::string& path, int w, int h, int fps, int fram
     frame->width = w;
     frame->height = h;
     if (av_frame_get_buffer(frame, 32) < 0) return false;
-    int64_t pts = 0;
     for (int f = 0; f < frames; ++f) {
         for (int y = 0; y < h; ++y)
             std::memset(frame->data[0] + static_cast<std::size_t>(y) * frame->linesize[0],
@@ -81,22 +92,22 @@ static bool make_source(const std::string& path, int w, int h, int fps, int fram
             std::memset(frame->data[1] + static_cast<std::size_t>(y) * frame->linesize[1], 128, w / 2);
         for (int y = 0; y < h / 2; ++y)
             std::memset(frame->data[2] + static_cast<std::size_t>(y) * frame->linesize[2], 128, w / 2);
+        frame->pts = f;
         if (avcodec_send_frame(enc, frame) < 0) break;
         AVPacket* pkt = av_packet_alloc();
         while (avcodec_receive_packet(enc, pkt) == 0) {
             av_packet_rescale_ts(pkt, enc->time_base, st->time_base);
-            pkt->stream_index = 0;
+            pkt->stream_index = st->index;
             av_interleaved_write_frame(oc, pkt);
             av_packet_unref(pkt);
         }
         av_packet_free(&pkt);
-        frame->pts = pts++;
     }
     avcodec_send_frame(enc, nullptr);
     AVPacket* pkt = av_packet_alloc();
     while (avcodec_receive_packet(enc, pkt) == 0) {
         av_packet_rescale_ts(pkt, enc->time_base, st->time_base);
-        pkt->stream_index = 0;
+        pkt->stream_index = st->index;
         av_interleaved_write_frame(oc, pkt);
         av_packet_unref(pkt);
     }
@@ -134,8 +145,10 @@ static const uint8_t* px(const VideoFramePtr& f, int x, int y) {
 
 int main() {
     const std::string src = "/tmp/opencode/media/visual_render_src.mp4";
-    if (!make_source(src, 64, 64, 30, 24))
+    if (!make_source(src, 64, 64, 30, 24)) {
+        std::printf("SKIP  could not synthesize the h264 source (no libx264?)\n");
         return 2;  // SKIP
+    }
 
     Project p = make_project(src);
     Clip a;
@@ -181,16 +194,17 @@ int main() {
         report(cmd != nullptr, "visual-export: reset transform");
     }
 
-    // Scale 2.0 about the fitted center: the border becomes black (the source
-    // no longer covers it) and the center still samples content.
+    // Zoom OUT to 0.5 about the fitted centre: scale multiplies the content's
+    // footprint, so a half-scale clip no longer reaches the canvas border (it
+    // turns black) while the centre still samples source content.
     cmd = set_clip_transform(p.sequence, Track::Kind::Video, 0, id,
-                             2.0f, 2.0f, 0.0, 0.0, 0.0f, 0.0, 0.0, false, false);
-    report(cmd != nullptr, "visual-export: set scale 2x");
+                             0.5f, 0.5f, 0.0, 0.0, 0.0f, 0.0, 0.0, false, false);
+    report(cmd != nullptr, "visual-export: set scale 0.5");
     VideoFramePtr scaled = render_video_frame(p, 4, 64, 64, 0, nullptr);
     report(scaled != nullptr, "visual-export: scaled render succeeds");
     if (scaled) {
         const double center = 32.0;
-        const double half = 64.0 / 8.0;  // fitted half-extent / scale -> 4px
+        const double half = 32.0 * 0.5;  // base half-extent * scale -> 16px
         double in_r = 0, in_g = 0, in_b = 0, out_r = 0, out_g = 0, out_b = 0;
         for (int y = 0; y < 64; ++y) {
             for (int x = 0; x < 64; ++x) {
@@ -208,9 +222,9 @@ int main() {
             }
         }
         report(out_r == 0 && out_g == 0 && out_b == 0,
-               "visual-export: scaled 2x leaves the border black");
+               "visual-export: scaled 0.5 leaves the border black");
         report(in_r > 0 || in_g > 0 || in_b > 0,
-               "visual-export: scaled 2x keeps the center lit");
+               "visual-export: scaled 0.5 keeps the center lit");
     }
 
     // Opacity 0.5 over the black background darkens each channel to ~half.

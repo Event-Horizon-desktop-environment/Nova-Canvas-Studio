@@ -1,4 +1,6 @@
 #include "UX/MainWindow.hpp"
+#include "UX/InspectorAudio.hpp"
+#include "UX/InspectorFile.hpp"
 #include "Logging.hpp"
 
 #include <QDoubleSpinBox>
@@ -34,14 +36,16 @@ void MainWindow::connect_timeline() {
     connect(timeline_, &TimelineWidget::clip_selected, this,
             [this](const canvas::core::Clip* clip) {
                 selected_clip_ = clip ? clip->id : 0;
-                update_inspector_audio();
+                update_inspector_audio_full(*this);
+                update_inspector_file(*this);
             });
 
     connect(timeline_, &TimelineWidget::clips_range_selected, this,
             [this](std::vector<canvas::core::ClipId> ids) {
                 timeline_->set_selection(ids);
                 selected_clip_ = ids.empty() ? 0 : ids.front();
-                update_inspector_audio();
+                update_inspector_audio_full(*this);
+                update_inspector_file(*this);
             });
 
     connect(timeline_, &TimelineWidget::blade_requested, this,
@@ -577,12 +581,47 @@ bool MainWindow::find_selected_clip(canvas::core::Track::Kind& out_kind, std::si
     return false;
 }
 
+bool MainWindow::find_audio_target(canvas::core::Track::Kind& out_kind, std::size_t& out_index,
+                                   canvas::core::Clip& out_clip) const {
+    if (!project_ || selected_clip_ == 0) return false;
+    const canvas::core::Sequence& seq = project_->sequence;
+    for (std::size_t i = 0; i < seq.audio_tracks.size(); ++i) {
+        for (const auto& c : seq.audio_tracks[i].clips) {
+            if (c.id == selected_clip_) {
+                out_kind = canvas::core::Track::Kind::Audio;
+                out_index = i;
+                out_clip = c;
+                return true;
+            }
+        }
+    }
+    for (std::size_t i = 0; i < seq.video_tracks.size(); ++i) {
+        for (const auto& c : seq.video_tracks[i].clips) {
+            if (c.id == selected_clip_) {
+                if (c.linked_id == 0) return false;
+                for (std::size_t a = 0; a < seq.audio_tracks.size(); ++a) {
+                    for (const auto& ac : seq.audio_tracks[a].clips) {
+                        if (ac.id == c.linked_id) {
+                            out_kind = canvas::core::Track::Kind::Audio;
+                            out_index = a;
+                            out_clip = ac;
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
 void MainWindow::update_inspector_audio() {
     if (!project_ || !inspector_audio_volume_ || !inspector_audio_pan_) return;
     canvas::core::Track::Kind kind;
     std::size_t index = 0;
     canvas::core::Clip clip;
-    if (!find_selected_clip(kind, index, clip)) return;
+    if (!find_audio_target(kind, index, clip)) return;
     inspector_audio_volume_->setValue(clip.volume_db);
     inspector_audio_pan_->setValue(clip.pan);
 }
@@ -592,7 +631,7 @@ void MainWindow::apply_inspector_audio() {
     canvas::core::Track::Kind kind;
     std::size_t index = 0;
     canvas::core::Clip clip;
-    if (!find_selected_clip(kind, index, clip)) return;
+    if (!find_audio_target(kind, index, clip)) return;
     const float vol = static_cast<float>(inspector_audio_volume_->value());
     const float pan = static_cast<float>(inspector_audio_pan_->value());
     if (vol == clip.volume_db && pan == clip.pan) return;
@@ -601,7 +640,7 @@ void MainWindow::apply_inspector_audio() {
     undo_.record(std::move(cmd));
     has_unsaved_changes_ = true;
     refresh_timeline();
-    push_snapshot();
+    push_audio_mix_snapshot();
     qWarning() << "[edit] CLIP-AUDIO kind="
                << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                << "track=" << index << "clip=" << clip.id

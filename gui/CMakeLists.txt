@@ -25,6 +25,14 @@ qt_add_executable(canvas
     src/UX/ShellDocks.cpp
     src/UX/ShellCenter.cpp
     src/UX/InspectorVisual.cpp
+    src/UX/InspectorAudio.cpp
+    src/UX/InspectorTransition.cpp
+    src/UX/InspectorFile.cpp
+    src/UX/InspectorShared.hpp
+    src/UX/InspectorVisual.hpp
+    src/UX/InspectorAudio.hpp
+    src/UX/InspectorTransition.hpp
+    src/UX/InspectorFile.hpp
     src/Widgets/timeline_snap.cpp
     src/Widgets/timeline_selection.cpp
     src/Widgets/timeline_drag.cpp

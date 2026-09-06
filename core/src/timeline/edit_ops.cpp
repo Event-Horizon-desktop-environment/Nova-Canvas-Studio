@@ -1,5 +1,6 @@
 #include "canvas/core/timeline/edit_ops.hpp"
 #include "canvas/core/timeline/audio_mix.hpp"
+#include "canvas/core/timeline/audio_processing.hpp"
 #include "canvas/core/timeline/visual.hpp"
 #include "canvas/core/util/log.hpp"
 
@@ -976,7 +977,7 @@ std::unique_ptr<ICommand> set_clip_audio(Sequence& seq, const Track::Kind kind,
 
     std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
 
-    const float norm_db = std::clamp(volume_db, audio_mix::kMinVolumeDb, audio_mix::kMaxVolumeDb);
+    const float norm_db = std::clamp(volume_db, audio_mix::kVolumeDbSliderMin, audio_mix::kVolumeDbSliderMax);
     const float norm_pan = std::clamp(pan, audio_mix::kPanMin, audio_mix::kPanMax);
     for (auto& cc : t->clips)
         if (cc.id == id) { cc.volume_db = norm_db; cc.pan = norm_pan; break; }
@@ -1165,4 +1166,136 @@ std::unique_ptr<ICommand> set_clip_composite(Sequence& seq, const Track::Kind ki
     return std::make_unique<EditCommand>("clip composite", std::move(before), std::move(after));
 }
 
+std::unique_ptr<ICommand> set_clip_audio_processing(
+    Sequence& seq, const Track::Kind kind, const std::size_t track_index, const ClipId id,
+    const float pitch_semitones, const float pitch_cents, const float speed_factor,
+    const bool speed_enabled, const bool eq_enabled,
+    const std::array<Clip::EqBand, 6>& eq_bands) {
+    Track* t = seq.track(kind, track_index);
+    const Clip* c = t ? t->clip_with_id(id) : nullptr;
+    if (!c) return nullptr;
+
+    std::vector<TrackRef> involved{{kind, track_index}};
+    Track* mate_track = nullptr;
+    ClipId mate_id = 0;
+    if (c->linked_id != 0) {
+        if (const auto ref = find_clip_ref(seq, c->linked_id, &mate_track)) {
+            collect_track(involved, seq, *ref);
+            mate_id = c->linked_id;
+        }
+    }
+
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+
+    const float n_semi = std::clamp(pitch_semitones, audio_processing::kPitchSemitonesMin,
+                                    audio_processing::kPitchSemitonesMax);
+    const float n_cents = std::clamp(pitch_cents, audio_processing::kPitchCentsMin,
+                                     audio_processing::kPitchCentsMax);
+    const float n_speed = std::clamp(speed_factor, audio_processing::kSpeedMin,
+                                     audio_processing::kSpeedMax);
+
+    auto set_fields = [&](Clip& cc) {
+        cc.pitch_semitones = n_semi;
+        cc.pitch_cents = n_cents;
+        cc.speed_factor = n_speed;
+        cc.speed_enabled = speed_enabled;
+        cc.eq_enabled = eq_enabled;
+        cc.eq_bands = eq_bands;
+    };
+    for (auto& cc : t->clips) {
+        if (cc.id == id) { set_fields(cc); break; }
+    }
+    if (mate_track && mate_id != 0) {
+        for (auto& mc : mate_track->clips)
+            if (mc.id == mate_id) { set_fields(mc); break; }
+    }
+
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>("clip audio processing", std::move(before), std::move(after));
 }
+
+std::unique_ptr<ICommand> set_clip_transition_curve(Sequence& seq, const Track::Kind kind,
+                                                    const std::size_t track_index, const ClipId id,
+                                                    const bool in_edge, const float ease_amount,
+                                                    const float curve_value) {
+    Track* t = seq.track(kind, track_index);
+    const Clip* c = t ? t->clip_with_id(id) : nullptr;
+    if (!c) return nullptr;
+
+    std::vector<TrackRef> involved{{kind, track_index}};
+    Track* mate_track = nullptr;
+    ClipId mate_id = 0;
+    if (c->linked_id != 0) {
+        if (const auto ref = find_clip_ref(seq, c->linked_id, &mate_track)) {
+            collect_track(involved, seq, *ref);
+            mate_id = c->linked_id;
+        }
+    }
+
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+
+    const float n_ease = std::clamp(ease_amount, audio_processing::kTransitionRatioMin,
+                                    audio_processing::kTransitionCurveMax);
+    const float n_curve = std::clamp(curve_value, audio_processing::kTransitionCurveMin,
+                                     audio_processing::kTransitionCurveMax);
+    (void)in_edge;  // v1: curve/ease are shared clip-wide, not per-edge
+    const auto set_fields = [&](Clip& cc) {
+        cc.transition_curve_value = n_curve;
+        cc.transition_ease = n_ease;
+    };
+    for (auto& cc : t->clips) {
+        if (cc.id == id) { set_fields(cc); break; }
+    }
+    if (mate_track && mate_id != 0) {
+        for (auto& mc : mate_track->clips)
+            if (mc.id == mate_id) { set_fields(mc); break; }
+    }
+
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>("clip transition curve", std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> set_clip_metadata(Sequence& seq, const Track::Kind kind,
+                                            const std::size_t track_index, const ClipId id,
+                                            const Clip::ClipTag tag, const uint8_t color,
+                                            const std::string& comments, const std::string& name) {
+    Track* t = seq.track(kind, track_index);
+    const Clip* c = t ? t->clip_with_id(id) : nullptr;
+    if (!c) return nullptr;
+
+    std::vector<TrackRef> involved{{kind, track_index}};
+    Track* mate_track = nullptr;
+    ClipId mate_id = 0;
+    if (c->linked_id != 0) {
+        if (const auto ref = find_clip_ref(seq, c->linked_id, &mate_track)) {
+            collect_track(involved, seq, *ref);
+            mate_id = c->linked_id;
+        }
+    }
+
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+
+    const uint8_t n_color = color > 12 ? 0 : color;
+    for (auto& cc : t->clips) {
+        if (cc.id != id) continue;
+        cc.clip_tag = tag;
+        cc.clip_color = n_color;
+        cc.comments = comments;
+        cc.name = name;
+        break;
+    }
+    if (mate_track && mate_id != 0) {
+        for (auto& mc : mate_track->clips) {
+            if (mc.id != mate_id) continue;
+            mc.clip_tag = tag;
+            mc.clip_color = n_color;
+            mc.comments = comments;
+            break;
+        }
+    }
+
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>("clip metadata", std::move(before), std::move(after));
+}
+
+}  // namespace canvas::core

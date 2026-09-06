@@ -1,10 +1,10 @@
 #include "UX/MainWindow.hpp"
 #include "ui_MainWindow.h"
 
-#include "UX/InspectorShared.hpp"
+#include "UX/InspectorAudio.hpp"
+#include "UX/InspectorFile.hpp"
+#include "UX/InspectorTransition.hpp"
 #include "UX/InspectorVisual.hpp"
-
-#include "canvas/core/timeline/audio_mix.hpp"
 
 #include <QAbstractItemView>
 #include <QButtonGroup>
@@ -233,8 +233,7 @@ void build_inspector_dock(MainWindow& mw) {
     inspector_title->setObjectName(QStringLiteral("inspectorDockTitle"));
     inspector_title->    setStyleSheet(QStringLiteral("background-color: #1A1D27;"));
     mw.inspector_dock_->setTitleBarWidget(inspector_title);
-    mw.inspector_dock_->setMinimumWidth(300);
-    mw.inspector_dock_->setMaximumWidth(400);
+    mw.inspector_dock_->setMinimumWidth(320);
     mw.inspector_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
 
     auto* inspector_body = new QWidget(mw.inspector_dock_);
@@ -259,6 +258,12 @@ void build_inspector_dock(MainWindow& mw) {
         b->setChecked(is_video);
         b->setAutoRaise(true);
         b->setStyleSheet(page_pill_style());
+        b->setToolTip(MainWindow::tr(m));
+        // Allow the pill to shrink below its text width so six mode buttons
+        // fit comfortably at any DPI scale and dock width.  A tooltip makes
+        // the truncated label discoverable.
+        b->setMinimumWidth(1);
+        b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         mode_group->addButton(b);
         mode_row_layout->addWidget(b);
         mode_buttons.push_back(b);
@@ -273,6 +278,8 @@ void build_inspector_dock(MainWindow& mw) {
     // "Audio" carries the working per-clip mix controls; the other modes keep
     // their reference layouts until their properties are wired to the model.
     auto* stack = new QStackedWidget(scroll);
+    const int video_tab_index = 0;
+    const int audio_tab_index = 1;
 
     // --- Video page ---------------------------------------------------------
     auto* video_page = new QWidget(stack);
@@ -288,41 +295,20 @@ void build_inspector_dock(MainWindow& mw) {
     stack->addWidget(video_page);
 
     // --- Audio page ---------------------------------------------------------
-    // The working category: Volume (dB) and Pan edit the selected clip's
-    // loudness/position as one undoable edit. The spins refresh whenever the
-    // selection changes (see TimelineActions / update_inspector_audio) and
-    // commit on editing-finished, so stepping the arrow buttons or typing a
-    // value produces a single clean undo. Range constants come from the shared
-    // audio_mix header (defaults 0 dB / center are the user-set references).
+    // The full Audio tab (Volume/Pan, Pitch, Speed Change, Equalizer + the AI
+    // placeholder sections) builds in InspectorAudio.cpp (splitplan refactor).
+    // Its volume/pan spins subscribe to MainWindow::apply_inspector_audio and
+    // feed the legacy member pointers, so the pre-split commit path still works.
     auto* audio_page = new QWidget(stack);
     auto* audio_layout = new QVBoxLayout(audio_page);
     audio_layout->setContentsMargins(0, 0, 0, 0);
     audio_layout->setSpacing(0);
-    auto* audio = new InspectorCategory(MainWindow::tr("Audio"), true, audio_page);
-    auto* vol = make_numeric(canvas::core::audio_mix::kMinVolumeDb,
-                             canvas::core::audio_mix::kMaxVolumeDb, 0.0, audio_page);
-    vol->setDecimals(1);
-    vol->setSuffix(QStringLiteral(" dB"));
-    vol->setMaximumWidth(110);
-    add_property_row(audio->body_layout(), MainWindow::tr("Volume (dB)"), vol);
-    auto* pan = make_numeric(canvas::core::audio_mix::kPanMin,
-                             canvas::core::audio_mix::kPanMax, 0.0, audio_page);
-    pan->setDecimals(2);
-    add_property_row(audio->body_layout(), MainWindow::tr("Pan"), pan);
-    audio_layout->addWidget(audio);
+    build_inspector_audio(mw, audio_layout, mode_buttons[audio_tab_index]);
     audio_layout->addStretch(1);
-    mw.inspector_audio_volume_ = vol;
-    mw.inspector_audio_pan_ = pan;
-    QObject::connect(vol, &QDoubleSpinBox::editingFinished, &mw, [&mw]() {
-        mw.apply_inspector_audio();
-    });
-    QObject::connect(pan, &QDoubleSpinBox::editingFinished, &mw, [&mw]() {
-        mw.apply_inspector_audio();
-    });
     stack->addWidget(audio_page);
 
-    // --- Effects / Transition / Image / File pages (placeholder for now) ----
-    for (const char* m : {"Effects", "Transition", "Image", "File"}) {
+    // --- Effects / Image pages (placeholder for now) ------------------------
+    for (const char* m : {"Effects", "Image"}) {
         auto* page = new QWidget(stack);
         auto* page_layout = new QVBoxLayout(page);
         page_layout->setContentsMargins(0, 0, 0, 0);
@@ -336,8 +322,25 @@ void build_inspector_dock(MainWindow& mw) {
         stack->addWidget(page);
     }
 
-    const int video_tab_index = 0;
-    const int audio_tab_index = 1;
+    // --- Transition page ----------------------------------------------------
+    // Start/End sub-tabs + Video/Audio categories (InspectorTransition.cpp).
+    // Only active while a transition bubble is selected on the timeline.
+    auto* transition_page = new QWidget(stack);
+    auto* transition_layout = new QVBoxLayout(transition_page);
+    transition_layout->setContentsMargins(0, 0, 0, 0);
+    transition_layout->setSpacing(0);
+    build_inspector_transition(mw, transition_layout);
+    stack->addWidget(transition_page);
+
+    // --- File page ----------------------------------------------------------
+    // Read-only source header info + fully-wired metadata (InspectorFile.cpp).
+    auto* file_page = new QWidget(stack);
+    auto* file_layout = new QVBoxLayout(file_page);
+    file_layout->setContentsMargins(0, 0, 0, 0);
+    file_layout->setSpacing(0);
+    build_inspector_file(mw, file_layout);
+    stack->addWidget(file_page);
+
     for (std::size_t i = 0; i < mode_buttons.size(); ++i) {
         const int idx = static_cast<int>(i);
         QObject::connect(mode_buttons[idx], &QToolButton::toggled, stack, [stack, idx](bool on) {
@@ -345,8 +348,6 @@ void build_inspector_dock(MainWindow& mw) {
         });
     }
     stack->setCurrentIndex(video_tab_index);
-    static_cast<void>(video_tab_index);
-    static_cast<void>(audio_tab_index);
 
     scroll->setWidget(stack);
     inspector_outer->addWidget(scroll, 1);

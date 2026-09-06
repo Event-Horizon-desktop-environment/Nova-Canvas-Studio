@@ -31,6 +31,10 @@ struct ThumbRequest {
     // its own audio and a blade cut doesn't change the visible spectrum.
     float src_lo = 0.0f;
     float src_hi = 1.0f;
+    // For audio waveform previews: the clip's volume as an amplitude gain in
+    // [0,1] (db_to_gain(clip.volume_db) clamped). Baked into the drawn peak
+    // heights so the timeline spectrum visibly shrinks/rises with the volume.
+    float gain = 1.0f;
 };
 
 class ThumbnailService final : public QObject {
@@ -42,7 +46,7 @@ public:
 
     void request(ThumbRequest req);
     void request_waveform(uint64_t id, std::string path, int width, int height, float src_lo,
-                          float src_hi);
+                          float src_hi, float gain = 1.0f);
     void clear_cache();
     // Sets the directory used to persist generated thumbnails and waveforms so
     // they survive across zooms and app restarts. Empty disables disk caching.
@@ -60,10 +64,11 @@ private:
         bool is_audio = false;
         float src_lo = 0.0f;
         float src_hi = 1.0f;
+        int gain_pct = 100;
 
         bool operator==(const CacheKey& o) const noexcept {
             return path == o.path && frame == o.frame && width == o.width && is_audio == o.is_audio &&
-                   src_lo == o.src_lo && src_hi == o.src_hi;
+                   src_lo == o.src_lo && src_hi == o.src_hi && gain_pct == o.gain_pct;
         }
     };
 
@@ -75,6 +80,7 @@ private:
             h ^= static_cast<std::size_t>(k.is_audio) * 0x9E3779B97F4A7C15ULL;
             h ^= static_cast<std::size_t>(k.src_lo) * 0x9E3779B97F4A7C15ULL;
             h ^= static_cast<std::size_t>(k.src_hi) * 0x9E3779B97F4A7C15ULL;
+            h ^= static_cast<std::size_t>(k.gain_pct) * 0x9E3779B97F4A7C15ULL;
             return h;
         }
     };
@@ -87,7 +93,7 @@ private:
     // Disk-cache helpers. Keyed files are written/read under cache_dir_.
     QString disk_path_thumbnail(const std::string& path, int64_t frame, int width) const;
     QString disk_path_waveform(const std::string& path, int width, int height, float src_lo,
-                               float src_hi) const;
+                               float src_hi, int gain_pct = 100) const;
     QString disk_path_raw_waveform(const std::string& path) const;
     static QString cache_file_name(const std::string& seed, const char* ext);
     static QString ensure_cache_dir(const QString& dir);

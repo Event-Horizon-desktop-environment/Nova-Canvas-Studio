@@ -268,7 +268,9 @@ constexpr const char* kInspectorCategoryHeaderQss =
 constexpr const char* kInspectorBodyQss = "background-color: #141A21;";
 
 constexpr const char* kPagePillQss =
-    "QToolButton { color: #9AA0B0; padding: 3px 14px; border-radius: 8px; }"
+    // Compact horizontal padding so six mode pills fit comfortably at 400px
+    // and every label is visible at all DPI scales.
+    "QToolButton { color: #9AA0B0; padding: 3px 8px; border-radius: 8px; }"
     "QToolButton:checked { color: #FFFFFF; background-color: #3B82F6; font-weight: 600; }"
     "QToolButton:hover:!checked { color: #F0F2F7; background-color: rgba(255,255,255,0.08); }";
 

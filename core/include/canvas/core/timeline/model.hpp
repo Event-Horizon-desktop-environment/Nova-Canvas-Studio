@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -68,6 +69,13 @@ struct Clip {
     TransitionType transition_in = TransitionType::None;
     int64_t transition_in_duration = 0;
 
+    // Transition shaping. `transition_curve_value` is the transition curve
+    // position 0..1 (0 = fully the outgoing frame's style, 1 = the incoming);
+    // `transition_ease` 0..1 drives the ease-out/in amount (0 = linear). Stored
+    // per-clip so undo restores them.
+    float transition_curve_value = 0.0f;
+    float transition_ease = 0.0f;
+
     // Audio mix parameters. `volume_db` is the gain in decibels (0 = unity);
     // `pan` ranges -1.0 (hard left) .. +1.0 (hard right), 0 = center. Applied to
     // this clip's audio (embedded or on an audio track) during playback and
@@ -98,6 +106,61 @@ struct Clip {
     // used when layering this clip over lower tracks / the background.
     float opacity = 1.0f;
     BlendMode blend_mode = BlendMode::Normal;
+
+    // Audio processing — pitch shift, speed change, and parametric EQ. These
+    // fields are stored per-clip so track-snapshot undo restores them
+    // automatically. Pitch is split into semitones (coarse) and cents (fine);
+    // speed is a linear factor (1.0 = unity); the EQ has 6 bands with
+    // configurable type/frequency/gain/Q.
+    float pitch_semitones = 0.0f;
+    float pitch_cents = 0.0f;
+    float speed_factor = 1.0f;
+    bool speed_enabled = false;
+
+    struct EqBand {
+        enum class Type : uint8_t { LowShelf = 0, Bell, HighShelf, LowPass, HighPass, Notch };
+        Type type = Type::Bell;
+        float frequency = 1000.0f;
+        float gain = 0.0f;
+        float q = 1.0f;
+        bool operator==(const EqBand&) const = default;
+    };
+    // The reference EQ curve shown when a clip first gains EqBand defaults
+    // (mirrors the reference app's six-band layout).
+    [[nodiscard]] static std::array<EqBand, 6> default_eq_bands() noexcept {
+        std::array<EqBand, 6> bands{};
+        bands[0].type = EqBand::Type::LowShelf;
+        bands[0].frequency = 20.0f;
+        bands[0].gain = 18.1f;
+        bands[1].type = EqBand::Type::Bell;
+        bands[1].frequency = 57.0f;
+        bands[1].gain = 18.1f;
+        bands[2].type = EqBand::Type::Bell;
+        bands[2].frequency = 97.0f;
+        bands[2].gain = 10.5f;
+        bands[2].q = 1.0f;
+        bands[3].type = EqBand::Type::Bell;
+        bands[3].frequency = 1200.0f;
+        bands[3].gain = 0.0f;
+        bands[3].q = 1.0f;
+        bands[4].type = EqBand::Type::HighShelf;
+        bands[4].frequency = 6000.0f;
+        bands[4].gain = 0.0f;
+        bands[5].type = EqBand::Type::LowPass;
+        bands[5].frequency = 19000.0f;
+        bands[5].gain = 0.0f;
+        return bands;
+    }
+    bool eq_enabled = false;
+    std::array<EqBand, 6> eq_bands = default_eq_bands();
+
+    // Clip metadata — tag (good-take / rejected), colour swatch (0 = none,
+    // 1–12 = swatch index), and free-form comments. Stored per-clip so undo
+    // restores them.
+    enum class ClipTag : uint8_t { None = 0, GoodTake, Rejected };
+    ClipTag clip_tag = ClipTag::None;
+    uint8_t clip_color = 0;
+    std::string comments;
 
     [[nodiscard]] bool is_linked() const noexcept { return linked_id != 0; }
     [[nodiscard]] int64_t duration() const { return tl_out - tl_in; }

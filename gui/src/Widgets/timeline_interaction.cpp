@@ -552,6 +552,8 @@ void TimelineWidget::select_transition_bubble(std::size_t index) {
                             : QPen(QColor(255, 255, 255, 230), 1.0));
         bb.pill->setZValue(sel ? 52 : 50);
     }
+    emit transition_selected(selected_transition_.a, selected_transition_.b,
+                             selected_transition_.in_edge);
 }
 
 void TimelineWidget::clear_selected_transition() {
@@ -559,6 +561,7 @@ void TimelineWidget::clear_selected_transition() {
     for (auto& bb : transition_bubbles_) {
         if (bb.pill) bb.pill->setPen(QPen(QColor(255, 255, 255, 230), 1.0));
     }
+    emit transition_selection_cleared();
 }
 
 bool TimelineWidget::delete_selected_transition() {

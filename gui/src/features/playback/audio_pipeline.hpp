@@ -43,6 +43,10 @@ public:
     // Project the decode/feed queries are made against (raw borrow; the owning
     // controller keeps the shared_ptr alive across any pipeline call).
     void set_project(const canvas::core::Project* project);
+    // Live swap of the project the mix reads from (no decoder reset, no device
+    // flush): the next mixed buffer picks up the new per-clip volume/pan/fade
+    // values, so audio edits apply in realtime during playback.
+    void update_project(const canvas::core::Project* project);
     // Open an audio decoder for a media entry (no-op unless it has audio).
     void add_media(const canvas::core::MediaEntry& entry);
     // Tear down for a project swap: flush+drain any active output, close all

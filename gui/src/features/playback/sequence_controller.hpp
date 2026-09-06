@@ -36,6 +36,10 @@ public:
     // playhead; pass -1 to preserve the current one (edit snapshots must not
     // reset the playhead — only a fresh open/new passes 0).
     void set_project(std::shared_ptr<const canvas::core::Project> project, int64_t initial_frame = -1);
+    // Live mix-parameter refresh: swaps the worker's project WITHOUT stopping
+    // playback or tearing down decoders/audio, so audio edits (volume/pan/
+    // pitch/speed/EQ) reach the next mixed buffer as the video keeps playing.
+    void update_audio_mix(std::shared_ptr<const canvas::core::Project> project);
     void add_media(const canvas::core::MediaEntry& entry);
     void play();
     void pause();
@@ -79,7 +83,7 @@ signals:
     void playback_changed(bool playing);
 
 private:
-    enum class Command { SetProject, AddMedia, Play, Pause, Seek, SeekPreview, Step, Stop };
+    enum class Command { SetProject, AddMedia, Play, Pause, Seek, SeekPreview, Step, UpdateAudioMix, Stop };
     struct Request {
         Command command = Command::Stop;
         int64_t arg = 0;
@@ -90,6 +94,7 @@ private:
     void worker_loop();
     void push(Request request);
     void handle_set_project(std::shared_ptr<const canvas::core::Project> project, int64_t initial_frame);
+    void handle_update_audio_mix(std::shared_ptr<const canvas::core::Project> project);
     void handle_add_media(const canvas::core::MediaEntry& entry);
     void handle_play();
     void handle_seek(int64_t frame_number);

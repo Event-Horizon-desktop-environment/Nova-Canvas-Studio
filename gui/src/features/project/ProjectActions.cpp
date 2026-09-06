@@ -1,4 +1,6 @@
 #include "UX/MainWindow.hpp"
+#include "UX/InspectorAudio.hpp"
+#include "UX/InspectorFile.hpp"
 #include "Logging.hpp"
 
 #include "Widgets/media_pool_widget.hpp"
@@ -427,7 +429,8 @@ void MainWindow::on_undo() {
     has_unsaved_changes_ = true;
     refresh_timeline();
     refresh_media_pool();
-    update_inspector_audio();
+    update_inspector_audio_full(*this);
+    update_inspector_file(*this);
     update_inspector_visual(*this);
     push_snapshot();
 }
@@ -438,7 +441,8 @@ void MainWindow::on_redo() {
     has_unsaved_changes_ = true;
     refresh_timeline();
     refresh_media_pool();
-    update_inspector_audio();
+    update_inspector_audio_full(*this);
+    update_inspector_file(*this);
     update_inspector_visual(*this);
     push_snapshot();
 }
