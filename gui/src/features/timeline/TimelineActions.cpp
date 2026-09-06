@@ -1,6 +1,8 @@
 #include "UX/MainWindow.hpp"
 #include "Logging.hpp"
 
+#include <QDoubleSpinBox>
+
 #include <cstdint>
 #include <utility>
 
@@ -32,12 +34,14 @@ void MainWindow::connect_timeline() {
     connect(timeline_, &TimelineWidget::clip_selected, this,
             [this](const canvas::core::Clip* clip) {
                 selected_clip_ = clip ? clip->id : 0;
+                update_inspector_audio();
             });
 
     connect(timeline_, &TimelineWidget::clips_range_selected, this,
             [this](std::vector<canvas::core::ClipId> ids) {
                 timeline_->set_selection(ids);
                 selected_clip_ = ids.empty() ? 0 : ids.front();
+                update_inspector_audio();
             });
 
     connect(timeline_, &TimelineWidget::blade_requested, this,
@@ -514,6 +518,94 @@ void MainWindow::connect_timeline() {
                            << "index=" << track_index << "now=" << tracks.size();
                 push_snapshot();
             });
+
+    // Track-header M/S/L toggles apply the inverse of the shown state as a
+    // single undoable edit, so Undo restores the previous mixing/lock flags.
+    const auto toggle_track_flag =
+        [this](canvas::core::Track::Kind kind, int track_index, bool on,
+               auto make_cmd) {
+            if (!project_ || track_index < 0) return;
+            auto cmd = make_cmd(project_->sequence, kind,
+                                static_cast<std::size_t>(track_index), on);
+            if (!cmd) return;
+            undo_.record(std::move(cmd));
+            has_unsaved_changes_ = true;
+            refresh_timeline();
+            push_snapshot();
+        };
+    connect(timeline_, &TimelineWidget::track_mute_toggled, this,
+            [toggle_track_flag, this](canvas::core::Track::Kind kind, int idx, bool on) {
+                toggle_track_flag(kind, idx, on,
+                                  canvas::core::set_track_muted);
+            });
+    connect(timeline_, &TimelineWidget::track_solo_toggled, this,
+            [toggle_track_flag, this](canvas::core::Track::Kind kind, int idx, bool on) {
+                toggle_track_flag(kind, idx, on,
+                                  canvas::core::set_track_solo);
+            });
+    connect(timeline_, &TimelineWidget::track_lock_toggled, this,
+            [toggle_track_flag, this](canvas::core::Track::Kind kind, int idx, bool on) {
+                toggle_track_flag(kind, idx, on,
+                                  canvas::core::set_track_locked);
+            });
+}
+
+bool MainWindow::find_selected_clip(canvas::core::Track::Kind& out_kind, std::size_t& out_index,
+                                    canvas::core::Clip& out_clip) const {
+    if (!project_ || selected_clip_ == 0) return false;
+    const canvas::core::Sequence& seq = project_->sequence;
+    for (std::size_t i = 0; i < seq.video_tracks.size(); ++i) {
+        for (const auto& c : seq.video_tracks[i].clips) {
+            if (c.id == selected_clip_) {
+                out_kind = canvas::core::Track::Kind::Video;
+                out_index = i;
+                out_clip = c;
+                return true;
+            }
+        }
+    }
+    for (std::size_t i = 0; i < seq.audio_tracks.size(); ++i) {
+        for (const auto& c : seq.audio_tracks[i].clips) {
+            if (c.id == selected_clip_) {
+                out_kind = canvas::core::Track::Kind::Audio;
+                out_index = i;
+                out_clip = c;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void MainWindow::update_inspector_audio() {
+    if (!project_ || !inspector_audio_volume_ || !inspector_audio_pan_) return;
+    canvas::core::Track::Kind kind;
+    std::size_t index = 0;
+    canvas::core::Clip clip;
+    if (!find_selected_clip(kind, index, clip)) return;
+    inspector_audio_volume_->setValue(clip.volume_db);
+    inspector_audio_pan_->setValue(clip.pan);
+}
+
+void MainWindow::apply_inspector_audio() {
+    if (!project_ || !inspector_audio_volume_ || !inspector_audio_pan_) return;
+    canvas::core::Track::Kind kind;
+    std::size_t index = 0;
+    canvas::core::Clip clip;
+    if (!find_selected_clip(kind, index, clip)) return;
+    const float vol = static_cast<float>(inspector_audio_volume_->value());
+    const float pan = static_cast<float>(inspector_audio_pan_->value());
+    if (vol == clip.volume_db && pan == clip.pan) return;
+    auto cmd = canvas::core::set_clip_audio(project_->sequence, kind, index, clip.id, vol, pan);
+    if (!cmd) return;
+    undo_.record(std::move(cmd));
+    has_unsaved_changes_ = true;
+    refresh_timeline();
+    push_snapshot();
+    qWarning() << "[edit] CLIP-AUDIO kind="
+               << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
+               << "track=" << index << "clip=" << clip.id
+               << "vol_db=" << vol << "pan=" << pan;
 }
 
 }  // namespace canvas::gui

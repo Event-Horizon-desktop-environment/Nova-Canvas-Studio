@@ -24,6 +24,7 @@ qt_add_executable(canvas
     src/UX/ShellTopBar.cpp
     src/UX/ShellDocks.cpp
     src/UX/ShellCenter.cpp
+    src/UX/InspectorVisual.cpp
     src/Widgets/timeline_snap.cpp
     src/Widgets/timeline_selection.cpp
     src/Widgets/timeline_drag.cpp

@@ -1,4 +1,6 @@
 #include "canvas/core/timeline/edit_ops.hpp"
+#include "canvas/core/timeline/audio_mix.hpp"
+#include "canvas/core/timeline/visual.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <algorithm>
@@ -38,7 +40,7 @@ std::vector<Clip> clipped_range(const std::vector<Clip>& clips, const int64_t in
 TrackSnapshot snapshot(const Sequence& seq, const Track::Kind kind, const std::size_t index) {
     const Track* t = seq.track(kind, index);
     assert(t);
-    return {kind, index, t->clips};
+    return {kind, index, t->locked, t->muted, t->solo, t->clips};
 }
 
 void shift_from(std::vector<Clip>& clips, const int64_t from, const int64_t delta) {
@@ -244,6 +246,9 @@ void EditCommand::apply(Sequence& seq, const std::vector<TrackSnapshot>& state) 
     for (const auto& snap : state) {
         Track* t = seq.track(snap.kind, snap.index);
         assert(t);
+        t->locked = snap.locked;
+        t->muted = snap.muted;
+        t->solo = snap.solo;
         t->clips = snap.clips;
     }
 }
@@ -949,6 +954,215 @@ std::unique_ptr<ICommand> delete_through_edit(Sequence& seq, const Track::Kind k
            (long long)merged.src_in, (long long)merged.src_out,
            (a->has_transition() ? "yes" : "no"), (long long)mate_id);
     return std::make_unique<EditCommand>("delete through edit", std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> set_clip_audio(Sequence& seq, const Track::Kind kind,
+                                         const std::size_t track_index, const ClipId id,
+                                         const float volume_db, const float pan) {
+    Track* t = seq.track(kind, track_index);
+    const Clip* c = t ? t->clip_with_id(id) : nullptr;
+    if (!c) return nullptr;
+
+    std::vector<TrackRef> involved{{kind, track_index}};
+
+    Track* mate_track = nullptr;
+    ClipId mate_id = 0;
+    if (c->linked_id != 0) {
+        if (const auto ref = find_clip_ref(seq, c->linked_id, &mate_track)) {
+            collect_track(involved, seq, *ref);
+            mate_id = c->linked_id;
+        }
+    }
+
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+
+    const float norm_db = std::clamp(volume_db, audio_mix::kMinVolumeDb, audio_mix::kMaxVolumeDb);
+    const float norm_pan = std::clamp(pan, audio_mix::kPanMin, audio_mix::kPanMax);
+    for (auto& cc : t->clips)
+        if (cc.id == id) { cc.volume_db = norm_db; cc.pan = norm_pan; break; }
+    if (mate_track && mate_id != 0) {
+        for (auto& mc : mate_track->clips)
+            if (mc.id == mate_id) { mc.volume_db = norm_db; mc.pan = norm_pan; break; }
+    }
+
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>("clip audio", std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> set_track_muted(Sequence& seq, const Track::Kind kind,
+                                          const std::size_t track_index, const bool muted) {
+    Track* t = seq.track(kind, track_index);
+    if (!t) return nullptr;
+    std::vector<TrackRef> involved{{kind, track_index}};
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+    if (t->muted == muted) {
+        std::vector<TrackSnapshot> same = before;
+        return std::make_unique<EditCommand>(muted ? "mute track" : "unmute track",
+                                             std::move(before), std::move(same));
+    }
+    t->muted = muted;
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>(muted ? "mute track" : "unmute track",
+                                         std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> set_track_solo(Sequence& seq, const Track::Kind kind,
+                                         const std::size_t track_index, const bool solo) {
+    Track* t = seq.track(kind, track_index);
+    if (!t) return nullptr;
+    std::vector<TrackRef> involved{{kind, track_index}};
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+    if (t->solo == solo) {
+        std::vector<TrackSnapshot> same = before;
+        return std::make_unique<EditCommand>("solo track", std::move(before), std::move(same));
+    }
+    t->solo = solo;
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>(solo ? "solo track" : "unsolo track",
+                                         std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> set_track_locked(Sequence& seq, const Track::Kind kind,
+                                           const std::size_t track_index, const bool locked) {
+    Track* t = seq.track(kind, track_index);
+    if (!t) return nullptr;
+    std::vector<TrackRef> involved{{kind, track_index}};
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+    if (t->locked == locked) {
+        std::vector<TrackSnapshot> same = before;
+        return std::make_unique<EditCommand>(locked ? "lock track" : "unlock track",
+                                             std::move(before), std::move(same));
+    }
+    t->locked = locked;
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>(locked ? "lock track" : "unlock track",
+                                         std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> set_clip_transform(Sequence& seq, const Track::Kind kind,
+                                             const std::size_t track_index, const ClipId id,
+                                             const float scale_x, const float scale_y,
+                                             const double pos_x, const double pos_y,
+                                             const float rotation_deg,
+                                             const double anchor_dx, const double anchor_dy,
+                                             const bool flip_h, const bool flip_v) {
+    Track* t = seq.track(kind, track_index);
+    const Clip* c = t ? t->clip_with_id(id) : nullptr;
+    if (!c) return nullptr;
+
+    std::vector<TrackRef> involved{{kind, track_index}};
+    Track* mate_track = nullptr;
+    ClipId mate_id = 0;
+    if (c->linked_id != 0) {
+        if (const auto ref = find_clip_ref(seq, c->linked_id, &mate_track)) {
+            collect_track(involved, seq, *ref);
+            mate_id = c->linked_id;
+        }
+    }
+
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+
+    const float nsx = std::clamp(scale_x, visual::kScaleMin, visual::kScaleMax);
+    const float nsy = std::clamp(scale_y, visual::kScaleMin, visual::kScaleMax);
+    const double npx = std::clamp(pos_x, visual::kPosMin, visual::kPosMax);
+    const double npy = std::clamp(pos_y, visual::kPosMin, visual::kPosMax);
+    const float nrot = std::clamp(rotation_deg, visual::kRotationMin, visual::kRotationMax);
+    const double nax = std::clamp(anchor_dx, visual::kAnchorMin, visual::kAnchorMax);
+    const double nay = std::clamp(anchor_dy, visual::kAnchorMin, visual::kAnchorMax);
+
+    const auto still_same = [&](const Clip& cc) {
+        return cc.scale_x == nsx && cc.scale_y == nsy && cc.pos_x == npx && cc.pos_y == npy &&
+               cc.rotation_deg == nrot && cc.anchor_dx == nax && cc.anchor_dy == nay &&
+               cc.flip_h == flip_h && cc.flip_v == flip_v;
+    };
+    const Clip* mc = mate_track ? mate_track->clip_with_id(mate_id) : nullptr;
+    if (still_same(*c) && (!mc || still_same(*mc))) {
+        std::vector<TrackSnapshot> same = before;
+        return std::make_unique<EditCommand>("clip transform", std::move(before), std::move(same));
+    }
+
+    for (auto& cc : t->clips) {
+        if (cc.id != id) continue;
+        cc.scale_x = nsx;
+        cc.scale_y = nsy;
+        cc.pos_x = npx;
+        cc.pos_y = npy;
+        cc.rotation_deg = nrot;
+        cc.anchor_dx = nax;
+        cc.anchor_dy = nay;
+        cc.flip_h = flip_h;
+        cc.flip_v = flip_v;
+        break;
+    }
+    if (mate_track && mate_id != 0) {
+        for (auto& mc : mate_track->clips) {
+            if (mc.id != mate_id) continue;
+            mc.scale_x = nsx;
+            mc.scale_y = nsy;
+            mc.pos_x = npx;
+            mc.pos_y = npy;
+            mc.rotation_deg = nrot;
+            mc.anchor_dx = nax;
+            mc.anchor_dy = nay;
+            mc.flip_h = flip_h;
+            mc.flip_v = flip_v;
+            break;
+        }
+    }
+
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>("clip transform", std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> set_clip_composite(Sequence& seq, const Track::Kind kind,
+                                             const std::size_t track_index, const ClipId id,
+                                             const float opacity, const BlendMode blend_mode) {
+    Track* t = seq.track(kind, track_index);
+    const Clip* c = t ? t->clip_with_id(id) : nullptr;
+    if (!c) return nullptr;
+
+    std::vector<TrackRef> involved{{kind, track_index}};
+    Track* mate_track = nullptr;
+    ClipId mate_id = 0;
+    if (c->linked_id != 0) {
+        if (const auto ref = find_clip_ref(seq, c->linked_id, &mate_track)) {
+            collect_track(involved, seq, *ref);
+            mate_id = c->linked_id;
+        }
+    }
+
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+
+    const float nop = std::clamp(opacity, visual::kOpacityMin, visual::kOpacityMax);
+    const BlendMode nblend = (static_cast<int>(blend_mode) >= 0 &&
+                              static_cast<int>(blend_mode) < visual::kBlendModeCount)
+                                 ? blend_mode
+                                 : BlendMode::Normal;
+
+    const auto matched = [&](const Clip& cc) { return cc.opacity == nop && cc.blend_mode == nblend; };
+    const Clip* mc = mate_track ? mate_track->clip_with_id(mate_id) : nullptr;
+    if (matched(*c) && (!mc || matched(*mc))) {
+        std::vector<TrackSnapshot> same = before;
+        return std::make_unique<EditCommand>("clip composite", std::move(before), std::move(same));
+    }
+
+    for (auto& cc : t->clips) {
+        if (cc.id != id) continue;
+        cc.opacity = nop;
+        cc.blend_mode = nblend;
+        break;
+    }
+    if (mate_track && mate_id != 0) {
+        for (auto& mc : mate_track->clips) {
+            if (mc.id != mate_id) continue;
+            mc.opacity = nop;
+            mc.blend_mode = nblend;
+            break;
+        }
+    }
+
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>("clip composite", std::move(before), std::move(after));
 }
 
 }

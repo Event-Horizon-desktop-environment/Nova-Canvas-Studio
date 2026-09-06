@@ -10,6 +10,7 @@
 
 #include <array>
 #include <algorithm>
+#include <cmath>
 
 namespace canvas::gui {
 
@@ -569,9 +570,51 @@ void ViewerGL::paintGL() {
          1.f,  1.f, 1.f, 0.f,
     };
     std::array<float, 16> s = s_src;
-    for (int i = 0; i < 16; i += 4) {
-        s[i] *= qw;       // x
-        s[i + 1] *= qh;   // y
+    const bool tf = frame_ && (frame_->scale_x != 1.0f || frame_->scale_y != 1.0f ||
+                               frame_->pos_x != 0.0 || frame_->pos_y != 0.0 ||
+                               frame_->rotation_deg != 0.0f ||
+                               frame_->anchor_dx != 0.0 || frame_->anchor_dy != 0.0 ||
+                               frame_->flip_h || frame_->flip_v);
+    if (tf) {
+        // Math in output-pixel space, mirroring the exporter's mapping so the
+        // viewport and an export agree: pivot P = fitted-rect center + anchor;
+        // scale about P, mirror (flips), rotate about P, then translate by the
+        // pixel position. Corners are the fitted letterbox rect in screen px.
+        const double hw = qw * vw * 0.5;
+        const double hh = qh * vh * 0.5;
+        const double cx = vw * 0.5;
+        const double cy = vh * 0.5;
+        const double px = cx + frame_->anchor_dx;
+        const double py = cy + frame_->anchor_dy;
+        const double ang = frame_->rotation_deg * 3.14159265358979323846 / 180.0;
+        const double cs = std::cos(ang);
+        const double sn = std::sin(ang);
+        const double sx = frame_->scale_x;
+        const double sy = frame_->scale_y;
+        const double fxx = frame_->flip_h ? -1.0 : 1.0;
+        const double fyy = frame_->flip_v ? -1.0 : 1.0;
+        const double corners[4][2] = {
+            {-hw, -hh}, {hw, -hh}, {-hw, hh}, {hw, hh}};
+        for (int i = 0; i < 16; i += 4) {
+            const int k = i / 4;
+            const double bx = corners[k][0] + cx - px;  // v - P
+            const double by = corners[k][1] + cy - py;
+            const double ax = bx * sx * fxx;
+            const double ay = by * sy * fyy;
+            const double rx = ax * cs - ay * sn;
+            const double ry = ax * sn + ay * cs;
+            const double ox = px + rx + frame_->pos_x;
+            const double oy = py + ry + frame_->pos_y;
+            s[i] = static_cast<float>(2.0 * ox / vw - 1.0);
+            s[i + 1] = static_cast<float>(1.0 - 2.0 * oy / vh);
+            if (frame_->flip_h) s[i + 2] = 1.0f - s[i + 2];
+            if (frame_->flip_v) s[i + 3] = 1.0f - s[i + 3];
+        }
+    } else {
+        for (int i = 0; i < 16; i += 4) {
+            s[i] *= qw;       // x
+            s[i + 1] *= qh;   // y
+        }
     }
     vbo_.bind();
     vbo_.write(0, s.data(), sizeof(float) * s.size());

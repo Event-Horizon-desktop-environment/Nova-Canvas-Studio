@@ -427,6 +427,8 @@ void MainWindow::on_undo() {
     has_unsaved_changes_ = true;
     refresh_timeline();
     refresh_media_pool();
+    update_inspector_audio();
+    update_inspector_visual(*this);
     push_snapshot();
 }
 
@@ -436,6 +438,8 @@ void MainWindow::on_redo() {
     has_unsaved_changes_ = true;
     refresh_timeline();
     refresh_media_pool();
+    update_inspector_audio();
+    update_inspector_visual(*this);
     push_snapshot();
 }
 

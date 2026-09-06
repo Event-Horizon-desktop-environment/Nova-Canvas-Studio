@@ -11,6 +11,9 @@ namespace canvas::core {
 struct TrackSnapshot {
     Track::Kind kind = Track::Kind::Video;
     std::size_t index = 0;
+    bool locked = false;
+    bool muted = false;
+    bool solo = false;
     std::vector<Clip> clips;
 };
 
@@ -117,6 +120,39 @@ std::unique_ptr<ICommand> clear_clip_transition_in(Sequence& seq, Track::Kind ki
 // edit that can be joined).
 std::unique_ptr<ICommand> delete_through_edit(Sequence& seq, Track::Kind kind,
                                               std::size_t track_index, ClipId out_id);
+// Sets the audio mix parameters (Volume in dB, Pan in [-1,1]) on a clip. If the
+// clip is linked, the mate inherits the same values (both halves of an A/V pair
+// share one loudness/position). Returns nullptr if the clip is not found.
+std::unique_ptr<ICommand> set_clip_audio(Sequence& seq, Track::Kind kind,
+                                         std::size_t track_index, ClipId id,
+                                         float volume_db, float pan);
+// Sets a video clip's visual transform (Zoom scale_x/scale_y, pixel Position
+// pos_x/pos_y, Rotation in degrees, Anchor offsets in pixels, and the flips).
+// If the clip is linked, its mate inherits the same values (an A/V pair shares
+// one transform; the audio half is a no-op visually). Values are clamped to the
+// visual limits. Returns nullptr if the clip is not found. Does nothing audible
+// regardless of the track kind (the fields are shared, not audio).
+std::unique_ptr<ICommand> set_clip_transform(Sequence& seq, Track::Kind kind,
+                                             std::size_t track_index, ClipId id,
+                                             float scale_x, float scale_y,
+                                             double pos_x, double pos_y,
+                                             float rotation_deg,
+                                             double anchor_dx, double anchor_dy,
+                                             bool flip_h, bool flip_v);
+// Sets a video clip's composite (opacity in [0,1] and the blend mode) with the
+// same linked-mate propagation and clamping as set_clip_transform.
+std::unique_ptr<ICommand> set_clip_composite(Sequence& seq, Track::Kind kind,
+                                             std::size_t track_index, ClipId id,
+                                             float opacity, BlendMode blend_mode);
+// Toggles a track's audio mixing flags. Each returns nullptr if the track
+// index is out of range. These are discrete per-track settings; the model's
+// `locked` flag (also toggled here) makes the track read-only in the timeline.
+std::unique_ptr<ICommand> set_track_muted(Sequence& seq, Track::Kind kind,
+                                          std::size_t track_index, bool muted);
+std::unique_ptr<ICommand> set_track_solo(Sequence& seq, Track::Kind kind,
+                                         std::size_t track_index, bool solo);
+std::unique_ptr<ICommand> set_track_locked(Sequence& seq, Track::Kind kind,
+                                           std::size_t track_index, bool locked);
 
 class UndoStack {
 public:

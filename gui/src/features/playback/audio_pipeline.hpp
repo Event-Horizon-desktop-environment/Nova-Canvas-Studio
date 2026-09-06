@@ -93,8 +93,8 @@ public:
     // anchor math yields nothing usable).
     int64_t audible_seq_frame(int64_t playhead_seq) const;
     // Feed watermark: whether the current play run has pre-rolled audio for a
-    // media (i.e. the watermark lives in a real clip's audio domain).
-    [[nodiscard]] bool feed_watermark_active() const { return feed_media_ >= 0; }
+    // media (i.e. a watermark lives in some clip's audio domain).
+    [[nodiscard]] bool feed_watermark_active() const { return !feed_watermarks_.empty(); }
     // After a drop-to-realtime playhead jump, re-anchor the feed watermark to
     // `new_frame` so the next play_step produces audio at realtime only.
     void advance_feed_for_drop(int64_t new_frame);
@@ -104,7 +104,26 @@ public:
     canvas::core::MediaId audio_media_at(int64_t seq_frame) const;
 
 private:
+    struct AudioSource {
+        const canvas::core::Clip* clip = nullptr;
+        double fps = 0.0;
+    };
+
+    // The master/reference clip for A/V sync: the first audible source
+    // (lowest-lane audio-track clip wins; the video track's embedded audio is
+    // the master only when no audio track covers the playhead).
     const canvas::core::Clip* audio_clip_at(int64_t seq_frame) const;
+    // Every clip audible at `seq_frame` after the mute/solo filter: audio tracks
+    // in playback order (bottom lane first), then the video tracks' embedded
+    // audio when NO audio-track clip covers the playhead and nothing is soloed.
+    std::vector<AudioSource> audible_sources_at(int64_t seq_frame) const;
+    // Writes `want_frames` frames of the summed mix of every audible source at
+    // `seq_frame` to the device, honoring the per-media feed watermark so
+    // pre-rolled audio is never re-written. Per-source clip Volume/Pan (equal-
+    // power) and the audio-transition fade envelopes are applied before summing.
+    // Returns the frames actually written (0 = nothing audible / no decode).
+    int64_t write_mixed(int64_t seq_frame, int64_t want_frames);
+
     const canvas::core::Project* project_ = nullptr;
     const canvas::core::Clip* clip_at_any_track(int64_t seq_frame) const;
     int64_t playhead_to_audio_sample(int64_t seq_frame) const;
@@ -135,12 +154,12 @@ private:
     double speed_video_ms_ = 0.0;
     double speed_audible_ms_ = 0.0;
 
-    // Next media-sample (in the current clip's audio domain) still needing to be
-    // written to the output device within the current play run, and the media
-    // that sample-domain belongs to. preroll() and play_step() both advance it so
-    // leading audio pre-rolled before the first present is never written twice.
-    int64_t feed_sample_ = -1;
-    canvas::core::MediaId feed_media_ = -1;
+    // Next media-sample (per media, in that media's sample domain) still needing
+    // to be written to the output device within the current play run. preroll()
+    // and play_step() both advance these so leading audio pre-rolled before the
+    // first present is never written twice — per media so each mixed source
+    // keeps its own lead-in.
+    std::unordered_map<canvas::core::MediaId, int64_t> feed_watermarks_;
 
     // UI-thread scrub-audio feed state (feed_scrub_audio): last target fed and
     // when, for throttling to device pace and de-duplication, plus the count of

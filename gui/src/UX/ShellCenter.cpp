@@ -1,4 +1,5 @@
 #include "UX/MainWindow.hpp"
+#include "UX/InspectorVisual.hpp"
 #include "ui_MainWindow.h"
 
 #include <QAction>
@@ -479,6 +480,10 @@ void build_center_workspace(MainWindow& mw) {
     mw.status_->addPermanentWidget(new QLabel(MainWindow::tr("Nova Canvas Studio"), mw.status_));
 
     mw.connect_timeline();
+
+    // The inspector's Transform/Composite categories subscribe to selection
+    // changes here (timeline_ exists only after build_center_workspace).
+    attach_inspector_visual(mw, mw.timeline_);
 }
 
 }  // namespace canvas::gui

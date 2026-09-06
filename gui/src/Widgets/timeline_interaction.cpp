@@ -787,6 +787,40 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         }
     }
 
+    // Header M/S/L icon clicks toggle the track's mixing/lock state. These must
+    // beat the header-strip marquee arm (chrome clicks start no sweep); row
+    // resize edges above keep priority.
+    if (sequence_ && scene_pos.x() < kSceneMargin + kTrackHeaderWidth) {
+        const auto hit_icons = [&](const std::vector<TrackHeader>& headers,
+                                   const std::vector<canvas::core::Track>& tracks,
+                                   canvas::core::Track::Kind kind) -> bool {
+            const std::size_t n = std::min(headers.size(), tracks.size());
+            for (std::size_t i = 0; i < n; ++i) {
+                const auto& h = headers[i];
+                if (h.mute_icon && h.mute_icon->sceneBoundingRect().contains(scene_pos)) {
+                    emit track_mute_toggled(kind, static_cast<int>(i), !tracks[i].muted);
+                    return true;
+                }
+                if (h.solo_icon && h.solo_icon->sceneBoundingRect().contains(scene_pos)) {
+                    emit track_solo_toggled(kind, static_cast<int>(i), !tracks[i].solo);
+                    return true;
+                }
+                if (h.lock_icon && h.lock_icon->sceneBoundingRect().contains(scene_pos)) {
+                    emit track_lock_toggled(kind, static_cast<int>(i), !tracks[i].locked);
+                    return true;
+                }
+            }
+            return false;
+        };
+        if (hit_icons(audio_track_headers_, sequence_->audio_tracks,
+                      canvas::core::Track::Kind::Audio) ||
+            hit_icons(video_track_headers_, sequence_->video_tracks,
+                      canvas::core::Track::Kind::Video)) {
+            event->accept();
+            return;
+        }
+    }
+
     // Transition cut-handle: grabbing a resize edge takes priority over a normal
     // clip drag. A persistent bubble grab works the same way (and snaps to the
     // preset durations while dragging).

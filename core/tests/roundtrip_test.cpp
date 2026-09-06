@@ -887,6 +887,156 @@ int main() {
         check(cmd == nullptr, "auto-track: unknown clip id returns nullptr");
     }
 
+    {
+        // Per-clip audio mix (volume_db/pan) + track mixing flags (muted/solo)
+        // survive a save/load round-trip and undo through the edit ops.
+        Project p = make_project();
+        Clip a;
+        a.media = 0;
+        a.tl_in = 0;
+        a.src_in = 0;
+        a.src_out = 30;
+        auto cmd = place_clip(p.sequence, Track::Kind::Audio, 0, a, Placement::Overwrite);
+        check(cmd != nullptr, "audio-mix: place audio clip");
+        undo.record(std::move(cmd));
+        const ClipId id = p.sequence.audio_tracks[0].clips[0].id;
+
+        cmd = set_clip_audio(p.sequence, Track::Kind::Audio, 0, id, -6.0f, 0.75f);
+        check(cmd != nullptr, "audio-mix: set_clip_audio returns command");
+        undo.record(std::move(cmd));
+        const auto& ac0 = p.sequence.audio_tracks[0].clips[0];
+        check(ac0.volume_db == -6.0f && ac0.pan == 0.75f,
+              "audio-mix: clip carries volume -6 dB and pan 0.75");
+
+        cmd = set_track_muted(p.sequence, Track::Kind::Audio, 0, true);
+        check(cmd != nullptr, "audio-mix: set_track_muted returns command");
+        undo.record(std::move(cmd));
+        cmd = set_track_solo(p.sequence, Track::Kind::Audio, 0, true);
+        check(cmd != nullptr, "audio-mix: set_track_solo returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.audio_tracks[0].muted && p.sequence.audio_tracks[0].solo,
+              "audio-mix: track carries muted+solo");
+
+        std::string err;
+        check(save_project(p, "/tmp/opencode/media/audio_mix.ehproj", &err),
+              "audio-mix: save project");
+        Project loaded;
+        check(load_project(loaded, "/tmp/opencode/media/audio_mix.ehproj", &err),
+              "audio-mix: load project");
+        const auto& lc = loaded.sequence.audio_tracks[0].clips[0];
+        check(lc.volume_db == -6.0f && lc.pan == 0.75f,
+              "audio-mix: clip volume/pan round-trip through serialization");
+        check(loaded.sequence.audio_tracks[0].muted &&
+                  loaded.sequence.audio_tracks[0].solo,
+              "audio-mix: track muted/solo round-trip through serialization");
+
+        check(undo.undo(p.sequence), "audio-mix: undo solo");
+        check(p.sequence.audio_tracks[0].muted && !p.sequence.audio_tracks[0].solo,
+              "audio-mix: undo solo keeps the mute");
+        check(undo.undo(p.sequence), "audio-mix: undo mute");
+        check(!p.sequence.audio_tracks[0].muted && !p.sequence.audio_tracks[0].solo,
+              "audio-mix: undo restores track flags");
+        check(undo.undo(p.sequence), "audio-mix: undo audio");
+        check(p.sequence.audio_tracks[0].clips[0].volume_db == 0.0f &&
+                  p.sequence.audio_tracks[0].clips[0].pan == 0.0f,
+              "audio-mix: undo restores clip defaults");
+
+        cmd = set_track_locked(p.sequence, Track::Kind::Audio, 0, true);
+        check(cmd != nullptr, "audio-mix: set_track_locked returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.audio_tracks[0].locked, "audio-mix: lock applied");
+        check(undo.undo(p.sequence), "audio-mix: undo lock");
+        check(!p.sequence.audio_tracks[0].locked, "audio-mix: undo clears lock");
+    }
+
+    {
+        // Visual transform + composite: set, undo, linked-mate inheritance, and
+        // serialization round-trip for the per-clip visual/composite fields.
+        Project p = make_project();
+        UndoStack undo;
+        Clip a;
+        a.media = 0;
+        a.tl_in = 0;
+        a.src_in = 0;
+        a.src_out = 30;
+        auto cmd = place_clip(p.sequence, Track::Kind::Video, 0, a, Placement::Overwrite);
+        check(cmd != nullptr, "visual: place video clip");
+        undo.record(std::move(cmd));
+        const ClipId id = p.sequence.video_tracks[0].clips[0].id;
+
+        cmd = set_clip_transform(p.sequence, Track::Kind::Video, 0, id,
+                                 1.5f, 1.0f, 120.0, -80.0, 45.0f, 10.0, -5.0, true, false);
+        check(cmd != nullptr, "visual: set_clip_transform returns command");
+        undo.record(std::move(cmd));
+        const auto& vc0 = p.sequence.video_tracks[0].clips[0];
+        check(vc0.scale_x == 1.5f && vc0.scale_y == 1.0f && vc0.pos_x == 120.0 &&
+                  vc0.pos_y == -80.0 && vc0.rotation_deg == 45.0f &&
+                  vc0.anchor_dx == 10.0 && vc0.anchor_dy == -5.0 &&
+                  vc0.flip_h && !vc0.flip_v,
+              "visual: clip carries full transform");
+
+        cmd = set_clip_composite(p.sequence, Track::Kind::Video, 0, id, 0.5f, BlendMode::Screen);
+        check(cmd != nullptr, "visual: set_clip_composite returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.video_tracks[0].clips[0].opacity == 0.5f &&
+                  p.sequence.video_tracks[0].clips[0].blend_mode == BlendMode::Screen,
+              "visual: clip carries composite opacity/blend");
+
+        std::string err;
+        check(save_project(p, "/tmp/opencode/media/visual.ehproj", &err), "visual: save project");
+        Project loaded;
+        check(load_project(loaded, "/tmp/opencode/media/visual.ehproj", &err), "visual: load project");
+        const auto& lc = loaded.sequence.video_tracks[0].clips[0];
+        check(lc.scale_x == 1.5f && lc.scale_y == 1.0f && lc.pos_x == 120.0 &&
+                  lc.pos_y == -80.0 && lc.rotation_deg == 45.0f &&
+                  lc.anchor_dx == 10.0 && lc.anchor_dy == -5.0 &&
+                  lc.flip_h && !lc.flip_v && lc.opacity == 0.5f &&
+                  lc.blend_mode == BlendMode::Screen,
+              "visual: full transform/composite round-trip through serialization");
+
+        check(undo.undo(p.sequence), "visual: undo composite");
+        check(p.sequence.video_tracks[0].clips[0].opacity == 1.0f &&
+                  p.sequence.video_tracks[0].clips[0].blend_mode == BlendMode::Normal,
+              "visual: undo restores composite defaults");
+        check(undo.undo(p.sequence), "visual: undo transform");
+        const auto& vc_undone = p.sequence.video_tracks[0].clips[0];
+        check(vc_undone.scale_x == 1.0f && vc_undone.scale_y == 1.0f &&
+                  vc_undone.pos_x == 0.0 && vc_undone.pos_y == 0.0 &&
+                  vc_undone.rotation_deg == 0.0f && vc_undone.anchor_dx == 0.0 &&
+                  vc_undone.anchor_dy == 0.0 && !vc_undone.flip_h && !vc_undone.flip_v,
+              "visual: undo restores transform defaults");
+
+        // Linked audio mate inherits the video transform (shared fields).
+        Project lp = make_project();
+        Clip v;
+        v.media = 0;
+        v.tl_in = 0;
+        v.src_in = 0;
+        v.src_out = 30;
+        cmd = place_clip(lp.sequence, Track::Kind::Video, 0, v, Placement::Overwrite);
+        check(cmd != nullptr, "visual: place linked video");
+        undo.record(std::move(cmd));
+        Clip au;
+        au.media = 0;
+        au.tl_in = 0;
+        au.src_in = 0;
+        au.src_out = 30;
+        cmd = place_clip(lp.sequence, Track::Kind::Audio, 0, au, Placement::Overwrite);
+        check(cmd != nullptr, "visual: place linked audio");
+        undo.record(std::move(cmd));
+        const ClipId vid = lp.sequence.video_tracks[0].clips[0].id;
+        cmd = link_clip(lp.sequence, Track::Kind::Video, 0, vid);
+        check(cmd != nullptr, "visual: link video to audio mate");
+        undo.record(std::move(cmd));
+        cmd = set_clip_transform(lp.sequence, Track::Kind::Video, 0, vid,
+                                 2.0f, 2.0f, 0.0, 0.0, 90.0f, 0.0, 0.0, false, true);
+        check(cmd != nullptr, "visual: transform linked video");
+        undo.record(std::move(cmd));
+        check(lp.sequence.audio_tracks[0].clips[0].scale_x == 2.0f &&
+                  lp.sequence.audio_tracks[0].clips[0].flip_v,
+              "visual: linked audio mate inherits the video transform");
+    }
+
     if (failures == 0) {
         std::printf("ALL TESTS PASSED\n");
         return 0;

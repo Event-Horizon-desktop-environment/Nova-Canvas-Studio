@@ -3,6 +3,7 @@
 #include "canvas/core/media/audio_decoder.hpp"
 #include "canvas/core/media/video_decoder.hpp"
 #include "canvas/core/timeline/audio_fade.hpp"
+#include "canvas/core/timeline/audio_mix.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <algorithm>
@@ -46,6 +47,38 @@ const Clip* top_clip_at(const Sequence& seq, Track::Kind kind, int64_t tl_frame)
     return nullptr;
 }
 
+// Adds the interleaved `src` chunk into `out` (a [frames x out_channels]
+// buffer) applying the per-frame transition envelope `gains`, the clip's
+// linear volume `vol` and the stereo pan balance (gl/gr). Mirrors
+// AudioPipeline::apply_mix_gain's fold-down so playback and export sum
+// identically (mono/stereo sources and >2ch surround folds).
+void mix_audio_chunk(std::vector<float>& out, const std::vector<float>& src, int src_ch,
+                     int out_channels, const std::vector<float>& gains, float vol,
+                     float gl, float gr) {
+    for (std::size_t s = 0; s < src.size(); ++s) {
+        const std::size_t frame_idx = s / static_cast<std::size_t>(src_ch);
+        const std::size_t src_sc = s % static_cast<std::size_t>(src_ch);
+        const float base = gains[frame_idx] * vol;
+        if (out_channels == 2) {
+            const std::size_t dl = frame_idx * 2u;
+            if (src_sc == 0) {
+                out[dl] += src[s] * base * gl;
+            } else if (src_sc == 1) {
+                out[dl + 1u] += src[s] * base * gr;
+            } else {
+                // Surround fold-down, matching the playback mix.
+                const std::size_t dst = (src_sc % 2u == 0u) ? dl : dl + 1u;
+                out[dst] += src[s] * base * (src_sc % 2u == 0u ? gl : gr) * 0.5f;
+            }
+        } else {
+            const std::size_t dst_sc =
+                std::min<std::size_t>(src_sc, static_cast<std::size_t>(out_channels) - 1);
+            out[frame_idx * static_cast<std::size_t>(out_channels) + dst_sc] +=
+                src[s] * base;
+        }
+    }
+}
+
 // 2D box blit that composites a decoded source RGBA frame onto a canvas,
 // scaling to `dst_w x dst_h` (letterboxed) at `dx,dy`. Alpha is not used; an
 // upper video track fully replaces the lower content where it covers.
@@ -72,6 +105,147 @@ void blit_rgba(const VideoFrame& src, std::vector<uint8_t>& canvas, int canvas_w
             canvas[dpo + 0] = src.rgba[so + 0];
             canvas[dpo + 1] = src.rgba[so + 1];
             canvas[dpo + 2] = src.rgba[so + 2];
+            canvas[dpo + 3] = 255;
+        }
+    }
+}
+
+inline uint8_t clamp_byte(int v) {
+    return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+}
+
+// Blend of a single `base` (canvas) channel-pair with `src` using `mode`, then
+// dissolved by `opacity` over `base`: final = blend * opacity + base*(1-opacity).
+// The identity (Normal + opacity 1) collapses to `src`, so the caller's fast
+// path bypasses this entirely and stays byte-identical to blit_rgba.
+inline uint8_t blend_channel(const int mode, const float opacity, const int base,
+                             const int src) {
+    int blended;
+    switch (mode) {
+        case 1:  // Add
+            blended = base + src;
+            break;
+        case 2:  // Multiply
+            blended = base * src / 255;
+            break;
+        case 3:  // Screen
+            blended = 255 - (255 - base) * (255 - src) / 255;
+            break;
+        case 4:  // Overlay
+            blended = base < 128 ? 2 * base * src / 255
+                                 : 255 - 2 * (255 - base) * (255 - src) / 255;
+            break;
+        default:  // Normal
+            blended = src;
+            break;
+    }
+    const float a = opacity;
+    const float fb = static_cast<float>(blended) * a + static_cast<float>(base) * (1.0f - a);
+    return clamp_byte(static_cast<int>(std::lround(fb)));
+}
+
+// Transform + composite blit. The base rect is the fitted letterboxed rect of
+// the source (bx,by,size base_w x base_h) whose CENTER is the origin of the
+// clip's visual transform. The forward mapping per output pixel `o`:
+//
+//   final = P + R(rot) * F * S * (o_in_base - P) + (pos_x, pos_y)
+//
+// where P = base-rect center + (anchor_dx, anchor_dy) is the rotation pivot, S
+// scales by (scale_x, scale_y), F mirrors (flip_h/flip_v) about the pivot, and
+// R rotates. Nearest-sample from the source. Fast path: when the clip has no
+// transform and is opaque/Normal, delegates to blit_rgba for byte-identical
+// output. Otherwise each destination pixel inside the bounding box of the
+// mapped quad is inverse-mapped and blender-overlaid per clip->blend_mode with
+// clip->opacity.
+void blit_rgba_transformed(const VideoFrame& src, std::vector<uint8_t>& canvas,
+                           int canvas_w, int canvas_h, int base_w, int base_h,
+                           int bx, int by, const Clip& clip) {
+    if (canvas_w <= 0 || canvas_h <= 0 || base_w <= 0 || base_h <= 0) return;
+    if (!clip.has_visual_transform() && !clip.needs_compositing()) {
+        blit_rgba(src, canvas, canvas_w, canvas_h, base_w, base_h, bx, by);
+        return;
+    }
+    if (clip.scale_x <= 0.0f || clip.scale_y <= 0.0f) return;
+
+    constexpr double kPi = 3.14159265358979323846;
+    const double ang = clip.rotation_deg * kPi / 180.0;
+    const double cs = std::cos(ang);
+    const double sn = std::sin(ang);
+    const double cx = bx + base_w * 0.5;
+    const double cy = by + base_h * 0.5;
+    const double px = cx + clip.anchor_dx;
+    const double py = cy + clip.anchor_dy;
+    const double fx = clip.flip_h ? -1.0 : 1.0;
+    const double fy = clip.flip_v ? -1.0 : 1.0;
+    const double sx_ = clip.scale_x;
+    const double sy_ = clip.scale_y;
+    const double pxx = clip.pos_x;
+    const double pyy = clip.pos_y;
+    const int mode = static_cast<int>(clip.blend_mode);
+
+    const double left = bx, top = by, right = bx + base_w, bottom = by + base_h;
+    double min_x = left, min_y = top, max_x = right, max_y = bottom;
+    {
+        const double corners[4][2] = {
+            {left - px, top - py}, {right - px, top - py},
+            {left - px, bottom - py}, {right - px, bottom - py}};
+        for (const auto& c : corners) {
+            const double sw = c[0] * fx * sx_;
+            const double sh = c[1] * fy * sy_;
+            const double ox = px + (sw * cs - sh * sn) + pxx;
+            const double oy = py + (sw * sn + sh * cs) + pyy;
+            if (ox < min_x) min_x = ox;
+            if (ox > max_x) max_x = ox;
+            if (oy < min_y) min_y = oy;
+            if (oy > max_y) max_y = oy;
+        }
+    }
+
+    const int x0 = static_cast<int>(std::floor(min_x));
+    const int x1 = static_cast<int>(std::ceil(max_x));
+    const int y0 = static_cast<int>(std::floor(min_y));
+    const int y1 = static_cast<int>(std::ceil(max_y));
+    if (x0 >= canvas_w || x1 < 0 || y0 >= canvas_h || y1 < 0) return;
+
+    const int xlo = std::max(0, x0);
+    const int xhi = std::min(canvas_w - 1, x1);
+    const int ylo = std::max(0, y0);
+    const int yhi = std::min(canvas_h - 1, y1);
+    if (xlo > xhi || ylo > yhi) return;
+
+    const std::size_t dst_stride = static_cast<std::size_t>(canvas_w) * 4u;
+    const float opacity = clip.opacity;
+    for (int oy = ylo; oy <= yhi; ++oy) {
+        const std::size_t drow = static_cast<std::size_t>(oy) * dst_stride;
+        for (int ox = xlo; ox <= xhi; ++ox) {
+            // Inverse map (reverse of scale -> flip -> rotate -> position).
+            const double ux = ox - pxx - px;
+            const double uy = oy - pyy - py;
+            const double vx = ux * cs + uy * sn;
+            const double vy = -ux * sn + uy * cs;
+            const double wx = vx * fx;
+            const double wy = vy * fy;
+            const double zx = wx / sx_;
+            const double zy = wy / sy_;
+            const double param_x = zx + px;
+            const double param_y = zy + py;
+            const double nx = (param_x - bx) / base_w;
+            const double ny = (param_y - by) / base_h;
+            if (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0) continue;
+            const int sy = std::clamp(static_cast<int>(ny * src.height), 0, src.height - 1);
+            const int sx = std::clamp(static_cast<int>(nx * src.width), 0, src.width - 1);
+            const std::size_t so =
+                static_cast<std::size_t>(sy) * src.stride + static_cast<std::size_t>(sx) * 4u;
+            std::size_t dpo = drow + static_cast<std::size_t>(ox) * 4u;
+            if (opacity >= 1.0f && mode == 0) {
+                canvas[dpo + 0] = src.rgba[so + 0];
+                canvas[dpo + 1] = src.rgba[so + 1];
+                canvas[dpo + 2] = src.rgba[so + 2];
+            } else {
+                canvas[dpo + 0] = blend_channel(mode, opacity, canvas[dpo + 0], src.rgba[so + 0]);
+                canvas[dpo + 1] = blend_channel(mode, opacity, canvas[dpo + 1], src.rgba[so + 1]);
+                canvas[dpo + 2] = blend_channel(mode, opacity, canvas[dpo + 2], src.rgba[so + 2]);
+            }
             canvas[dpo + 3] = 255;
         }
     }
@@ -140,7 +314,8 @@ VideoFramePtr render_video_frame(const Project& project, int64_t tl_frame, int w
         // but correctness + quality matter most for export.
         auto frame = dec.decode_to_frame(src_frame, 0);
         if (frame) {
-            blit_rgba(*frame, canvas->rgba, width, height, dst_w, dst_h, dx, dy);
+            blit_rgba_transformed(*frame, canvas->rgba, width, height, dst_w, dst_h,
+                                  dx, dy, *clip);
         } else {
             CANVAS_LOG("render_video_frame: decode FAILED track=%zu src_frame=%lld media=%d",
                    i, (long long)src_frame, clip->media);
@@ -468,9 +643,13 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
                             static_cast<std::size_t>(out_channels),
                         0.0f);
 
-    // Decode each enabled audio track and mix (sum) its samples in place.
+    // Decode each audible audio track and mix (sum) its samples in place.
+    // Tracks are looped from the top (later tracks win nothing here — audio
+    // sums, so order is irrelevant); locked tracks are still rendered
+    // (locked = read-only, audio stays audible, mirroring playback).
+    const bool any_solo = audio_mix::any_solo(seq.audio_tracks);
     for (const auto& track : seq.audio_tracks) {
-        if (track.locked) continue;
+        if (track.muted || (any_solo && !track.solo)) continue;
         // Determine which timeline frame range this audio chunk covers.
         const double frame_at_sample =
             (static_cast<double>(tl_sample) / out_sample_rate) * fps;
@@ -510,7 +689,6 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
         }
 
         const int src_ch = chunk->channels;
-        const std::size_t n = chunk->samples.size();
         // Per-output-frame gain from the clip's audio IN/OUT transitions
         // (audio_fade_gain returns 1.0 when no audio fade touches the frame).
         std::vector<float> gains(static_cast<std::size_t>(num_frames));
@@ -519,16 +697,12 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
                 static_cast<double>(k) / out_sample_rate * fps);
             gains[static_cast<std::size_t>(k)] = audio_fade_gain(*clip, frm);
         }
-        // Mix: sum left into left, right into right; down/up-mix simply.
-        for (std::size_t s = 0; s < n; ++s) {
-            const std::size_t src_sc = s % static_cast<std::size_t>(src_ch);
-            const std::size_t dst_sc =
-                std::min<std::size_t>(src_sc, static_cast<std::size_t>(out_channels) - 1);
-            const std::size_t frame_idx = s / static_cast<std::size_t>(src_ch);
-            const std::size_t frame_ch = frame_idx * static_cast<std::size_t>(out_channels);
-            if (frame_ch + dst_sc < out->samples.size())
-                out->samples[frame_ch + dst_sc] += chunk->samples[s] * gains[frame_idx];
-        }
+        // Mix: sum with the clip's volume and pan balance.
+        float gl = 1.0f;
+        float gr = 1.0f;
+        audio_mix::pan_gains(clip->pan, gl, gr);
+        mix_audio_chunk(out->samples, chunk->samples, src_ch, out_channels, gains,
+                        audio_mix::db_to_gain(clip->volume_db), gl, gr);
     }
     return out;
 }
@@ -562,11 +736,19 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
     const int64_t start_tl_frame = std::llround(
         (static_cast<double>(tl_sample) / out_sample_rate) * fps);
 
-    // Mix each enabled audio track in place, reusing the persistent per-track
+    // Mix each audible audio track in place, reusing the persistent per-track
     // AudioDecoder so sequential chunks advance one continuous decode stream
     // (no re-open/resampler re-prime per chunk — that produced repeated audio).
+    // Locked tracks are still rendered (locked = read-only, still audible),
+    // mirroring playback semantics.
+    const bool any_solo = audio_mix::any_solo(project_->sequence.audio_tracks);
     for (AudioTrackDecoder& atd : audio_tracks_) {
         const Track& track = *atd.track;
+        if (track.muted || (any_solo && !track.solo)) {
+            atd.dec.reset();
+            atd.active_clip = nullptr;
+            continue;
+        }
         const Clip* clip = track.clip_at(start_tl_frame);
         if (!clip || !clip->enabled || clip->media < 0) {
             atd.dec.reset();
@@ -636,7 +818,6 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
         ++_d_call;
 
         const int src_ch = chunk->channels;
-        const std::size_t n = chunk->samples.size();
         // Per-output-frame gain from the clip's audio IN/OUT transitions
         // (audio_fade_gain returns 1.0 when no audio fade touches the frame).
         std::vector<float> gains(static_cast<std::size_t>(num_frames));
@@ -645,15 +826,12 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
                 static_cast<double>(k) / out_sample_rate * fps);
             gains[static_cast<std::size_t>(k)] = audio_fade_gain(*clip, frm);
         }
-        for (std::size_t s = 0; s < n; ++s) {
-            const std::size_t src_sc = s % static_cast<std::size_t>(src_ch);
-            const std::size_t dst_sc =
-                std::min<std::size_t>(src_sc, static_cast<std::size_t>(out_channels) - 1);
-            const std::size_t frame_idx = s / static_cast<std::size_t>(src_ch);
-            const std::size_t frame_ch = frame_idx * static_cast<std::size_t>(out_channels);
-            if (frame_ch + dst_sc < out->samples.size())
-                out->samples[frame_ch + dst_sc] += chunk->samples[s] * gains[frame_idx];
-        }
+        // Mix: sum with the clip's volume and pan balance.
+        float gl = 1.0f;
+        float gr = 1.0f;
+        audio_mix::pan_gains(clip->pan, gl, gr);
+        mix_audio_chunk(out->samples, chunk->samples, src_ch, out_channels, gains,
+                        audio_mix::db_to_gain(clip->volume_db), gl, gr);
     }
     return out;
 }

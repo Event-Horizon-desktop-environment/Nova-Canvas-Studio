@@ -72,6 +72,22 @@ struct RenderFrame {
     bool fade_from_black = false;
     bool fade_to_black = false;
 
+    // Preview transform for the top clip (viewport only). Mirrors the clip's
+    // visual transform in output-pixel units; all identity defaults mean an
+    // untransformed clip displays exactly as before. The viewer applies scale /
+    // pixel offset / rotation about the anchor / flips to its letterbox quad on
+    // the CPU. Compositing (opacity/blend mode) is deliberately NOT previewed —
+    // multilayer blending is an export-renderer feature.
+    float scale_x = 1.0f;
+    float scale_y = 1.0f;
+    double pos_x = 0.0;
+    double pos_y = 0.0;
+    float rotation_deg = 0.0f;
+    double anchor_dx = 0.0;
+    double anchor_dy = 0.0;
+    bool flip_h = false;
+    bool flip_v = false;
+
     // GPU fast path: NV12 planes produced by the hardware-decode + GPU
     // composite path. When set, the viewer should prefer these (upload Y/UV as
     // textures, convert to RGB in the shader) over downloading `a` as RGBA.

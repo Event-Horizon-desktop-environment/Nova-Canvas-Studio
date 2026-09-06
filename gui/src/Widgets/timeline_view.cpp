@@ -361,6 +361,7 @@ void TimelineWidget::draw_tracks() {
     const double left = kSceneMargin;
     constexpr QColor kIconColor(0x9A, 0xA0, 0xB0);       // muted ink for icons
     constexpr QColor kIconColorDim(0x5F, 0x65, 0x77);    // faint ink for dim icons
+    constexpr QColor kIconAccent(0x4C, 0x92, 0xFF);      // active-state ink (lock/mute/solo)
 
     // With no clips yet the header column and rows stay hidden; a single
     // placeholder panel explains the empty state instead.
@@ -406,14 +407,19 @@ void TimelineWidget::draw_tracks() {
         // Reorder / lock / view-mode icon row, right-aligned in the header.
         QGraphicsPixmapItem* lock_icon = nullptr;
         QGraphicsPixmapItem* view_mode_icon = nullptr;
+        const bool vlocked = sequence_->video_tracks[i].locked;
         if (full) {
             add_icon(scene_, QStringLiteral("reorder"), left + kTrackHeaderWidth - 44, y + 10, kIconColorDim, 13);
-            lock_icon = add_icon(scene_, QStringLiteral("unlock"), left + kTrackHeaderWidth - 26, y + 9, kIconColor);
+            lock_icon = add_icon(scene_, vlocked ? QStringLiteral("lock") : QStringLiteral("unlock"),
+                                 left + kTrackHeaderWidth - 26, y + 9,
+                                 vlocked ? kIconAccent : kIconColor);
             view_mode_icon = add_icon(scene_, QStringLiteral("track_viewmode"), left + kTrackHeaderWidth - 44, y + 21, kIconColor);
         } else {
             const double ic_y = y + (th - 13.0) / 2.0;
             add_icon(scene_, QStringLiteral("reorder"), left + kTrackHeaderWidth - 53, ic_y, kIconColorDim, 13);
-            lock_icon = add_icon(scene_, QStringLiteral("unlock"), left + kTrackHeaderWidth - 37, ic_y, kIconColor);
+            lock_icon = add_icon(scene_, vlocked ? QStringLiteral("lock") : QStringLiteral("unlock"),
+                                 left + kTrackHeaderWidth - 37, ic_y,
+                                 vlocked ? kIconAccent : kIconColor);
             view_mode_icon = add_icon(scene_, QStringLiteral("track_viewmode"), left + kTrackHeaderWidth - 21, ic_y, kIconColor);
         }
 
@@ -586,15 +592,29 @@ void TimelineWidget::draw_tracks() {
         QGraphicsPixmapItem* lock_icon = nullptr;
         QGraphicsPixmapItem* solo_icon = nullptr;
         QGraphicsPixmapItem* mute_icon = nullptr;
+        const auto& hdr_track = sequence_->audio_tracks[i];
+        const bool alocked = hdr_track.locked;
+        const bool asolo = hdr_track.solo;
+        const bool amuted = hdr_track.muted;
         if (full) {
-            lock_icon = add_icon(scene_, QStringLiteral("unlock"), left + kTrackHeaderWidth - 26, y + 9, kIconColor);
-            solo_icon = add_icon(scene_, QStringLiteral("solo"), left + kTrackHeaderWidth - 44, y + 20, kIconColor);
-            mute_icon = add_icon(scene_, QStringLiteral("mute"), left + kTrackHeaderWidth - 26, y + 20, kIconColor);
+            lock_icon = add_icon(scene_, alocked ? QStringLiteral("lock") : QStringLiteral("unlock"),
+                                 left + kTrackHeaderWidth - 26, y + 9,
+                                 alocked ? kIconAccent : kIconColor);
+            solo_icon = add_icon(scene_, QStringLiteral("solo"), left + kTrackHeaderWidth - 44, y + 20,
+                                 asolo ? QColor(0xF2, 0xA9, 0x3C) : kIconColor);
+            mute_icon = add_icon(scene_, amuted ? QStringLiteral("mute") : QStringLiteral("volume"),
+                                 left + kTrackHeaderWidth - 26, y + 20,
+                                 amuted ? QColor(0xEF, 0x44, 0x44) : kIconColor);
         } else {
             const double ic_y = y + (th - 13.0) / 2.0;
-            lock_icon = add_icon(scene_, QStringLiteral("unlock"), left + kTrackHeaderWidth - 53, ic_y, kIconColor);
-            solo_icon = add_icon(scene_, QStringLiteral("solo"), left + kTrackHeaderWidth - 37, ic_y, kIconColor);
-            mute_icon = add_icon(scene_, QStringLiteral("mute"), left + kTrackHeaderWidth - 21, ic_y, kIconColor);
+            lock_icon = add_icon(scene_, alocked ? QStringLiteral("lock") : QStringLiteral("unlock"),
+                                 left + kTrackHeaderWidth - 53, ic_y,
+                                 alocked ? kIconAccent : kIconColor);
+            solo_icon = add_icon(scene_, QStringLiteral("solo"), left + kTrackHeaderWidth - 37, ic_y,
+                                 asolo ? QColor(0xF2, 0xA9, 0x3C) : kIconColor);
+            mute_icon = add_icon(scene_, amuted ? QStringLiteral("mute") : QStringLiteral("volume"),
+                                 left + kTrackHeaderWidth - 21, ic_y,
+                                 amuted ? QColor(0xEF, 0x44, 0x44) : kIconColor);
         }
 
         // "Audio N" label (tall rows only; see the video branch).

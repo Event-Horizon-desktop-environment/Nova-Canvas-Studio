@@ -119,3 +119,8 @@ add_executable(canvas_scrub_bench_test tests/scrub_bench_test.cpp)
 target_link_libraries(canvas_scrub_bench_test PRIVATE canvas_core)
 set_target_properties(canvas_scrub_bench_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME scrub_bench COMMAND canvas_scrub_bench_test)
+
+add_executable(canvas_visual_render_test tests/visual_render_test.cpp)
+target_link_libraries(canvas_visual_render_test PRIVATE canvas_core)
+set_target_properties(canvas_visual_render_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME visual_render COMMAND canvas_visual_render_test)

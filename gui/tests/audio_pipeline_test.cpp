@@ -13,6 +13,7 @@
 
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/audio_fade.hpp"
+#include "canvas/core/timeline/audio_mix.hpp"
 #include "canvas/core/timeline/model.hpp"
 
 #include "fake_audio_sink.hpp"
@@ -37,7 +38,11 @@ constexpr int64_t kScrubChunkFrames = 5760;  // llround(120ms * 48k)
 
 constexpr double kTau = 6.2831853071795865;
 
-bool write_test_wav(const char* path, int seconds = 6) {
+// Generic stereo test-tone writer: each channel is a sine at
+// (base_freq + 100*ch) Hz with its own phase offset, at `amp` amplitude,
+// stored as 16-bit PCM so the decoded floats land on exact /32768 steps.
+bool write_wav(const char* path, int seconds, double base_freq, float amp,
+               double start_l, double start_r) {
     std::FILE* f = std::fopen(path, "wb");
     if (!f) return false;
     const int64_t total = static_cast<int64_t>(kRate) * seconds;
@@ -61,12 +66,12 @@ bool write_test_wav(const char* path, int seconds = 6) {
     std::fwrite(&bps, 2, 1, f);
     std::fwrite("data", 1, 4, f);
     std::fwrite(&data_bytes, 4, 1, f);
-    const double start_c[2] = {0.0, 1.7};
     for (int64_t i = 0; i < total; ++i) {
         for (int c = 0; c < kChannels; ++c) {
-            const double ph = kTau * (300.0 + 100.0 * c) / kRate * static_cast<double>(i) +
-                              start_c[c];
-            const float v = static_cast<float>(0.8 * std::sin(ph));
+            const double ph = kTau * (base_freq + 100.0 * c) / kRate *
+                                  static_cast<double>(i) +
+                              (c ? start_r : start_l);
+            const float v = static_cast<float>(amp * std::sin(ph));
             const std::int16_t s = static_cast<std::int16_t>(std::llround(v * 32767.0f));
             std::fwrite(&s, 2, 1, f);
         }
@@ -75,12 +80,22 @@ bool write_test_wav(const char* path, int seconds = 6) {
     return true;
 }
 
-// Ground-truth float for the same waveform (must match write_test_wav).
-float exp_sample(int64_t frame, int ch) {
-    const double ph = kTau * (300.0 + 100.0 * ch) / kRate * static_cast<double>(frame) +
-                      (ch ? 1.7 : 0.0);
-    const float v = static_cast<float>(0.8 * std::sin(ph));
+bool write_test_wav(const char* path, int seconds = 6) {
+    return write_wav(path, seconds, 300.0, 0.8f, 0.0, 1.7);
+}
+
+// Ground-truth float for the same waveform (must match write_wav).
+float exp_wave(int64_t frame, int ch, double base_freq, float amp,
+               double start_l, double start_r) {
+    const double ph = kTau * (base_freq + 100.0 * ch) / kRate *
+                          static_cast<double>(frame) +
+                      (ch ? start_r : start_l);
+    const float v = static_cast<float>(amp * std::sin(ph));
     return static_cast<float>(std::llround(v * 32767.0f)) / 32768.0f;
+}
+
+float exp_sample(int64_t frame, int ch) {
+    return exp_wave(frame, ch, 300.0, 0.8f, 0.0, 1.7);
 }
 
 // Every float in v[begin..end) (interleaved, absolute source frame `abs_frame`
@@ -289,7 +304,136 @@ int main() {
               "G: audio before the fade window is at unity gain");
     }
 
-    // --- H. lifecycle ------------------------------------------------------------
+    // --- G2. MULTI-TRACK MIX  (the new multi-channel feature) -----------------
+    // A second audio track (A2) with its own tone media overlays A1 in time.
+    //  * With defaults the mix is the SUM of both tracks (both centered at unity).
+    //  * Muting A1 silences that track only; the other keeps playing.
+    //  * Solo on A2 isolates it (A1 falls silent even though enabled).
+    //  * Hard-panning A2 right removes it from the left channel only.
+    //  * -6 dB on A2 halves its contribution (10^(-6/20) ≈ 0.5012).
+    {
+        const char* wav2 = "/tmp/canvas_audio_pipe_test2.wav";
+        check(write_wav(wav2, 6, 300.0, 0.5f, 0.9, 0.2), "G2: write second tone wav");
+
+        Project p = make_project(0, 180);
+        p.name = "MixTest";
+        MediaEntry m1;
+        m1.id = 1;
+        m1.path = wav2;
+        m1.fps = kFps;
+        m1.width = 320;
+        m1.height = 180;
+        m1.total_frames = 180;
+        m1.bin = "Scratch";
+        p.media.push_back(m1);
+        Track a2;
+        a2.kind = Track::Kind::Audio;
+        a2.name = "A2";
+        Clip c2;
+        c2.media = 1;
+        c2.name = "Tone2";
+        c2.tl_in = 0;
+        c2.tl_out = 180;
+        c2.src_in = 0;
+        c2.src_out = 180;
+        c2.enabled = true;
+        a2.clips.push_back(c2);
+        p.sequence.audio_tracks.push_back(std::move(a2));
+
+        // Run a fresh pipeline over the CURRENT model state in `p` (mutated
+        // between scenarios) and return the full received stream.
+        const auto run = [&]() -> std::vector<float> {
+            canvas::gui::test::FakeAudioSink sink;
+            canvas::gui::AudioPipeline pipe{sink};
+            pipe.set_project(&p);
+            pipe.add_media(p.media[0]);
+            pipe.add_media(p.media[1]);
+            pipe.open_output();
+            pipe.rewind(0, true);
+            for (int k = 0; k < 10; ++k) pipe.play_step(k, 1.0 / kFps, false);
+            return sink.all_;
+        };
+
+        const float g6 = canvas::core::audio_mix::db_to_gain(-6.0f);
+
+        // Baseline: both tracks at unity, centers -> straight sum.
+        {
+            const auto all = run();
+            check(all.size() == 16000u * 2, "G2: two-track run writes the same frame count");
+            bool ok = all.size() == 16000u * 2;
+            for (std::size_t i = 0; i < all.size() && ok; ++i) {
+                const float want =
+                    exp_sample(static_cast<int64_t>(i / kChannels),
+                               static_cast<int>(i % kChannels)) +
+                    exp_wave(static_cast<int64_t>(i / kChannels),
+                             static_cast<int>(i % kChannels), 300.0, 0.5f, 0.9, 0.2);
+                if (std::fabs(all[i] - want) > 1e-3f) ok = false;
+            }
+            check(ok, "G2: two audio tracks SUM at unity");
+        }
+
+        // Track mute: A1 muted -> only A2 audible.
+        {
+            p.sequence.audio_tracks[0].muted = true;
+            const auto all = run();
+            bool ok = !all.empty();
+            for (std::size_t i = 0; i < all.size() && ok; ++i) {
+                const float want = exp_wave(static_cast<int64_t>(i / kChannels),
+                                            static_cast<int>(i % kChannels), 300.0, 0.5f, 0.9, 0.2);
+                if (std::fabs(all[i] - want) > 1e-3f) ok = false;
+            }
+            check(ok, "G2: muted audio track is silent (A2 alone)");
+            p.sequence.audio_tracks[0].muted = false;
+        }
+
+        // Solo: A2 soloed -> A1 falls silent despite being enabled.
+        {
+            p.sequence.audio_tracks[1].solo = true;
+            const auto all = run();
+            bool ok = !all.empty();
+            for (std::size_t i = 0; i < all.size() && ok; ++i) {
+                const float want = exp_wave(static_cast<int64_t>(i / kChannels),
+                                            static_cast<int>(i % kChannels), 300.0, 0.5f, 0.9, 0.2);
+                if (std::fabs(all[i] - want) > 1e-3f) ok = false;
+            }
+            check(ok, "G2: solo isolates the soloed track (A1 silenced)");
+            p.sequence.audio_tracks[1].solo = false;
+        }
+
+        // Hard-pan A2 RIGHT: A2 leaves the left channel, stays on the right.
+        {
+            p.sequence.audio_tracks[1].clips[0].pan = 1.0f;
+            const auto all = run();
+            bool ok = !all.empty();
+            for (std::size_t i = 0; i < all.size() && ok; ++i) {
+                const int64_t fr = static_cast<int64_t>(i / kChannels);
+                const int ch = static_cast<int>(i % kChannels);
+                const float s2 = exp_wave(fr, ch, 300.0, 0.5f, 0.9, 0.2);
+                const float want = exp_sample(fr, ch) + (ch == 0 ? 0.0f : s2);
+                if (std::fabs(all[i] - want) > 1e-3f) ok = false;
+            }
+            check(ok, "G2: hard-panned track is silent on the opposite channel");
+            p.sequence.audio_tracks[1].clips[0].pan = 0.0f;
+        }
+
+        // Clip volume: A2 at -6 dB -> its samples scaled by ~0.5012.
+        {
+            p.sequence.audio_tracks[1].clips[0].volume_db = -6.0f;
+            const auto all = run();
+            bool ok = !all.empty();
+            for (std::size_t i = 0; i < all.size() && ok; ++i) {
+                const int64_t fr = static_cast<int64_t>(i / kChannels);
+                const int ch = static_cast<int>(i % kChannels);
+                const float want =
+                    exp_sample(fr, ch) +
+                    exp_wave(fr, ch, 300.0, 0.5f, 0.9, 0.2) * g6;
+                if (std::fabs(all[i] - want) > 1.5e-3f) ok = false;
+            }
+            check(ok, "G2: -6 dB clip volume halves the track's contribution");
+        }
+
+        std::remove(wav2);
+    }
     {
         canvas::gui::test::FakeAudioSink sink;
         canvas::gui::AudioPipeline pipe(sink);

@@ -31,6 +31,16 @@ enum class TransitionType {
     return t >= TransitionType::AudioFadeConstantGain;
 }
 
+// How a video clip composites over the content beneath it (lower tracks then
+// the black background). `Normal` is a plain alpha-over.
+enum class BlendMode {
+    Normal = 0,
+    Add,
+    Multiply,
+    Screen,
+    Overlay,
+};
+
 struct Clip {
     ClipId id = 0;
     MediaId media = -1;
@@ -58,6 +68,37 @@ struct Clip {
     TransitionType transition_in = TransitionType::None;
     int64_t transition_in_duration = 0;
 
+    // Audio mix parameters. `volume_db` is the gain in decibels (0 = unity);
+    // `pan` ranges -1.0 (hard left) .. +1.0 (hard right), 0 = center. Applied to
+    // this clip's audio (embedded or on an audio track) during playback and
+    // export. Stored per-clip so the existing track-snapshot undo machinery
+    // restores them automatically.
+    float volume_db = 0.0f;
+    float pan = 0.0f;
+
+    // Visual transform (video clips). `scale_x`/"scale_y" are the Zoom factor
+    // (1 = 100%); `pos_x`/"pos_y" shift the content in output pixels (0 =
+    // centered); `rotation_deg` is the rotation about the anchor; the anchor is
+    // an offset in pixels from the fitted frame's CENTER (0 = center, matching
+    // the reference inspector's "Anchor Point"); `flip_h`/"flip_v" mirror the
+    // source around its center. All identity by default, so existing projects
+    // (and untouched clips) composite exactly as before. Audio clips carry the
+    // same fields (an A/V pair shares them) but they only affect the video half.
+    float scale_x = 1.0f;
+    float scale_y = 1.0f;
+    double pos_x = 0.0;
+    double pos_y = 0.0;
+    float rotation_deg = 0.0f;
+    double anchor_dx = 0.0;
+    double anchor_dy = 0.0;
+    bool flip_h = false;
+    bool flip_v = false;
+
+    // Composite (video clips): `opacity` 0..1 (1 = opaque) and the blend mode
+    // used when layering this clip over lower tracks / the background.
+    float opacity = 1.0f;
+    BlendMode blend_mode = BlendMode::Normal;
+
     [[nodiscard]] bool is_linked() const noexcept { return linked_id != 0; }
     [[nodiscard]] int64_t duration() const { return tl_out - tl_in; }
     [[nodiscard]] bool has_transition_out() const noexcept {
@@ -69,6 +110,17 @@ struct Clip {
     [[nodiscard]] bool has_transition() const noexcept {
         return has_transition_out() || has_transition_in();
     }
+    // True when any visual transform field deviates from its identity default
+    // (the fast-path compositing check).
+    [[nodiscard]] bool has_visual_transform() const noexcept {
+        return scale_x != 1.0f || scale_y != 1.0f || pos_x != 0.0 || pos_y != 0.0 ||
+               rotation_deg != 0.0f || anchor_dx != 0.0 || anchor_dy != 0.0 ||
+               flip_h || flip_v;
+    }
+    // True when the clip draws non-opaque (transparency / blend mode).
+    [[nodiscard]] bool needs_compositing() const noexcept {
+        return opacity != 1.0f || blend_mode != BlendMode::Normal;
+    }
 };
 
 struct Track {
@@ -77,6 +129,11 @@ struct Track {
     Kind kind = Kind::Video;
     std::string name;
     bool locked = false;
+    // Audio mixing state. `muted` silences the track entirely; `solo` isolates
+    // it: if ANY audio track is soloed, only soloed tracks are audible (mute
+    // still beats solo). Meaningless for video tracks, which carry no mix.
+    bool muted = false;
+    bool solo = false;
     std::vector<Clip> clips;
 
     [[nodiscard]] const Clip* clip_at(int64_t pos) const noexcept;

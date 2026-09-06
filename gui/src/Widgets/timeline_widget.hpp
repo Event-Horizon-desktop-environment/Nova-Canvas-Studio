@@ -191,6 +191,13 @@ signals:
     void link_requested(canvas::core::Track::Kind kind, int track_index, canvas::core::ClipId id);
     void add_track_requested(canvas::core::Track::Kind kind);
     void delete_track_requested(canvas::core::Track::Kind kind, int track_index);
+    // Emitted when the user clicks a track header's M/S/L icon: `on` is the
+    // DESIRED state (the inverse of the track's current flag). Carries
+    // Track::Kind + index so a single handler can toggle audio as well as
+    // video (video headers only offer the lock icon).
+    void track_mute_toggled(canvas::core::Track::Kind kind, int track_index, bool on);
+    void track_solo_toggled(canvas::core::Track::Kind kind, int track_index, bool on);
+    void track_lock_toggled(canvas::core::Track::Kind kind, int track_index, bool on);
     // Emitted from the clip context menu's "Add Transition" submenu.
     void transition_requested(const canvas::core::Clip* clip, canvas::core::TransitionType type,
                               int64_t duration);

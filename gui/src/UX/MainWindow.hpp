@@ -25,6 +25,8 @@ class QKeyEvent;
 class QAction;
 class QMenu;
 class QToolButton;
+class QDoubleSpinBox;
+class QVBoxLayout;
 class MediaPoolWidget;
 class QTimer;
 class QTreeWidget;
@@ -52,6 +54,16 @@ QWidget* build_transport_bar(MainWindow& main_window);
 // touch the chrome members they populate with private-API access.
 void build_left_dock(MainWindow& main_window);
 void build_inspector_dock(MainWindow& main_window);
+
+// The Inspector's Transform/Composite property block lives in InspectorVisual.cpp
+// (splitplan refactor). build_inspector_visual() fills the Video tab's categories;
+// attach_inspector_visual() connects the timeline's selection signals after the
+// timeline exists; update_inspector_visual()/apply_inspector_visual() read and
+// commit the selected clip's transform/composite fields.
+void build_inspector_visual(MainWindow& main_window, QVBoxLayout* video_layout);
+void attach_inspector_visual(MainWindow& main_window, TimelineWidget* timeline);
+void update_inspector_visual(MainWindow& main_window);
+void apply_inspector_visual(MainWindow& main_window);
 
 // The center workspace (viewer column + contextual/toolbar chrome), the
 // timeline dock, and the Deliver page docks live in ShellCenter.cpp (splitplan
@@ -118,6 +130,15 @@ private:
     void rebuild_recent_menu();
     void remember_recent_project(const QString& path);
     QStringList recent_projects() const;
+    // Inspector: refreshes the Audio category's Volume/Pan spins from the
+    // selected clip (no-op and keeps their values when nothing is selected),
+    // and commits the current spin values to the selected clip as one undoable
+    // edit (set_clip_audio), then refreshes the timeline.
+    void update_inspector_audio();
+    void apply_inspector_audio();
+    // Locates the selected clip in the sequence; returns its kind/index.
+    bool find_selected_clip(canvas::core::Track::Kind& out_kind, std::size_t& out_index,
+                            canvas::core::Clip& out_clip) const;
 
     Ui::MainWindow* ui = nullptr;
     QMenu* open_recent_menu_ = nullptr;
@@ -156,6 +177,11 @@ private:
     friend QWidget* build_transport_bar(MainWindow& main_window);
     friend void build_left_dock(MainWindow& main_window);
     friend void build_inspector_dock(MainWindow& main_window);
+    friend void build_inspector_visual(MainWindow& main_window, QVBoxLayout* video_layout);
+    friend void attach_inspector_visual(MainWindow& main_window, TimelineWidget* timeline);
+    friend void update_inspector_visual(MainWindow& main_window);
+    friend void apply_inspector_visual(MainWindow& main_window, unsigned parts);
+    friend void apply_inspector_visual(MainWindow& main_window);
     friend void build_center_workspace(MainWindow& main_window);
 
     std::unique_ptr<canvas::core::Project> project_;
@@ -167,6 +193,8 @@ private:
     int64_t current_frame_ = 0;
     bool has_unsaved_changes_ = false;
     canvas::core::ClipId selected_clip_ = 0;
+    QDoubleSpinBox* inspector_audio_volume_ = nullptr;
+    QDoubleSpinBox* inspector_audio_pan_ = nullptr;
 };
 
 }

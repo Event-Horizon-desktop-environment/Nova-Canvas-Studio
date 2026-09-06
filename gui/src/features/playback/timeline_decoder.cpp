@@ -283,6 +283,20 @@ canvas::core::TransitionRenderMode to_render_mode(const canvas::core::Transition
         default:                return RM::None;
     }
 }
+
+// Copies A's visual transform onto a RenderFrame so the viewport applies it.
+void apply_clip_visual(canvas::core::RenderFrame& out,
+                       const canvas::core::Clip& a) {
+    out.scale_x = a.scale_x;
+    out.scale_y = a.scale_y;
+    out.pos_x = a.pos_x;
+    out.pos_y = a.pos_y;
+    out.rotation_deg = a.rotation_deg;
+    out.anchor_dx = a.anchor_dx;
+    out.anchor_dy = a.anchor_dy;
+    out.flip_h = a.flip_h;
+    out.flip_v = a.flip_v;
+}
 }  // namespace
 
 const canvas::core::Clip* TimelineDecoder::top_video_clip_at(const canvas::core::Project& project,
@@ -302,6 +316,7 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
     auto out = std::make_shared<canvas::core::RenderFrame>();
 
     const canvas::core::Clip* a = top_video_clip_at(project, seq_frame);
+    if (a) apply_clip_visual(*out, *a);
     if (!a) return out;
 
     // Is `seq_frame` inside the transition window owned by A's OUT boundary?
@@ -395,6 +410,8 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                                                   std::int64_t seq_frame,
                                                   int max_dim) {
     auto out = std::make_shared<canvas::core::RenderFrame>();
+    const canvas::core::Clip* a = top_video_clip_at(project, seq_frame);
+
     // DECISIVE branch trace (always-on): report exactly which early return the
     // scrub preview takes, so a decode that "runs but yields nothing" can't
     // silently evade the [scrub:BAD] fallback path.
@@ -406,7 +423,7 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
             top_video_clip_at(project, seq_frame) ? 1 : 0, max_dim,
             static_cast<long long>(project.sequence.duration_frames()));
 
-    const canvas::core::Clip* a = top_video_clip_at(project, seq_frame);
+    if (a) apply_clip_visual(*out, *a);
     if (!a) return out;
 
     const int64_t dur_out = a->transition_out_duration;

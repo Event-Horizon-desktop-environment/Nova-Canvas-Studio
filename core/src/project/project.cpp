@@ -26,6 +26,19 @@ json clip_to_json(const Clip& c) {
                 {"transition_out_duration", c.transition_out_duration},
                 {"transition_in", static_cast<int>(c.transition_in)},
                 {"transition_in_duration", c.transition_in_duration},
+                {"volume_db", c.volume_db},
+                {"pan", c.pan},
+                {"scale_x", c.scale_x},
+                {"scale_y", c.scale_y},
+                {"pos_x", c.pos_x},
+                {"pos_y", c.pos_y},
+                {"rotation_deg", c.rotation_deg},
+                {"anchor_dx", c.anchor_dx},
+                {"anchor_dy", c.anchor_dy},
+                {"flip_h", c.flip_h},
+                {"flip_v", c.flip_v},
+                {"opacity", c.opacity},
+                {"blend_mode", static_cast<int>(c.blend_mode)},
                 {"name", c.name}};
 }
 
@@ -47,6 +60,20 @@ Clip clip_from_json(const json& j) {
         c.transition_in = static_cast<TransitionType>(j.at("transition_in").get<int>());
     if (j.contains("transition_in_duration"))
         j.at("transition_in_duration").get_to(c.transition_in_duration);
+    if (j.contains("volume_db")) j.at("volume_db").get_to(c.volume_db);
+    if (j.contains("pan")) j.at("pan").get_to(c.pan);
+    if (j.contains("scale_x")) j.at("scale_x").get_to(c.scale_x);
+    if (j.contains("scale_y")) j.at("scale_y").get_to(c.scale_y);
+    if (j.contains("pos_x")) j.at("pos_x").get_to(c.pos_x);
+    if (j.contains("pos_y")) j.at("pos_y").get_to(c.pos_y);
+    if (j.contains("rotation_deg")) j.at("rotation_deg").get_to(c.rotation_deg);
+    if (j.contains("anchor_dx")) j.at("anchor_dx").get_to(c.anchor_dx);
+    if (j.contains("anchor_dy")) j.at("anchor_dy").get_to(c.anchor_dy);
+    if (j.contains("flip_h")) j.at("flip_h").get_to(c.flip_h);
+    if (j.contains("flip_v")) j.at("flip_v").get_to(c.flip_v);
+    if (j.contains("opacity")) j.at("opacity").get_to(c.opacity);
+    if (j.contains("blend_mode"))
+        c.blend_mode = static_cast<BlendMode>(j.at("blend_mode").get<int>());
     if (j.contains("name")) j.at("name").get_to(c.name);
     return c;
 }
@@ -54,7 +81,8 @@ Clip clip_from_json(const json& j) {
 json track_to_json(const Track& t) {
     json clips = json::array();
     for (const auto& c : t.clips) clips.push_back(clip_to_json(c));
-    return json{{"name", t.name}, {"locked", t.locked}, {"clips", clips}};
+    return json{{"name", t.name}, {"locked", t.locked}, {"muted", t.muted},
+                {"solo", t.solo}, {"clips", clips}};
 }
 
 Track track_from_json(const json& j, const Track::Kind kind) {
@@ -62,6 +90,8 @@ Track track_from_json(const json& j, const Track::Kind kind) {
     t.kind = kind;
     if (j.contains("name")) j.at("name").get_to(t.name);
     if (j.contains("locked")) j.at("locked").get_to(t.locked);
+    if (j.contains("muted")) j.at("muted").get_to(t.muted);
+    if (j.contains("solo")) j.at("solo").get_to(t.solo);
     for (const auto& cj : j.at("clips")) t.clips.push_back(clip_from_json(cj));
     std::sort(t.clips.begin(), t.clips.end(), [](const Clip& a, const Clip& b) { return a.tl_in < b.tl_in; });
     return t;

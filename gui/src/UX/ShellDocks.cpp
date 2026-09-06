@@ -1,9 +1,14 @@
 #include "UX/MainWindow.hpp"
 #include "ui_MainWindow.h"
 
+#include "UX/InspectorShared.hpp"
+#include "UX/InspectorVisual.hpp"
+
+#include "canvas/core/timeline/audio_mix.hpp"
+
 #include <QAbstractItemView>
+#include <QButtonGroup>
 #include <QColor>
-#include <QComboBox>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFrame>
@@ -15,7 +20,7 @@
 #include <QPoint>
 #include <QScrollArea>
 #include <QSize>
-#include <QSlider>
+#include <QStackedWidget>
 #include <QTabWidget>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -32,98 +37,6 @@
 #include "canvas/core/media/video_decoder.hpp"
 
 namespace canvas::gui {
-
-namespace {
-
-// ------------------------------------------------------------------------
-// InspectorCategory — one collapsible property group, matching the standard
-// inspector convention: enable dot | title | chevron | reset icon
-// in the header, individual property rows in the body.
-// ------------------------------------------------------------------------
-class InspectorCategory : public QWidget {
-public:
-    InspectorCategory(const QString& title, bool expanded, QWidget* parent = nullptr)
-        : QWidget(parent) {
-        auto* outer = new QVBoxLayout(this);
-        outer->setContentsMargins(0, 0, 0, 0);
-        outer->setSpacing(0);
-
-        header_ = new QToolButton(this);
-        header_->setStyleSheet(inspector_category_header_style());
-        header_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-        header_->setCheckable(true);
-        header_->setChecked(expanded);
-        header_->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
-        header_->setText(QStringLiteral("  \u25CF  ") + title);
-
-        auto* reset = new QToolButton(this);
-        reset->setIcon(icon("reset"));
-        reset->setIconSize(QSize(14, 14));
-        reset->setAutoRaise(true);
-        reset->setToolTip(tr("Reset to default"));
-
-        auto* header_row = new QWidget(this);
-        auto* header_layout = new QHBoxLayout(header_row);
-        header_layout->setContentsMargins(0, 0, 4, 0);
-        header_layout->setSpacing(0);
-        header_layout->addWidget(header_, 1);
-        header_layout->addWidget(reset);
-        header_row->setStyleSheet(QStringLiteral("background-color: #1A1D27; border-bottom: 1px solid #232833;"));
-
-        body_ = new QWidget(this);
-        body_->setStyleSheet(inspector_body_style());
-        body_layout_ = new QVBoxLayout(body_);
-        body_layout_->setContentsMargins(10, 8, 10, 10);
-        body_layout_->setSpacing(8);
-        body_->setVisible(expanded);
-
-        outer->addWidget(header_row);
-        outer->addWidget(body_);
-
-        connect(header_, &QToolButton::toggled, this, [this](bool on) {
-            header_->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
-            body_->setVisible(on);
-        });
-    }
-
-    QVBoxLayout* body_layout() { return body_layout_; }
-
-private:
-    QToolButton* header_ = nullptr;
-    QWidget* body_ = nullptr;
-    QVBoxLayout* body_layout_ = nullptr;
-};
-
-// One property row: label | field | optional per-property reset icon.
-void add_property_row(QVBoxLayout* body, const QString& label, QWidget* field, bool with_reset = true) {
-    auto* row = new QHBoxLayout;
-    row->setSpacing(6);
-    auto* lbl = new QLabel(label);
-    lbl->setMinimumWidth(78);
-    lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
-    row->addWidget(lbl);
-    row->addWidget(field, 1);
-    if (with_reset) {
-        auto* reset = new QToolButton;
-        reset->setIcon(icon("reset"));
-        reset->setIconSize(QSize(14, 14));
-        reset->setAutoRaise(true);
-        reset->setFixedWidth(18);
-        row->addWidget(reset);
-    }
-    body->addLayout(row);
-}
-
-QDoubleSpinBox* make_numeric(double lo, double hi, double val, QWidget* parent) {
-    auto* s = new QDoubleSpinBox(parent);
-    s->setRange(lo, hi);
-    s->setValue(val);
-    s->setDecimals(3);
-    s->setMaximumWidth(90);
-    return s;
-}
-
-}  // namespace
 
 void build_left_dock(MainWindow& mw) {
     auto* left_tabs = new QTabWidget(&mw);
@@ -335,6 +248,9 @@ void build_inspector_dock(MainWindow& mw) {
     mode_row_layout->setContentsMargins(6, 6, 6, 6);
     mode_row_layout->setSpacing(2);
     const char* modes[] = {"Video", "Audio", "Effects", "Transition", "Image", "File"};
+    auto* mode_group = new QButtonGroup(mode_row);
+    mode_group->setExclusive(true);
+    std::vector<QToolButton*> mode_buttons;
     for (const char* m : modes) {
         auto* b = new QToolButton(mode_row);
         const bool is_video = qstrcmp(m, "Video") == 0;
@@ -343,107 +259,96 @@ void build_inspector_dock(MainWindow& mw) {
         b->setChecked(is_video);
         b->setAutoRaise(true);
         b->setStyleSheet(page_pill_style());
+        mode_group->addButton(b);
         mode_row_layout->addWidget(b);
+        mode_buttons.push_back(b);
     }
     inspector_outer->addWidget(mode_row);
 
     auto* scroll = new QScrollArea(inspector_body);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
-    auto* categories_host = new QWidget(scroll);
-    auto* categories_layout = new QVBoxLayout(categories_host);
-    categories_layout->setContentsMargins(0, 0, 0, 0);
-    categories_layout->setSpacing(0);
 
-    // Transform — expanded by default (§3, observed category order).
-    auto* transform = new InspectorCategory(MainWindow::tr("Transform"), true, categories_host);
-    auto* zoom_row = new QWidget(categories_host);
-    auto* zoom_row_layout = new QHBoxLayout(zoom_row);
-    zoom_row_layout->setContentsMargins(0, 0, 0, 0);
-    zoom_row_layout->setSpacing(4);
-    zoom_row_layout->addWidget(make_numeric(0.0, 10.0, 1.0, zoom_row));
-    auto* chain = new QToolButton(zoom_row);
-    chain->setIcon(icon("chain"));
-    chain->setIconSize(QSize(14, 14));
-    chain->setCheckable(true);
-    chain->setChecked(true);
-    chain->setToolTip(MainWindow::tr("Link X and Y"));
-    zoom_row_layout->addWidget(chain);
-    zoom_row_layout->addWidget(make_numeric(0.0, 10.0, 1.0, zoom_row));
-    add_property_row(transform->body_layout(), MainWindow::tr("Zoom"), zoom_row);
+    // One category stack per mode tab; the tabs switch which one is on top.
+    // "Audio" carries the working per-clip mix controls; the other modes keep
+    // their reference layouts until their properties are wired to the model.
+    auto* stack = new QStackedWidget(scroll);
 
-    auto* pos_row = new QWidget(categories_host);
-    auto* pos_row_layout = new QHBoxLayout(pos_row);
-    pos_row_layout->setContentsMargins(0, 0, 0, 0);
-    pos_row_layout->setSpacing(4);
-    pos_row_layout->addWidget(make_numeric(-4096.0, 4096.0, 0.0, pos_row));
-    pos_row_layout->addWidget(make_numeric(-4096.0, 4096.0, 0.0, pos_row));
-    add_property_row(transform->body_layout(), MainWindow::tr("Position"), pos_row);
+    // --- Video page ---------------------------------------------------------
+    auto* video_page = new QWidget(stack);
+    auto* video_layout = new QVBoxLayout(video_page);
+    video_layout->setContentsMargins(0, 0, 0, 0);
+    video_layout->setSpacing(0);
 
-    add_property_row(transform->body_layout(), MainWindow::tr("Rotation Angle"), make_numeric(-360.0, 360.0, 0.0, categories_host));
+    // Video tab's property categories (Transform/Composite + the reference
+    // placeholders) all build in InspectorVisual.cpp (splitplan refactor); the
+    // widget handles + selection wiring live there too.
+    build_inspector_visual(mw, video_layout);
+    video_layout->addStretch(1);
+    stack->addWidget(video_page);
 
-    auto* anchor_row = new QWidget(categories_host);
-    auto* anchor_row_layout = new QHBoxLayout(anchor_row);
-    anchor_row_layout->setContentsMargins(0, 0, 0, 0);
-    anchor_row_layout->setSpacing(4);
-    anchor_row_layout->addWidget(make_numeric(-4096.0, 4096.0, 0.0, anchor_row));
-    anchor_row_layout->addWidget(make_numeric(-4096.0, 4096.0, 0.0, anchor_row));
-    add_property_row(transform->body_layout(), MainWindow::tr("Anchor Point"), anchor_row);
-
-    add_property_row(transform->body_layout(), MainWindow::tr("Pitch"), make_numeric(-180.0, 180.0, 0.0, categories_host));
-    add_property_row(transform->body_layout(), MainWindow::tr("Yaw"), make_numeric(-180.0, 180.0, 0.0, categories_host));
-
-    auto* flip_row = new QWidget(categories_host);
-    auto* flip_row_layout = new QHBoxLayout(flip_row);
-    flip_row_layout->setContentsMargins(0, 0, 0, 0);
-    flip_row_layout->setSpacing(4);
-    auto* flip_h = new QToolButton(flip_row);
-    flip_h->setIcon(icon("flip_h"));
-    flip_h->setIconSize(QSize(14, 14));
-    flip_h->setCheckable(true);
-    flip_h->setToolTip(MainWindow::tr("Flip Horizontal"));
-    auto* flip_v = new QToolButton(flip_row);
-    flip_v->setIcon(icon("flip_v"));
-    flip_v->setIconSize(QSize(14, 14));
-    flip_v->setCheckable(true);
-    flip_v->setToolTip(MainWindow::tr("Flip Vertical"));
-    flip_row_layout->addWidget(flip_h);
-    flip_row_layout->addWidget(flip_v);
-    flip_row_layout->addStretch(1);
-    add_property_row(transform->body_layout(), MainWindow::tr("Flip"), flip_row, /*with_reset=*/false);
-    categories_layout->addWidget(transform);
-
-    categories_layout->addWidget(new InspectorCategory(MainWindow::tr("AI Smart Reframe"), false, categories_host));
-    categories_layout->addWidget(new InspectorCategory(MainWindow::tr("Cropping"), false, categories_host));
-    categories_layout->addWidget(new InspectorCategory(MainWindow::tr("Dynamic Zoom"), false, categories_host));
-
-    auto* composite = new InspectorCategory(MainWindow::tr("Composite"), false, categories_host);
-    auto* blend_mode = new QComboBox(categories_host);
-    blend_mode->addItems({MainWindow::tr("Normal"), MainWindow::tr("Add"), MainWindow::tr("Multiply"), MainWindow::tr("Screen"), MainWindow::tr("Overlay")});
-    add_property_row(composite->body_layout(), MainWindow::tr("Composite Mode"), blend_mode);
-    auto* opacity_row = new QWidget(categories_host);
-    auto* opacity_row_layout = new QHBoxLayout(opacity_row);
-    opacity_row_layout->setContentsMargins(0, 0, 0, 0);
-    opacity_row_layout->setSpacing(4);
-    auto* opacity_slider = new QSlider(Qt::Horizontal, opacity_row);
-    opacity_slider->setRange(0, 100);
-    opacity_slider->setValue(100);
-    auto* opacity_value = new QLabel(QStringLiteral("100.00"), opacity_row);
-    opacity_value->setStyleSheet(QStringLiteral("color: #E8EAF0; font-size: 11px;"));
-    QObject::connect(opacity_slider, &QSlider::valueChanged, &mw, [opacity_value](int v) {
-        opacity_value->setText(QString::number(v) + QStringLiteral(".00"));
+    // --- Audio page ---------------------------------------------------------
+    // The working category: Volume (dB) and Pan edit the selected clip's
+    // loudness/position as one undoable edit. The spins refresh whenever the
+    // selection changes (see TimelineActions / update_inspector_audio) and
+    // commit on editing-finished, so stepping the arrow buttons or typing a
+    // value produces a single clean undo. Range constants come from the shared
+    // audio_mix header (defaults 0 dB / center are the user-set references).
+    auto* audio_page = new QWidget(stack);
+    auto* audio_layout = new QVBoxLayout(audio_page);
+    audio_layout->setContentsMargins(0, 0, 0, 0);
+    audio_layout->setSpacing(0);
+    auto* audio = new InspectorCategory(MainWindow::tr("Audio"), true, audio_page);
+    auto* vol = make_numeric(canvas::core::audio_mix::kMinVolumeDb,
+                             canvas::core::audio_mix::kMaxVolumeDb, 0.0, audio_page);
+    vol->setDecimals(1);
+    vol->setSuffix(QStringLiteral(" dB"));
+    vol->setMaximumWidth(110);
+    add_property_row(audio->body_layout(), MainWindow::tr("Volume (dB)"), vol);
+    auto* pan = make_numeric(canvas::core::audio_mix::kPanMin,
+                             canvas::core::audio_mix::kPanMax, 0.0, audio_page);
+    pan->setDecimals(2);
+    add_property_row(audio->body_layout(), MainWindow::tr("Pan"), pan);
+    audio_layout->addWidget(audio);
+    audio_layout->addStretch(1);
+    mw.inspector_audio_volume_ = vol;
+    mw.inspector_audio_pan_ = pan;
+    QObject::connect(vol, &QDoubleSpinBox::editingFinished, &mw, [&mw]() {
+        mw.apply_inspector_audio();
     });
-    opacity_row_layout->addWidget(opacity_slider, 1);
-    opacity_row_layout->addWidget(opacity_value);
-    add_property_row(composite->body_layout(), MainWindow::tr("Opacity"), opacity_row);
-    categories_layout->addWidget(composite);
+    QObject::connect(pan, &QDoubleSpinBox::editingFinished, &mw, [&mw]() {
+        mw.apply_inspector_audio();
+    });
+    stack->addWidget(audio_page);
 
-    for (const char* name : {"Speed Change", "Stabilization", "Lens Correction", "Retime and Scaling", "AI Super Scale"}) {
-        categories_layout->addWidget(new InspectorCategory(MainWindow::tr(name), false, categories_host));
+    // --- Effects / Transition / Image / File pages (placeholder for now) ----
+    for (const char* m : {"Effects", "Transition", "Image", "File"}) {
+        auto* page = new QWidget(stack);
+        auto* page_layout = new QVBoxLayout(page);
+        page_layout->setContentsMargins(0, 0, 0, 0);
+        page_layout->setSpacing(0);
+        auto* hint = new QLabel(MainWindow::tr("%1 properties — not available yet.").arg(MainWindow::tr(m)), page);
+        hint->setContentsMargins(10, 10, 10, 10);
+        hint->setStyleSheet(QStringLiteral("color: #5F6577; font-size: 11px;"));
+        hint->setWordWrap(true);
+        page_layout->addWidget(hint);
+        page_layout->addStretch(1);
+        stack->addWidget(page);
     }
-    categories_layout->addStretch(1);
 
-    scroll->setWidget(categories_host);
+    const int video_tab_index = 0;
+    const int audio_tab_index = 1;
+    for (std::size_t i = 0; i < mode_buttons.size(); ++i) {
+        const int idx = static_cast<int>(i);
+        QObject::connect(mode_buttons[idx], &QToolButton::toggled, stack, [stack, idx](bool on) {
+            if (on) stack->setCurrentIndex(idx);
+        });
+    }
+    stack->setCurrentIndex(video_tab_index);
+    static_cast<void>(video_tab_index);
+    static_cast<void>(audio_tab_index);
+
+    scroll->setWidget(stack);
     inspector_outer->addWidget(scroll, 1);
 
     mw.inspector_dock_->setWidget(inspector_body);
