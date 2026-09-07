@@ -299,6 +299,39 @@ void ThumbnailService::worker_loop() {
                          << "frame=" << req.frame << "w=" << req.target_width
                          << "ok=" << (img.isNull() ? "NO" : "yes")
                          << "took_ms=" << ms;
+            // Always-on throttle (~1/s): team-wide generate throughput and backlog.
+            // A queue that keeps growing past kWorkers with slow took_ms means
+            // imports/scrubs are feeding faster than the decode workers drain.
+            static auto agg_t0 = t0;
+            static int agg_n = 0;
+            static double agg_ms = 0.0;
+            ++agg_n;
+            agg_ms += ms;
+            const double since_s = std::chrono::duration<double>(t1 - agg_t0).count();
+            if (since_s >= 1.0) {
+                const double avg_ms = agg_ms / static_cast<double>(agg_n);
+                size_t ql = 0, cs = 0;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    ql = queue_.size();
+                    cs = cache_.size();
+                }
+                std::size_t wc = 0;
+                {
+                    std::lock_guard<std::mutex> lock(waveform_mutex_);
+                    wc = waveform_cache_.size();
+                }
+                qWarning().nospace()
+                    << "[thumb] generated=" << agg_n
+                    << " avg_ms=" << QString::number(avg_ms, 'f', 0)
+                    << " last_ms=" << QString::number(ms, 'f', 0)
+                    << " queue=" << ql
+                    << " lru=" << cs
+                    << " wf_cache=" << wc;
+                agg_t0 = t1;
+                agg_n = 0;
+                agg_ms = 0.0;
+            }
         }
         if (img.isNull()) continue;
 
@@ -339,18 +372,23 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
             const QString raw_file = disk_path_raw_waveform(req.path);
             if (load_raw_waveform(raw_file, &raw)) {
                 ok = true;
-                if (debug_enabled())
-                    qDebug() << "thumb: waveform loaded raw from disk path="
-                             << QString::fromStdString(req.path);
+                // Rare (one per unique audio file per session), so always-on: a
+                // raw cached waveform makes first-paint instant; a miss means the
+                // next block incurs the full-file decode.
+                qWarning().nospace() << "thumb: waveform loaded RAW from disk path="
+                                     << QString::fromStdString(req.path);
             } else {
                 const auto t0 = std::chrono::steady_clock::now();
                 ok = canvas::core::decode_audio_waveform(req.path, kWaveformRawBuckets, &raw, &error);
                 const auto t1 = std::chrono::steady_clock::now();
                 const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-                if (debug_enabled())
-                    qDebug() << "thumb: waveform full-file decode took_ms=" << ms
-                             << "buckets=" << kWaveformRawBuckets
-                             << "path=" << QString::fromStdString(req.path);
+                // Always-on: the first waveform for a file is a full-file decode
+                // (can be seconds on a long take); repeated slow ones point at a
+                // painful disk or a format that defeats the cached raw.
+                qWarning().nospace() << "thumb: waveform full-file DECODE took_ms="
+                                     << QString::number(ms, 'f', 0)
+                                     << " buckets=" << kWaveformRawBuckets
+                                     << " path=" << QString::fromStdString(req.path);
                 save_raw_waveform(raw_file, raw);
             }
             if (!ok) {

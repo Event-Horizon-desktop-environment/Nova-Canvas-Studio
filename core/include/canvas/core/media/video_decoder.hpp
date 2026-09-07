@@ -78,6 +78,24 @@ public:
     VideoFramePtr decode_next();
     void set_output_dim(int max_output_dim);
 
+    // Per-path access accounting for diagnostics: how frames reached the caller —
+    // sequential forward walk (the cheap steady-playback path) vs a keyframe
+    // (re)seek. Steady playback must be ~100% sequential; a seek-heavy ratio in
+    // the [dec] aggregate means the playhead keeps jumping the sequential window
+    // (watermark/commit mismatch) or the cache is cold after every seek.
+    struct PathStats {
+        std::uint64_t sequential = 0;
+        std::uint64_t seeks = 0;
+        double sequential_ms = 0.0;
+        double seek_ms = 0.0;
+        // Fraction of decode_to_frame cost spent in pixel conversion
+        // (hw->cpu transfer + swscale). A convert_ms/sequential_ms near 1.0 with
+        // a climbing avg decode_ms points at the download/scaler, not the codec.
+        double convert_ms = 0.0;
+    };
+    [[nodiscard]] PathStats path_stats() const;
+    PathStats take_path_stats();
+
     // Returns the frame at `target_frame`, decoding forward sequentially from the
     // current position when that is cheap (target >= next_frame_), so smooth
     // playback doesn't re-seek (and re-decode from a keyframe) on every frame.
@@ -190,6 +208,13 @@ private:
     AVPacket* packet_ = nullptr;
     int hw_pix_fmt_ = AV_PIX_FMT_NONE;
     bool hw_avail_ = false;
+    // NV12/CUDA engagement tracking: a hardware-configured decoder can still
+    // emit SOFTWARE frames when the stream is entered mid-GOP (the AV1 sequence
+    // header that primes the NVDEC session lives in an earlier keyframe).
+    // hw_engaged_ records the first real CUDA frame; soft_only_ latches when a
+    // keyframe re-anchor didn't help so decode_to_hw gives up re-anchoring.
+    bool hw_engaged_ = false;
+    bool soft_only_ = false;
 
     int video_stream_ = -1;
     AVRational stream_tb_{0, 1};
@@ -202,6 +227,12 @@ private:
     int64_t next_frame_ = 0;
     bool draining_ = false;
     int out_max_dim_ = 0;
+    // Sequential-walk vs keyframe-seek path accounting (see PathStats).
+    std::uint64_t path_seq_ = 0;
+    std::uint64_t path_seeks_ = 0;
+    double path_seq_ms_ = 0.0;
+    double path_seek_ms_ = 0.0;
+    double convert_ms_ = 0.0;
 
     // Keyframe index (see IframeEntry). Built lazily on background threads into a
     // process-wide cache keyed by path (s_iframe_cache); never on the

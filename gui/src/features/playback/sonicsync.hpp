@@ -36,6 +36,7 @@
 // methods are fine.
 
 #include <cstdint>
+#include <chrono>
 
 #include <canvas/core/project/project.hpp>
 
@@ -60,6 +61,23 @@ public:
     // Freeze a seek that is NOT while playing (paused scrub / transport). Audio
     // is irrelevant then; just record the position so a later play re-anchors.
     void on_seek_paused(std::int64_t target);
+
+    // Seek-hold window accounting since construction (additive, diagnostics).
+    // A long max hold = the target frame took that long to decode+present, i.e.
+    // the audio stay-silent window on a seek-while-playing. Sustained growth in
+    // the [play] line's hold_ fields means seeks are decode-bound, not pointer-bound.
+    struct HoldStats {
+        std::uint64_t hold_count = 0;
+        double hold_ms_min = 0.0;
+        double hold_ms_max = 0.0;
+        double hold_ms_avg = 0.0;
+    };
+    [[nodiscard]] HoldStats hold_stats() const
+    {
+        HoldStats out{hold_count_, hold_ms_min_, hold_ms_max_, 0.0};
+        if (hold_count_ > 0) out.hold_ms_avg = hold_ms_sum_ / static_cast<double>(hold_count_);
+        return out;
+    }
 
     // True while we are in the seek-hold window (seek-while-playing, target frame
     // not yet presented). While true the caller must NOT feed per-frame audio —
@@ -90,6 +108,12 @@ private:
     bool hold_released_ = false;
     std::int64_t hold_target_ = 0;
     bool pending_reanchor_ = false;
+    // Seek-hold window timing (begin→end), tracked for HoldStats.
+    std::chrono::steady_clock::time_point hold_start_{};
+    std::uint64_t hold_count_ = 0;
+    double hold_ms_sum_ = 0.0;
+    double hold_ms_min_ = 0.0;
+    double hold_ms_max_ = 0.0;
 };
 
 }  // namespace canvas::gui

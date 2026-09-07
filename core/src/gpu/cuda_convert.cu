@@ -9,6 +9,8 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdio>
+
 namespace canvas::core::gpu {
 
 using cuda_event_t = cudaEvent_t;
@@ -160,6 +162,28 @@ cudaStream_t& convert_stream() {
     }();
     return s;
 }
+
+// CUDA error-transition logger: prints exactly one "[gpu] cuda error" line at
+// the FIRST failure of a site after a run of successes, then stays quiet while
+// it keeps failing, and prints one "[gpu] cuda recovered" line when the site
+// returns to success. A driver reset / context loss reads as a single one-shot
+// transition instead of a per-frame spam, and the recovery line marks the end
+// of the outage for log-timestamp alignment with the FFmpeg switches above.
+bool gpu_cuda_check(const char* name, const cudaError_t e) {
+    static thread_local const char* s_bad = nullptr;
+    if (e == cudaSuccess) {
+        if (s_bad) {
+            fprintf(stderr, "[gpu] cuda recovered name=%s\n", s_bad);
+            s_bad = nullptr;
+        }
+        return true;
+    }
+    if (s_bad != name) {
+        s_bad = name;
+        fprintf(stderr, "[gpu] cuda error name=%s err=%s\n", name, cudaGetErrorName(e));
+    }
+    return false;
+}
 }  // namespace
 
 bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int src_w, int src_h,
@@ -180,7 +204,7 @@ bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int sr
     nv12Resize<<<grp, blk, 0, s>>>(srcY, srcUV, src_w, src_h, src_y_pitch, src_uv_pitch,
                                    dst_w, dst_h, dx, dy, dY, yPitch, dUV, uvPitch,
                                    out_w, out_h);
-    return cudaGetLastError() == cudaSuccess;
+    return gpu_cuda_check("nv12_resize_async", cudaGetLastError());
 }
 
 bool convert_nv12_sync() {
@@ -199,8 +223,13 @@ bool convert_nv12_sync() {
 bool convert_nv12_device_sync() {
     const cudaError_t e = cudaDeviceSynchronize();
     cudaGetLastError();
-    return e == cudaSuccess;
+    return gpu_cuda_check("nv12_device_sync", e);
 }
+
+// How many times the resize-event ring found a full slot (consumer a full ring
+// behind). File-scope so convert_nv12_record_event can bump it and
+// nv12_pool_stalls() can consume-on-read it across calls; TU-local by design.
+static uint64_t s_stalls = 0;
 
 bool convert_nv12_record_event(void** out) {
     if (!out) return false;
@@ -215,16 +244,19 @@ bool convert_nv12_record_event(void** out) {
     cuda_event_t& ev = s_events[s_head % kPoolSize];
     const int slot = s_head % kPoolSize;
     if (!s_created[slot]) {
-        if (cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) return false;
+        if (!gpu_cuda_check("nv12_event_create",
+                            cudaEventCreateWithFlags(&ev, cudaEventDisableTiming)))
+            return false;
         s_created[slot] = true;
     } else if (cudaEventQuery(ev) != cudaSuccess) {
         // Still busy: the consumer is behind by a full ring — encode is the
         // slower side. Fall back to a blocking record so ordering is preserved.
+        ++s_stalls;
         cudaEventSynchronize(ev);
     }
     ++s_head;
     cudaGetLastError();
-    if (cudaEventRecord(ev, s) != cudaSuccess) return false;
+    if (!gpu_cuda_check("nv12_event_record", cudaEventRecord(ev, s))) return false;
     *out = ev;
     return true;
 }
@@ -243,6 +275,18 @@ void convert_nv12_destroy_event(void* ev) {
     // Events come from the internal ring pool; recycling is handled by
     // convert_nv12_record_event. Nothing to free.
     (void)ev;
+}
+
+uint64_t nv12_pool_stalls() {
+    // Consume-on-read counter: how many times convert_nv12_record_event found
+    // the 64-slot event ring fully busy (the resize consumer is a full ring
+    // behind). A nonzero delta on the `[render]` line is the signature of an
+    // encode-bound export.
+    static uint64_t s_stalls_seen = 0;
+    const uint64_t now = s_stalls;
+    const uint64_t delta = now - s_stalls_seen;
+    s_stalls_seen = now;
+    return delta;
 }
 
 bool convert_rgba_to_nv12(const uint8_t* rgba, int src_w, int src_h,

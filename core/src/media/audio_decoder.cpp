@@ -2,6 +2,7 @@
 #include "canvas/core/util/log.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <vector>
 
@@ -38,6 +39,16 @@ struct AudioDecoder::Impl {
     // forward playback decodes continuously instead of re-clipping per call.
     std::vector<float> decoded;
     int64_t decoded_at = 0;
+
+    // True once a forward decode walk hit the physical end of the stream short
+    // of the requested target (`eof_sample` = output-sample position where that
+    // happened). Requests at/behind that position are served as silence instead
+    // of re-seeking from the stream start and re-walking the whole file on every
+    // call — the permanent-silence regression (write_mixed starves for *seconds*
+    // while the device pads).
+    bool at_eof = false;
+    int64_t eof_sample = 0;
+    std::uint64_t resync_count = 0;
 
     ~Impl() {
         if (packet) av_packet_free(&packet);
@@ -187,6 +198,9 @@ void AudioDecoder::seek(const int64_t start_sample, const int out_sample_rate) {
     // place and serve the same first slice forever (repeating audio instead of
     // advancing).
     impl_->decoded_at = start_sample;
+    // A real seek re-enters the stream, so a past-EOF state no longer applies.
+    impl_->at_eof = false;
+    impl_->eof_sample = 0;
 }
 
 void AudioDecoder::reset() {
@@ -237,6 +251,7 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
     }
     const int64_t target = std::max<int64_t>(0, start_sample);
     const int64_t ch = impl_->channels;
+    const auto dec_t0 = std::chrono::steady_clock::now();
 
     // Resample rate / channel config changed -> rebuild the resampler and rewind
     // to the stream start (the reliable container seek, see resync below) so the
@@ -266,12 +281,23 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
     const bool should_resync =
         target < impl_->decoded_at - std::max<int64_t>(max_frames, buffered) ||
         target >= impl_->decoded_at + std::max<int64_t>(buffered, max_frames);
+    // A walk that already reached EOF at `eof_sample` makes a past-EOF target a
+    // replay of the same dead region: skip the seek(0)+walk entirely and serve
+    // silence from where the decode stands (the fill below can't advance either).
+    const bool past_eof_request = impl_->at_eof && target >= impl_->eof_sample;
     if (should_resync) {
-        if (log::enabled())
-            CANVAS_LOG("audio decode: RESYNC target=%lld decoded_at=%lld buffered=%lld rate=%d",
-                   static_cast<long long>(target), static_cast<long long>(impl_->decoded_at),
-                   static_cast<long long>(buffered), out_sample_rate);
-        seek(0, out_sample_rate);
+        if (past_eof_request) {
+            if (log::enabled())
+                CANVAS_LOG("audio decode: PAST-EOF RESYNC-SKIP target=%lld eof_sample=%lld",
+                       static_cast<long long>(target), static_cast<long long>(impl_->eof_sample));
+        } else {
+            ++impl_->resync_count;
+            if (log::enabled())
+                CANVAS_LOG("audio decode: RESYNC target=%lld decoded_at=%lld buffered=%lld rate=%d",
+                       static_cast<long long>(target), static_cast<long long>(impl_->decoded_at),
+                       static_cast<long long>(buffered), out_sample_rate);
+            seek(0, out_sample_rate);
+        }
     }
 
     if (!ensure_swr(impl_->swr_ctx, impl_->codec_ctx, out_sample_rate, impl_->channels)) {
@@ -363,7 +389,17 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
             impl_->decoded.erase(impl_->decoded.begin(),
                                  impl_->decoded.begin() + static_cast<std::ptrdiff_t>(drop * ch));
             impl_->decoded_at += drop;
-            if (drop == 0) break;  // stalled at EOF
+            if (drop == 0) {
+                // Physical stream end reached short of the requested target:
+                // record it so later past-EOF requests skip the redundant
+                // seek(0)+walk and are served as silence.
+                impl_->at_eof = true;
+                impl_->eof_sample = impl_->decoded_at;
+                if (log::enabled())
+                    CANVAS_LOG("audio_decoder: decode EOF-at-walk decoded_at=%lld target=%lld",
+                           (long long)impl_->decoded_at, (long long)target);
+                break;
+            }
         }
     }
 
@@ -375,28 +411,56 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
     const int64_t available =
         static_cast<int64_t>(impl_->decoded.size() / static_cast<std::size_t>(ch));
     const int64_t serve = std::min<int64_t>(max_frames, available);
-    if (serve <= 0) {
-        CANVAS_LOG("audio_decoder: decode EMPTY serve=0 available=%lld target=%lld eof=%d",
-               (long long)available, (long long)target, (int)eof);
+    if (serve > 0) {
+        auto chunk = std::make_shared<AudioChunk>();
+        chunk->start_sample = impl_->decoded_at;
+        chunk->sample_rate = out_sample_rate;
+        chunk->channels = static_cast<int>(ch);
+        chunk->samples.assign(
+            impl_->decoded.begin(),
+            impl_->decoded.begin() + static_cast<std::ptrdiff_t>(serve * ch));
+        impl_->decoded.erase(impl_->decoded.begin(),
+                             impl_->decoded.begin() + static_cast<std::ptrdiff_t>(serve * ch));
+        impl_->decoded_at += serve;
         impl_->next_sample = impl_->decoded_at;
-        return nullptr;
+        const double dec_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - dec_t0)
+                .count();
+        CANVAS_LOG("audio_decoder: decode OK target=%lld served=%lld buffered=%lld sample_rate=%d "
+               "took=%.2fms speed_x=%.1f",
+               (long long)target, (long long)serve,
+               (long long)(impl_->decoded.size() / static_cast<std::size_t>(ch)), out_sample_rate,
+               dec_ms, dec_ms > 0.0 ? static_cast<double>(serve) / dec_ms / (static_cast<double>(out_sample_rate) / 1000.0) : 0.0);
+        return chunk;
     }
 
+    // Nothing decodeable at/after `decoded_at`: the stream physically ended
+    // short of the requested window (or a packet-level error left the codec
+    // stalled). Returning nullptr here strands the audio pipeline — write_mixed
+    // skips the source, the feed watermark freezes, and playback goes
+    // permanently silent (`wrote=0 ... audible by seconds in the field log')
+    // until a manual seek re-enters the stream. Serve SILENCE instead so the
+    // stream keeps flowing in lockstep with the playhead; real content resumes
+    // on the next seek/resync that lands before the end.
+    if (impl_->at_eof || target > impl_->decoded_at) {
+        impl_->at_eof = true;
+        impl_->eof_sample = impl_->decoded_at;
+    }
+    if (log::enabled())
+        CANVAS_LOG("audio_decoder: decode SILENCE target=%lld at=%lld eof_sample=%lld max_frames=%d",
+               (long long)target, (long long)impl_->decoded_at, (long long)impl_->eof_sample,
+               max_frames);
     auto chunk = std::make_shared<AudioChunk>();
     chunk->start_sample = impl_->decoded_at;
     chunk->sample_rate = out_sample_rate;
     chunk->channels = static_cast<int>(ch);
-    chunk->samples.assign(
-        impl_->decoded.begin(),
-        impl_->decoded.begin() + static_cast<std::ptrdiff_t>(serve * ch));
-    impl_->decoded.erase(impl_->decoded.begin(),
-                         impl_->decoded.begin() + static_cast<std::ptrdiff_t>(serve * ch));
-    impl_->decoded_at += serve;
+    chunk->samples.assign(static_cast<std::size_t>(max_frames) * static_cast<std::size_t>(ch),
+                          0.0f);
+    impl_->decoded_at += max_frames;
     impl_->next_sample = impl_->decoded_at;
-    CANVAS_LOG("audio_decoder: decode OK target=%lld served=%lld buffered=%lld sample_rate=%d",
-           (long long)target, (long long)serve,
-           (long long)(impl_->decoded.size() / static_cast<std::size_t>(ch)), out_sample_rate);
     return chunk;
 }
+
+std::uint64_t AudioDecoder::resync_count() const { return impl_->resync_count; }
 
 }  // namespace canvas::core

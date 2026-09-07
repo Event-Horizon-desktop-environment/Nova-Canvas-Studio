@@ -9,6 +9,7 @@ void SonicSync::begin_seek_hold(const std::int64_t target) {
     hold_released_ = false;
     hold_target_ = target;
     pending_reanchor_ = true;
+    hold_start_ = std::chrono::steady_clock::now();
 }
 
 void SonicSync::end_seek_hold() {
@@ -16,6 +17,16 @@ void SonicSync::end_seek_hold() {
     // (begin_seek_hold is only called while playing) is mirrored by on_seek_paused,
     // which does not set hold_active_ so this is a no-op there.
     if (!hold_active_) return;
+    const double hold_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - hold_start_).count();
+    if (hold_count_ == 0) {
+        hold_ms_min_ = hold_ms_max_ = hold_ms;
+    } else {
+        hold_ms_min_ = std::min(hold_ms_min_, hold_ms);
+        hold_ms_max_ = std::max(hold_ms_max_, hold_ms);
+    }
+    ++hold_count_;
+    hold_ms_sum_ += hold_ms;
     hold_released_ = true;  // audio may resume; caller re-anchors to hold_target_
     pending_reanchor_ = false;
 }

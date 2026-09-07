@@ -88,6 +88,7 @@ void RenderQueue::enqueue(RenderJob job) {
         job.id = next_id_++;
         job.status = RenderJob::Status::Queued;
         jobs_.push_back(std::move(job));
+        enqueued_at_[job.id] = std::chrono::steady_clock::now();
     }
     cv_.notify_one();
     if (on_changed) on_changed();
@@ -111,6 +112,7 @@ void RenderQueue::enqueue_individual(
             job.id = next_id_++;
             job.status = RenderJob::Status::Queued;
             jobs_.push_back(std::move(job));
+            enqueued_at_[job.id] = std::chrono::steady_clock::now();
         }
         ++index;
     }
@@ -155,10 +157,17 @@ void RenderQueue::clear_queued() {
 }
 
 void RenderQueue::cancel(uint64_t id) {
-    std::lock_guard<std::mutex> lk(mutex_);
-    for (auto& j : jobs_)
-        if (j.id == id)
-            j.status = RenderJob::Status::Cancelled;
+    double prog = 0.0;
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        for (auto& j : jobs_)
+            if (j.id == id) {
+                j.status = RenderJob::Status::Cancelled;
+                prog = j.progress;
+            }
+    }
+    log::log_warning("[render:q] CANCEL id=%llu progress=%.0f%%", (unsigned long long)id,
+                     prog * 100.0);
     if (on_changed) on_changed();
 }
 
@@ -227,6 +236,10 @@ std::vector<RenderJob> RenderQueue::jobs() const {
 
 void RenderQueue::worker() {
     using Project = canvas::core::Project;
+    // Idle->busy->idle edge tracker for the always-on [render:q] lines. `idle`
+    // means the worker just found nothing to drain (pre-start or between batches).
+    static bool s_was_busy = false;
+    static uint64_t s_last_dispatch = 0;
     while (true) {
         RenderJob local;
         uint64_t id = 0;
@@ -252,7 +265,45 @@ void RenderQueue::worker() {
                 break;
             }
         }
-        if (id == 0) continue;
+        if (id == 0) {
+            // Worker found nothing to pick up: idle tick. Log the edge ONCE per
+            // idle session (not every cv wake), so idle->busy->idle churn around
+            // a batch shows up without spamming.
+            if (s_was_busy) {
+                s_was_busy = false;
+                log::log_warning("[render:q] worker IDLE after job %llu",
+                                 (unsigned long long)s_last_dispatch);
+            }
+            continue;
+        }
+        s_last_dispatch = id;
+        if (!s_was_busy) {
+            s_was_busy = true;
+            log::log_warning("[render:q] worker BUSY dispatch id=%llu", (unsigned long long)id);
+        }
+
+        // Always-on dispatch line: time this job sat in the queue (user staged it
+        // then hit start), how many others were queued behind it, and whether the
+        // worker was coming from idle. A backlog here with a busy renderer means
+        // the user queued more frames than the machine can chew through.
+        double wait_ms = 0.0;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            const auto it = enqueued_at_.find(id);
+            if (it != enqueued_at_.end()) {
+                wait_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - it->second).count();
+                enqueued_at_.erase(it);
+            }
+        }
+        std::size_t depth = 0;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            for (const auto& j : jobs_)
+                if (j.status == RenderJob::Status::Queued) ++depth;
+        }
+        log::log_warning("[render:q] dispatch id=%llu '%s' depth_behind=%zu wait_ms=%.0f",
+                    (unsigned long long)id, local.name.c_str(), depth, wait_ms);
 
         if (on_job_started) on_job_started(id);
         CANVAS_LOG("render queue: job %llu '%s' START out='%s' frames=%lld",

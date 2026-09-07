@@ -18,6 +18,7 @@
 
 #include "fake_audio_sink.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -186,6 +187,7 @@ Project make_project(int64_t src_in, int64_t src_out) {
     a1.kind = Track::Kind::Audio;
     a1.name = "A1";
     Clip c;
+    c.id = p.sequence.next_clip_id++;
     c.media = 0;
     c.name = "Tone";
     c.tl_in = 0;
@@ -384,6 +386,7 @@ int main() {
         a2.kind = Track::Kind::Audio;
         a2.name = "A2";
         Clip c2;
+        c2.id = p.sequence.next_clip_id++;
         c2.media = 1;
         c2.name = "Tone2";
         c2.tl_in = 0;
@@ -692,6 +695,7 @@ int main() {
         a2.kind = Track::Kind::Audio;
         a2.name = "A2";
         Clip c2;
+        c2.id = p.sequence.next_clip_id++;
         c2.media = 1;
         c2.name = "Tone2";
         c2.tl_in = 0;
@@ -728,6 +732,60 @@ int main() {
               "H: any pre-fill beyond the steps is bounded by the kAudioLeadMs lead");
 
         std::remove(wavH2);
+    }
+
+    // --- J. SAME-MEDIA CONSECUTIVE CLIPS keep independent feed positions ------
+    // Regression for the field log's clip-boundary audio gap: two timeline clips
+    // of the SAME media (a film split into segments) used to share a MEDIA-keyed
+    // feed watermark, so the second clip's audio started N seconds into the
+    // source (or wrote nothing) at the boundary. Feed progress is per-CLIP, so
+    // the audio for the second placement starts at its own src_in.
+    {
+        Project p = make_project(0, 180);
+        // Track A1 holds the film twice: clip K1 covers [0,90) from the file's
+        // start; clip K2 covers [90,180) ALSO from the file's start (src_in=0).
+        // At the crossing the audible source switches K1 -> K2, whose media
+        // position resets to 0 — far below K1's feed watermark.
+        Clip& k1 = p.sequence.audio_tracks[0].clips[0];
+        k1.tl_out = 90;
+        k1.src_out = 90;
+        Clip k2 = k1;
+        k2.id = p.sequence.next_clip_id++;
+        k2.tl_in = 90;
+        k2.tl_out = 180;
+        k2.src_in = 0;
+        k2.src_out = 90;
+        p.sequence.audio_tracks[0].clips.push_back(k2);
+
+        canvas::gui::test::FakeAudioSink sink;
+        canvas::gui::AudioPipeline pipe{sink};
+        pipe.set_project(&p);
+        pipe.add_media(p.media[0]);
+        pipe.open_output();
+        pipe.rewind(0, true);
+        for (int k = 0; k < 90; ++k) pipe.play_step(k, 1.0 / kFps, false);
+        const uint64_t before90 = sink.written_total_;  // frames written before K2's first step
+        for (int k = 90; k < 95; ++k) pipe.play_step(k, 1.0 / kFps, false);
+
+        // The FIRST frame the k=90 step hands to the device must be clip K2's
+        // own source start (media frame 0), not K1's leftover feed head.
+        auto at_written = [&](int64_t written_frame) {
+            return std::array<float, 2>{
+                sink.all_[static_cast<std::size_t>(written_frame) * kChannels + 0],
+                sink.all_[static_cast<std::size_t>(written_frame) * kChannels + 1]};
+        };
+        auto want_at = [&](int64_t media_frame) {
+            return std::array<float, 2>{exp_sample(media_frame, 0),
+                                        exp_sample(media_frame, 1)};
+        };
+        bool boundary_ok = true;
+        for (int ch = 0; ch < kChannels; ++ch)
+            if (at_written(before90)[ch] != want_at(0)[ch]) boundary_ok = false;
+        if (boundary_ok)
+            for (int ch = 0; ch < kChannels; ++ch)
+                if (at_written(before90 + kPerFrame)[ch] != want_at(kPerFrame)[ch])
+                    boundary_ok = false;
+        check(boundary_ok, "J: same-media clip boundary feeds K2 from its own source start (no jump)");
     }
 
     // --- I. SELF-HEALING RE-ANCHOR on an un-anchored playhead jump ------------

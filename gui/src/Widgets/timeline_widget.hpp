@@ -160,6 +160,17 @@ public:
 
     [[nodiscard]] double frames_per_pixel() const { return frames_per_pixel_; }
 
+    // Lane a media drop at `scene_y` would target: the existing track of the
+    // media's kind under the cursor, or the per-kind index of a NEW track to
+    // create at the drop position (>= current count of that kind) when the drop
+    // lands on empty space. Cross-section drops clamp to the first track of the
+    // media's kind. `index` is a per-kind slicing index (V1/A1 = 0, V2/A2 = 1, ...).
+    struct DropLane {
+        canvas::core::Track::Kind kind = canvas::core::Track::Kind::Video;
+        int index = 0;
+    };
+    DropLane resolve_drop_lane(double scene_y, canvas::core::Track::Kind media_kind) const;
+
     // True when a transition bubble is selected, so Delete/Backspace clears the
     // transition instead of deleting a clip.
     [[nodiscard]] bool has_selected_transition() const { return selected_transition_.valid; }
@@ -192,8 +203,8 @@ signals:
     // already happened in the model); the widget re-acquires the rebuilt items
     // and continues the drag on the new track.
     void new_upper_track_requested(canvas::core::ClipId clip_id, int64_t tl_in);
-    void media_dropped(int media_id, int64_t frame);
-    void media_files_dropped(const QStringList& paths, int64_t frame);
+    void media_dropped(int media_id, int64_t frame, double scene_y);
+    void media_files_dropped(const QStringList& paths, int64_t frame, double scene_y);
     void unlink_requested(canvas::core::Track::Kind kind, int track_index, canvas::core::ClipId id);
     void link_requested(canvas::core::Track::Kind kind, int track_index, canvas::core::ClipId id);
     void add_track_requested(canvas::core::Track::Kind kind);

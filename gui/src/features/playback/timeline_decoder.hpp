@@ -73,6 +73,14 @@ public:
     // reduced frame into the full-res cache.
     canvas::core::RenderFramePtr preview(const canvas::core::Project& project,
                                      std::int64_t seq_frame, int max_dim);
+    // Preview-LRU hit/miss accounting since the last call (additive, FROZEN-safe).
+    // Scrub drags consume it at [scrub] END to report the per-drag cache ratio.
+    struct PreviewStats {
+        std::uint64_t hits = 0;
+        std::uint64_t misses = 0;
+        std::uint64_t evictions = 0;
+    };
+    [[nodiscard]] PreviewStats take_preview_stats();
     // Media frame rate at `seq_frame` (what frame interval the playhead advances
     // at), or `fallback_fps` when nothing covers it.
     double media_rate_at(const canvas::core::Project& project, std::int64_t seq_frame,
@@ -113,6 +121,9 @@ private:
     std::unordered_map<PreviewKey, canvas::core::VideoFramePtr, PreviewKeyHash> preview_cache_;
     std::deque<PreviewKey> preview_lru_;
     static constexpr std::size_t kPreviewCacheMax = 32;
+    std::uint64_t preview_hits_ = 0;
+    std::uint64_t preview_misses_ = 0;
+    std::uint64_t preview_evictions_ = 0;
 
     canvas::core::HwDeviceManager hw_;
 

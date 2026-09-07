@@ -540,6 +540,79 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     int64_t audio_sample = 0;
     bool ended = false;
 
+    // Always-on producer cadence (~1/s): frames encoded per second, ETA, and the
+    // number of non-sequential source decodes (GPU path only; see render_stalls).
+    // A render grinding at far below the timeline fps with a big pct gap is
+    // decode-bound; stalls climbing between lines mean the compositor keeps
+    // reseeking instead of walking frames forward.
+    int64_t render_stalls = 0;
+    double render_enc_ms = 0.0, render_enc_samples = 0.0;
+    // Windowed fast-path coverage: how many frames went through the GPU single-
+    // clip composite (`render_fast`) vs the CPU compositor (`render_cpu`). A low
+    // fast_pct with many overlapping clips is expected; a low fast_pct on a
+    // solo-clip export means the GPU path keeps bailing (see `[gpu]` lines).
+    int64_t render_fast = 0, render_cpu = 0;
+    // CPU compositing time per frame (session.frame / render_video_frame), driver
+    // of software-limited exports.
+    double render_comp_ms = 0.0, render_comp_n = 0.0;
+    // Per-frame audio mix time (session.audio_chunk). Rises with track count and
+    // is the budget to watch when audio_avg_ms approaches 1/fps of the timeline.
+    double render_audio_ms = 0.0, render_audio_n = 0.0;
+    // av_hwframe_get_buffer / av_frame_alloc failures in the RGBA->hw upload
+    // path: GPU device-memory pressure mid-export.
+    int64_t render_hw_alloc_miss = 0;
+    // Max producer->consumer queue depth observed this window. A steady 64
+    // (full) means composite/decode outruns encode; a steady 1 means the
+    // producer lags and encode idles.
+    std::size_t render_q_max = 0;
+    const auto render_tick0 = std::chrono::steady_clock::now();
+    auto last_render_log = render_tick0;
+    int64_t frames_at_last_log = 0;
+    auto log_render_tick = [&]() {
+        const auto now = std::chrono::steady_clock::now();
+        const double since_s = std::chrono::duration<double>(now - last_render_log).count();
+        if (since_s < 1.0) return;
+        const double since_start_s = std::chrono::duration<double>(now - render_tick0).count();
+        const int64_t done = frame;
+        const double fps =
+            since_s > 0.0 ? static_cast<double>(done - frames_at_last_log) / since_s : 0.0;
+        const int64_t rem = total_video - std::min<int64_t>(done, total_video);
+        const double eta_s = fps > 0.0 ? static_cast<double>(rem) / fps : 0.0;
+        const double pct = total_video > 0
+            ? 100.0 * static_cast<double>(std::min<int64_t>(done, total_video)) /
+                  static_cast<double>(total_video)
+            : 0.0;
+        const double enc_avg = render_enc_samples > 0.0
+            ? render_enc_ms / render_enc_samples : 0.0;
+        const int64_t win_total = render_fast + render_cpu;
+        const double fast_pct = win_total > 0
+            ? 100.0 * static_cast<double>(render_fast) / static_cast<double>(win_total) : 0.0;
+        const double comp_avg = render_comp_n > 0.0
+            ? render_comp_ms / render_comp_n : 0.0;
+        const double audio_avg = render_audio_n > 0.0
+            ? render_audio_ms / render_audio_n : 0.0;
+        const uint64_t stalls = canvas::core::gpu::cuda_available()
+            ? canvas::core::gpu::nv12_pool_stalls() : 0;
+        ::canvas::core::log::log_warning(
+            "[render] frame=%lld/%lld pct=%.1f%% fps=%.2f eta_s=%.0f stalls=%lld "
+            "fast=%.1f%% (gpu=%lld cpu=%lld) comp_avg_ms=%.1f audio_avg_ms=%.1f "
+            "enc_avg_ms=%.1f alloc_miss=%lld qmax=%zu pool_stalls=%llu elaps_s=%.0f",
+            static_cast<long long>(done), static_cast<long long>(total_video), pct, fps, eta_s,
+            static_cast<long long>(render_stalls), fast_pct,
+            static_cast<long long>(render_fast), static_cast<long long>(render_cpu),
+            comp_avg, audio_avg, enc_avg,
+            static_cast<long long>(render_hw_alloc_miss), render_q_max, stalls, since_start_s);
+        last_render_log = now;
+        frames_at_last_log = done;
+        render_stalls = 0;
+        render_enc_ms = render_enc_samples = 0.0;
+        render_fast = render_cpu = 0;
+        render_comp_ms = render_comp_n = 0.0;
+        render_audio_ms = render_audio_n = 0.0;
+        render_hw_alloc_miss = 0;
+        render_q_max = 0;
+    };
+
     // Decoded audio chunks are per-frame sized (e.g. 800 @48k/60fps) and don't
     // align to the encoder's 1024-sample frame size, so stage them in an
     // accumulator and send only complete encoder frames.
@@ -579,15 +652,18 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             auto _tf1 = std::chrono::steady_clock::now();
             static double _st_fg = 0, _st_rz = 0; static long _cnt = 0;
             if (_gk) {
+                ++render_fast;
                 _st_fg += std::chrono::duration<double, std::milli>(_tf1 - _tf0).count();
                 // Sanity: output frames must map to strictly advancing source frames;
                 // a non-+1 delta means dropped/duplicated frames (judder).
                 static int64_t s_prev_src = INT64_MIN;
                 if (gfi.src_frame >= 0) {
-                    if (s_prev_src != INT64_MIN && gfi.src_frame != s_prev_src + 1)
+                    if (s_prev_src != INT64_MIN && gfi.src_frame != s_prev_src + 1) {
+                        ++render_stalls;
                         fprintf(stderr, "[FRAME-DIAG] tl_frame=%lld src=+%lld (prev src=%lld) delta=%lld\n",
                                 (long long)f, (long long)gfi.src_frame,
                                 (long long)s_prev_src, (long long)(gfi.src_frame - s_prev_src));
+                    }
                     s_prev_src = gfi.src_frame;
                 }
                 AVFrame* hw = av_frame_alloc();
@@ -628,6 +704,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                         return {hw, ev, src_ref};
                     }
                     if (src_ref) av_frame_unref(src_ref);
+                } else {
+                    ++render_hw_alloc_miss;
                 }
                 av_frame_free(&hw);
             }
@@ -635,9 +713,14 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
 
         // CPU composite fallback (identical to the legacy loop): render RGBA on
         // the CPU, then convert to NV12 either with a CUDA kernel or swscale.
+        const auto comp_t0 = std::chrono::steady_clock::now();
         auto vf = session_ok ? session.frame(f)
                              : render_video_frame(project, f, s.width, s.height, 0);
         if (!vf) return {nullptr, nullptr, nullptr};
+        ++render_cpu;
+        render_comp_ms += std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - comp_t0).count();
+        render_comp_n += 1.0;
         const std::size_t bytes =
             std::min<std::size_t>(vf->rgba.size(), rgb->linesize[0] * (std::size_t)s.height);
         memcpy(rgb->data[0], vf->rgba.data(), bytes);
@@ -659,9 +742,11 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                     hw->pts = f;
                     to_send = hw;
                 } else {
+                    ++render_hw_alloc_miss;
                     av_frame_free(&hw);
                 }
-            } else if (hw) {
+            } else {
+                ++render_hw_alloc_miss;
                 av_frame_free(&hw);
             }
         }
@@ -686,6 +771,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                             av_frame_free(&hw);
                         }
                     } else if (hw) {
+                        ++render_hw_alloc_miss;
                         av_frame_free(&hw);
                     }
                 }
@@ -770,6 +856,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                     to_send = slot.frame;
                     ev = slot.event;
                     src = slot.source;
+                    render_q_max = std::max(render_q_max, ready_frames.size());
                 }
             }
             qcv.notify_all();
@@ -780,6 +867,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             // Source planes are consumed; drop the ref.
             if (src) av_frame_unref(src);
 
+            const auto enc_t0 = std::chrono::steady_clock::now();
             if (to_send) {
                 avcodec_send_frame(vctx, to_send);
                 // NVENC reads surfaces asynchronously; barrier before returning the
@@ -811,13 +899,21 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                 }
             }
             av_packet_free(&pkt);
+            render_enc_ms += std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - enc_t0).count();
+            render_enc_samples += 1.0;
+            log_render_tick();
 
             // audio for this pass
             if (do_audio && audio_sample < total_audio) {
                 const int per_frame = (int)std::max<int64_t>(1,
                     (int64_t)std::llround((double)s.audio_sample_rate / s.fps));
+                const auto audio_t0 = std::chrono::steady_clock::now();
                 auto ac = session.audio_chunk(audio_sample, per_frame,
                                               s.audio_sample_rate, s.audio_channels, s.fps);
+                render_audio_ms += std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - audio_t0).count();
+                render_audio_n += 1.0;
                 const int n = (ac && !ac->samples.empty())
                     ? (int)(ac->samples.size() / s.audio_channels)
                     : 0;
@@ -911,6 +1007,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                 canvas::core::gpu::cuda_available()) {
                 RenderSession::GpuFrameInfo gfi;
                 if (session.frame_gpu(frame, &gfi) && gfi.valid) {
+                    ++render_fast;
                     AVFrame* hw = av_frame_alloc();
                     auto tb0 = std::chrono::steady_clock::now();
                     if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
@@ -936,9 +1033,14 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             }
 
             if (!gpu_composited) {
+            const auto comp_t0 = std::chrono::steady_clock::now();
             auto vf = session_ok ? session.frame(frame)
                                  : render_video_frame(project, frame, s.width, s.height, 0);
             if (vf) {
+                ++render_cpu;
+                render_comp_ms += std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - comp_t0).count();
+                render_comp_n += 1.0;
                 const std::size_t bytes =
                     std::min<std::size_t>(vf->rgba.size(), rgb->linesize[0] * (std::size_t)s.height);
                 memcpy(rgb->data[0], vf->rgba.data(), bytes);
@@ -962,9 +1064,11 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                             hw->pts = frame;
                             to_send = hw;
                         } else {
+                            ++render_hw_alloc_miss;
                             av_frame_free(&hw);
                         }
                     } else if (hw) {
+                        ++render_hw_alloc_miss;
                         av_frame_free(&hw);
                     }
                 }
@@ -990,6 +1094,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                                     av_frame_free(&hw);
                                 }
                             } else if (hw) {
+                                ++render_hw_alloc_miss;
                                 av_frame_free(&hw);
                             }
                         }
@@ -1029,8 +1134,12 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         if (do_audio && audio_sample < total_audio) {
             const int per_frame = (int)std::max<int64_t>(1,
                 (int64_t)std::llround((double)s.audio_sample_rate / s.fps));
+            const auto audio_t0 = std::chrono::steady_clock::now();
             auto ac = session.audio_chunk(audio_sample, per_frame,
                                           s.audio_sample_rate, s.audio_channels, s.fps);
+            render_audio_ms += std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - audio_t0).count();
+            render_audio_n += 1.0;
             const int n = (ac && !ac->samples.empty())
                 ? (int)(ac->samples.size() / s.audio_channels)
                 : 0;
@@ -1052,6 +1161,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         }
 
         // drain output packets from both encoders
+        const auto cpu_enc_t0 = std::chrono::steady_clock::now();
         bool got = false;
         AVPacket* pkt = av_packet_alloc();
         while (avcodec_receive_packet(vctx, pkt) == 0) {
@@ -1071,6 +1181,10 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             }
         }
         av_packet_free(&pkt);
+        render_enc_ms += std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - cpu_enc_t0).count();
+        render_enc_samples += 1.0;
+        log_render_tick();
 
         if (frame >= total_video && (audio_sample >= total_audio || !do_audio)) {
             // flush any staged partial audio frame (tail < a_frame_size)

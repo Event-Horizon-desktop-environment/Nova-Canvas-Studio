@@ -27,6 +27,7 @@ inline bool convert_nv12_resize_async(const uint8_t*, const uint8_t*, int, int, 
 inline bool convert_nv12_record_event(void**) { return false; }
 inline bool convert_nv12_wait_event(void*) { return true; }
 inline void convert_nv12_destroy_event(void*) {}
+inline uint64_t nv12_pool_stalls() { return 0; }
 inline bool convert_nv12_sync() { return true; }
 inline bool convert_nv12_device_sync() { return true; }
 inline bool convert_nv12_resize_to_host(const uint8_t*, const uint8_t*, int, int, std::size_t,
@@ -63,6 +64,8 @@ bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int sr
 bool convert_nv12_record_event(void** out);
 bool convert_nv12_wait_event(void* ev);
 void convert_nv12_destroy_event(void* ev);
+// Consume-on-read counter of convert_nv12_record_event ring-busy stalls.
+uint64_t nv12_pool_stalls();
 bool convert_nv12_sync();
 // Full-device barrier: waits for NVENC's async read of an encoder input surface
 // so the surface can be safely returned to the pool before reuse.

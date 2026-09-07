@@ -21,6 +21,19 @@ public:
     void clear();
     [[nodiscard]] std::size_t size_bytes() const;
 
+    // Cumulative accounting since construction (or the last clear()), for
+    // playback health logs: how well the budget is being reused (hit rate) and
+    // how often a full slot silently evict-reloads (an eviction storm shows up
+    // as misses climbing while bytes stay pinned at the cap).
+    struct Stats {
+        std::uint64_t hits = 0;
+        std::uint64_t misses = 0;
+        std::uint64_t evictions = 0;
+        std::size_t bytes = 0;
+        std::size_t max_bytes = 0;
+    };
+    [[nodiscard]] Stats stats() const;
+
 private:
     void evict_locked();
 
@@ -29,6 +42,9 @@ private:
     std::size_t bytes_ = 0;
     std::list<int64_t> lru_;
     std::unordered_map<int64_t, std::pair<VideoFramePtr, std::list<int64_t>::iterator>> map_;
+    std::uint64_t hits_ = 0;
+    std::uint64_t misses_ = 0;
+    std::uint64_t evictions_ = 0;
 };
 
 }

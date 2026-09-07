@@ -76,12 +76,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(media_pool_, &MediaPoolWidget::filesDropped, this,
             [this](QStringList paths) { import_media_paths(paths); });
     connect(timeline_, &TimelineWidget::media_files_dropped, this,
-            [this](QStringList paths, int64_t frame) {
+            [this](QStringList paths, int64_t frame, double scene_y) {
                 const std::size_t start = project_->media.size();
                 import_media_paths(paths);
                 int64_t offset = 0;
                 for (std::size_t i = start; i < project_->media.size(); ++i) {
-                    place_media_at(project_->media[i].id, frame + offset, canvas::core::Placement::Overwrite);
+                    place_media_at(project_->media[i].id, frame + offset, canvas::core::Placement::Overwrite, scene_y);
                     const auto& m = project_->media[i];
                     offset += (m.total_frames > 0 ? m.total_frames : 300 * static_cast<int64_t>(m.fps > 0 ? m.fps : 30.0));
                 }
@@ -140,15 +140,22 @@ void MainWindow::refresh_timeline() {
 
 void MainWindow::push_snapshot(const int64_t initial_frame) {
     // Deep-copy the current project so the worker thread reads an immutable snapshot.
+    const auto t0 = std::chrono::steady_clock::now();
+    auto snapshot = std::make_shared<canvas::core::Project>(*project_);
+    const double copy_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - t0).count();
+    // Always-on: the copy cost lands on the UI thread on every edit. A big
+    // timeline pushing multi-ms copies per keystroke shows up as edit lag even
+    // when the worker keeps up, so this is the first place to look at.
     qWarning().nospace()
         << "[proj] snapshot push anchor=" << initial_frame
+        << " copy_ms=" << QString::number(copy_ms, 'f', 1)
         << " undo_depth=" << undo_.count()
         << " last_cmd=" << (undo_.can_undo() ? QString::fromStdString(undo_.next_undo_name()) : QStringLiteral("-"))
         << " media=" << project_->media.size()
         << " v_tracks=" << project_->sequence.video_tracks.size()
         << " a_tracks=" << project_->sequence.audio_tracks.size()
         << " frames=" << project_->sequence.duration_frames();
-    auto snapshot = std::make_shared<canvas::core::Project>(*project_);
     controller_.set_project(std::move(snapshot), initial_frame);
 }
 
@@ -168,7 +175,6 @@ void MainWindow::on_position_changed(const int64_t frame_number) {
 }
 
 void MainWindow::on_playback_changed(const bool playing) {
-    play_button_->setText(playing ? tr("Pause") : tr("Play"));
     const QString icon_path = playing ? QStringLiteral(":/icons/pause.svg")
                                       : QStringLiteral(":/icons/play.svg");
     play_button_->setIcon(QIcon(icon_path));
@@ -198,6 +204,32 @@ void MainWindow::update_fps_label() {
 
 void MainWindow::on_fps_tick() {
     if (!fps_label_) return;
+    // Event-loop lag probe: schedule a zero-latency queued callback now and
+    // measure how late it arrives. If anything blocks the main thread (synchronous
+    // media open, a heavy paint), the 500ms timer fires late too, so the whole
+    // stall accumulates here instead of being short-circuited by the next tick.
+    const auto probe_t0 = std::chrono::steady_clock::now();
+    QMetaObject::invokeMethod(this, [probe_t0] {
+        static auto s_at = std::chrono::steady_clock::now();
+        static int s_n = 0;
+        static double s_ms = 0.0, s_max = 0.0;
+        const double lag_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - probe_t0).count();
+        ++s_n;
+        s_ms += lag_ms;
+        s_max = std::max(s_max, lag_ms);
+        const auto now = std::chrono::steady_clock::now();
+        if (s_n == 1 || now - s_at >= std::chrono::seconds(2)) {
+            s_at = now;
+            qWarning().nospace()
+                << "[eventloop] lag_avg_ms=" << QString::number(s_ms / s_n, 'f', 1)
+                << " lag_max_ms=" << QString::number(s_max, 'f', 1)
+                << " n=" << s_n;
+            s_n = 0;
+            s_ms = 0.0;
+            s_max = 0.0;
+        }
+    }, Qt::QueuedConnection);
     // While a render job is running, the fps readout next to "Edited" doubles
     // as the encoder-speed meter instead of the playback rate.
     if (render_fps_ > 0.0) {

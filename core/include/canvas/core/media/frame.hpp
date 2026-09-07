@@ -91,9 +91,15 @@ struct RenderFrame {
     // GPU fast path: NV12 planes produced by the hardware-decode + GPU
     // composite path. When set, the viewer should prefer these (upload Y/UV as
     // textures, convert to RGB in the shader) over downloading `a` as RGBA.
-    // Only set for the single-clip, no-transition case (like the exporter's
-    // GPU fast path); transitions still use the RGBA `a`/`b` frames.
+    // Set for the single-clip no-transition case and, together with `b_nv12` +
+    // `mode`/`progress`, for GPU-rendered transitions (the viewer blends both
+    // Y/UV pairs in the fragment shader).
     Nv12FramePtr nv12;
+    // Incoming (B) frame during an NV12 transition: the clip behind the OUT
+    // boundary, delivered as hardware planes so the cut/cross-fade window stays
+    // on the GPU fast path instead of two full-res CPU RGBA decodes. Present
+    // alongside `mode`/`progress`; `b` (RGBA) stays null for this path.
+    Nv12FramePtr b_nv12;
 
     [[nodiscard]] bool has_transition() const noexcept {
         return mode != TransitionRenderMode::None && b != nullptr;

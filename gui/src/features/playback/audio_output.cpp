@@ -80,6 +80,13 @@ struct AudioOutput::Impl {
     std::atomic<uint64_t> stat_dropped_frames{0};
     std::atomic<uint64_t> stat_written_frames{0};
     std::atomic<uint64_t> stat_write_errors{0};
+    // Live-playback silence holds fed by the writer (holding the device open
+    // between real chunks) and XRUN recoveries — the audible pop signature. A
+    // silence hold that outpaces real data means the decode/feed is starving the
+    // device; XRUNs mean we fell far enough behind to corrupt the stream.
+    std::atomic<uint64_t> stat_silence_holds{0};
+    std::atomic<uint64_t> stat_silence_hold_frames{0};
+    std::atomic<uint64_t> stat_xruns{0};
 
     static void on_process(void* userdata) {
         auto* self = static_cast<Impl*>(userdata);
@@ -217,6 +224,10 @@ struct AudioOutput::Impl {
                     self->stat_written_frames.fetch_add(
                         err > 0 ? static_cast<uint64_t>(err) : 0,
                         std::memory_order_relaxed);
+                    self->stat_silence_holds.fetch_add(1, std::memory_order_relaxed);
+                    if (err > 0)
+                        self->stat_silence_hold_frames.fetch_add(
+                            static_cast<uint64_t>(err), std::memory_order_relaxed);
                 }
                 // Non-blocking device: give the PCM time between retries.
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -263,6 +274,7 @@ struct AudioOutput::Impl {
                     qWarning() << "audio: ALSA writei error" << err
                                << "(" << snd_strerror(static_cast<int>(err)) << ")"
                                << "state=" << snd_pcm_state(self->pcm);
+                    self->stat_xruns.fetch_add(1, std::memory_order_relaxed);
                     if (snd_pcm_recover(self->pcm, static_cast<int>(err), 1) < 0) {
                         qWarning() << "audio: ALSA recover FAILED, stopping writer";
                         break;
@@ -280,8 +292,35 @@ struct AudioOutput::Impl {
             }
 
             const auto now = std::chrono::steady_clock::now();
+            static uint64_t s_prev_xruns = 0;
+            static uint64_t s_prev_sil = 0;
             if (playback_debug() && now - last_log >= std::chrono::seconds(1)) {
                 last_log = now;
+                // Device buffer-depth telemetry: the ALSA `delay` (frames still
+                // queued in the device/plugin) directly measures how far ahead of
+                // the audible position we are feeding. min/avg/max per second
+                // show whether the pipeline rides a healthy short cushion or
+                // drifts deep ahead (which hides as extra latency on scrub/seek).
+                long long buf_min = 0, buf_avg = 0, buf_max = 0;
+                {
+                    snd_pcm_sframes_t d = 0;
+                    long long acc = 0, cnt = 0, mx = 0, mn = 0;
+                    bool ok = false;
+                    for (int k = 0; k < 5; ++k) {
+                        if (snd_pcm_delay(self->pcm, &d) == 0 && d >= 0) {
+                            const long long v = static_cast<long long>(d);
+                            if (!ok) { mn = mx = v; ok = true; }
+                            else if (v < mn) mn = v;
+                            if (v > mx) mx = v;
+                            acc += v; ++cnt;
+                        }
+                    }
+                    if (ok) {
+                        buf_min = mn;
+                        buf_avg = acc / cnt;
+                        buf_max = mx;
+                    }
+                }
                 qDebug() << "audio: writer wrote_frames=" << wrote_batch
                          << "errors=" << errs_batch
                          << "cum_written=" << self->stat_written_frames.load()
@@ -289,7 +328,13 @@ struct AudioOutput::Impl {
                          << "cum_dropped=" << self->stat_dropped_frames.load()
                          << "queue_pending="
                          << (self->q.size() - self->q_start)
-                         << "pcm_state=" << snd_pcm_state(self->pcm);
+                         << "pcm_state=" << snd_pcm_state(self->pcm)
+                         << "buf_frames=" << buf_min << "/" << buf_avg << "/" << buf_max
+                         << "xruns_delta=" << (self->stat_xruns.load(std::memory_order_relaxed) - s_prev_xruns)
+                         << "silence_frames="
+                         << (self->stat_silence_hold_frames.load(std::memory_order_relaxed) - s_prev_sil);
+                s_prev_xruns = self->stat_xruns.load(std::memory_order_relaxed);
+                s_prev_sil = self->stat_silence_hold_frames.load(std::memory_order_relaxed);
                 wrote_batch = 0;
                 errs_batch = 0;
             }
@@ -383,6 +428,12 @@ bool AudioOutput::open(const int sample_rate, const int channels) {
     // ---- Prefer ALSA (blocking writei gives reliable, realtime-paced playback) ----
     int err = snd_pcm_open(&impl_->pcm, "default", SND_PCM_STREAM_PLAYBACK, 0);
     if (err < 0) {
+        // Always-on: only shows when ALSA is genuinely absent/unusable, and that
+        // is exactly when a user can't hear output ("why is audio silent?") —
+        // capturing the precise reason here beats a blank fallback.
+        qWarning() << "[audio] ALSA open FAILED"
+                   << "(" << snd_strerror(err) << ")"
+                   << "-> falling back to PipeWire";
         impl_->pcm = nullptr;
     } else {
         snd_pcm_nonblock(impl_->pcm, 1);
@@ -390,6 +441,10 @@ bool AudioOutput::open(const int sample_rate, const int channels) {
                                  SND_PCM_ACCESS_RW_INTERLEAVED, channels, sample_rate, 1,
                                  50000 /* ~50ms buffer */);
         if (err < 0) {
+            qWarning() << "[audio] ALSA set_params FAILED"
+                       << "(" << snd_strerror(err) << ")"
+                       << "rate=" << sample_rate << "channels=" << channels
+                       << "-> falling back to PipeWire";
             snd_pcm_close(impl_->pcm);
             impl_->pcm = nullptr;
         } else {
@@ -397,9 +452,8 @@ bool AudioOutput::open(const int sample_rate, const int channels) {
             open_ = true;
             impl_->q_max = static_cast<std::size_t>(sample_rate) * 3;  // ~64ms
             impl_->alsa_thread_start();
-            if (debug_enabled())
-                qDebug() << "audio: open OK via ALSA"
-                         << "rate=" << sample_rate << "channels=" << channels;
+            qWarning() << "[audio] ALSA OPENED rate=" << sample_rate
+                       << "channels=" << channels;
             return true;
         }
     }
@@ -465,15 +519,13 @@ bool AudioOutput::open(const int sample_rate, const int channels) {
 
     if (impl_->pw_ok) {
         open_ = true;
-        if (debug_enabled())
-            qDebug() << "audio: open OK via PipeWire"
-                     << "rate=" << sample_rate << "channels=" << channels;
+        qWarning() << "[audio] PIPEWIRE OPENED rate=" << sample_rate
+                   << "channels=" << channels;
         return true;
     }
 
-    if (debug_enabled())
-        qWarning() << "audio: open FAILED (ALSA + PipeWire) rate=" << sample_rate
-                   << "channels=" << channels;
+    qWarning() << "[audio] OPEN FAILED (ALSA + PipeWire) rate=" << sample_rate
+               << "channels=" << channels;
     return false;
 }
 
@@ -696,6 +748,15 @@ uint64_t AudioOutput::audible_position_frames() const {
 uint64_t AudioOutput::stat_write_errors() const {
     return impl_ ? impl_->stat_write_errors.load(std::memory_order_relaxed) : 0;
 }
+uint64_t AudioOutput::stat_silence_holds() const {
+    return impl_ ? impl_->stat_silence_holds.load(std::memory_order_relaxed) : 0;
+}
+uint64_t AudioOutput::stat_silence_hold_frames() const {
+    return impl_ ? impl_->stat_silence_hold_frames.load(std::memory_order_relaxed) : 0;
+}
+uint64_t AudioOutput::stat_xruns() const {
+    return impl_ ? impl_->stat_xruns.load(std::memory_order_relaxed) : 0;
+}
 
 void AudioOutput::set_hold_active(bool on) {
     if (!impl_) return;
@@ -744,6 +805,9 @@ void AudioOutput::log_pipeline_stats(const char* tag) const {
         << "audio[pipeline:" << tag << "] enqueued=" << stat_enqueued_frames()
         << " written=" << stat_written_frames() << " dropped=" << stat_dropped_frames()
         << " write_errors=" << stat_write_errors()
+        << " silence_holds=" << stat_silence_holds()
+        << " silence_frames=" << stat_silence_hold_frames()
+        << " xruns=" << stat_xruns()
         << " open=" << open_
         << " alsa=" << (impl_ && impl_->alsa_ok)
         << " pw=" << (impl_ && impl_->pw_ok && impl_->stream)

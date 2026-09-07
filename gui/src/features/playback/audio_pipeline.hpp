@@ -176,6 +176,7 @@ private:
     // written-frame counter at that moment, so the *audible* position within the
     // run can be derived and compared to the video position being presented.
     int64_t anchor_media_sample_ = 0;
+    int64_t anchor_seq_frame_ = 0;
     uint64_t written_at_anchor_ = 0;
     uint64_t run_id_ = 0;
     uint64_t speed_run_ = 0;
@@ -187,7 +188,7 @@ private:
     // and play_step() both advance these so leading audio pre-rolled before the
     // first present is never written twice — per media so each mixed source
     // keeps its own lead-in.
-    std::unordered_map<canvas::core::MediaId, int64_t> feed_watermarks_;
+    std::unordered_map<canvas::core::ClipId, int64_t> feed_watermarks_;
 
     // Last timeline frame fed to the mix within the current play run, for
     // play_step()'s self-healing re-anchor: a playhead that moves before the
@@ -196,6 +197,11 @@ private:
     // run's front watermark suppresses the mix (`span <= 0`) and the device
     // drains ahead — the garbled-audio regression in the field log.
     int64_t last_seq_fed_ = -1;
+
+    // Last time the A/V-drift re-anchor fired (play_step), so a chronic offset
+    // (audible many seconds ahead of or behind the picture after a long video
+    // stall) re-anchors at most ~1/s instead of every frame.
+    std::chrono::steady_clock::time_point last_drift_anchor_{};
 
     // UI-thread scrub-audio feed state (feed_scrub_audio): last target fed and
     // when, for throttling to device pace and de-duplication, plus the count of
@@ -217,6 +223,23 @@ private:
     // burst-vs-stall pattern (the listening signature of tearing) is visible.
     uint64_t feed_ledger_frames_ = 0;
     std::chrono::steady_clock::time_point feed_ledger_at_{};
+    // Cut-window diagnostic (CANVAS_PLAYBACK_DEBUG): primary audible clip fed
+    // last frame, to detect a clip change at a cut, and the remaining frames of
+    // per-frame [diag:cut] logging after entering a clip boundary (a change or
+    // ±3 frames of tl_in/tl_out). Makes the cut-time feed stall / cold-decoder
+    // short chunk / device-backlog balloon visible frame-by-frame.
+    int64_t last_primary_clip_ = -1;
+    int cut_diag_ = 0;
+    // Per-step audio decode ms, accumulated inside write_mixed() (all sources)
+    // and reported by play_step()'s [audio] health line, so decode cost vs the
+    // feed `want` is visible (a slow decode manifesting only as audible churn).
+    double step_decode_ms_ = 0.0;
+    // Per-step mix ms (source fade/gain/pan summing across audible_sources) and
+    // device write ms (sink_.write_float), accumulated in write_mixed() and
+    // reported on the same [audio] line; sum vs decode tells whether a churning
+    // stream is decode-bound or device-bound.
+    double step_mix_ms_ = 0.0;
+    double step_write_ms_ = 0.0;
     void maybe_wave_capture_open_locked();
     void wave_capture_write_locked(const float* data, std::size_t frames);
     void wave_capture_close_locked();

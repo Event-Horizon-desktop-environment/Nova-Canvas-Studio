@@ -105,6 +105,11 @@ void SequenceController::begin_scrub() {
         scrub_drag_active_ = true;
         scrub_start_ = Clock::now();
         scrub_first_ = current_frame_.load();
+        scrub_previews_ = 0;
+        scrub_preview_hits_ = scrub_preview_misses_ = 0;
+        scrub_preview_evictions_ = 0;
+        scrub_preview_ms_sum_ = 0.0;
+        scrub_preview_ms_max_ = 0.0;
         // Fresh drag: reset the pipeline's scrub-audio state so the first move
         // always feeds.
         audio_.begin_scrub();
@@ -118,14 +123,27 @@ void SequenceController::end_scrub() {
     scrubbing_.store(false);
     const double drag_ms =
         std::chrono::duration<double, std::milli>(Clock::now() - scrub_start_).count();
-    qWarning() << "[scrub] END released_at=" << current_frame_.load()
-               << "was_playing=" << playing_.load()
-               << "audio_open=" << scrub_audio_open_
-               << "drag_ms=" << drag_ms
-               << "first=" << scrub_first_
-               << "span=" << (current_frame_.load() - scrub_first_)
-               << "repositions=" << audio_.repositions_since_begin()
-               << "pending=" << audio_out_.pending_frames();
+    const auto pv = decoder_.take_preview_stats();
+    scrub_preview_hits_ += pv.hits;
+    scrub_preview_misses_ += pv.misses;
+    scrub_preview_evictions_ += pv.evictions;
+    const double avg_pv_ms =
+        scrub_previews_ > 0 ? scrub_preview_ms_sum_ / static_cast<double>(scrub_previews_) : 0.0;
+    qWarning().nospace()
+        << "[scrub] END released_at=" << current_frame_.load()
+        << " was_playing=" << playing_.load()
+        << " audio_open=" << scrub_audio_open_
+        << " drag_ms=" << QString::number(drag_ms, 'f', 0)
+        << " first=" << scrub_first_
+        << " span=" << (current_frame_.load() - scrub_first_)
+        << " previews=" << scrub_previews_
+        << " pv_hits=" << scrub_preview_hits_
+        << " pv_misses=" << scrub_preview_misses_
+        << " pv_evicts=" << scrub_preview_evictions_
+        << " pv_avg_ms=" << QString::number(avg_pv_ms, 'f', 1)
+        << " pv_max_ms=" << QString::number(scrub_preview_ms_max_, 'f', 1)
+        << " repositions=" << audio_.repositions_since_begin()
+        << " pending=" << audio_out_.pending_frames();
     scrub_drag_active_ = false;
     // Resolve the scrub-audio device: drop it if we opened it for audible
     // scrubbing while paused, so the next Play opens and re-anchors fresh. If we
@@ -236,21 +254,44 @@ void SequenceController::worker_loop() {
                 present_next();
             }
             const auto t_done = Clock::now();
-            if (debug_enabled()) {
-                static int dt_iter_ = 0;
-                if ((dt_iter_++ % 15) == 0) {
-                    const double fill_ms =
-                        std::chrono::duration<double, std::milli>(t_filled - t_loop).count();
-                    const double wait_ms =
-                        std::chrono::duration<double, std::milli>(t_waited - t_before_wait).count();
-                    const double pres_ms =
-                        std::chrono::duration<double, std::milli>(t_done - t_waited).count();
-                    const double late_ms =
-                        std::chrono::duration<double, std::milli>(t_before_wait - nwp).count();
-                    qDebug() << "loop: iter fill_ms=" << fill_ms << "wait_ms=" << wait_ms
-                             << "present_ms=" << pres_ms << "late_ms=" << late_ms
-                             << "woke_by_cmd=" << wat
-                             << "skipped=" << skipped;
+            // Always-on ~1/s pipeline-latency aggregate (the "how fast things
+            // happen in the UX" numbers): fill = decode-ahead cost, wait = time
+            // parked on the pacing clock, present = viewer frame hand-off, late
+            // = how far past the scheduled present we were. Sustained present_ms
+            // or late_ms >> interval means the viewer/emit path is the bottleneck;
+            // a climbing fill_ms means decode is.
+            {
+                const double fill_ms =
+                    std::chrono::duration<double, std::milli>(t_filled - t_loop).count();
+                const double wait_ms =
+                    std::chrono::duration<double, std::milli>(t_waited - t_before_wait).count();
+                const double pres_ms =
+                    std::chrono::duration<double, std::milli>(t_done - t_waited).count();
+                const double late_ms =
+                    std::chrono::duration<double, std::milli>(t_before_wait - nwp).count();
+                static auto loop_agg_at = Clock::now();
+                static int loop_agg_n = 0;
+                static double loop_fill = 0.0, loop_wait = 0.0, loop_pres = 0.0;
+                static double loop_late_max = 0.0;
+                ++loop_agg_n;
+                loop_fill += fill_ms;
+                loop_wait += wait_ms;
+                loop_pres += pres_ms;
+                loop_late_max = std::max(loop_late_max, late_ms);
+                const auto lnow = Clock::now();
+                if (loop_agg_n == 1 || lnow - loop_agg_at >= std::chrono::seconds(1)) {
+                    loop_agg_at = lnow;
+                    qWarning().nospace()
+                        << "[loop] n=" << loop_agg_n
+                        << " fill_ms=" << QString::number(loop_fill / loop_agg_n, 'f', 2)
+                        << " wait_ms=" << QString::number(loop_wait / loop_agg_n, 'f', 2)
+                        << " present_ms=" << QString::number(loop_pres / loop_agg_n, 'f', 2)
+                        << " late_max_ms=" << QString::number(loop_late_max, 'f', 2)
+                        << " wake_by_cmd=" << wat
+                        << " skipped=" << skipped;
+                    loop_agg_n = 0;
+                    loop_fill = loop_wait = loop_pres = 0.0;
+                    loop_late_max = 0.0;
                 }
             }
         } else {
@@ -350,6 +391,10 @@ void SequenceController::handle_play() {
     if (audio_.is_active()) audio_out_.set_hold_active(true);
     playing_.store(true);
     next_present_ = Clock::now();
+    play_t0_ = Clock::now();
+    play_armed_ = true;
+    aud_baseline_frames_ = audio_out_.audible_position_frames();
+    aud_armed_ = audio_.is_active();
     audio_out_.log_pipeline_stats("play-post");
     qWarning() << "[transport] PLAY at=" << current_frame_.load()
                << "/" << total_frames_.load();
@@ -363,6 +408,9 @@ void SequenceController::handle_seek(const int64_t frame_number) {
     if (last > 0) target = std::clamp(target, int64_t{0}, last - 1);
     if (target < 0) target = 0;
 
+    seek_arm_t0_ = Clock::now();
+    seek_present_armed_ = true;
+    seek_present_target_ = target;
     reset_ready();
     // SonicSync (MLT "audio rides with its frame" model): the seek-hold gate marks
     // the window — from now until the decoded target frame reaches the display —
@@ -402,6 +450,16 @@ void SequenceController::handle_seek(const int64_t frame_number) {
     sonicsync_.end_seek_hold();
     emit frame_ready(std::move(frame));
     emit position_changed(target);
+    // Seek->first-present latency: when paused this present IS the first one;
+    // while playing, present_next delivers the armed target on its next pass.
+    if (!was_playing && seek_present_armed_) {
+        seek_present_armed_ = false;
+        const double d =
+            std::chrono::duration<double, std::milli>(Clock::now() - seek_arm_t0_).count();
+        qWarning().nospace() << "[transport] seek->first_present at=" << target
+                             << " latency_ms=" << QString::number(d, 'f', 0)
+                             << " decode_ms=" << QString::number(decode_ms, 'f', 1);
+    }
     const auto preroll_t0 = Clock::now();
     if (was_playing) audio_.preroll(target, kAudioLeadMs, was_playing);
     const double preroll_ms = std::chrono::duration<double, std::milli>(Clock::now() - preroll_t0).count();
@@ -459,6 +517,11 @@ void SequenceController::handle_seek_preview(const int64_t frame_number) {
     const auto preview_t0 = Clock::now();
     auto frame = frame_for_playhead_preview(target, kPreviewMaxDim);
     const double preview_ms = std::chrono::duration<double, std::milli>(Clock::now() - preview_t0).count();
+    if (scrub_drag_active_) {
+        ++scrub_previews_;
+        scrub_preview_ms_sum_ += preview_ms;
+        scrub_preview_ms_max_ = std::max(scrub_preview_ms_max_, preview_ms);
+    }
     const bool got = frame != nullptr && (frame->nv12 || frame->a || frame->b);
     // Re-check AFTER the decode: an even newer target may have queued while we
     // were decoding. Don't present (or move the playhead to) a frame that is no
@@ -606,10 +669,33 @@ void SequenceController::present_next() {
                                   : Clock::now() - next_present_;
         const auto margin = std::chrono::duration_cast<Clock::duration>(intv_us + intv_us / 4);
         if (lateness > margin) {
+            // TWO-TIER OVERRUN POLICY. A late present falls into one of:
+            //  - MODEST overrun (bounded, <= ~1s): decode-throughput shortfall
+            //    (e.g. the 60fps clip decoded by the fallback software path).
+            //    The old drop-to-realtime fired on EVERY such present: it cleared
+            //    the lookahead, then re-decoded kLookahead (24) frames from the
+            //    jumped playhead — a ~1.4s block per presented frame that the
+            //    30fps pacing budget re-triggered, producing the sustained 1-2s
+            //    cadence / fps_window ~5 stall at ~frame 456. Instead re-stamp
+            //    the pacing clock so the already-decoded queue presents at the
+            //    natural decode rate; video and audio then pace down together as
+            //    smooth slow-motion instead of stutter-burst.
+            //  - SEVERE overrun (> ~1s): a long single stall (re-seek, scrub
+            //    hold). Hard drop-to-realtime: jump the playhead to the
+            //    realtime-expected frame (SonicSync-capped) and re-anchor pacing
+            //    + audio feed, so the timeline re-joins wall-clock.
+            const auto hard_lateness =
+                std::chrono::duration_cast<Clock::duration>(intv_us + intv_us / 4 +
+                                                            std::chrono::milliseconds(1000));
+            if (lateness <= hard_lateness) {
+                next_present_ = Clock::now();
+            } else {
             // Frames of realtime we owe: advance the playhead (dropping frames)
             // so the next present lands on the realtime-expected frame.
             const int64_t owed = static_cast<int64_t>((lateness + intv_us / 2) / intv_us);
             int64_t target_catch = current_frame_.load() + owed;
+            ++drop_events_;
+            drop_frames_ += owed;
 
             // === MASTER-CLOCK CAP (SonicSync) ===
             // Advancing the playhead ahead of what the speaker has actually
@@ -631,6 +717,7 @@ void SequenceController::present_next() {
                     if (playback_debug())
                         qDebug() << "playback: drop capped audible_seq=" << aud_seq
                                  << "target=" << target_catch << "->" << capped;
+                    ++cap_events_;
                     target_catch = capped;
                 }
             }
@@ -643,6 +730,7 @@ void SequenceController::present_next() {
             audio_.advance_feed_for_drop(new_frame);
             // Re-anchor the pacing clock to now so following waits are non-trivial.
             next_present_ = Clock::now();
+            }
         }
     }
 
@@ -658,14 +746,15 @@ void SequenceController::present_next() {
     // somehow not prefetched (fast seek right at the boundary), fall back to
     // an inline decode so we never skip a frame.
     canvas::core::RenderFramePtr frame;
-    {
+    const bool popped_ready = [&] {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!ready_.empty() && ready_base_ == want) {
             frame = std::move(ready_.front());
             ready_.pop_front();
             ++ready_base_;
         }
-    }
+        return frame != nullptr;
+    }();
     if (!frame) {
         fill_lookahead(want);
         std::lock_guard<std::mutex> lock(mutex_);
@@ -675,6 +764,14 @@ void SequenceController::present_next() {
             ++ready_base_;
         }
     }
+    {
+        // Stall-prediction telemetry: how many frames the lookahead still held
+        // after this pop (0 = decode-bound), and whether we had to inline-decodes.
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_ready_depth_ = static_cast<int64_t>(ready_.size());
+    }
+    if (popped_ready) ++present_ready_hits_;
+    else if (frame) ++present_inline_;
 
     const double rate = fps_.load();
     const auto interval = rate > 0.0
@@ -694,6 +791,34 @@ void SequenceController::present_next() {
     }
 
     current_frame_.store(want);
+
+    // Transport-latency milestones (one always-on line each, fired once).
+    const double dt_present = play_armed_
+        ? std::chrono::duration<double, std::milli>(Clock::now() - play_t0_).count()
+        : 0.0;
+    if (play_armed_) {
+        play_armed_ = false;
+        qWarning().nospace()
+            << "[transport] play->first_present frame=" << want
+            << " latency_ms=" << QString::number(dt_present, 'f', 0);
+    }
+    if (aud_armed_ && audio_.is_active() &&
+        audio_out_.audible_position_frames() > aud_baseline_frames_) {
+        aud_armed_ = false;
+        const double d =
+            std::chrono::duration<double, std::milli>(Clock::now() - play_t0_).count();
+        qWarning().nospace()
+            << "[transport] play->first_audible frame=" << want
+            << " latency_ms=" << QString::number(d, 'f', 0);
+    }
+    if (seek_present_armed_ && want == seek_present_target_) {
+        seek_present_armed_ = false;
+        const double d =
+            std::chrono::duration<double, std::milli>(Clock::now() - seek_arm_t0_).count();
+        qWarning().nospace() << "[transport] seek->first_present at=" << want
+                             << " latency_ms=" << QString::number(d, 'f', 0);
+    }
+
     static auto last_exact = Clock::now();
     static int exact_log_ = 0;
     if (playback_debug() && (exact_log_++ % 10) == 0) {
@@ -756,7 +881,17 @@ void SequenceController::present_next() {
             << " fps_window="
             << QString::number(contiguous && win_s > 0.0 ? walk / win_s : 0.0, 'f', 1)
             << (contiguous ? "" : " (non-contiguous)")
+            << " ready=" << last_ready_depth_
+            << " ready_hits=" << present_ready_hits_
+            << " inline=" << present_inline_
+            << " drops=" << drop_events_
+            << " drop_frames=" << drop_frames_
+            << " cap=" << cap_events_
+            << " hold_max_ms=" << QString::number(sonicsync_.hold_stats().hold_ms_max, 'f', 0)
+            << " hold_cnt=" << sonicsync_.hold_stats().hold_count
             << " audio=" << audio_.is_active();
+        present_ready_hits_ = present_inline_ = 0;
+        drop_events_ = drop_frames_ = cap_events_ = 0;
     }
 
     emit frame_ready(std::move(frame));

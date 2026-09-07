@@ -141,6 +141,24 @@ private:
     unsigned scrub_log_tick_ = 0;
     std::chrono::steady_clock::time_point scrub_start_{};
     int64_t scrub_first_ = 0;
+    // Per-drag scrub-preview telemetry (reset on begin_scrub, reported by
+    // [scrub] END): preview decodes, LRU hits vs misses, and decode time, so a
+    // drag that fought the preview cache (miss-heavy, slow) is attributable.
+    std::uint64_t scrub_previews_ = 0;
+    std::uint64_t scrub_preview_hits_ = 0;
+    std::uint64_t scrub_preview_misses_ = 0;
+    std::uint64_t scrub_preview_evictions_ = 0;
+    double scrub_preview_ms_sum_ = 0.0;
+    double scrub_preview_ms_max_ = 0.0;
+    // Transport-latency telemetry: play->first-present, play->first-audible, and
+    // commit-seek->first-present, one always-on [transport] line each milestone.
+    std::chrono::steady_clock::time_point play_t0_{};
+    bool play_armed_ = false;
+    std::uint64_t aud_baseline_frames_ = 0;
+    bool aud_armed_ = false;
+    std::chrono::steady_clock::time_point seek_arm_t0_{};
+    bool seek_present_armed_ = false;
+    std::int64_t seek_present_target_ = 0;
     // Audible-scrub preference. When true, each settled scrub position writes a
     // short audio grain decoded from the media at that time, so scrubbing "sounds
     // out" the media position. Independent of normal playback audio.
@@ -165,6 +183,17 @@ private:
     // Contiguous frame-walks since the last [play] health sample (drives
     // fps_window without the stale-sample `non-contiguous` artifact).
     int64_t contig_delta_ = 0;
+    // Stall-prediction counters for the [play] health line, reset every sample:
+    // how many presents popped an already-decoded lookahead frame vs fell back
+    // to an inline decode (the real stall cause), plus drop-to-realtime / cap
+    // burst stats (see present_next). `last_ready_depth_` is the lookahead
+    // remaining after the most recent pop — near-zero means we're decode-bound.
+    int64_t present_ready_hits_ = 0;
+    int64_t present_inline_ = 0;
+    int64_t drop_events_ = 0;
+    int64_t drop_frames_ = 0;
+    int64_t cap_events_ = 0;
+    int64_t last_ready_depth_ = 0;
 
     // Audio output state. The concrete sink is owned here (volume/mute/dim and
     // scrub-end telemetry read it directly) and injected into AudioPipeline,

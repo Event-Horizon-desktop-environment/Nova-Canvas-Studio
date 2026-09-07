@@ -63,6 +63,12 @@ public:
     uint64_t stat_dropped_frames() const;
     uint64_t stat_written_frames() const override;
     uint64_t stat_write_errors() const;
+    // Silence holds fed by the writer (device kept alive between real chunks) and
+    // ALSA XRUN recoveries since open. Exposed for the [audio:feed] / pipeline
+    // stats line so starvation-vs-underrun is attributable.
+    [[nodiscard]] uint64_t stat_silence_holds() const;
+    [[nodiscard]] uint64_t stat_silence_hold_frames() const;
+    [[nodiscard]] uint64_t stat_xruns() const;
 
     // Approximate media-time position (in frames at the opened sample_rate) that is
     // currently AUDIBLE at the speaker — accounts for DMA/device data ahead of the

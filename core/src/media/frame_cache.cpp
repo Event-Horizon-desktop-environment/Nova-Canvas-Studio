@@ -8,7 +8,11 @@ namespace canvas::core {
 VideoFramePtr FrameCache::get(const int64_t frame_number) {
     const std::lock_guard lock(mutex_);
     const auto it = map_.find(frame_number);
-    if (it == map_.end()) return nullptr;
+    if (it == map_.end()) {
+        ++misses_;
+        return nullptr;
+    }
+    ++hits_;
     lru_.splice(lru_.end(), lru_, it->second.second);
     return it->second.first;
 }
@@ -31,6 +35,7 @@ void FrameCache::evict_locked() {
         if (it == map_.end()) continue;
         bytes_ -= it->second.first->bytes();
         map_.erase(it);
+        ++evictions_;
     }
 }
 
@@ -39,11 +44,17 @@ void FrameCache::clear() {
     map_.clear();
     lru_.clear();
     bytes_ = 0;
+    hits_ = misses_ = evictions_ = 0;
 }
 
 std::size_t FrameCache::size_bytes() const {
     const std::lock_guard lock(mutex_);
     return bytes_;
+}
+
+FrameCache::Stats FrameCache::stats() const {
+    const std::lock_guard lock(mutex_);
+    return Stats{hits_, misses_, evictions_, bytes_, max_bytes_};
 }
 
 }

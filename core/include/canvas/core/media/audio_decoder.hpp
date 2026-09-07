@@ -36,6 +36,12 @@ public:
     void seek(int64_t start_sample, int out_sample_rate);
     void reset();
 
+    // Cumulative number of container-seek-and-discard resyncs performed. Every
+    // resync restarts the sequential walk from the stream start, so a steady
+    // playback run should never tick this; growth mid-playback is a red flag the
+    // playhead keeps jumping outside the decoded window (feed/watermark mismatch).
+    [[nodiscard]] std::uint64_t resync_count() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

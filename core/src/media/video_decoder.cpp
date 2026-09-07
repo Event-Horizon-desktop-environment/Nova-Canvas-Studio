@@ -13,12 +13,58 @@
 
 namespace canvas::core {
 
+namespace {
+
+// Read-stall detector (~1/s): counts av_read_frame calls that blew past the
+// 20ms "smooth demux" bound. A spiky stall_ms while decode ms stays flat is the
+// solvent wrapper around slow/disconnected storage; it lights up long before
+// the decode-time aggregates do.
+void read_stall_tick(const double ms) {
+    static auto s_at = std::chrono::steady_clock::now();
+    static int s_total = 0, s_stalls = 0;
+    static double s_over_ms = 0.0, s_max = 0.0;
+    ++s_total;
+    if (ms >= 20.0) {
+        ++s_stalls;
+        s_over_ms += ms - 20.0;
+        s_max = std::max(s_max, ms);
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (s_total == 1 || now - s_at >= std::chrono::seconds(1)) {
+        s_at = now;
+        if (s_stalls > 0)
+            ::canvas::core::log::log_warning(
+                "[io] reads=%d stalls_ge20ms=%d over_ms=%.0f max_ms=%.0f",
+                s_total, s_stalls, s_over_ms, s_max);
+        s_total = 0;
+        s_stalls = 0;
+        s_over_ms = 0.0;
+        s_max = 0.0;
+    }
+}
+
+// Consecutive-decode-failure burst tracker. Three errors in a row across the
+// walk loops is the signature of a dropped NVDEC session, driver reset, or a
+// corrupt media tail — one warning at the crossing, reset on any success.
+void decode_fail(const char* where) {
+    static int burst = 0;
+    if (++burst == 3)
+        ::canvas::core::log::log_warning("[dec] fail_burst=%d where=%s", burst, where);
+}
+void decode_ok() {
+    static int burst = 0;
+    burst = 0;
+}
+
+}  // namespace
+
 VideoDecoder::~VideoDecoder() { close(); }
 
 bool VideoDecoder::open(const std::string& path, std::string* error,
                         const AVBufferRef* hw_device_ctx) {
     close();
     path_ = path;
+    const auto open_t0 = std::chrono::steady_clock::now();
 
     AVFormatContext* ctx = nullptr;
     if (avformat_open_input(&ctx, path.c_str(), nullptr, nullptr) < 0) {
@@ -204,8 +250,21 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
     CANVAS_LOG("decode open: audio=%s rate=%d ch=%d",
            audio_stream_ >= 0 ? "yes" : "no", audio_sample_rate_, audio_channels_);
 
+    // Always-on: per-media open cost. Media that takes seconds to open (giant
+    // mp4 index, slow disk, network mount) is the #1 "paused scrub hangs when it
+    // first touches a clip" cause; the [dec] ms number below is whole-file.
+    const double open_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - open_t0).count();
+    ::canvas::core::log::log_warning(
+        "[dec] open media=%s ms=%.0f dims=%dx%d fps=%.3f frames=%lld hw=%s audio=%s",
+        path.c_str(), open_ms, width_, height_, frame_rate_,
+        static_cast<long long>(total_frames_), hw_avail_ ? "hw" : "sw",
+        audio_stream_ >= 0 ? "yes" : "no");
+
     next_frame_ = 0;
     draining_ = false;
+    hw_engaged_ = false;
+    soft_only_ = false;
     return true;
 }
 
@@ -243,6 +302,8 @@ void VideoDecoder::close() {
     total_frames_ = -1;
     next_frame_ = 0;
     draining_ = false;
+    hw_engaged_ = false;
+    soft_only_ = false;
     stream_tb_ = {0, 1};
     hw_pix_fmt_ = AV_PIX_FMT_NONE;
     hw_avail_ = false;
@@ -306,6 +367,7 @@ VideoFramePtr VideoDecoder::decode_next() {
             av_frame_unref(av_frame_);
             if (!out) continue;
             next_frame_ = number + 1;
+            decode_ok();
             return out;
         }
         if (ret == AVERROR_EOF) {
@@ -320,11 +382,15 @@ VideoFramePtr VideoDecoder::decode_next() {
         if (ret != AVERROR(EAGAIN)) {
             log::log_error("video_decoder: decode_next ERROR ret=%d at frame %lld",
                             ret, (long long)next_frame_);
+            decode_fail("decode_next");
             return nullptr;
         }
         if (draining_) return nullptr;
         for (;;) {
+            const auto rd_t0 = std::chrono::steady_clock::now();
             const int r = av_read_frame(fmt_ctx_, packet_);
+            read_stall_tick(std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - rd_t0).count());
             if (r < 0) {
                 draining_ = true;
                 avcodec_send_packet(codec_ctx_, nullptr);
@@ -414,7 +480,10 @@ VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int ma
                             if (r2 != AVERROR(EAGAIN)) return nullptr;
                             int pr = -1;
                             for (;;) {
+                                const auto rdr_t0 = std::chrono::steady_clock::now();
                                 pr = av_read_frame(fmt_ctx_, packet_);
+                                read_stall_tick(std::chrono::duration<double, std::milli>(
+                                                    std::chrono::steady_clock::now() - rdr_t0).count());
                                 if (pr == AVERROR_EOF) { draining_ = true; break; }
                                 if (pr < 0) break;
                                 if (packet_->stream_index != video_stream_) {
@@ -436,9 +505,10 @@ VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int ma
                     next_frame_ = last_number + 1;
                     const double df_ms = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - df_t0).count();
-                    ::canvas::core::log::log_error(
-                        "vdecode forward target=%lld got=%lld CAPPED fast_over_frames=%d max=%d ms=%.2f",
-                        (long long)target, (long long)last_number, fast_over, max_over, df_ms);
+::canvas::core::log::log_error(
+                    "vdecode forward target=%lld got=%lld CAPPED fast_over_frames=%d max=%d ms=%.2f",
+                    (long long)target, (long long)last_number, fast_over, max_over, df_ms);
+                    decode_ok();
                     return out;
                 }
                 continue;
@@ -453,6 +523,7 @@ VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int ma
             ::canvas::core::log::log_error(
                 "vdecode forward target=%lld got=%lld fast_over_frames=%d ms=%.2f",
                 (long long)target, (long long)number, fast_over, df_ms);
+            decode_ok();
             return out;
         }
         if (ret == AVERROR_EOF) {
@@ -465,11 +536,15 @@ VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int ma
         if (ret != AVERROR(EAGAIN)) {
             log::log_error("video_decoder: decode_forward_to ERROR ret=%d target=%lld",
                             ret, (long long)target);
+            decode_fail("decode_forward_to");
             return nullptr;
         }
         if (draining_) return nullptr;
         for (;;) {
+            const auto rd_t0 = std::chrono::steady_clock::now();
             const int r = av_read_frame(fmt_ctx_, packet_);
+            read_stall_tick(std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - rd_t0).count());
             if (r < 0) {
                 draining_ = true;
                 avcodec_send_packet(codec_ctx_, nullptr);
@@ -497,72 +572,120 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
     // used to fail and this function returned null before decoding at all.
     if (!hw_avail_ || hw_pix_fmt_ != AV_PIX_FMT_CUDA) return nullptr;
     CANVAS_LOG("video_decoder: decode_to_hw target=%lld max_over=%d", (long long)target, max_over);
+    // A CUDA decode session is primed by the bitstream's owning keyframe (the
+    // AV1 sequence header). Entering mid-GOP makes FFmpeg transparently emit
+    // SOFTWARE frames from a hardware-configured decoder; the NV12 composite
+    // kernel then fails and the caller drops to the full-res CPU RGBA path for
+    // the whole stretch (~6-15fps on 2K60 instead of 30). Detect the software
+    // emission once and re-anchor on the owning keyframe so NVDEC actually
+    // engages; once engaged, every later seek keeps producing device frames.
     int fast_over = 0;
-    for (;;) {
-        const int ret = avcodec_receive_frame(codec_ctx_, av_frame_);
-        if (ret == 0) {
-            int64_t ticks = av_frame_->best_effort_timestamp;
-            if (ticks == AV_NOPTS_VALUE) ticks = av_frame_->pts;
-            const bool have_ts = ticks != AV_NOPTS_VALUE;
-            const double secs = have_ts
-                ? static_cast<double>(ticks) * av_q2d(stream_tb_)
-                : static_cast<double>(next_frame_) / frame_rate_;
-            const int64_t number =
-                std::max<int64_t>(static_cast<int64_t>(std::llround(secs * frame_rate_)), 0);
-
-            if (number < target) {
-                // Fast-over this intermediate GPU frame without downloading it. `av_frame_` is
-                // a single reused buffer, so count first and only unref if continuing.
-                ++fast_over;
-                if (max_over > 0 && fast_over >= max_over) {
-                    // Too far at preview cost (sparse-keyframe GOP): return the
-                    // frame just reached on the device as an approximate teaser;
-                    // the next move resumes from here. Borrowed like the exact
-                    // target path (caller must consume before the next decode).
-                    ::canvas::core::log::log_error(
-                        "vdecode hw-forward target=%lld got=%lld CAPPED fast_over_frames=%d max=%d",
-                        (long long)target, (long long)number, fast_over, max_over);
-                    next_frame_ = number + 1;
-                    return av_frame_;
-                }
-                av_frame_unref(av_frame_);
-                next_frame_ = number + 1;
-                continue;
-            }
-            // Target (or next frame at/after it) on the device.
-            next_frame_ = number + 1;
-            CANVAS_LOG("video_decoder: decode_to_hw OK target=%lld got=%lld",
-                   (long long)target, (long long)number);
-            return av_frame_;
-        }
-        if (ret == AVERROR_EOF) {
-            if (next_frame_ > 0 && (last_frame_ < 0 || next_frame_ - 1 < last_frame_))
-                last_frame_ = next_frame_ - 1;
-            CANVAS_LOG("video_decoder: decode_to_hw EOF at frame %lld", (long long)next_frame_);
-            return nullptr;
-        }
-        if (ret != AVERROR(EAGAIN)) {
-            log::log_error("video_decoder: decode_to_hw ERROR ret=%d target=%lld",
-                            ret, (long long)target);
-            return nullptr;
-        }
-        if (draining_) return nullptr;
-        for (;;) {
-            const int r = av_read_frame(fmt_ctx_, packet_);
-            if (r < 0) {
-                draining_ = true;
-                avcodec_send_packet(codec_ctx_, nullptr);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (attempt == 1) {
+            if (soft_only_) break;
+            const IframeEntry* entry = iframe_at_or_before(target);
+            if (entry) {
+                container_seek_seconds(entry->pts_seconds);
+                ::canvas::core::log::log_warning(
+                    "[dec] HW-ENGAGE target=%lld iframe=%lld gop_secs=%.3f",
+                    (long long)target, (long long)entry->frame, entry->pts_seconds);
+            } else if (frame_rate_ > 0.0 && target > 0) {
+                container_seek_seconds(static_cast<double>(target) / frame_rate_);
+            } else {
                 break;
             }
-            if (packet_->stream_index != video_stream_) {
-                av_packet_unref(packet_);
-                continue;
+            fast_over = 0;
+        }
+        for (;;) {
+            const int ret = avcodec_receive_frame(codec_ctx_, av_frame_);
+            if (ret == 0) {
+                int64_t ticks = av_frame_->best_effort_timestamp;
+                if (ticks == AV_NOPTS_VALUE) ticks = av_frame_->pts;
+                const bool have_ts = ticks != AV_NOPTS_VALUE;
+                const double secs = have_ts
+                    ? static_cast<double>(ticks) * av_q2d(stream_tb_)
+                    : static_cast<double>(next_frame_) / frame_rate_;
+                const int64_t number =
+                    std::max<int64_t>(static_cast<int64_t>(std::llround(secs * frame_rate_)), 0);
+
+                if (number < target) {
+                    // Fast-over this intermediate GPU frame without downloading it. `av_frame_` is
+                    // a single reused buffer, so count first and only unref if continuing.
+                    ++fast_over;
+                    if (max_over > 0 && fast_over >= max_over) {
+                        // Too far at preview cost (sparse-keyframe GOP): return the
+                        // frame just reached on the device as an approximate teaser;
+                        // the next move resumes from here. Borrowed like the exact
+                        // target path (caller must consume before the next decode).
+                        ::canvas::core::log::log_error(
+                            "vdecode hw-forward target=%lld got=%lld CAPPED fast_over_frames=%d max=%d",
+                            (long long)target, (long long)number, fast_over, max_over);
+                        next_frame_ = number + 1;
+                        return av_frame_;
+                    }
+                    av_frame_unref(av_frame_);
+                    next_frame_ = number + 1;
+                    continue;
+                }
+                // Target (or next frame at/after it) on the device.
+                next_frame_ = number + 1;
+                if (av_frame_->format != hw_pix_fmt_) {
+                    // SOFTWARE frame from a hardware-configured decoder (mid-GOP
+                    // entry; the owning keyframe never primed the CUDA session). On
+                    // the first attempt re-anchor so NVDEC engages; if the retry
+                    // still yields software, latch soft_only_ and hand it back — the
+                    // caller's GPU composite will fail and fall back to CPU RGBA,
+                    // which is exactly the behavior this re-anchor fixes.
+                    if (attempt == 0 && !hw_engaged_) {
+                        av_frame_unref(av_frame_);
+                        CANVAS_LOG("video_decoder: hw emitting software target=%lld got=%lld; "
+                                   "re-anchoring keyframe",
+                                   (long long)target, (long long)number);
+                        break;
+                    }
+                    if (attempt == 1) soft_only_ = true;
+                    return av_frame_;
+                }
+                hw_engaged_ = true;
+                CANVAS_LOG("video_decoder: decode_to_hw OK target=%lld got=%lld",
+                       (long long)target, (long long)number);
+                decode_ok();
+                return av_frame_;
             }
-            avcodec_send_packet(codec_ctx_, packet_);
-            av_packet_unref(packet_);
-            break;
+            if (ret == AVERROR_EOF) {
+                if (next_frame_ > 0 && (last_frame_ < 0 || next_frame_ - 1 < last_frame_))
+                    last_frame_ = next_frame_ - 1;
+                CANVAS_LOG("video_decoder: decode_to_hw EOF at frame %lld", (long long)next_frame_);
+                return nullptr;
+            }
+            if (ret != AVERROR(EAGAIN)) {
+                log::log_error("video_decoder: decode_to_hw ERROR ret=%d target=%lld",
+                                ret, (long long)target);
+                decode_fail("decode_to_hw");
+                return nullptr;
+            }
+            if (draining_) return nullptr;
+            for (;;) {
+                const auto rd_t0 = std::chrono::steady_clock::now();
+                const int r = av_read_frame(fmt_ctx_, packet_);
+                read_stall_tick(std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - rd_t0).count());
+                if (r < 0) {
+                    draining_ = true;
+                    avcodec_send_packet(codec_ctx_, nullptr);
+                    break;
+                }
+                if (packet_->stream_index != video_stream_) {
+                    av_packet_unref(packet_);
+                    continue;
+                }
+                avcodec_send_packet(codec_ctx_, packet_);
+                av_packet_unref(packet_);
+                break;
+            }
         }
     }
+    return nullptr;
 }
 
 const AVFrame* VideoDecoder::decode_to_hw_indexed(const int64_t target, const int max_over) {
@@ -634,6 +757,7 @@ VideoFramePtr VideoDecoder::make_rgba_frame(const AVFrame* src, const int64_t ti
     out->rgba.resize(out->stride * static_cast<std::size_t>(out_h));
 
     const bool scaled = (out_w != cvt->width) || (out_h != cvt->height);
+    const auto conv_t0 = std::chrono::steady_clock::now();
     sws_ctx_ = sws_getCachedContext(sws_ctx_, cvt->width, cvt->height,
                                     static_cast<AVPixelFormat>(cvt->format),
                                     out_w, out_h, AV_PIX_FMT_RGBA,
@@ -648,6 +772,36 @@ VideoFramePtr VideoDecoder::make_rgba_frame(const AVFrame* src, const int64_t ti
     uint8_t* dst_data[] = {out->rgba.data()};
     int dst_linesize[] = {static_cast<int>(out->stride)};
     sws_scale(sws_ctx_, cvt->data, cvt->linesize, 0, cvt->height, dst_data, dst_linesize);
+    convert_ms_ += std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - conv_t0).count();
+    // Always-on ~1s CPU-conversion telemetry: sws (with/hw-download) cost per
+    // RGBA frame, dims, and whether we downscaled (preview cap). Sustained
+    // avg_ms here is pure CPU cost in the decode path — the thing software
+    // playback is bound by when hw decode is off or the source is non-planar.
+    static auto sws_agg_at = std::chrono::steady_clock::now();
+    static int sws_agg_n = 0;
+    static double sws_agg_ms = 0.0, sws_max_ms = 0.0;
+    static int sws_scaled = 0;
+    static int sws_sw = 0, sws_sh = 0, sws_dw = 0, sws_dh = 0;
+    const double cvt_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - conv_t0).count();
+    ++sws_agg_n;
+    sws_agg_ms += cvt_ms;
+    sws_max_ms = std::max(sws_max_ms, cvt_ms);
+    if (scaled) ++sws_scaled;
+    sws_sw = cvt->width; sws_sh = cvt->height;
+    sws_dw = out_w; sws_dh = out_h;
+    const auto sws_now = std::chrono::steady_clock::now();
+    if (sws_agg_n == 1 || sws_now - sws_agg_at >= std::chrono::seconds(1)) {
+        sws_agg_at = sws_now;
+        log::log_warning(
+            "[decode] sws_avg_ms=%.2f sws_max_ms=%.2f n=%d scaled=%d src=%dx%d dst=%dx%d",
+            sws_agg_ms / static_cast<double>(sws_agg_n), sws_max_ms, sws_agg_n,
+            sws_scaled, sws_sw, sws_sh, sws_dw, sws_dh);
+        sws_agg_n = 0;
+        sws_agg_ms = sws_max_ms = 0.0;
+        sws_scaled = 0;
+    }
     av_frame_free(&sw);
     return out;
 }
@@ -691,21 +845,32 @@ VideoFramePtr VideoDecoder::decode_to_frame(int64_t target, int max_output_dim) 
     const bool dbg_hw = hw_pix_fmt_ != AV_PIX_FMT_NONE;
     VideoFramePtr dbg_out = nullptr;
 
-    // Give sequential decode a small window of forward progress to avoid a
+// Give sequential decode a small window of forward progress to avoid a
     // random seek on the common playback path. If we've already moved past the
     // target or it's far ahead, seek — a big sequential forward jump would block
     // for (distance * ~ms/frame) and stall scrubbing, while a keyframe seek
     // bounds decode-forward to a single GOP.
     if (target >= next_frame_ && target - next_frame_ < 64) {
-VideoFramePtr frame = decode_forward_to(target, kFullResMaxOver);
+        const auto seq_t0 = std::chrono::steady_clock::now();
+        VideoFramePtr frame = decode_forward_to(target, kFullResMaxOver);
+        const double seq_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - seq_t0).count();
         if (frame) {
             next_frame_ = frame->frame_number + 1;
             dbg_out = std::move(frame);
+            ++path_seq_;
+            path_seq_ms_ += seq_ms;
         } else {
             // Fall through to a (re)seek if sequential decode stalled.
         }
     }
-    if (!dbg_out) dbg_out = seek_to_frame_indexed(target, max_output_dim);
+    if (!dbg_out) {
+        const auto seek_t0 = std::chrono::steady_clock::now();
+        dbg_out = seek_to_frame_indexed(target, max_output_dim);
+        ++path_seeks_;
+        path_seek_ms_ += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - seek_t0).count();
+    }
 
     if (dbg_out) {
         const double dbg_ms = std::chrono::duration<double, std::milli>(
@@ -785,11 +950,26 @@ void VideoDecoder::build_iframe_index() {
         if (s_iframe_cache.count(path) || !s_iframe_inflight.insert(path).second) return;
     }
     std::thread([path, stream_tb, fps, vstream] {
+        const auto ib_t0 = std::chrono::steady_clock::now();
         auto built = build_iframe_sync(path, stream_tb, fps, vstream);
+        const double ib_ms = std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - ib_t0).count();
         std::lock_guard<std::mutex> lk2(s_iframe_mtx);
         if (built && built->size() > 1 && !s_iframe_cache.count(path))
             s_iframe_cache[path] = std::move(built);
         s_iframe_inflight.erase(path);
+        // Always-on: the I-frame index build is a one-shot, seconds-scale scan
+        // that first-touch scrub latency and export seek cost are gated on. A
+        // multi-second build on a long file is expected; repeated builds of the
+        // SAME path mean the in-flight/cache dedupe broke.
+        const double gop_s = (built && built->size() > 2)
+            ? (built->back().frame - built->front().frame) /
+                  (static_cast<double>(built->size()) * std::max(fps, 1.0))
+            : 0.0;
+        ::canvas::core::log::log_warning(
+            "[dec] iframe_index path=%s entries=%zu ms=%.0f gop_secs=%.2f cached=%d",
+            path.c_str(), built ? built->size() : 0, ib_ms, gop_s,
+            s_iframe_cache.count(path) > 0);
         CANVAS_LOG("video_decoder: iframe_index built for '%s' entries=%zu cached=%d",
                path.c_str(), built ? built->size() : 0,
                s_iframe_cache.count(path) > 0);
@@ -989,7 +1169,10 @@ AudioChunkPtr VideoDecoder::decode_audio(const int64_t start_sample, const int m
 
         // Need more packets: read the next audio packet.
         for (;;) {
+            const auto rd_t0 = std::chrono::steady_clock::now();
             const int r = av_read_frame(audio_fmt_ctx_, audio_packet_);
+            read_stall_tick(std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - rd_t0).count());
             if (r < 0) {
                 avcodec_send_packet(audio_codec_, nullptr);
                 break;
@@ -1018,6 +1201,18 @@ AudioChunkPtr VideoDecoder::decode_audio(const int64_t start_sample, const int m
     chunk->channels = ch;
     chunk->samples = std::move(out);
     return chunk;
+}
+
+VideoDecoder::PathStats VideoDecoder::path_stats() const {
+    return PathStats{path_seq_, path_seeks_, path_seq_ms_, path_seek_ms_, convert_ms_};
+}
+
+VideoDecoder::PathStats VideoDecoder::take_path_stats() {
+    const PathStats out = path_stats();
+    path_seq_ = path_seeks_ = 0;
+    path_seq_ms_ = path_seek_ms_ = 0.0;
+    convert_ms_ = 0.0;
+    return out;
 }
 
 }

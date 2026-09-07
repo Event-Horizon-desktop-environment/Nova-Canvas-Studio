@@ -4,12 +4,14 @@
 #include "canvas/core/project/project.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace canvas::core {
@@ -110,6 +112,8 @@ private:
     std::shared_ptr<const canvas::core::Project> active_project_;
     std::function<bool(const ExportSettings&, std::shared_ptr<const canvas::core::Project>&)>
         project_resolver_;
+    // Enqueue wall-time per job id (for the always-on dispatch wait_ms line).
+    std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> enqueued_at_;
 };
 
 }  // namespace canvas::core

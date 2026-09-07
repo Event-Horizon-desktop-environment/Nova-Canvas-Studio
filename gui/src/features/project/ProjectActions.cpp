@@ -18,6 +18,8 @@
 #include <QTreeWidgetItem>
 #include <QColor>
 #include <QStatusBar>
+
+#include <chrono>
 #include <QSize>
 
 #include <algorithm>
@@ -45,18 +47,15 @@ void MainWindow::new_untitled_project() {
     project_->bins.clear();
 }
 
-void MainWindow::ensure_tracks(std::size_t min_video, std::size_t min_audio) {
-    while (project_->sequence.video_tracks.size() < min_video) {
+void MainWindow::ensure_tracks_at(canvas::core::Track::Kind kind, std::size_t index) {
+    auto& tracks = kind == canvas::core::Track::Kind::Video ? project_->sequence.video_tracks
+                                                            : project_->sequence.audio_tracks;
+    while (tracks.size() <= index) {
         canvas::core::Track t;
-        t.kind = canvas::core::Track::Kind::Video;
-        t.name = "V" + std::to_string(project_->sequence.video_tracks.size() + 1);
-        project_->sequence.video_tracks.push_back(std::move(t));
-    }
-    while (project_->sequence.audio_tracks.size() < min_audio) {
-        canvas::core::Track t;
-        t.kind = canvas::core::Track::Kind::Audio;
-        t.name = "A" + std::to_string(project_->sequence.audio_tracks.size() + 1);
-        project_->sequence.audio_tracks.push_back(std::move(t));
+        t.kind = kind;
+        t.name = (kind == canvas::core::Track::Kind::Video ? "V" : "A") +
+                 std::to_string(tracks.size() + 1);
+        tracks.push_back(std::move(t));
     }
 }
 
@@ -71,7 +70,9 @@ bool MainWindow::place_selected_media(canvas::core::Placement mode) {
     return place_media_at(project_->media[idx].id, current_frame_, mode);
 }
 
-bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame, canvas::core::Placement mode) {
+bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
+                                canvas::core::Placement mode,
+                                std::optional<double> drop_scene_y) {
     if (!project_) return false;
     const canvas::core::MediaEntry* found = nullptr;
     for (const auto& m : project_->media) {
@@ -79,7 +80,6 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame, c
     }
     if (!found) return false;
 
-    ensure_tracks(1, 1);
     const bool audio_only = found->width <= 0 && found->height <= 0;
     const int64_t src_out = found->total_frames > 0
                                 ? found->total_frames
@@ -87,10 +87,19 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame, c
     const std::string base = QFileInfo(QString::fromStdString(found->path))
                                  .completeBaseName()
                                  .toStdString();
+    // The lane the drop targets: an existing channel of the media's kind under
+    // the drop point, or the per-kind index of a channel to CREATE there (drop
+    // into empty space). Without a drop point (pool double-click, menu) fall
+    // back to the first channel of the kind.
+    const auto kind = audio_only ? canvas::core::Track::Kind::Audio : canvas::core::Track::Kind::Video;
+    const int lane = drop_scene_y && timeline_
+                         ? timeline_->resolve_drop_lane(*drop_scene_y, kind).index
+                         : 0;
+    ensure_tracks_at(kind, static_cast<std::size_t>(lane));
 
-    // Pure audio media (mp3/flac/wav/...): lands as a single audio clip on A1.
-    // Creating a linked video half would put a dead video clip (no decode) on
-    // V1, so audio-only media stays audio-only.
+    // Pure audio media (mp3/flac/wav/...): lands as a single audio clip on the
+    // dropped audio lane. Creating a linked video half would put a dead video
+    // clip (no decode) on a video channel, so audio-only media stays audio-only.
     if (audio_only) {
         canvas::core::Clip aclip;
         aclip.media = found->id;
@@ -98,11 +107,11 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame, c
         aclip.src_in = 0;
         aclip.src_out = src_out;
         aclip.name = base + " Audio";
-        auto cmd = canvas::core::place_clip(project_->sequence, canvas::core::Track::Kind::Audio, 0,
-                                        std::move(aclip), mode);
+        auto cmd = canvas::core::place_clip(project_->sequence, canvas::core::Track::Kind::Audio,
+                                        static_cast<std::size_t>(lane), std::move(aclip), mode);
         if (!cmd) return false;
-        qWarning() << "[edit] PLACE-AUDIO media=" << media_id << "at=" << frame
-                   << "mode=" << static_cast<int>(mode)
+        qWarning() << "[edit] PLACE-AUDIO media=" << media_id << "track=" << lane
+                   << "at=" << frame << "mode=" << static_cast<int>(mode)
                    << "path=" << QString::fromStdString(found->path);
         undo_.record(std::move(cmd));
         has_unsaved_changes_ = true;
@@ -125,10 +134,14 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame, c
     aclip.src_out = clip.src_out;
     aclip.name = base + " Audio";
 
-    auto cmd = canvas::core::place_linked_clip(project_->sequence, 0, 0, std::move(clip),
-                                           std::move(aclip), mode);
+    // The linked audio half still needs a home: ensure at least one audio
+    // channel exists (A1), created below the video section when there is none.
+    ensure_tracks_at(canvas::core::Track::Kind::Audio, 0);
+
+    auto cmd = canvas::core::place_linked_clip(project_->sequence, static_cast<std::size_t>(lane), 0,
+                                           std::move(clip), std::move(aclip), mode);
     if (!cmd) return false;
-    qWarning() << "[edit] PLACE media=" << media_id << "at=" << frame
+    qWarning() << "[edit] PLACE media=" << media_id << "v_track=" << lane << "at=" << frame
                << "mode=" << static_cast<int>(mode)
                << "path=" << QString::fromStdString(found->path);
     undo_.record(std::move(cmd));
@@ -309,8 +322,15 @@ int MainWindow::import_media_paths(const QStringList& paths) {
     int imported = 0;
     for (const QString& path : paths) {
         std::string error;
+        // Always-on per-import probe timing: open/stream-probe cost, plus the
+        // media's own dims/fps/duration. A slow probe blocks the UI thread here,
+        // so climbing probe_ms across imports explains import stalls (it used to
+        // feel random whether a big file would hang).
+        const auto probe_t0 = std::chrono::steady_clock::now();
         canvas::core::VideoDecoder probe;
         if (probe.open(path.toStdString(), &error)) {
+            const double probe_ms = std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - probe_t0).count();
             canvas::core::MediaEntry entry;
             entry.id = static_cast<canvas::core::MediaId>(project_->media.size());
             entry.path = path.toStdString();
@@ -322,6 +342,14 @@ int MainWindow::import_media_paths(const QStringList& paths) {
             entry.has_audio = probe.has_audio();
             project_->media.push_back(entry);
             controller_.add_media(entry);
+
+            qWarning().nospace()
+                << "[import] VIDEO probe_ms=" << QString::number(probe_ms, 'f', 0)
+                << " dims=" << entry.width << "x" << entry.height
+                << " fps=" << QString::number(entry.fps, 'f', 3)
+                << " frames=" << entry.total_frames
+                << " audio=" << (entry.has_audio ? "yes" : "no")
+                << " path=" << path;
 
             status_->showMessage(tr("Imported: %1 (%2x%3, %4fps)")
                                      .arg(path)
@@ -340,6 +368,8 @@ int MainWindow::import_media_paths(const QStringList& paths) {
         // then agrees on where frames sit in time).
         canvas::core::AudioDecoder aprobe;
         if (aprobe.open(path.toStdString()) && aprobe.has_audio()) {
+            const double probe_ms = std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - probe_t0).count();
             const double seq_fps = project_->sequence.fps > 0.0 ? project_->sequence.fps : 30.0;
             const double secs = aprobe.duration_seconds();
             canvas::core::MediaEntry entry;
@@ -354,6 +384,12 @@ int MainWindow::import_media_paths(const QStringList& paths) {
             entry.has_audio = true;
             project_->media.push_back(entry);
             controller_.add_media(entry);
+
+            qWarning().nospace()
+                << "[import] AUDIO probe_ms=" << QString::number(probe_ms, 'f', 0)
+                << " secs=" << QString::number(secs, 'f', 1)
+                << " rate=" << aprobe.source_sample_rate()
+                << " path=" << path;
 
             status_->showMessage(tr("Imported: %1 (audio, %2s, %3 Hz)")
                                      .arg(path)

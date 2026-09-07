@@ -183,14 +183,7 @@ QWidget* build_transport_bar(MainWindow& mw) {
     auto* to_start = flat_btn(icon("to_start"), "Go to Start (Home)", false);
     auto* prev_frame = flat_btn(icon("step_back"), "Previous Frame (Left)", false);
     auto* stop_btn = flat_btn(icon("stop"), "Stop", false);
-    mw.play_button_ = new QPushButton(icon("play"), QString(), &mw);
-    mw.play_button_->setIconSize(QSize(18, 18));
-    mw.play_button_->setToolTip(MainWindow::tr("Play/Pause (Space)"));
-    mw.play_button_->setAutoDefault(false);
-    mw.play_button_->setCursor(Qt::PointingHandCursor);
-    mw.play_button_->setStyleSheet(
-        "QPushButton { background: transparent; border: none; padding: 4px; }"
-        "QPushButton:hover { background: rgba(255,255,255,0.08); border-radius: 6px; }");
+    mw.play_button_ = flat_btn(icon("play"), "Play/Pause (Space)", false);
     auto* next_frame = flat_btn(icon("step_forward"), "Next Frame (Right)", false);
     auto* to_end = flat_btn(icon("to_end"), "Go to End (End)", false);
     auto* loop_btn = flat_btn(icon("loop"), "Loop playback", true);
@@ -227,7 +220,7 @@ QWidget* build_transport_bar(MainWindow& mw) {
         mw.controller_.pause();
         mw.controller_.step(-1);
     });
-    QObject::connect(mw.play_button_, &QPushButton::clicked, &mw, [&mw] { mw.controller_.toggle_play_pause(); });
+    QObject::connect(mw.play_button_, &QToolButton::clicked, &mw, [&mw] { mw.controller_.toggle_play_pause(); });
     QObject::connect(stop_btn, &QToolButton::clicked, &mw, [&mw] {
         // Stop = pause with the playhead left in place (the standard transport stop).
         mw.controller_.pause();

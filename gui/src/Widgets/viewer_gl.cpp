@@ -11,6 +11,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 
 namespace canvas::gui {
 
@@ -48,6 +49,80 @@ void main() {
     fragColor = vec4(clamp(r, 0.0, 255.0),
                      clamp(g, 0.0, 255.0),
                      clamp(b, 0.0, 255.0), 1.0) / 255.0;
+}
+)";
+
+// NV12 transition blend: converts BOTH Y/UV pairs (A and incoming B) to RGB and
+// applies the same TransitionRenderMode math as kFragSrc. Samplers 2/3 read the
+// B planes, which the CPU binds to A's planes when no B frame exists (single-
+// clip fades) so MODE_FADEIN_A/FADEOUT never sample an unallocated texture.
+constexpr const char* kFragNv12Trans = R"(
+#version 330 core
+uniform sampler2D u_tex_y;
+uniform sampler2D u_tex_uv;      // A's interleaved CbCr
+uniform sampler2D u_tex_b_y;
+uniform sampler2D u_tex_b_uv;    // B's interleaved CbCr
+uniform int    u_mode;           // TransitionRenderMode
+uniform float  u_progress;
+uniform float  u_aspect;
+in vec2 v_uv;
+out vec4 fragColor;
+
+const int MODE_NONE         = 0;
+const int MODE_CROSSDISS    = 1;
+const int MODE_DIPBLACK     = 2;
+const int MODE_FADEOUT      = 3;
+const int MODE_FADEIN       = 4;
+const int MODE_WIPELEFT     = 5;
+const int MODE_WIPERIGHT    = 6;
+const int MODE_WIPEUP       = 7;
+const int MODE_WIPEDOWN     = 8;
+const int MODE_FADEIN_A     = 9;
+
+vec4 sample_yuv(sampler2D ytex, sampler2D uvtex, vec2 p) {
+    float Y  = texture(ytex,  p).r * 255.0;
+    float Cb = texture(uvtex, p).r * 255.0 - 128.0;
+    float Cr = texture(uvtex, p).g * 255.0 - 128.0;
+    float r = 1.164 * (Y - 16.0) + 1.596 * Cr;
+    float g = 1.164 * (Y - 16.0) - 0.392 * Cb - 0.813 * Cr;
+    float b = 1.164 * (Y - 16.0) + 2.017 * Cb;
+    return vec4(clamp(r, 0.0, 255.0),
+                clamp(g, 0.0, 255.0),
+                clamp(b, 0.0, 255.0), 1.0) / 255.0;
+}
+
+void main() {
+    vec4 a = sample_yuv(u_tex_y, u_tex_uv, v_uv);
+    if (u_mode == MODE_NONE) { fragColor = a; return; }
+    vec4 b = sample_yuv(u_tex_b_y, u_tex_b_uv, v_uv);
+    float t = clamp(u_progress, 0.0, 1.0);
+
+    if (u_mode == MODE_FADEIN_A) { fragColor = a * t; return; }
+    if (u_mode == MODE_CROSSDISS) { fragColor = mix(a, b, t); return; }
+    if (u_mode == MODE_DIPBLACK) {
+        float phase = t < 0.5 ? (2.0 * t) : 1.0;
+        vec4 black = vec4(0.0, 0.0, 0.0, 1.0);
+        vec4 first = mix(a, black, phase);
+        if (t < 0.5) { fragColor = first; return; }
+        fragColor = mix(black, b, 2.0 * (t - 0.5));
+        return;
+    }
+    if (u_mode == MODE_FADEOUT) { fragColor = a * (1.0 - t); return; }
+    if (u_mode == MODE_FADEIN) { fragColor = b * t; return; }
+
+    vec2 uv = v_uv;
+    float edge;
+    if (u_mode == MODE_WIPELEFT)  edge = 1.0 - t;
+    else if (u_mode == MODE_WIPERIGHT) edge = t;
+    else if (u_mode == MODE_WIPEUP)   edge = 1.0 - t;
+    else edge = t;
+    float c;
+    if (u_mode == MODE_WIPELEFT || u_mode == MODE_WIPERIGHT) c = uv.x;
+    else c = uv.y;
+    float feather = 0.02;
+    float blend = smoothstep(edge - feather, edge + feather, c);
+    fragColor = mix(a, b, blend);
+    return;
 }
 )";
 
@@ -188,6 +263,7 @@ void ViewerGL::clear() {
     texture_valid_ = false;
     texture_second_valid_ = false;
     nv12_valid_ = false;
+    nv12_b_valid_ = false;
     texture_dirty_ = false;
     update();
 }
@@ -221,6 +297,12 @@ void ViewerGL::initializeGL() {
     program_nv12_->addShaderFromSourceCode(QOpenGLShader::Vertex, kVertexSrc);
     program_nv12_->addShaderFromSourceCode(QOpenGLShader::Fragment, kFragNv12Src);
     program_nv12_->link();
+
+    // Four-sampler variant for transitions drawn from hardware planes (A + B).
+    program_nv12_trans_ = std::make_unique<QOpenGLShaderProgram>();
+    program_nv12_trans_->addShaderFromSourceCode(QOpenGLShader::Vertex, kVertexSrc);
+    program_nv12_trans_->addShaderFromSourceCode(QOpenGLShader::Fragment, kFragNv12Trans);
+    program_nv12_trans_->link();
 
     // Unit quad covering NDC in [-1,1]; aspect/letterboxing is handled by
     // adjusting the quad positions each frame from the texture aspect.
@@ -266,6 +348,16 @@ void ViewerGL::initializeGL() {
     texture_nv12_uv_->setMagnificationFilter(QOpenGLTexture::Linear);
     texture_nv12_uv_->setWrapMode(QOpenGLTexture::ClampToEdge);
 
+    texture_nv12_b_y_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+    texture_nv12_b_y_->setMinificationFilter(QOpenGLTexture::Linear);
+    texture_nv12_b_y_->setMagnificationFilter(QOpenGLTexture::Linear);
+    texture_nv12_b_y_->setWrapMode(QOpenGLTexture::ClampToEdge);
+
+    texture_nv12_b_uv_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+    texture_nv12_b_uv_->setMinificationFilter(QOpenGLTexture::Linear);
+    texture_nv12_b_uv_->setMagnificationFilter(QOpenGLTexture::Linear);
+    texture_nv12_b_uv_->setWrapMode(QOpenGLTexture::ClampToEdge);
+
     if (frame_) upload_frame();
 }
 
@@ -275,6 +367,41 @@ void ViewerGL::resizeGL(int w, int h) {
 
 void ViewerGL::upload_frame() {
     if (!frame_ || !texture_) return;
+    // Always-on ~1s upload telemetry: NV12 fast-path upload vs the RGBA (CPU
+    // texture) fallback, with their average costs. A scrub that rides NV12 and
+    // suddenly drops to rgba_upload means the fast path was lost — and nv12cvt
+    // tallies the per-pixel YUV->RGB software conversions that re-appear then.
+    static auto up_agg_at = std::chrono::steady_clock::now();
+    static int up_n = 0;
+    static double up_nv12_ms = 0.0, up_rgba_ms = 0.0;
+    static int up_nv12_cnt = 0, up_rgba_cnt = 0, up_cvt_cnt = 0, up_realloc_cnt = 0;
+    const auto up_t0 = std::chrono::steady_clock::now();
+    const auto up_mark = [&](const char* path) {
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - up_t0).count();
+        ++up_n;
+        if (path[0] == 'n') { up_nv12_ms += ms; ++up_nv12_cnt; }
+        else { up_rgba_ms += ms; ++up_rgba_cnt; }
+        const auto unow = std::chrono::steady_clock::now();
+        if (up_n == 1 || unow - up_agg_at >= std::chrono::seconds(1)) {
+            up_agg_at = unow;
+            qWarning().nospace()
+                << "[viewer] upload n=" << up_n
+                << " nv12_ms=" << QString::number(
+                       up_nv12_cnt ? up_nv12_ms / up_nv12_cnt : 0.0, 'f', 2)
+                << " (" << up_nv12_cnt << "x)"
+                << " rgba_ms=" << QString::number(
+                       up_rgba_cnt ? up_rgba_ms / up_rgba_cnt : 0.0, 'f', 2)
+                << " (" << up_rgba_cnt << "x)"
+                << " nv12->rgba_cvt=" << up_cvt_cnt
+                << " texture_realloc=" << up_realloc_cnt;
+            up_n = 0;
+            up_nv12_ms = up_rgba_ms = 0.0;
+            up_nv12_cnt = up_rgba_cnt = 0;
+            up_cvt_cnt = 0;
+            up_realloc_cnt = 0;
+        }
+    };
 
     // NV12 GPU fast path: upload the two planes as R8 (luma) + RG8 (CbCr)
     // textures; the BT.601 YUV->RGB conversion is applied in the fragment
@@ -327,15 +454,31 @@ void ViewerGL::upload_frame() {
             rf->fade_to_black = frame_->fade_to_black;
             frame_ = std::move(rf);
             nv12_valid_ = false;
+            ++up_cvt_cnt;
+            up_mark("r");
             return;   // no texture yet; paintGL calls upload_frame again for RGBA
         }
 
         const bool y_realloc = !texture_nv12_y_->isStorageAllocated() || tex_w_ != w ||
                                tex_h_ != h;
         if (y_realloc) {
+            ++up_realloc_cnt;
+            // Qt forbids setSize/setFormat once storage is allocated (logs
+            // "Cannot change format once storage has been allocated" and keeps
+            // the stale buffer). Size changes therefore need a fresh texture
+            // object; re-create the pair here (still on the context thread via
+            // upload_frame's callers).
+            texture_nv12_y_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+            texture_nv12_y_->setMinificationFilter(QOpenGLTexture::Linear);
+            texture_nv12_y_->setMagnificationFilter(QOpenGLTexture::Linear);
+            texture_nv12_y_->setWrapMode(QOpenGLTexture::ClampToEdge);
             texture_nv12_y_->setSize(w, h);
             texture_nv12_y_->setFormat(QOpenGLTexture::R8_UNorm);
             texture_nv12_y_->allocateStorage();
+            texture_nv12_uv_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+            texture_nv12_uv_->setMinificationFilter(QOpenGLTexture::Linear);
+            texture_nv12_uv_->setMagnificationFilter(QOpenGLTexture::Linear);
+            texture_nv12_uv_->setWrapMode(QOpenGLTexture::ClampToEdge);
             texture_nv12_uv_->setSize(w / 2, h / 2);
             texture_nv12_uv_->setFormat(QOpenGLTexture::RG8_UNorm);
             texture_nv12_uv_->allocateStorage();
@@ -359,10 +502,58 @@ void ViewerGL::upload_frame() {
                 texture_nv12_uv_->setData(0, 0, row, w / 2, 1, 1, QOpenGLTexture::RG,
                                           QOpenGLTexture::UInt8, n->uv.data() + row * uv_pitch);
         }
+        // Incoming (B) clip during an NV12 transition: upload its Y/UV pair too
+        // so paintGL can blend both clips in kFragNv12Trans.
+        nv12_b_valid_ = false;
+        if (frame_->b_nv12 && !frame_->b_nv12->y.empty()) {
+            const canvas::core::Nv12Frame* bn = frame_->b_nv12.get();
+            const int bw = bn->width;
+            const int bh = bn->height;
+            const bool b_realloc = !texture_nv12_b_y_->isStorageAllocated() ||
+                                   tex_bw_ != bw || tex_bh_ != bh;
+            if (b_realloc) {
+                ++up_realloc_cnt;
+                texture_nv12_b_y_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+                texture_nv12_b_y_->setMinificationFilter(QOpenGLTexture::Linear);
+                texture_nv12_b_y_->setMagnificationFilter(QOpenGLTexture::Linear);
+                texture_nv12_b_y_->setWrapMode(QOpenGLTexture::ClampToEdge);
+                texture_nv12_b_y_->setSize(bw, bh);
+                texture_nv12_b_y_->setFormat(QOpenGLTexture::R8_UNorm);
+                texture_nv12_b_y_->allocateStorage();
+                texture_nv12_b_uv_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+                texture_nv12_b_uv_->setMinificationFilter(QOpenGLTexture::Linear);
+                texture_nv12_b_uv_->setMagnificationFilter(QOpenGLTexture::Linear);
+                texture_nv12_b_uv_->setWrapMode(QOpenGLTexture::ClampToEdge);
+                texture_nv12_b_uv_->setSize(bw / 2, bh / 2);
+                texture_nv12_b_uv_->setFormat(QOpenGLTexture::RG8_UNorm);
+                texture_nv12_b_uv_->allocateStorage();
+                tex_bw_ = bw;
+                tex_bh_ = bh;
+            }
+            const int b_y_pitch = static_cast<int>(bn->y_pitch);
+            const int b_uv_pitch = static_cast<int>(bn->uv_pitch);
+            if (b_y_pitch == bw && b_uv_pitch == bw) {
+                texture_nv12_b_y_->setData(0, 0, 0, bw, bh, 1, QOpenGLTexture::Red,
+                                           QOpenGLTexture::UInt8, bn->y.data());
+                texture_nv12_b_uv_->setData(0, 0, 0, bw / 2, bh / 2, 1, QOpenGLTexture::RG,
+                                            QOpenGLTexture::UInt8, bn->uv.data());
+            } else {
+                for (int row = 0; row < bh; ++row)
+                    texture_nv12_b_y_->setData(0, 0, row, bw, 1, 1, QOpenGLTexture::Red,
+                                               QOpenGLTexture::UInt8,
+                                               bn->y.data() + row * b_y_pitch);
+                for (int row = 0; row < bh / 2; ++row)
+                    texture_nv12_b_uv_->setData(0, 0, row, bw / 2, 1, 1, QOpenGLTexture::RG,
+                                                QOpenGLTexture::UInt8,
+                                                bn->uv.data() + row * b_uv_pitch);
+            }
+            nv12_b_valid_ = true;
+        }
         texture_valid_ = false;
         texture_second_valid_ = false;
         nv12_valid_ = true;
         texture_dirty_ = false;
+        up_mark("n");
         static int64_t nv12up_log_ = 0;
         if ((nv12up_log_++ % 16) == 0)
             qWarning() << "[viewer] nv12_upload"
@@ -374,11 +565,12 @@ void ViewerGL::upload_frame() {
     nv12_valid_ = false;
     if (!frame_->a || frame_->a->rgba.empty()) {
         texture_dirty_ = false;
+        up_mark("r");
         return;
     }
 
-    auto upload = [this](QOpenGLTexture& tex, const canvas::core::VideoFramePtr& f, int& tw, int& th,
-                     bool& valid, const char* label) {
+    auto upload = [this](std::unique_ptr<QOpenGLTexture>& tex, const canvas::core::VideoFramePtr& f,
+                     int& tw, int& th, bool& valid) {
         if (!f || f->rgba.empty()) return;
         int w = f->width;
         int h = f->height;
@@ -427,7 +619,8 @@ void ViewerGL::upload_frame() {
             }
         }
 
-        const bool realloc = !tex.isStorageAllocated() || tw != w || th != h;
+        const bool realloc = !tex->isStorageAllocated() || tw != w || th != h;
+        if (realloc) ++up_realloc_cnt;
         static int64_t tex_log_ = 0;
         if ((tex_log_++ % 16) == 0)
             qWarning() << "[viewer] rgba_upload"
@@ -436,27 +629,34 @@ void ViewerGL::upload_frame() {
                        << "upscaled=" << (w != f->width || h != f->height ? "yes" : "no")
                        << "widget=" << std::max(1, width()) << "x" << std::max(1, height());
         if (realloc) {
-            tex.setSize(w, h);
-            tex.setFormat(QOpenGLTexture::RGBA8_UNorm);
-            tex.allocateStorage();
+            // Qt forbids setSize/setFormat once storage is allocated; a size
+            // change needs a fresh texture object instead.
+            tex = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+            tex->setMinificationFilter(QOpenGLTexture::Linear);
+            tex->setMagnificationFilter(QOpenGLTexture::Linear);
+            tex->setWrapMode(QOpenGLTexture::ClampToEdge);
+            tex->setSize(w, h);
+            tex->setFormat(QOpenGLTexture::RGBA8_UNorm);
+            tex->allocateStorage();
             tw = w;
             th = h;
         }
-        tex.setData(0, 0, 0, w, h, 1, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, data);
+        tex->setData(0, 0, 0, w, h, 1, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, data);
         valid = true;
     };
 
-    upload(*texture_, frame_->a, tex_w_, tex_h_, texture_valid_, "tex_a");
+    upload(texture_, frame_->a, tex_w_, tex_h_, texture_valid_);
 
     texture_second_valid_ = false;
     if (frame_->b && frame_->b->rgba.size() >= frame_->b->stride * frame_->b->height) {
         int bw = 0;
         int bh = 0;
-        upload(*texture_b_, frame_->b, bw, bh, texture_second_valid_, "tex_b");
+        upload(texture_b_, frame_->b, bw, bh, texture_second_valid_);
         // Keep second texture size so letterboxing matches texture A's aspect.
     }
 
     texture_dirty_ = false;
+    up_mark("r");
 }
 
 void ViewerGL::paintGL() {
@@ -513,6 +713,12 @@ void ViewerGL::paintGL() {
                          : std::min(va / aspect, 1.0f);
     {
         static int64_t paint_log_ = 0;
+        static auto log_t0 = std::chrono::steady_clock::now();
+        static double sum_ms = 0.0;
+        static int64_t sum_n = 0;
+        // Measure this paint's wall time (upload + draw) so presentation cost is
+        // attributable to the GL path, not just the decode that fed it.
+        const auto p0 = std::chrono::steady_clock::now();
         if ((paint_log_++ % 30) == 0)
             qWarning() << "[viewer] paint"
                        << "mode=" << (scale_mode_ == ScaleMode::Fill ? "fill" : "fit")
@@ -522,16 +728,71 @@ void ViewerGL::paintGL() {
                        << "widget_aspect=" << va
                        << "cover_x=" << qw << "cover_y=" << qh
                        << "path=" << (nv12_valid_ ? "nv12" : "rgba");
+        const auto p1 = std::chrono::steady_clock::now();
+        const double paint_ms =
+            std::chrono::duration<double, std::milli>(p1 - p0).count();
+        sum_ms += paint_ms;
+        ++sum_n;
+        // ~1/s aggregate paint cost: sustained ms here (well above ~8.3ms@60Hz)
+        // means the viewer itself is the bottleneck once decode is healthy.
+        const double since_s = std::chrono::duration<double>(p1 - log_t0).count();
+        if (since_s >= 1.0) {
+            qWarning().nospace()
+                << "[viewer] paint avg_ms="
+                << QString::number(sum_ms / static_cast<double>(sum_n), 'f', 2)
+                << " last_ms=" << QString::number(paint_ms, 'f', 2)
+                << " n=" << sum_n
+                << " starved=" << (texture_dirty_ ? "upload_pending" : "no_new_frame");
+            log_t0 = p1;
+            sum_ms = 0.0;
+            sum_n = 0;
+        }
     }
 
-    // Single-clip edge fade (fade-in-from-black at the clip's head, or
-    // fade-out-to-black at its tail) blends the A texture against black via
-    // u_mode/u_progress. It must use the RGBA path (the NV12 fast path can't
-    // apply the fade) and needs no B texture.
+    // Single-clip edge fade (fade-in-from-black at the clip's head, or fade-out-
+    // to-black at its tail) blends the A texture against black via u_mode/
+    // u_progress. Rendering it needs no B texture.
     const bool single_fade = frame_ && (frame_->fade_from_black || frame_->fade_to_black);
 
-    const bool use_nv12 = !single_fade && nv12_valid_ && frame_ && frame_->nv12;
-    if (use_nv12) {
+    const bool nv12_cur = nv12_valid_ && frame_ && frame_->nv12;
+    // NV12 BLEND: hardware planes also carry transitions and edge fades when
+    // the timeline delivers them GPU-first (b_nv12 + mode/progress for
+    // two-input transitions, or a single clip for fades). Preferred over both
+    // the plain NV12 path and the RGBA path.
+    const bool nv12_blend =
+        nv12_cur &&
+        (single_fade || frame_->mode != canvas::core::TransitionRenderMode::None);
+    if (nv12_blend) {
+        program_nv12_trans_->bind();
+        vao_.bind();
+        texture_nv12_y_->bind(0);
+        texture_nv12_uv_->bind(1);
+        program_nv12_trans_->setUniformValue("u_tex_y", 0);
+        program_nv12_trans_->setUniformValue("u_tex_uv", 1);
+        const bool have_b = nv12_b_valid_ && frame_->b_nv12;
+        if (have_b) {
+            texture_nv12_b_y_->bind(2);
+            texture_nv12_b_uv_->bind(3);
+        } else {
+            // Single-clip fade (no B frame): bind A's planes to the B slots so
+            // MODE_FADEIN_A/FADEOUT never sample an unallocated texture.
+            texture_nv12_y_->bind(2);
+            texture_nv12_uv_->bind(3);
+        }
+        program_nv12_trans_->setUniformValue("u_tex_b_y", 2);
+        program_nv12_trans_->setUniformValue("u_tex_b_uv", 3);
+        if (single_fade) {
+            const int fade_mode = frame_->fade_from_black ? 9 /*MODE_FADEIN_A*/
+                                                          : 3 /*MODE_FADEOUT*/;
+            program_nv12_trans_->setUniformValue("u_mode", fade_mode);
+            program_nv12_trans_->setUniformValue("u_progress", frame_->progress);
+        } else {
+            program_nv12_trans_->setUniformValue("u_mode",
+                                                 static_cast<int>(frame_->mode));
+            program_nv12_trans_->setUniformValue("u_progress", frame_->progress);
+        }
+        program_nv12_trans_->setUniformValue("u_aspect", aspect);
+    } else if (nv12_cur) {
         program_nv12_->bind();
         vao_.bind();
         texture_nv12_y_->bind(0);
@@ -625,7 +886,18 @@ void ViewerGL::paintGL() {
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-    if (use_nv12) {
+    if (nv12_blend) {
+        if (nv12_b_valid_ && frame_->b_nv12) {
+            texture_nv12_b_uv_->release();
+            texture_nv12_b_y_->release();
+        } else {
+            texture_nv12_uv_->release();  // bound to both slots 1 and 3 (B fallback)
+            texture_nv12_y_->release();   // bound to both slots 0 and 2 (B fallback)
+        }
+        texture_nv12_uv_->release();
+        texture_nv12_y_->release();
+        program_nv12_trans_->release();
+    } else if (nv12_cur) {
         texture_nv12_uv_->release();
         texture_nv12_y_->release();
         program_nv12_->release();

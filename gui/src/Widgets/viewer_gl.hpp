@@ -56,10 +56,15 @@ private:
     std::unique_ptr<QOpenGLTexture> texture_b_;
     std::unique_ptr<QOpenGLShaderProgram> program_;
     // NV12 GPU fast path: Y uploaded as an R8 texture, interleaved CbCr as an
-    // RG8 texture, converted to RGB in kFragNv12Src (BT.601 limited).
+    // RG8 texture, converted to RGB in kFragNv12Src (BT.601 limited). The
+    // second Y/UV pair backs the incoming (B) clip during an NV12 transition,
+    // blended by kFragNv12Trans.
     std::unique_ptr<QOpenGLTexture> texture_nv12_y_;
     std::unique_ptr<QOpenGLTexture> texture_nv12_uv_;
+    std::unique_ptr<QOpenGLTexture> texture_nv12_b_y_;
+    std::unique_ptr<QOpenGLTexture> texture_nv12_b_uv_;
     std::unique_ptr<QOpenGLShaderProgram> program_nv12_;
+    std::unique_ptr<QOpenGLShaderProgram> program_nv12_trans_;
     QOpenGLBuffer vbo_{QOpenGLBuffer::VertexBuffer};
     QOpenGLVertexArrayObject vao_;
     GLint attr_pos_ = -1;
@@ -69,10 +74,13 @@ private:
     GLint uni_aspect_ = -1;
     int tex_w_ = 0;
     int tex_h_ = 0;
+    int tex_bw_ = 0;
+    int tex_bh_ = 0;
     bool texture_valid_ = false;
     bool texture_second_valid_ = false;
     bool texture_dirty_ = false;
     bool nv12_valid_ = false;
+    bool nv12_b_valid_ = false;
 };
 
 }

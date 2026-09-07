@@ -6,6 +6,7 @@
 #include "canvas/core/util/log.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace canvas::gui {
@@ -43,12 +44,21 @@ void TimelineDecoder::add_media(const canvas::core::MediaEntry& entry) {
 }
 
 void TimelineDecoder::close() {
+    // Project-switch census: how many decoder slots were torn down and how many
+    // had gone hardware, so add_media storms (one decode init per media) are
+    // attributable to the switch rather than to a fill_lookahead loop.
+    size_t hw_slots = 0;
+    for (const auto& [id, slot] : slots_)
+        if (slot->loaded && slot->decoder.is_hardware()) ++hw_slots;
+    ::canvas::core::log::log_warning("[dec] close slots=%zu hw=%zu previews=%zu",
+                                 slots_.size(), hw_slots, preview_cache_.size());
     slots_.clear();
     preview_cache_.clear();
     preview_lru_.clear();
 }
 
 void TimelineDecoder::invalidate(const canvas::core::MediaId media) {
+    const size_t before_slots = slots_.size();
     slots_.erase(media);
     for (auto it = preview_cache_.begin(); it != preview_cache_.end();) {
         if (it->first.media == media) {
@@ -59,6 +69,16 @@ void TimelineDecoder::invalidate(const canvas::core::MediaId media) {
             ++it;
         }
     }
+    ::canvas::core::log::log_warning("[dec] invalidate media=%d slots=%zu->%zu",
+                                 (int)media, before_slots, slots_.size());
+}
+
+TimelineDecoder::PreviewStats TimelineDecoder::take_preview_stats() {
+    const PreviewStats out{preview_hits_, preview_misses_, preview_evictions_};
+    preview_hits_ = 0;
+    preview_misses_ = 0;
+    preview_evictions_ = 0;
+    return out;
 }
 
 bool TimelineDecoder::is_loaded(const canvas::core::MediaId id) const {
@@ -104,6 +124,7 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
         const PreviewKey key{clip.media, src_frame};
         auto cit = preview_cache_.find(key);
         if (cit != preview_cache_.end()) {
+            ++preview_hits_;
             preview_lru_.erase(std::remove(preview_lru_.begin(), preview_lru_.end(), key),
                                preview_lru_.end());
             preview_lru_.push_back(key);
@@ -117,6 +138,7 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
             return cit->second;
         }
         auto frame = slot->decoder.decode_to_frame(src_frame, max_dim);
+        ++preview_misses_;
         if (frame) {
             static int d = 0;
             if (((++d) & 3u) == 0u)
@@ -131,14 +153,31 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
                 const PreviewKey oldest = preview_lru_.front();
                 preview_lru_.pop_front();
                 preview_cache_.erase(oldest);
+                ++preview_evictions_;
             }
         }
         return frame;
     }
 
     auto frame = slot->cache.get(src_frame);
+    // Full-res decode telemetry: measure the decode cost so playback stalls are
+    // attributable (a GOP-backwards hardware indexed-seek vs a forward sequential
+    // walk feel very different). The ~1s `[dec]` aggregate reports cache-hit rate
+    // and avg/peak decode_ms so a throughput cliff shows up as hit% falling and
+    // avg_ms climbing together, not as a mysterious dropped-frame cadence.
+    static auto dec_log_at = std::chrono::steady_clock::now();
+    static uint64_t fullres_req_ = 0, fullres_hits_ = 0;
+    static canvas::core::FrameCache::Stats last_cache_stats_{};
+    static canvas::core::VideoDecoder::PathStats last_path_stats_{};
+    static double fullres_ms_sum_ = 0.0, fullres_ms_max_ = 0.0;
+    bool was_cache_hit = frame != nullptr;
+    double dec_ms = 0.0;
     if (!frame) {
+        const auto dec_t0 = std::chrono::steady_clock::now();
         frame = slot->decoder.decode_to_frame(src_frame);
+        dec_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - dec_t0).count();
+        fullres_ms_sum_ += dec_ms;
+        if (dec_ms > fullres_ms_max_) fullres_ms_max_ = dec_ms;
         // The decoder labels a frame with its *decoded* PTS-derived number, which can
         // differ from the requested target (a forward-walk holding the first frame
         // at/after the target, or PTS/rate skew). Cache only when the numbers
@@ -146,6 +185,73 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
         // would later get frame N when src_frame M was asked for). A miss just
         // re-decodes.
         if (frame && frame->frame_number == src_frame) slot->cache.put(frame);
+        if (::canvas::core::log::enabled())
+            ::canvas::core::log::log_warning(
+                "[dec] fullres DECODE media=%d seq=%lld src=%lld ms=%.2f hw=%d dims=%dx%d got=%d",
+                clip.media, static_cast<long long>(seq_frame),
+                static_cast<long long>(src_frame), dec_ms,
+                (int)slot->decoder.is_hardware(), slot->decoder.width(),
+                slot->decoder.height(), frame ? frame->width : 0);
+    } else {
+        ++fullres_hits_;
+    }
+    ++fullres_req_;
+    const auto dec_now = std::chrono::steady_clock::now();
+    if (fullres_req_ == 1 || dec_now - dec_log_at >= std::chrono::seconds(1)) {
+        dec_log_at = dec_now;
+        const double avg_ms =
+            fullres_req_ > 0 ? fullres_ms_sum_ / static_cast<double>(fullres_req_) : 0.0;
+        const auto cs = slot->cache.stats();
+        // Per-window cache deltas: evict_delta/miss_delta are how many entries
+        // were dropped/decoded afresh THIS second. Sustained evict storms with a
+        // high budget% mean the frame budget is too small for the timeline
+        // (decode-thrash) — the same shape as the older scrub-cache bug.
+        const auto evict_delta = cs.evictions < last_cache_stats_.evictions
+            ? 0 : cs.evictions - last_cache_stats_.evictions;
+        const auto miss_delta = cs.misses < last_cache_stats_.misses
+            ? 0 : cs.misses - last_cache_stats_.misses;
+        last_cache_stats_ = cs;
+        // Seek-vs-sequential path deltas for this window (steady playback must be
+        // ~100% sequential): seq_avg/seek_avg are the per-window mean decode cost.
+        const auto ps = slot->decoder.path_stats();
+        const auto seq_delta = ps.sequential < last_path_stats_.sequential
+            ? 0 : ps.sequential - last_path_stats_.sequential;
+        const auto seek_delta = ps.seeks < last_path_stats_.seeks
+            ? 0 : ps.seeks - last_path_stats_.seeks;
+        const auto seq_ms_delta = ps.sequential_ms < last_path_stats_.sequential_ms
+            ? 0.0 : ps.sequential_ms - last_path_stats_.sequential_ms;
+        const auto seek_ms_delta = ps.seek_ms < last_path_stats_.seek_ms
+            ? 0.0 : ps.seek_ms - last_path_stats_.seek_ms;
+        last_path_stats_ = ps;
+        const double seq_avg = seq_delta > 0 ? seq_ms_delta / static_cast<double>(seq_delta) : 0.0;
+        const double seek_avg = seek_delta > 0 ? seek_ms_delta / static_cast<double>(seek_delta) : 0.0;
+        const auto conv_delta = ps.convert_ms < last_path_stats_.convert_ms
+            ? 0.0 : ps.convert_ms - last_path_stats_.convert_ms;
+        const double conv_pct =
+            seq_ms_delta > 0.0 ? 100.0 * conv_delta / seq_ms_delta : 0.0;
+        const double budget_pct = cs.max_bytes > 0
+            ? 100.0 * static_cast<double>(cs.bytes) / static_cast<double>(cs.max_bytes) : 0.0;
+        ::canvas::core::log::log_warning(
+            "[dec] fullres req=%llu hit=%llu (%.0f%%) avg_ms=%.2f max_ms=%.2f hw=%d "
+            "cache_hits=%llu cache_misses=%llu miss_delta=%llu evict_delta=%llu "
+            "budget=%.0f%% bytes=%zu/%zu seq=%llu seeks=%llu seq_avg_ms=%.2f seek_avg_ms=%.2f "
+            "conv_pct=%.0f%% slots=%zu%s",
+            static_cast<unsigned long long>(fullres_req_),
+            static_cast<unsigned long long>(fullres_hits_),
+            fullres_req_ > 0
+                ? 100.0 * static_cast<double>(fullres_hits_) / static_cast<double>(fullres_req_)
+                : 0.0,
+            avg_ms, fullres_ms_max_, (int)slot->decoder.is_hardware(),
+            static_cast<unsigned long long>(cs.hits),
+            static_cast<unsigned long long>(cs.misses),
+            static_cast<unsigned long long>(miss_delta),
+            static_cast<unsigned long long>(evict_delta), budget_pct, cs.bytes, cs.max_bytes,
+            static_cast<unsigned long long>(seq_delta),
+            static_cast<unsigned long long>(seek_delta), seq_avg, seek_avg,
+            conv_pct, slots_.size(), was_cache_hit ? "" : " (decode)");
+        fullres_req_ = fullres_hits_ = 0;
+        fullres_ms_sum_ = 0.0;
+        fullres_ms_max_ = 0.0;
     }
     return frame;
 }
@@ -206,6 +312,8 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
     //  preview drag: a capped sequential walk parks the decoder behind the
     //  playhead and leaves the preview on the wrong (stale) picture.
     const AVFrame* hw;
+    double hw_ms = 0.0;
+    const auto hw_t0 = std::chrono::steady_clock::now();
     if (max_dim > 0) {
         hw = slot->decoder.decode_to_hw_indexed(
             src_frame, ::canvas::core::VideoDecoder::kPreviewMaxOver);
@@ -231,6 +339,7 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
             hw = slot->decoder.decode_to_hw_indexed(src_frame);
         }
     }
+    hw_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hw_t0).count();
     if (!hw || !hw->data[0] || !hw->data[1]) return nullptr;
 
     // Same reduce rule as decode_to_frame: cap the longest edge at max_dim
@@ -255,6 +364,7 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
     frame->height = out_h;
     frame->y_pitch = static_cast<std::size_t>(out_w);
     frame->uv_pitch = static_cast<std::size_t>(out_w);
+    const auto gpu_t0 = std::chrono::steady_clock::now();
     if (!canvas::core::gpu::convert_nv12_resize_to_host(
             reinterpret_cast<const uint8_t*>(hw->data[0]),
             reinterpret_cast<const uint8_t*>(hw->data[1]),
@@ -263,6 +373,45 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
             static_cast<std::size_t>(hw->linesize[1]),
             out_w, out_h, out_w, out_h, 0, 0, &frame->y, &frame->uv))
         return nullptr;
+    const double gpu_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gpu_t0).count();
+    // NV12 GPU fast-path timing: decode_to_hw (NVDEC) vs the on-GPU resize/composite
+    // download, so a GPU-path regression (driver, memory pressure, slice layout)
+    // shows up as hw_ms/gpu_ms climbing in the ~1s aggregate.
+    static auto nv12_log_at = std::chrono::steady_clock::now();
+    static uint64_t nv12_req_ = 0;
+    static double nv12_hw_ms_ = 0.0, nv12_gpu_ms_ = 0.0;
+    static double nv12_hw_max_ = 0.0, nv12_gpu_max_ = 0.0;
+    ++nv12_req_;
+    nv12_hw_ms_ += hw_ms;
+    nv12_gpu_ms_ += gpu_ms;
+    nv12_hw_max_ = std::max(nv12_hw_max_, hw_ms);
+    nv12_gpu_max_ = std::max(nv12_gpu_max_, gpu_ms);
+    if (::canvas::core::log::enabled())
+        ::canvas::core::log::log_warning(
+            "[dec] nv12 media=%d seq=%lld src=%lld max_dim=%d dec_hw_ms=%.2f gpu_ms=%.2f",
+            clip.media, static_cast<long long>(seq_frame),
+            static_cast<long long>(src_frame), max_dim, hw_ms, gpu_ms);
+    const auto nv12_now = std::chrono::steady_clock::now();
+    if (nv12_req_ == 1 || nv12_now - nv12_log_at >= std::chrono::seconds(1)) {
+        const double elaps_s = std::max(1e-3, std::chrono::duration<double>(nv12_now - nv12_log_at).count());
+        nv12_log_at = nv12_now;
+        const double avg_hw = nv12_hw_ms_ / static_cast<double>(nv12_req_);
+        const double avg_gpu = nv12_gpu_ms_ / static_cast<double>(nv12_req_);
+        // fps_hw is the hw-decode+resize cadence (timeline frames/s). It never
+        // beating the timeline fps while [play] cadence looks normal means the
+        // GPU compositor is the cap; beating it comfortably means the presenter
+        // (or decode granularity) is.
+        ::canvas::core::log::log_warning(
+            "[dec] nv12 req=%llu fps_hw=%.1f hw_avg_ms=%.2f hw_max_ms=%.2f gpu_avg_ms=%.2f gpu_max_ms=%.2f "
+            "dims=%dx%d",
+            static_cast<unsigned long long>(nv12_req_),
+            static_cast<double>(nv12_req_) / elaps_s, avg_hw, nv12_hw_max_, avg_gpu,
+            nv12_gpu_max_, out_w, out_h);
+        nv12_req_ = 0;
+        nv12_hw_ms_ = nv12_gpu_ms_ = 0.0;
+        nv12_hw_max_ = nv12_gpu_max_ = 0.0;
+    }
     return frame;
 }
 
@@ -356,11 +505,89 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                              !canvas::core::is_audio_transition(a->transition_in) &&
                              seq_frame >= a->tl_in && seq_frame < a->tl_in + dur_in;
 
-    // A single-clip fade must go through the RGBA path (the viewer alpha-blends
-    // `a` against black); the raw GPU NV12 fast path can't express it.
-    const bool need_rgba = in_out_trans || in_in_trans;
+    if (in_in_trans || in_out_trans) {
+        // GPU transition path: try to deliver A (and B, once visible mid-window)
+        // as hardware NV12 planes so a cut/cross-fade stays on the GPU fast path
+        // instead of the two full-res CPU RGBA decodes that collapsed the
+        // transition window to ~1.5 fps at 2K60. Falls through to the RGBA path
+        // below when a required plane can't be hardware-decoded.
+        if (auto nvA = decode_nv12(project, *a, seq_frame, 0)) {
+            // Single-clip IN fade needs only A: the viewer ramps A itself against
+            // black in the shader.
+            if (in_in_trans && !in_out_trans) {
+                out->nv12 = std::move(nvA);
+                out->mode = to_render_mode(a->transition_in);
+                if (dur_in > 0)
+                    out->progress = static_cast<float>(seq_frame - a->tl_in) /
+                                    static_cast<float>(dur_in);
+                out->fade_from_black = true;
+                return out;
+            }
 
-    if (!need_rgba) {
+            // OUT transition: the incoming clip B (sitting exactly at the cut on
+            // the same track) plays BEHIND A. Advance B through its pre-roll
+            // handle (media frames before its timeline IN) so the dissolve
+            // reveals live footage instead of a frozen first frame; clamp to
+            // source 0 when the head was trimmed tight against the media start.
+            const canvas::core::Sequence& seq = project.sequence;
+            const canvas::core::Clip* b = nullptr;
+            for (const auto& track : seq.video_tracks) {
+                if (track.locked) continue;
+                for (const auto& cc : track.clips) {
+                    if (cc.tl_in == a->tl_out) { b = &cc; break; }
+                }
+                if (b) break;
+            }
+            if (b && b != a) {
+                const double bsf = project.sequence.fps;
+                const double bmf = media_fps_of(project, *b);
+                const double bratio = (bmf > 0.0 && bsf > 0.0) ? bsf / bmf : 1.0;
+                int64_t b_seq = b->tl_in + static_cast<int64_t>(std::llround(
+                    (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
+                if (b_seq < 0) b_seq = 0;
+                auto nvB = [&]() -> canvas::core::Nv12FramePtr {
+                    // Same clip media => the adjacent clips share ONE hardware
+                    // decoder slot. B's pre-roll handle coincides with A's source
+                    // position (B sits at the cut, so b->tl_in == a->tl_out, and
+                    // the seq->media map makes b_seq == seq_frame), i.e. B would
+                    // decode the exact frame A already has. Decoding it would
+                    // re-seek the shared CUDA session backward to a target only A
+                    // has reached, re-decoding up to a full 10s keyframe GOP per
+                    // transition frame (~250ms on 2K60 — the exact stutter seen in
+                    // the logs). Reuse A's planes instead: crossfading identical
+                    // frames is the seamless-cut the dissolve intends, and matches
+                    // what the RGBA path rendered.
+                    if (b->media == a->media) return nvA;
+                    // Distinct media => its own decoder slot; the handle advances
+                    // forward every frame, so the per-media decode stays sequential.
+                    return decode_nv12(project, *b, b_seq, 0);
+                }();
+                if (nvB) {
+                    out->nv12 = std::move(nvA);
+                    out->b_nv12 = std::move(nvB);
+                    out->mode = to_render_mode(a->transition_out);
+                    if (dur_out > 0)
+                        out->progress = static_cast<float>(seq_frame - tr_out_start) /
+                                        static_cast<float>(dur_out);
+                    return out;
+                }
+                // B couldn't be hardware-decoded: fall through and render the
+                // whole transition on the CPU RGBA path below.
+            } else {
+                // No incoming clip at the cut (e.g. the last clip on the track):
+                // fade A itself out to black over the transition window.
+                out->nv12 = std::move(nvA);
+                out->mode = to_render_mode(a->transition_out);
+                if (dur_out > 0) {
+                    out->progress = static_cast<float>(seq_frame - tr_out_start) /
+                                    static_cast<float>(dur_out);
+                }
+                out->fade_to_black = true;
+                return out;
+            }
+        }
+        // A-side hardware decode unavailable at this position: RGBA path below.
+    } else {
         // GPU fast path: HW decode + CUDA composite straight into a small NV12
         // the viewer uploads as Y/UV textures (no full-res CPU RGBA). Falls back
         // to the RGBA path below when unavailable (software decode, non-CUDA

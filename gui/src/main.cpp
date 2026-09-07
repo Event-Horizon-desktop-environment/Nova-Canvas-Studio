@@ -6,7 +6,14 @@
 #include "Logging.hpp"
 #include "UX/MainWindow.hpp"
 #include "UX/theme.hpp"
+#include "canvas/core/media/hw_device.hpp"
 
+extern "C" {
+#include <libavutil/avutil.h>
+#include <libavutil/cpu.h>
+}
+
+#include <chrono>
 #include <csignal>
 #include <thread>
 
@@ -66,6 +73,30 @@ int main(int argc, char* argv[]) {
     QApplication::setApplicationName(QStringLiteral("canvas"));
     QApplication::setApplicationDisplayName(QStringLiteral("Nova Canvas Studio"));
     QApplication::setOrganizationName(QStringLiteral("Nova Canvas"));
+
+    // Startup env report (always-on): the exact FFmpeg build and the hardware
+    // decode surface so playback/export failures can be blamed on a stale ABI
+    // or the absence of a GPU without digging. ALSA/PipeWire presence is
+    // handled by AudioOutput later, but avversion here anchors the whole stack.
+    const char* fv = av_version_info();
+    const int ffver = LIBAVUTIL_VERSION_INT;
+    // Feeding the manager triggers its own themed probe log ([hw] probing...),
+    // so we just surface the outcome here rather than re-probing.
+    const auto env_t0 = std::chrono::steady_clock::now();
+    canvas::core::HwDeviceManager hw;
+    (void)hw.device_ctx();
+    const double env_probe_ms = std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - env_t0).count();
+    qWarning().nospace()
+        << "[env] qt=" << qVersion()
+        << " ffmpeg=" << (fv ? fv : "?")
+        << " lavutil=" << AV_VERSION_MAJOR(ffver)
+        << "." << AV_VERSION_MINOR(ffver) << "." << AV_VERSION_MICRO(ffver)
+        << " hw_decode=" << (hw.is_hardware()
+                                 ? QString::fromStdString(hw.device_name())
+                                 : QStringLiteral("software"))
+        << " cpus=" << av_cpu_count()
+        << " probe_ms=" << QString::number(env_probe_ms, 'f', 0);
 
     canvas::gui::apply_theme(app);
 

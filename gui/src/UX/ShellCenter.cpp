@@ -363,7 +363,7 @@ void build_center_workspace(MainWindow& mw) {
         QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
             .filePath(QStringLiteral("thumbs")));
     QObject::connect(mw.timeline_, &TimelineWidget::media_dropped, &mw,
-            [&mw](int media_id, int64_t frame) { mw.place_media_at(media_id, frame, canvas::core::Placement::Overwrite); });
+            [&mw](int media_id, int64_t frame, double scene_y) { mw.place_media_at(media_id, frame, canvas::core::Placement::Overwrite, scene_y); });
 
     sync_zoom_slider();
 

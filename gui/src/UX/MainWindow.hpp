@@ -2,12 +2,13 @@
 
 #include <QLabel>
 #include <QMainWindow>
-#include <QPushButton>
+#include <QToolButton>
 #include <QSlider>
 #include <QStringList>
 #include <QElapsedTimer>
 
 #include <memory>
+#include <optional>
 
 #include "canvas/core/media/video_decoder.hpp"
 #include "canvas/core/project/project.hpp"
@@ -143,9 +144,12 @@ private:
     void toggle_transition_on_selected();
     void remove_all_transitions();
     void toggle_bookmark_at_playhead();
-    void ensure_tracks(std::size_t min_video, std::size_t min_audio);
+    // Grows the sequence's track list of the given kind until it covers
+    // `index` (inclusive), naming new channels Vn/An by their 1-based order.
+    void ensure_tracks_at(canvas::core::Track::Kind kind, std::size_t index);
     bool place_selected_media(canvas::core::Placement mode);
-    bool place_media_at(canvas::core::MediaId media_id, int64_t frame, canvas::core::Placement mode);
+    bool place_media_at(canvas::core::MediaId media_id, int64_t frame, canvas::core::Placement mode,
+                        std::optional<double> drop_scene_y = std::nullopt);
     void refresh_media_pool();
     void new_untitled_project();
     int import_media_paths(const QStringList& paths);
@@ -179,7 +183,7 @@ private:
     ViewerGL* viewer_ = nullptr;
     TimelineWidget* timeline_ = nullptr;
     QSlider* scrub_ = nullptr;
-    QPushButton* play_button_ = nullptr;
+    QToolButton* play_button_ = nullptr;
     QLabel* time_label_ = nullptr;
     QStatusBar* status_ = nullptr;
     QLabel* fps_label_ = nullptr;

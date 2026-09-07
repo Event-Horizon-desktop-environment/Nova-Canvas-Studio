@@ -12,6 +12,9 @@
 #include <QRectF>
 #include <QGraphicsItem>
 #include <QGraphicsRectItem>
+
+#include <chrono>
+#include <cstdlib>
 #include <QGraphicsTextItem>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsPathItem>
@@ -47,6 +50,40 @@ int TimelineWidget::track_at_y(double scene_y, int v_count) const {
 
 int TimelineWidget::kind_track_index(int flat_track, int v_count) const {
     return flat_track < v_count ? flat_track : flat_track - v_count;
+}
+
+TimelineWidget::DropLane TimelineWidget::resolve_drop_lane(double scene_y,
+                                                           canvas::core::Track::Kind media_kind) const {
+    const int v_count = sequence_ ? static_cast<int>(sequence_->video_tracks.size()) : 0;
+    const int a_count = sequence_ ? static_cast<int>(sequence_->audio_tracks.size()) : 0;
+    if (media_kind == canvas::core::Track::Kind::Video) {
+        // Video lanes are the top screen rows, stacked Vn..V1 (flat == kind index).
+        for (int f = v_count - 1; f >= 0; --f) {
+            const double t = track_top(f, v_count);
+            if (scene_y >= t && scene_y < t + track_height(f, v_count))
+                return {media_kind, f};
+        }
+        if (v_count == 0) return {media_kind, 0};
+        // Dropped in the empty spacer above the top row: open a NEW top channel
+        // at the drop position (new video tracks stack on top of the section).
+        if (scene_y < track_top(v_count - 1, v_count)) return {media_kind, v_count};
+        // Dropped in the divider/audio region: clamp to the bottom video lane.
+        return {media_kind, 0};
+    }
+    // Audio lanes live below the Video/Audio divider, stacked A1..An (flat v_count + index).
+    for (int f = 0; f < a_count; ++f) {
+        const double t = track_top(v_count + f, v_count);
+        if (scene_y >= t && scene_y < t + track_height(v_count + f, v_count))
+            return {media_kind, f};
+    }
+    if (a_count == 0) return {media_kind, 0};
+    const double last_bottom = track_top(v_count + a_count - 1, v_count) +
+                               track_height(v_count + a_count - 1, v_count);
+    // Dropped in the empty space below the last audio lane: open a NEW bottom
+    // channel at the drop position (new audio tracks stack below the section).
+    if (scene_y >= last_bottom) return {media_kind, a_count};
+    // Dropped in the video/divider region: clamp to the top audio lane.
+    return {media_kind, 0};
 }
 
 int64_t TimelineWidget::snap_frame(int64_t frame) const {
@@ -111,23 +148,50 @@ bool TimelineWidget::reacquire_dragged_clip(const canvas::core::ClipId id,
 
 void TimelineWidget::scrub_to_frame(const int64_t frame) {
     static int scrub_log_ = 0;
+    const auto st_t0 = std::chrono::steady_clock::now();
     if (debug_enabled() && (scrub_log_++ % 30) == 0)
         qDebug() << "timeline: scrub_to_frame" << frame;
     if ((scrub_log_++ & 3u) == 0u) {
         static int64_t last_log = -1;
         static auto last_t = QDateTime::currentDateTime();
         static bool first = true;
+        static double cost_sum = 0.0;
+        static int cost_n = 0;
         auto now = QDateTime::currentDateTime();
         double dt_ms = 0.0;
         if (!first) dt_ms = last_t.msecsTo(now);
         qWarning() << "[scrub] TIMELINE scrub_to_frame=" << frame
                    << "dt_ms=" << dt_ms
-                   << "delta=" << (last_log >= 0 ? (frame - last_log) : 0);
+                   << "delta=" << (last_log >= 0 ? (frame - last_log) : 0)
+                   << "px_per_move=" << (last_log >= 0 ? std::abs(frame - last_log) : 0);
         last_log = frame;
         last_t = now;
         first = false;
     }
     set_playhead_position(frame);
+    // Per-move cost of the whole scrub plumbing on the UI thread: playhead
+    // update + rebuild signal + emit. This runs per pointer move; sustained
+    // cost_ms >> frame budget here is the "why does scrubbing feel sticky"
+    // answer (the widget-side presenter latency, before the worker decodes).
+    const double cost_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - st_t0).count();
+    static auto s_agg_at = std::chrono::steady_clock::now();
+    static int s_agg_n = 0;
+    static double s_agg_ms = 0.0, s_max_ms = 0.0;
+    ++s_agg_n;
+    s_agg_ms += cost_ms;
+    s_max_ms = std::max(s_max_ms, cost_ms);
+    const auto s_now = std::chrono::steady_clock::now();
+    if (s_agg_n == 1 || s_now - s_agg_at >= std::chrono::seconds(1)) {
+        s_agg_at = s_now;
+        qWarning() << "[scrub] UI cost_ms=" << cost_ms
+                   << "avg_ms=" << QString::number(s_agg_ms / s_agg_n, 'f', 2)
+                   << "max_ms=" << QString::number(s_max_ms, 'f', 2)
+                   << "n=" << s_agg_n;
+        s_agg_n = 0;
+        s_agg_ms = 0.0;
+        s_max_ms = 0.0;
+    }
     emit playhead_moved(frame);
 }
 
@@ -1212,9 +1276,11 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
             }
         }
 
+        const auto drag_t0 = std::chrono::steady_clock::now();
         const auto res = drag_ctrl_.move(
             frame_at_x(event->pos().x()), candidate, v_count, dragged_clip_->track_kind,
             snap_enabled_ && fps_ > 0.0, frames_per_pixel_);
+        (void)drag_t0;
 
         // The controller resolved the same-kind target track under the cursor;
         // paint the primary clip on it (the mate keeps its own lane).
@@ -1228,6 +1294,30 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         position_clip_at(*dragged_clip_, res.new_tl_in);
         if (drag_mate_) position_clip_at(*drag_mate_, res.new_tl_in);
         update_snap_indicator(res.snapped, res.new_tl_in);
+
+        // Per-move cost of a live clip drag (snap math + repositioning the
+        // on-screen items). Sustained ms_last >> frame budget while holding a
+        // clip = sticky drags before the commit/rebuild cost even shows up.
+        static auto s_drag_at = std::chrono::steady_clock::now();
+        static int s_drag_n = 0;
+        static double s_drag_ms = 0.0, s_drag_max = 0.0;
+        const double drag_ms = std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - drag_t0).count();
+        ++s_drag_n;
+        s_drag_ms += drag_ms;
+        s_drag_max = std::max(s_drag_max, drag_ms);
+        const auto drag_now = std::chrono::steady_clock::now();
+        if (s_drag_n == 1 || drag_now - s_drag_at >= std::chrono::seconds(1)) {
+            s_drag_at = drag_now;
+            qWarning() << "[ui:drag] move ms_avg=" << QString::number(s_drag_ms / s_drag_n, 'f', 2)
+                       << "ms_last=" << QString::number(drag_ms, 'f', 2)
+                       << "ms_max=" << QString::number(s_drag_max, 'f', 2)
+                       << "moves/s=" << s_drag_n
+                       << "snapped=" << (res.snapped ? 1 : 0);
+            s_drag_n = 0;
+            s_drag_ms = 0.0;
+            s_drag_max = 0.0;
+        }
         event->accept();
         return;
     }
@@ -1379,7 +1469,8 @@ void TimelineWidget::dropEvent(QDropEvent* event) {
     if (event->mimeData()->hasFormat("application/x-eh-media-id")) {
         const int media_id = event->mimeData()->data("application/x-eh-media-id").toInt();
         const int64_t frame = frame_at_x(event->position().toPoint().x());
-        emit media_dropped(media_id, frame);
+        const double scene_y = mapToScene(event->position().toPoint()).y();
+        emit media_dropped(media_id, frame, scene_y);
         event->acceptProposedAction();
         return;
     }
@@ -1392,7 +1483,8 @@ void TimelineWidget::dropEvent(QDropEvent* event) {
         }
         if (!paths.isEmpty()) {
             const int64_t frame = frame_at_x(event->position().toPoint().x());
-            emit media_files_dropped(paths, frame);
+            const double scene_y = mapToScene(event->position().toPoint()).y();
+            emit media_files_dropped(paths, frame, scene_y);
         }
         event->acceptProposedAction();
         return;

@@ -4,6 +4,8 @@
 
 #include <nlohmann/json.hpp>
 #include <fstream>
+#include <iterator>
+#include <chrono>
 
 namespace canvas::core {
 
@@ -354,12 +356,15 @@ bool save_project(const Project& project, const std::string& path, std::string* 
         for (const auto& j : project.render_jobs) render_jobs.push_back(job_to_json(j));
         doc["render_jobs"] = std::move(render_jobs);
 
+        const auto t_ser0 = std::chrono::steady_clock::now();
         std::ofstream out(path);
         if (!out) {
             if (error) *error = "cannot open '" + path + "' for writing";
             return false;
         }
         out << doc.dump(2) << '\n';
+        const double write_ms = std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - t_ser0).count();
         const auto count_transitions = [](const std::vector<Track>& tracks) {
             std::size_t n = 0;
             for (const auto& t : tracks)
@@ -367,13 +372,15 @@ bool save_project(const Project& project, const std::string& path, std::string* 
                     if (c.has_transition()) ++n;
             return n;
         };
-        CANVAS_LOG("project: SAVED '%s' version=%d clips_with_transitions=%zu (video=%zu audio=%zu) render_jobs=%zu",
+        CANVAS_LOG("project: SAVED '%s' version=%d clips_with_transitions=%zu (video=%zu audio=%zu) render_jobs=%zu bytes=%zu write_ms=%.0f",
                path.c_str(), kProjectVersion,
                count_transitions(project.sequence.video_tracks) +
                    count_transitions(project.sequence.audio_tracks),
                count_transitions(project.sequence.video_tracks),
                count_transitions(project.sequence.audio_tracks),
-               project.render_jobs.size());
+               project.render_jobs.size(),
+               out.tellp() > 0 ? static_cast<std::size_t>(out.tellp()) : 0,
+               write_ms);
         return true;
     } catch (const std::exception& e) {
         if (error) *error = e.what();
@@ -382,13 +389,16 @@ bool save_project(const Project& project, const std::string& path, std::string* 
 }
 
 bool load_project(Project& out, const std::string& path, std::string* error) {
+    const auto t_total0 = std::chrono::steady_clock::now();
     try {
         std::ifstream in(path);
         if (!in) {
             if (error) *error = "cannot open '" + path + "'";
             return false;
         }
-        json doc = json::parse(in);
+        const std::string raw((std::istreambuf_iterator<char>(in)),
+                              std::istreambuf_iterator<char>());
+        json doc = json::parse(raw);
         // Current format key is "canvas_project"; older files predating the
         // Nova Canvas rename serialized the same document under
         // "event_horizon_project", so keep reading that key for backwards
@@ -450,13 +460,17 @@ bool load_project(Project& out, const std::string& path, std::string* error) {
                     if (c.has_transition()) ++n;
             return n;
         };
-        CANVAS_LOG("project: LOADED '%s' version=%d clips_with_transitions=%zu (video=%zu audio=%zu) render_jobs=%zu",
+        const double total_ms = std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - t_total0).count();
+        CANVAS_LOG("project: LOADED '%s' version=%d clips_with_transitions=%zu (video=%zu audio=%zu) render_jobs=%zu bytes=%zu total_ms=%.0f",
                path.c_str(), version,
                count_transitions(p.sequence.video_tracks) +
                    count_transitions(p.sequence.audio_tracks),
                count_transitions(p.sequence.video_tracks),
                count_transitions(p.sequence.audio_tracks),
-               p.render_jobs.size());
+               p.render_jobs.size(),
+               raw.size(),
+               total_ms);
 
         out = std::move(p);
         return true;

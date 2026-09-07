@@ -28,10 +28,19 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 
 namespace canvas::gui {
 
 void TimelineWidget::rebuild_timeline() {
+    const auto rebuild_t0 = std::chrono::steady_clock::now();
+    // Whole-scene teardown+rebuild. This is the dominant timeline UX cost on
+    // every edit/scrub/resize: bytes of scene items reallocated per second is
+    // the "why is the editor getting sticky" tell.
+    static int64_t s_rb_n = 0;
+    static auto s_rb_at = std::chrono::steady_clock::now();
+    static double s_rb_ms = 0.0, s_rb_max = 0.0;
+    ++s_rb_n;
     scene_.clear();
     clip_items_.clear();
     video_track_headers_.clear();
@@ -122,6 +131,24 @@ void TimelineWidget::rebuild_timeline() {
         for (const auto id : selection_.ids())
             sel += QString::number(static_cast<quint64>(id)) + QLatin1Char(' ');
         qDebug() << "timeline: rebuild finished, re-applied selection ->[" << sel << "]";
+    }
+
+    const double rb_ms = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - rebuild_t0).count();
+    s_rb_ms += rb_ms;
+    s_rb_max = std::max(s_rb_max, rb_ms);
+    const auto rb_now = std::chrono::steady_clock::now();
+    if (s_rb_n == 1 || rb_now - s_rb_at >= std::chrono::seconds(1)) {
+        s_rb_at = rb_now;
+        qWarning() << "[ui:timeline] rebuild ms_avg=" << QString::number(s_rb_ms / s_rb_n, 'f', 2)
+                   << "ms_last=" << QString::number(rb_ms, 'f', 2)
+                   << "ms_max=" << QString::number(s_rb_max, 'f', 2)
+                   << "n=" << s_rb_n
+                   << "clips=" << (sequence_ ? static_cast<int>(clip_items_.size()) : 0)
+                   << "items=" << scene_.items().size();
+        s_rb_n = 0;
+        s_rb_ms = 0.0;
+        s_rb_max = 0.0;
     }
 }
 
