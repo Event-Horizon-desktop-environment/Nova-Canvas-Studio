@@ -152,6 +152,10 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
     total_frames_ = frame_rate_ > 0.0 && duration_seconds_ > 0.0
         ? static_cast<int64_t>(std::llround(duration_seconds_ * frame_rate_))
         : -1;
+    // Seed the decode clamp from the open-time duration estimate so behavior is
+    // unchanged when the container hands a duration; refine_last_frame() and the
+    // EOF sites tighten it later when only the stream extent is known.
+    last_frame_ = total_frames_ > 0 ? total_frames_ - 1 : -1;
     CANVAS_LOG("decode open: '%s' %dx%d fps=%.3f dur=%.3fs hw=%s hw_pix=%d",
            path.c_str(), width_, height_, frame_rate_, duration_seconds_,
            hw_avail_ ? "yes" : "no", hw_pix_fmt_);
@@ -250,6 +254,38 @@ void VideoDecoder::reset_stream_state(const int64_t resume_frame) {
     next_frame_ = resume_frame;
 }
 
+// Clamps a caller's target frame into the valid source-window [0, last_frame_].
+// The upper bound is only an approximation until the stream actually ends (see
+// refine_last_frame / the EOF sites), but it is the crucial guard that keeps a
+// seek far past the media end from walking the whole GOP chain: even when the
+// container hands no duration (opening a paused file), the moment a single frame
+// is decoded we know the stream extends at least to frame 0 and a seek target of
+// 35k collapses to last_frame_ instead of triggering a many-second forward walk.
+int64_t VideoDecoder::clamp_target(const int64_t target) const {
+    int64_t t = target < 0 ? 0 : target;
+    if (last_frame_ > 0) t = std::min(t, last_frame_);
+    return t;
+}
+
+// Narrows last_frame_ to the stream's own encoded extent when the container
+// duration was missing at open(). Uses the video stream duration when present,
+// else the container duration (which FFmpeg fills in from the stream duration
+// during find_stream_info), else the frame-rate fallback. Always called on the
+// decode path so the clamp tightens as soon as ANY extent is available, without
+// waiting for a full demux.
+void VideoDecoder::refine_last_frame() {
+    if (last_frame_ > 0 || frame_rate_ <= 0.0) return;
+    if (fmt_ctx_ && video_stream_ >= 0) {
+        const AVStream* st = fmt_ctx_->streams[video_stream_];
+        double secs = st->duration > 0 ? static_cast<double>(st->duration) * av_q2d(stream_tb_) : 0.0;
+        if (secs <= 0.0 && fmt_ctx_->duration > 0 && fmt_ctx_->duration != AV_NOPTS_VALUE)
+            secs = static_cast<double>(fmt_ctx_->duration) / AV_TIME_BASE;
+        if (secs <= 0.0 && duration_seconds_ > 0.0) secs = duration_seconds_;
+        if (secs > 0.0) last_frame_ = std::max<int64_t>(0, static_cast<int64_t>(
+            std::llround(secs * frame_rate_)));
+    }
+}
+
 VideoFramePtr VideoDecoder::decode_next() {
     if (!codec_ctx_ || frame_rate_ <= 0.0) {
         CANVAS_LOG("video_decoder: decode_next SKIP (codec=%p fps=%.3f)", (void*)codec_ctx_, frame_rate_);
@@ -273,6 +309,11 @@ VideoFramePtr VideoDecoder::decode_next() {
             return out;
         }
         if (ret == AVERROR_EOF) {
+            // Stream exhausted: the highest produced frame is now known exactly,
+            // so future seeks clamp to it (a scrub past the end no longer re-
+            // walks the GOP chain to find EOF again).
+            if (next_frame_ > 0 && (last_frame_ < 0 || next_frame_ - 1 < last_frame_))
+                last_frame_ = next_frame_ - 1;
             CANVAS_LOG("video_decoder: decode_next EOF at frame %lld", (long long)next_frame_);
             return nullptr;
         }
@@ -334,6 +375,7 @@ std::string VideoDecoder::video_stream_summary() const {
 
 VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int max_over) {
     if (!codec_ctx_ || frame_rate_ <= 0.0) return nullptr;
+    refine_last_frame();
     const auto df_t0 = std::chrono::steady_clock::now();
     int fast_over = 0;
     // Most recently decoded frame, kept so we can fall back to a representative
@@ -414,6 +456,8 @@ VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int ma
             return out;
         }
         if (ret == AVERROR_EOF) {
+            if (next_frame_ > 0 && (last_frame_ < 0 || next_frame_ - 1 < last_frame_))
+                last_frame_ = next_frame_ - 1;
             CANVAS_LOG("video_decoder: decode_forward_to EOF target=%lld at frame %lld",
                    (long long)target, (long long)next_frame_);
             return nullptr;
@@ -444,6 +488,7 @@ VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int ma
 
 const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_over) {
     if (!codec_ctx_ || frame_rate_ <= 0.0) return nullptr;
+    refine_last_frame();
     // This path only serves hardware-decoded frames (device NV12 on CUDA); software
     // decode must use the CPU RGBA path. hw_pix_fmt_ is the *hwaccel* format
     // negotiated in open() (AV_PIX_FMT_CUDA) — the tag AVFrame::format carries
@@ -491,6 +536,8 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
             return av_frame_;
         }
         if (ret == AVERROR_EOF) {
+            if (next_frame_ > 0 && (last_frame_ < 0 || next_frame_ - 1 < last_frame_))
+                last_frame_ = next_frame_ - 1;
             CANVAS_LOG("video_decoder: decode_to_hw EOF at frame %lld", (long long)next_frame_);
             return nullptr;
         }
@@ -521,9 +568,8 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
 const AVFrame* VideoDecoder::decode_to_hw_indexed(const int64_t target, const int max_over) {
     if (!codec_ctx_ || frame_rate_ <= 0.0) return nullptr;
     if (!hw_avail_ || hw_pix_fmt_ != AV_PIX_FMT_CUDA) return nullptr;
-    int64_t t = target;
-    if (total_frames_ > 0) t = std::clamp(t, int64_t{0}, total_frames_ - 1);
-    if (t < 0) t = 0;
+    refine_last_frame();
+    int64_t t = clamp_target(target);
 
     // Jump to the keyframe that owns this target so the forward walk only
     // traverses one Group of Pictures. Uses the built keyframe index; without
@@ -538,7 +584,7 @@ const AVFrame* VideoDecoder::decode_to_hw_indexed(const int64_t target, const in
     } else if (frame_rate_ > 0.0) {
         container_seek_seconds(static_cast<double>(t) / frame_rate_);
     }
-    const AVFrame* hw = decode_to_hw(t, max_over);  // sets next_frame_ internally
+    const AVFrame* hw = decode_to_hw(t, max_over == 0 ? kFullResMaxOver : max_over);  // sets next_frame_ internally
     return hw;
 }
 
@@ -613,8 +659,8 @@ void VideoDecoder::set_output_dim(int max_output_dim) {
 VideoFramePtr VideoDecoder::seek_to_frame(int64_t target, int max_output_dim) {
     if (!fmt_ctx_ || frame_rate_ <= 0.0) return nullptr;
     set_output_dim(max_output_dim);
-    if (total_frames_ > 0) target = std::clamp(target, int64_t{0}, total_frames_ - 1);
-    if (target < 0) target = 0;
+    refine_last_frame();
+    target = clamp_target(target);
 
     const auto us = static_cast<int64_t>(
         std::llround(target / frame_rate_ * static_cast<double>(AV_TIME_BASE)));
@@ -625,7 +671,7 @@ VideoFramePtr VideoDecoder::seek_to_frame(int64_t target, int max_output_dim) {
         avformat_seek_file(fmt_ctx_, -1, INT64_MIN, 0, 0, 0);
     reset_stream_state(target);
 
-    VideoFramePtr frame = decode_forward_to(target);
+    VideoFramePtr frame = decode_forward_to(target, kFullResMaxOver);
     const double st_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - st_t0).count();
     ::canvas::core::log::log_error("vdecode container-seek target=%lld ms=%.2f ok=%d",
@@ -638,8 +684,8 @@ VideoFramePtr VideoDecoder::seek_to_frame(int64_t target, int max_output_dim) {
 VideoFramePtr VideoDecoder::decode_to_frame(int64_t target, int max_output_dim) {
     if (!codec_ctx_ || frame_rate_ <= 0.0) return nullptr;
     set_output_dim(max_output_dim);
-    if (total_frames_ > 0) target = std::clamp(target, int64_t{0}, total_frames_ - 1);
-    if (target < 0) target = 0;
+    refine_last_frame();
+    target = clamp_target(target);
 
     const auto dbg_start = std::chrono::steady_clock::now();
     const bool dbg_hw = hw_pix_fmt_ != AV_PIX_FMT_NONE;
@@ -651,7 +697,7 @@ VideoFramePtr VideoDecoder::decode_to_frame(int64_t target, int max_output_dim) 
     // for (distance * ~ms/frame) and stall scrubbing, while a keyframe seek
     // bounds decode-forward to a single GOP.
     if (target >= next_frame_ && target - next_frame_ < 64) {
-        VideoFramePtr frame = decode_forward_to(target);
+VideoFramePtr frame = decode_forward_to(target, kFullResMaxOver);
         if (frame) {
             next_frame_ = frame->frame_number + 1;
             dbg_out = std::move(frame);
@@ -765,8 +811,8 @@ const IframeEntry* VideoDecoder::iframe_at_or_before(const int64_t target) const
 
 VideoFramePtr VideoDecoder::seek_to_frame_indexed(int64_t target, int max_output_dim) {
     set_output_dim(max_output_dim);
-    if (total_frames_ > 0) target = std::clamp(target, int64_t{0}, total_frames_ - 1);
-    if (target < 0) target = 0;
+    refine_last_frame();
+    target = clamp_target(target);
 
     // Find the I-frame that owns this target (at-or-before).
     const IframeEntry* entry = iframe_at_or_before(target);
@@ -781,9 +827,20 @@ VideoFramePtr VideoDecoder::seek_to_frame_indexed(int64_t target, int max_output
     // Preview path (max_output_dim > 0) caps decode-forward so a scrub never
     // stalls on sparse-keyframe GOPs: it decodes at most ~kPreviewMaxOver frames
     // past the keyframe and returns the nearest frame reached (an approximate
-    // low-res tease) instead of walking the entire multi-second GOP. Full-res
-    // single-frame (export/scrub-commit) stays exact with max_over=0.
-    const int max_over = max_output_dim > 0 ? kPreviewMaxOver : 0;
+    // low-res tease) instead of walking the entire multi-second GOP. Any other
+    // dim (0 = full-res, or a stray negative) walks at most ~kFullResMaxOver
+    // frames for the same reason.
+    //
+    // BUT a full-res far-forward seek into an ultra-sparse GOP (observed: a
+    // 19,000-frame keyframe interval) used to walk THE WHOLE GOP uncapped — one
+    // scrub position took 78 s of decode-forward, during which audio pre-rolled
+    // ~6 s ahead and the device drained, garbling the first seconds of playback.
+    // A NEITHER-positive-nor-zero max_output_dim previously fell through to
+    // max_over=0 (uncapped again; field log: 51-58s scrub walks in a 8+ min AV1
+    // with iframe=16000). Cap those too, so no caller can ever re-enable the
+    // unbounded walk: a far seek returns the nearest decoded frame as an
+    // approximate still instead of blocking the worker for tens of seconds.
+    const int max_over = max_output_dim > 0 ? kPreviewMaxOver : kFullResMaxOver;
     const auto idx_t0 = std::chrono::steady_clock::now();
     container_seek_seconds(entry->pts_seconds);
     VideoFramePtr frame = decode_forward_to(target, max_over);

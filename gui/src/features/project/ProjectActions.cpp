@@ -156,9 +156,10 @@ void MainWindow::refresh_media_pool() {
         item->setForeground(QColor(220, 225, 230));
         media_pool_->addItem(item);
 
-        if (m.width <= 0 && m.height <= 0) {
-            // Audio-only media: paint its spectrum (waveform) as the pool
-            // preview rather than a video frame (there is none).
+        if (m.has_audio || (m.width <= 0 && m.height <= 0)) {
+            // Audio-bearing media (audio-only files or video with an audio
+            // stream): paint its spectrum (waveform) as the pool preview so the
+            // pool shows the sound rather than a video frame.
             thumbnails_.request_waveform(static_cast<uint64_t>(i), m.path, 240, 136, 0.0f, 1.0f);
             continue;
         }
@@ -176,6 +177,79 @@ void MainWindow::refresh_media_pool() {
     for (const auto& m : project_->media)
         paths[m.id] = canvas::gui::MediaMeta{m.path, m.total_frames};
     if (timeline_) timeline_->set_media_paths(std::move(paths));
+}
+
+void MainWindow::delete_selected_media() {
+    if (!project_ || !media_pool_) return;
+    const QList<QListWidgetItem*> items = media_pool_->selectedItems();
+    if (items.isEmpty()) return;
+
+    std::vector<int> indices;
+    std::vector<canvas::core::MediaId> ids;
+    for (const QListWidgetItem* item : items) {
+        const QVariant v = item->data(Qt::UserRole);
+        if (!v.isValid()) continue;
+        const int idx = static_cast<int>(v.toLongLong());
+        if (idx < 0 || static_cast<std::size_t>(idx) >= project_->media.size()) continue;
+        indices.push_back(idx);
+        ids.push_back(project_->media[idx].id);
+    }
+    if (indices.empty()) return;
+
+    // Clips on the timeline referencing a removed media go with it, and any
+    // linked mate (the audio half of a video+audio pair on a partner track) is
+    // pulled along so no half is left stranded on the timeline.
+    std::vector<canvas::core::ClipId> clips;
+    const auto collect = [&](std::vector<canvas::core::Track>& tracks, bool linked_pass) {
+        for (const auto& t : tracks) {
+            for (const auto& c : t.clips) {
+                if (linked_pass) {
+                    if (c.is_linked() &&
+                        std::find(clips.begin(), clips.end(), c.linked_id) != clips.end())
+                        clips.push_back(c.id);
+                } else if (std::find(ids.begin(), ids.end(), c.media) != ids.end()) {
+                    clips.push_back(c.id);
+                }
+            }
+        }
+    };
+    collect(project_->sequence.video_tracks, /*linked_pass=*/false);
+    collect(project_->sequence.audio_tracks, /*linked_pass=*/false);
+    collect(project_->sequence.video_tracks, /*linked_pass=*/true);
+    collect(project_->sequence.audio_tracks, /*linked_pass=*/true);
+
+    const auto erase_clips = [&](std::vector<canvas::core::Track>& tracks) {
+        for (auto& t : tracks) {
+            t.clips.erase(
+                std::remove_if(t.clips.begin(), t.clips.end(),
+                               [&](const canvas::core::Clip& c) {
+                                   return std::find(clips.begin(), clips.end(), c.id) != clips.end();
+                               }),
+                t.clips.end());
+        }
+    };
+    erase_clips(project_->sequence.video_tracks);
+    erase_clips(project_->sequence.audio_tracks);
+
+    // Pool entries are indexed by list position; erase high-to-low so the
+    // earlier indices stay valid.
+    std::sort(indices.begin(), indices.end());
+    for (auto it = indices.rbegin(); it != indices.rend(); ++it)
+        project_->media.erase(project_->media.begin() + *it);
+
+    refresh_media_pool();
+    refresh_timeline();
+    push_snapshot(current_frame_);
+    has_unsaved_changes_ = true;
+    status_->showMessage(
+        tr("Removed %1 media item(s) from the pool").arg(indices.size()), 4000);
+}
+
+void MainWindow::delete_selected_media_and_clips() {
+    delete_selected_media();
+    if (timeline_ && !timeline_->selected_clip_ids().empty()) {
+        delete_selected_clip(/*ripple=*/true);
+    }
 }
 
 void MainWindow::refresh_bin_tree() {
@@ -245,6 +319,7 @@ int MainWindow::import_media_paths(const QStringList& paths) {
             entry.height = probe.height();
             entry.total_frames = probe.total_frames();
             entry.bin = current_bin_.toStdString();
+            entry.has_audio = probe.has_audio();
             project_->media.push_back(entry);
             controller_.add_media(entry);
 
@@ -276,6 +351,7 @@ int MainWindow::import_media_paths(const QStringList& paths) {
             entry.total_frames =
                 secs > 0.0 ? static_cast<int64_t>(std::llround(secs * seq_fps)) : 0;
             entry.bin = current_bin_.toStdString();
+            entry.has_audio = true;
             project_->media.push_back(entry);
             controller_.add_media(entry);
 
@@ -305,6 +381,15 @@ void MainWindow::on_open_project() {
 }
 
 bool MainWindow::save_project_to(const QString& path) {
+    // Persist the deliver context with the timeline: panel settings + a
+    // snapshot of the current queue (staged, finished cards, failures).
+    if (deliver_settings_) project_->deliver_settings = deliver_settings_->settings();
+    const auto jobs = render_queue_.jobs();
+    project_->render_jobs.clear();
+    project_->render_jobs.reserve(jobs.size());
+    for (const auto& j : jobs)
+        project_->render_jobs.push_back(canvas::core::render_job_snapshot(j));
+
     std::string error;
     if (!canvas::core::save_project(*project_, path.toStdString(), &error)) {
         status_->showMessage(tr("Save failed: %1").arg(QString::fromStdString(error)), 8000);
@@ -361,6 +446,17 @@ void MainWindow::open_file(const QString& path) {
         refresh_media_pool();
         refresh_timeline();
         push_snapshot(0);
+        // Reinstate deliver context: panel settings + the render queue exactly
+        // as it was saved (finished cards keep their completion time).
+        if (deliver_settings_) deliver_settings_->set_settings(project_->deliver_settings);
+        std::vector<canvas::core::RenderJob> restored;
+        restored.reserve(project_->render_jobs.size());
+        for (const auto& sn : project_->render_jobs)
+            restored.push_back(canvas::core::render_job_from_snapshot(sn));
+        render_queue_.restore(restored);
+        render_queue_.set_active_project(
+            std::make_shared<const canvas::core::Project>(*project_), {});
+        reflect_render_queue();
         setWindowTitle(tr("Nova Canvas Studio — %1").arg(QString::fromStdString(project_->name)));
         status_->showMessage(tr("Opened project %1").arg(path), 5000);
     } else {

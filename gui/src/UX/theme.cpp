@@ -76,14 +76,32 @@ public:
             dpr = int(app->devicePixelRatio());
         }
         const QSize px(size.width() * dpr, size.height() * dpr);
+
+        // Render at 2x the target (supersample) and smoothly downscale, so
+        // both vector strokes and any down-converted raster art inside the SVG
+        // (e.g. the film-strip thumbnail) stay crisp instead of pixellated.
+        constexpr int kSupersample = 2;
+        const QSize big(px.width() * kSupersample, px.height() * kSupersample);
+        QPixmap hi(big);
+        hi.fill(Qt::transparent);
+        {
+            QSvgRenderer renderer(QStringLiteral(":/icons/%1.svg").arg(file_));
+            QPainter p(&hi);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setRenderHint(QPainter::SmoothPixmapTransform);
+            renderer.render(&p, QRectF(QPointF(0, 0), QSizeF(big)));
+            p.end();
+        }
+
         QPixmap pm(px);
         pm.fill(Qt::transparent);
         pm.setDevicePixelRatio(dpr);
         {
-            QSvgRenderer renderer(QStringLiteral(":/icons/%1.svg").arg(file_));
-            QPainter p(&pm);
-            renderer.render(&p, QRectF(QPointF(0, 0), QSizeF(px)));
-            p.end();
+            QPainter d(&pm);
+            d.setRenderHint(QPainter::SmoothPixmapTransform);
+            d.drawPixmap(QRectF(QPointF(0, 0), QSizeF(px)), hi,
+                         QRectF(QPointF(0, 0), QSizeF(big)));
+            d.end();
         }
         QColor tint = modeColor(mode);
         if (normal_.isValid() && (mode == QIcon::Normal || mode == QIcon::Selected)) {
@@ -131,12 +149,21 @@ QString make_flat_controls_qss() {
       "QMenuBar { background: transparent; color: %1; }"
       "QMenuBar::item { background: transparent; border-radius: 8px; padding: 4px 10px; }"
       "QMenuBar::item:selected { background: %4; }"
-      "QMenu { background: %2; color: %1; border: 1px solid %3; border-radius: 8px;"
-      "  padding: 6px; }"
-      "QMenu::item { padding: 6px 20px 6px 12px; border-radius: 8px; }"
-      "QMenu::item:selected { background: %5; }"
-      "QMenu::item:disabled { color: %6; }"
-      "QMenu::separator { height: 1px; background: %3; margin: 5px 6px; }"
+      "QMenuBar::item:pressed { background: rgba(255,255,255,0.12); }"
+      // Floating menu card: one raised semi-rounded popup surface matching the
+      // app's card language, with pill-shaped hover items and a blue check
+      // indicator for checkable actions (right-click / bar menus alike).
+      "QMenu { background: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
+      "  border-radius: 12px; padding: 6px; }"
+      "QMenu::item { padding: 5px 24px 5px 12px; border-radius: 8px; margin: 1px 4px; }"
+      "QMenu::item:selected { background: rgba(255,255,255,0.08); color: #FFFFFF; }"
+      "QMenu::item:disabled { color: #5F6577; }"
+      "QMenu::separator { height: 1px; background: #2A2F3C; margin: 5px 8px; }"
+      "QMenu::indicator { width: 16px; height: 16px; margin: 0 4px; }"
+      "QMenu::indicator:checked { background: #3B82F6; border-radius: 4px;"
+      "  image: url(:/icons/check.svg); }"
+      "QMenu::icon { margin-left: 4px; margin-right: 8px; }"
+      "QMenu::separator:horizontal { height: 1px; }"
       "QStatusBar { color: %7; }"
       "QTabBar::tab { background: transparent; color: %7; padding: 6px 14px;"
       "  border-bottom: 2px solid transparent; }"
@@ -162,11 +189,22 @@ QString make_flat_controls_qss() {
       "QSlider::handle:horizontal:hover { background: %12; }"
       "QSlider::handle:horizontal:pressed { background: %9; }"
       "QSlider::sub-page:horizontal { background: %12; border-radius: 1.5px; }"
+      "QCheckBox, QRadioButton { spacing: 8px; outline: none; }"
+      "QCheckBox::indicator, QRadioButton::indicator { width: 16px; height: 16px;"
+      "  background: %10; border: 1px solid %3; border-radius: 5px; }"
+      "QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: %12; }"
+      "QCheckBox::indicator:checked { background: %13; border-color: %13;"
+      "  image: url(:/icons/check.svg); }"
       "QComboBox { background: %10; color: %1; border: 1px solid %3;"
       "  border-radius: 8px; padding: 4px 10px; }"
       "QComboBox:hover { background: %11; }"
       "QComboBox QAbstractItemView { background: %2; border: none;"
-      "  selection-background-color: %13; selection-color: %14; outline: none; }"
+      "  selection-background-color: %13; selection-color: %14; outline: none;"
+      "  border-radius: 8px; padding: 4px; }"
+      "QLineEdit { background: %10; color: %1; border: 1px solid %3;"
+      "  border-radius: 8px; padding: 3px 8px; }"
+      "QLineEdit:focus { border-color: %12; }"
+      "QAbstractScrollArea::corner { background: transparent; border: none; }"
       "QDoubleSpinBox, QSpinBox { background: %10; color: %1; border: 1px solid %3;"
       "  border-radius: 8px; padding: 3px 8px; }"
       "QDoubleSpinBox:focus, QSpinBox:focus, QDoubleSpinBox:hover, QSpinBox:hover"
@@ -260,44 +298,78 @@ constexpr const char* kBinTreeQss =
     "QTreeWidget::item:selected { background-color: rgba(255,255,255,0.14); color: #FFFFFF; }"
     "QTreeWidget::item:selected:hover { background-color: rgba(255,255,255,0.20); }";
 
+// Semi-rounded inspector category card: the header is the raised top band (or
+// the whole card when collapsed), the body the inset content well. Radii match
+// the card shape; the seam between the two is the header's bottom hairline.
 constexpr const char* kInspectorCategoryHeaderQss =
-    "QToolButton { background-color: #1A1D27; border: none;"
-    " padding: 5px 6px; text-align: left; color: #E8EAF0; font-weight: 600; }"
+    "QToolButton { background: transparent; border: none;"
+    " padding: 8px 10px; text-align: left; color: #E8EAF0; font-weight: 600;"
+    " border-radius: 8px; }"
     "QToolButton:hover { background-color: rgba(255,255,255,0.08); }";
 
-constexpr const char* kInspectorBodyQss = "background-color: #141A21;";
+// Header row (the card's top band). Two shapes: OPEN rounds the top corners
+// (the body below rounds the bottom); CLOSED rounds all four corners. Scoped
+// by objectName so the border never cascades onto the child toggle/reset.
+constexpr const char* kInspectorCardHeaderOpenQss =
+    "QWidget#inspectorCardHeader { background-color: #1A1D27;"
+    " border: 1px solid #232833;"
+    " border-top-left-radius: 12px; border-top-right-radius: 12px; }";
+constexpr const char* kInspectorCardHeaderClosedQss =
+    "QWidget#inspectorCardHeader { background-color: #1A1D27;"
+    " border: 1px solid #232833; border-radius: 12px; }";
+constexpr const char* kInspectorCardBodyQss =
+    "QWidget#inspectorCardBody { background-color: #141A21;"
+    " border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;"
+    " border-left: 1px solid #232833; border-right: 1px solid #232833;"
+    " border-bottom: 1px solid #232833; }";
 
 constexpr const char* kPagePillQss =
-    // Compact horizontal padding so six mode pills fit comfortably at 400px
-    // and every label is visible at all DPI scales.
-    "QToolButton { color: #9AA0B0; padding: 3px 8px; border-radius: 8px; }"
+    // Raised pill with a soft border — visible but not loud.  Selected glows
+    // with the accent so the active page is immediately readable.
+    "QToolButton { color: #9AA0B0; padding: 5px 10px; border-radius: 8px;"
+    " background-color: #1A1D27; border: 1px solid #232833; }"
+    "QToolButton:checked { color: #FFFFFF; background-color: rgba(59,130,246,0.16);"
+    " border: 1px solid rgba(59,130,246,0.50); font-weight: 600; }"
+    "QToolButton:hover:!checked { color: #F0F2F7; background-color: #20242F;"
+    " border-color: #2A2F3C; }"
+    "QToolButton:pressed { background-color: #2A2F3C; }";
+
+// Inspector mode tabs: a recessed semi-rounded segmented track (the pill row's
+// container) with individual pills that read as one segmented control.
+constexpr const char* kInspectorTabTrackQss =
+    "QWidget { background-color: #0E1117;"
+    " border: 1px solid #232833; border-radius: 12px; }";
+
+constexpr const char* kInspectorTabQss =
+    "QToolButton { color: #9AA0B0; background: transparent; border: none;"
+    " border-radius: 9px; padding: 5px 4px; font-weight: 500; }"
     "QToolButton:checked { color: #FFFFFF; background-color: #3B82F6; font-weight: 600; }"
     "QToolButton:hover:!checked { color: #F0F2F7; background-color: rgba(255,255,255,0.08); }";
 
-// Flat, icon-only toolbar buttons: no persistent border or background; state is
-// communicated by a soft highlight layer only. Checked = active-tool highlight.
+// Flat icon toolbar buttons — every icon button now has a subtle raised surface
+// so the whole chrome feels physical, not invisible-until-hovered.
 constexpr const char* kFlatToolQss =
-    "QToolButton { background: transparent; border: none; border-radius: 6px;"
+    "QToolButton { background: #1A1D27; border: 1px solid #232833; border-radius: 6px;"
     " padding: 4px; }"
-    "QToolButton:hover { background: rgba(255,255,255,0.07); }"
-    "QToolButton:pressed { background: rgba(255,255,255,0.12); }"
-    "QToolButton:checked { background: rgba(59,130,246,0.26); }";
+    "QToolButton:hover { background: #20242F; border-color: #2A2F3C; }"
+    "QToolButton:pressed { background: #2A2F3C; }"
+    "QToolButton:checked { background: rgba(59,130,246,0.20);"
+    " border: 1px solid rgba(59,130,246,0.40); }";
 
-// "Bracket-pill" edit-tool cluster outline (select/trim/blade/mode): a bordered,
-// rounded group where the active member shows a soft blue highlight.
+// "Bracket-pill" edit-tool cluster (select/trim/blade/mode): raised members
+// with a cohesive border, active member shows a soft blue fill.
 constexpr const char* kToolClusterQss =
-    "QToolButton { background: transparent; border: none; border-radius: 6px;"
+    "QToolButton { background: #1A1D27; border: 1px solid #232833; border-radius: 6px;"
     " padding: 4px; }"
-    "QToolButton:hover { background: rgba(255,255,255,0.07); }"
-    "QToolButton:checked { background: rgba(59,130,246,0.30); border-radius: 6px; }";
+    "QToolButton:hover { background: #20242F; border-color: #2A2F3C; }"
+    "QToolButton:checked { background: rgba(59,130,246,0.20);"
+    " border: 1px solid rgba(59,130,246,0.40); border-radius: 6px; }";
 
-// Semi-rounded outlined button (DIM) — the one bordered/outlined button in the
-// whole chrome. Corners are semi-rounded (not a pill); the checked state glows
-// red to signal active monitoring dimming.
+// Semi-rounded outlined button (DIM) — raised surface with a colored border.
 constexpr const char* kOutlinePillQss =
-    "QToolButton { color: #C7CCD8; background: transparent; border: 1px solid #3A4150;"
-    " border-radius: 6px; padding: 2px 12px; font-size: 10px; }"
-    "QToolButton:hover { border-color: #5A6375; color: #FFFFFF; background: rgba(255,255,255,0.05); }"
+    "QToolButton { color: #C7CCD8; background: #1A1D27; border: 1px solid #3A4150;"
+    " border-radius: 8px; padding: 3px 12px; font-size: 10px; }"
+    "QToolButton:hover { border-color: #5A6375; color: #FFFFFF; background: #20242F; }"
     "QToolButton:checked { border-color: #EF4444; color: #FCA5A5; background: rgba(239,68,68,0.18); }";
 
 // Semi-rounded sliders: pill groove, round handle — never square.
@@ -320,7 +392,11 @@ QString top_status_bar_style() { return QString::fromLatin1(kTopStatusBarQss); }
 QString big_timecode_style() { return QString::fromLatin1(kBigTimecodeQss); }
 QString bin_tree_style() { return QString::fromLatin1(kBinTreeQss); }
 QString inspector_category_header_style() { return QString::fromLatin1(kInspectorCategoryHeaderQss); }
-QString inspector_body_style() { return QString::fromLatin1(kInspectorBodyQss); }
+QString inspector_card_header_open_style() { return QString::fromLatin1(kInspectorCardHeaderOpenQss); }
+QString inspector_card_header_closed_style() { return QString::fromLatin1(kInspectorCardHeaderClosedQss); }
+QString inspector_card_body_style() { return QString::fromLatin1(kInspectorCardBodyQss); }
+QString inspector_tab_track_style() { return QString::fromLatin1(kInspectorTabTrackQss); }
+QString inspector_tab_style() { return QString::fromLatin1(kInspectorTabQss); }
 QString page_pill_style() { return QString::fromLatin1(kPagePillQss); }
 QString flat_tool_style() { return QString::fromLatin1(kFlatToolQss); }
 QString tool_cluster_style() { return QString::fromLatin1(kToolClusterQss); }

@@ -378,7 +378,9 @@ void build_center_workspace(MainWindow& mw) {
     timeline_dock->setObjectName(QStringLiteral("timelineDock"));
     auto* timeline_title = new QWidget(timeline_dock);
     timeline_title->setObjectName(QStringLiteral("timelineDockTitle"));
-    timeline_title->    setStyleSheet(QStringLiteral("background-color: #1A1D27;"));
+    timeline_title->setStyleSheet(QStringLiteral(
+        "QWidget#timelineDockTitle { background-color: #1A1D27;"
+        " border-bottom: 1px solid #232833; }"));
     timeline_dock->setTitleBarWidget(timeline_title);
     timeline_dock->setWidget(timeline_frame);
     timeline_dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
@@ -426,8 +428,15 @@ void build_center_workspace(MainWindow& mw) {
             &MainWindow::render_all_from_queue);
     QObject::connect(mw.deliver_queue_panel_, &RenderQueuePanel::render_all_clicked, &mw,
             &MainWindow::render_all_from_queue);
-    QObject::connect(mw.deliver_queue_panel_, &RenderQueuePanel::clear_finished_clicked, &mw,
-            [&mw] { mw.render_queue_.clear_finished(); mw.reflect_render_queue(); });
+    QObject::connect(mw.deliver_queue_panel_, &RenderQueuePanel::clear_queued_clicked, &mw,
+            [&mw] { mw.render_queue_.clear_queued(); mw.has_unsaved_changes_ = true;
+                    mw.reflect_render_queue(); });
+    QObject::connect(mw.deliver_queue_panel_, &RenderQueuePanel::job_remove_clicked, &mw,
+            [&mw](uint64_t id) { mw.render_queue_.remove(id); mw.has_unsaved_changes_ = true;
+                                 mw.reflect_render_queue(); });
+    QObject::connect(mw.deliver_queue_panel_, &RenderQueuePanel::cancel_all_clicked, &mw,
+            [&mw] { mw.render_queue_.cancel_all(); mw.has_unsaved_changes_ = true;
+                    mw.reflect_render_queue(); });
 
     // Reflect queue changes into the UI panel (called on the main thread via a
     // queued-style refresh using QMetaObject to stay thread-safe with the

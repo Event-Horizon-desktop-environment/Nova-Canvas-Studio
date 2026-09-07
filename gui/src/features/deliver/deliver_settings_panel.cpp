@@ -20,6 +20,7 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -30,7 +31,7 @@ namespace {
 void style_field(QWidget* w) {
     w->setStyleSheet(QStringLiteral(
         "QComboBox,QSpinBox,QDoubleSpinBox,QLineEdit{background:#0C0E14;color:#E8EAF0;"
-        "border:1px solid #232833;border-radius:4px;padding:3px 6px;font-size:11px;}"));
+        "border:1px solid #232833;border-radius:8px;padding:4px 8px;font-size:11px;}"));
 }
 
 QWidget* make_row(const QString& label, QWidget* field, QWidget* parent = nullptr) {
@@ -61,6 +62,24 @@ QScrollArea* make_scroll(QWidget* content) {
     return sa;
 }
 
+// A grouped settings section: a recessed semi-rounded card with a small caps
+// header, appended to the given page layout. Returns the card's inner layout
+// for the caller to fill with rows.
+QVBoxLayout* make_section(const QString& title, QVBoxLayout* page) {
+    auto* card = new QWidget;
+    card->setStyleSheet(QStringLiteral(
+        "QWidget{background:#0E1117;border:1px solid #232833;border-radius:10px;}"));
+    auto* inner = new QVBoxLayout(card);
+    inner->setContentsMargins(10, 8, 10, 10);
+    inner->setSpacing(6);
+    auto* t = new QLabel(title, card);
+    t->setStyleSheet(QStringLiteral("color:#9AA0B0;font-size:10px;font-weight:600;"
+                                    "padding:0 2px;"));
+    inner->addWidget(t);
+    page->addWidget(card);
+    return inner;
+}
+
 }  // namespace
 
 DeliverSettingsPanel::DeliverSettingsPanel(QWidget* parent) : QWidget(parent) {
@@ -73,7 +92,8 @@ void DeliverSettingsPanel::build() {
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
-    // Header: preset + scope + file name/location.
+    // Header: preset + scope + file name/location. Raised card band with a
+    // hairline, matching the inspector / dock-title surfaces.
     auto* header = new QWidget(this);
     header->setStyleSheet(QStringLiteral("background:#1A1D27;border-bottom:1px solid #232833;"));
     auto* h = new QVBoxLayout(header);
@@ -123,16 +143,22 @@ void DeliverSettingsPanel::build() {
     location_browse_ = new QPushButton(tr("Browse..."), header);
     location_browse_->setStyleSheet(QStringLiteral(
         "QPushButton{background:#1A1D27;color:#C6CAD6;border:1px solid #232833;"
-        "border-radius:4px;padding:3px 8px;font-size:11px;}"));
+        "border-radius:8px;padding:4px 10px;font-size:11px;}"
+        "QPushButton:hover{background:#20242F;}"));
     loc_row->addWidget(location_browse_);
     h->addLayout(loc_row);
 
     root->addWidget(header);
 
     tabs_ = new QTabWidget(this);
-    tabs_->setStyleSheet(QStringLiteral("QTabWidget::pane{background:#141A21;} "
-                                        "QTabBar::tab{color:#9AA0B0;} "
-                                        "QTabBar::tab:selected{color:#E8EAF0;}"));
+    tabs_->setStyleSheet(QStringLiteral(
+        "QWidget#qt_tabwidget_stackedwidget{background:#141A21;}"
+        "QTabWidget::pane{background:#141A21;border:none;}"
+        "QTabBar::tab{background:transparent;color:#9AA0B0;padding:6px 14px;"
+        "  border:none;border-radius:8px;font-weight:500;margin:2px 1px;}"
+        "QTabBar::tab:selected{color:#FFFFFF;background:#3B82F6;font-weight:600;}"
+        "QTabBar::tab:hover{color:#E8EAF0;}"
+        "QTabBar::tab:selected:hover{color:#FFFFFF;}"));
     root->addWidget(tabs_, 1);
 
     // ---------------- VIDEO TAB ----------------
@@ -143,25 +169,28 @@ void DeliverSettingsPanel::build() {
 
     export_video_ = (QCheckBox*)make_check(tr("Export Video"));
     export_video_->setChecked(true);   // video exported by default
-    v->addWidget(export_video_);
 
     format_combo_ = new QComboBox;
     for (const auto& f : canvas::core::deliver_formats()) format_combo_->addItem(QString::fromStdString(f));
     style_field(format_combo_);
-    v->addWidget(make_row(tr("Format"), format_combo_));
 
     codec_combo_ = new QComboBox;
     for (const auto& c : canvas::core::deliver_video_codecs()) codec_combo_->addItem(QString::fromStdString(c));
     style_field(codec_combo_);
-    v->addWidget(make_row(tr("Codec"), codec_combo_));
 
     encoder_combo_ = new QComboBox;
     style_field(encoder_combo_);
     rebuild_encoder_list();
-    v->addWidget(make_row(tr("Encoder"), encoder_combo_));
 
     network_opt_ = (QCheckBox*)make_check(tr("Network Optimization"));
-    v->addWidget(network_opt_);
+    {
+        auto* sec = make_section(tr("OUTPUT"), v);
+        sec->addWidget(export_video_);
+        sec->addWidget(make_row(tr("Format"), format_combo_));
+        sec->addWidget(make_row(tr("Codec"), codec_combo_));
+        sec->addWidget(make_row(tr("Encoder"), encoder_combo_));
+        sec->addWidget(network_opt_);
+    }
 
     resolution_combo_ = new QComboBox;
     resolution_combo_->addItem(tr("Timeline Resolution"));
@@ -171,7 +200,6 @@ void DeliverSettingsPanel::build() {
     resolution_combo_->addItem(tr("1280 x 720"));
     resolution_combo_->addItem(tr("Custom"));
     style_field(resolution_combo_);
-    v->addWidget(make_row(tr("Resolution"), resolution_combo_));
 
     auto* res_row = new QHBoxLayout;
     res_w_ = new QSpinBox;
@@ -190,7 +218,6 @@ void DeliverSettingsPanel::build() {
     vertical_res_->setStyleSheet(QStringLiteral("QCheckBox{color:#C6CAD6;font-size:11px;}"));
     res_row->addWidget(vertical_res_);
     res_row->setContentsMargins(0, 0, 0, 0);
-    v->addLayout(res_row);
 
     auto* fr_row = new QWidget;
     auto* fr = new QHBoxLayout(fr_row);
@@ -201,54 +228,75 @@ void DeliverSettingsPanel::build() {
     custom_fps_chk_->setChecked(false);
     fr->addWidget(custom_fps_chk_);
     fr->addStretch(1);
-    v->addWidget(fr_row);
 
     fps_spin_ = new QDoubleSpinBox;
     fps_spin_->setRange(1.0, 240.0);
     fps_spin_->setValue(30.0);
     fps_spin_->setEnabled(false);
     style_field(fps_spin_);
-    v->addWidget(make_row(tr("FPS"), fps_spin_));
+    {
+        auto* sec = make_section(tr("RESOLUTION & FRAME RATE"), v);
+        sec->addWidget(make_row(tr("Resolution"), resolution_combo_));
+        sec->addLayout(res_row);
+        sec->addWidget(fr_row);
+        sec->addWidget(make_row(tr("FPS"), fps_spin_));
+    }
 
     export_alpha_ = (QCheckBox*)make_check(tr("Export Alpha"));
     chapters_ = (QCheckBox*)make_check(tr("Chapters from Markers"));
-    v->addWidget(export_alpha_);
-    v->addWidget(chapters_);
 
     profile_combo_ = new QComboBox;
     profile_combo_->addItems({tr("Main"), tr("Main10"), tr("Main 4:2:2"), tr("Main 4:2:2 10"),
                               tr("Main 4:4:4"), tr("Main 4:4:4 10")});
     style_field(profile_combo_);
-    v->addWidget(make_row(tr("Encoding Profile"), profile_combo_));
 
     key_frames_combo_ = new QComboBox;
     key_frames_combo_->addItem(tr("Automatic"));
     key_frames_combo_->addItem(tr("Every 30 frames"));
     style_field(key_frames_combo_);
-    v->addWidget(make_row(tr("Key Frames"), key_frames_combo_));
 
     key_interval_spin_ = new QSpinBox;
     key_interval_spin_->setRange(1, 600);
     key_interval_spin_->setValue(30);
     style_field(key_interval_spin_);
-    v->addWidget(make_row(tr("Key Frame Interval"), key_interval_spin_));
 
     frame_reorder_ = (QCheckBox*)make_check(tr("Frame reordering"));
-    v->addWidget(frame_reorder_);
+
+    preset_q_combo_ = new QComboBox;
+    preset_q_combo_->addItems({tr("Placebo"), tr("Very Slow"), tr("Slow"), tr("Medium"),
+                               tr("Fast"), tr("Faster"), tr("Very Fast"), tr("Superfast"),
+                               tr("Ultrafast")});
+    preset_q_combo_->setCurrentText(tr("Faster"));
+    style_field(preset_q_combo_);
+
+    tuning_combo_ = new QComboBox;
+    tuning_combo_->addItems({tr("High Quality"), tr("Low Latency"), tr("Ultra Low Latency"),
+                             tr("Lossless")});
+    style_field(tuning_combo_);
+
+    two_pass_ = (QCheckBox*)make_check(tr("Two Pass"));
+    {
+        auto* sec = make_section(tr("ENCODING"), v);
+        sec->addWidget(make_row(tr("Encoding Profile"), profile_combo_));
+        sec->addWidget(make_row(tr("Key Frames"), key_frames_combo_));
+        sec->addWidget(make_row(tr("Key Frame Interval"), key_interval_spin_));
+        sec->addWidget(frame_reorder_);
+        sec->addWidget(make_row(tr("Preset"), preset_q_combo_));
+        sec->addWidget(make_row(tr("Tuning"), tuning_combo_));
+        sec->addWidget(two_pass_);
+    }
 
     rate_control_combo_ = new QComboBox;
     rate_control_combo_->addItems({tr("Constant QP"), tr("Variable Bitrate (Quality)"),
                                    tr("Variable Bitrate (Target Kbps)"), tr("Constant Bitrate")});
     rate_control_combo_->setCurrentIndex(3);
     style_field(rate_control_combo_);
-    v->addWidget(make_row(tr("Rate Control"), rate_control_combo_));
 
     quality_combo_ = new QComboBox;
     quality_combo_->addItems({tr("Best"), tr("High Quality"), tr("Good"), tr("Balanced"),
                               tr("Low"), tr("Lowest")});
     quality_combo_->setCurrentText(tr("Best"));
     style_field(quality_combo_);
-    v->addWidget(make_row(tr("Quality"), quality_combo_));
 
     bitrate_row_ = new QWidget(this);
     {
@@ -264,7 +312,6 @@ void DeliverSettingsPanel::build() {
         style_field(bitrate_spin_);
         row->addWidget(bitrate_spin_, 1);
     }
-    v->addWidget(bitrate_row_);
 
     max_bitrate_row_ = new QWidget(this);
     {
@@ -278,46 +325,33 @@ void DeliverSettingsPanel::build() {
         style_field(max_bitrate_spin_);
         row->addWidget(max_bitrate_spin_, 1);
     }
-    v->addWidget(max_bitrate_row_);
+
+    multi_encode_combo_ = new QComboBox;
+    multi_encode_combo_->addItems({tr("Auto"), tr("Enabled"), tr("Disabled")});
+    style_field(multi_encode_combo_);
+    {
+        auto* sec = make_section(tr("QUALITY & BITRATE"), v);
+        sec->addWidget(make_row(tr("Rate Control"), rate_control_combo_));
+        sec->addWidget(make_row(tr("Quality"), quality_combo_));
+        sec->addWidget(bitrate_row_);
+        sec->addWidget(max_bitrate_row_);
+        sec->addWidget(make_row(tr("Multi Encode"), multi_encode_combo_));
+    }
 
     // Bitrate fields are only meaningful for bitrate-driven modes (Constant
     // Bitrate / VBR target). For quality modes they are hidden; for CBR only the
     // single "Bit Rate" field is shown (target == max raised here).
     update_bitrate_visibility();
 
-    multi_encode_combo_ = new QComboBox;
-    multi_encode_combo_->addItems({tr("Auto"), tr("Enabled"), tr("Disabled")});
-    style_field(multi_encode_combo_);
-    v->addWidget(make_row(tr("Multi Encode"), multi_encode_combo_));
-
-    preset_q_combo_ = new QComboBox;
-    preset_q_combo_->addItems({tr("Placebo"), tr("Very Slow"), tr("Slow"), tr("Medium"),
-                               tr("Fast"), tr("Faster"), tr("Very Fast"), tr("Superfast"),
-                               tr("Ultrafast")});
-    preset_q_combo_->setCurrentText(tr("Faster"));
-    style_field(preset_q_combo_);
-    v->addWidget(make_row(tr("Preset"), preset_q_combo_));
-
-    tuning_combo_ = new QComboBox;
-    tuning_combo_->addItems({tr("High Quality"), tr("Low Latency"), tr("Ultra Low Latency"),
-                             tr("Lossless")});
-    style_field(tuning_combo_);
-    v->addWidget(make_row(tr("Tuning"), tuning_combo_));
-
-    two_pass_ = (QCheckBox*)make_check(tr("Two Pass"));
-    v->addWidget(two_pass_);
-
     lookahead_spin_ = new QSpinBox;
     lookahead_spin_->setRange(0, 64);
     lookahead_spin_->setValue(16);
     style_field(lookahead_spin_);
-    v->addWidget(make_row(tr("Lookahead"), lookahead_spin_));
 
     lookahead_level_ = new QSpinBox;
     lookahead_level_->setRange(0, 6);
     lookahead_level_->setValue(0);
     style_field(lookahead_level_);
-    v->addWidget(make_row(tr("Lookahead Level"), lookahead_level_));
 
     scene_cut_ = (QCheckBox*)make_check(tr("Disable adaptive I-frame at scene cuts"));
     adaptive_b_ = (QCheckBox*)make_check(tr("Enable adaptive B-frame"));
@@ -329,13 +363,24 @@ void DeliverSettingsPanel::build() {
     weighted_pred_ = (QCheckBox*)make_check(tr("Enable weighted prediction"));
     temporal_filt_ = (QCheckBox*)make_check(tr("Temporal Filtering"));
     uni_b_ = (QCheckBox*)make_check(tr("Unidirection B Frames"));
-    v->addWidget(scene_cut_);
-    v->addWidget(adaptive_b_);
-    v->addWidget(make_row(tr("AQ Strength"), aq_strength_));
-    v->addWidget(nref_p_);
-    v->addWidget(weighted_pred_);
-    v->addWidget(temporal_filt_);
-    v->addWidget(uni_b_);
+    {
+        auto* sec = make_section(tr("ADVANCED"), v);
+        sec->addWidget(make_row(tr("Lookahead"), lookahead_spin_));
+        sec->addWidget(make_row(tr("Lookahead Level"), lookahead_level_));
+        sec->addWidget(make_row(tr("AQ Strength"), aq_strength_));
+        sec->addWidget(scene_cut_);
+        sec->addWidget(adaptive_b_);
+        sec->addWidget(nref_p_);
+        sec->addWidget(weighted_pred_);
+        sec->addWidget(temporal_filt_);
+        sec->addWidget(uni_b_);
+    }
+
+    {
+        auto* sec = make_section(tr("ALPHA & MARKERS"), v);
+        sec->addWidget(export_alpha_);
+        sec->addWidget(chapters_);
+    }
 
     v->addStretch(1);
     tabs_->addTab(make_scroll(video), tr("Video"));
@@ -348,30 +393,33 @@ void DeliverSettingsPanel::build() {
 
     export_audio_ = (QCheckBox*)make_check(tr("Export Audio"));
     export_audio_->setChecked(true);   // audio exported by default
-    au->addWidget(export_audio_);
 
     audio_codec_combo_ = new QComboBox;
     for (const auto& c : canvas::core::deliver_audio_codecs()) audio_codec_combo_->addItem(QString::fromStdString(c));
     style_field(audio_codec_combo_);
-    au->addWidget(make_row(tr("Codec"), audio_codec_combo_));
 
     audio_bitrate_ = new QSpinBox;
     audio_bitrate_->setRange(32, 512);
     audio_bitrate_->setValue(192);
     style_field(audio_bitrate_);
-    au->addWidget(make_row(tr("Bitrate (Kbps)"), audio_bitrate_));
 
     audio_rate_combo_ = new QComboBox;
     audio_rate_combo_->addItems({tr("44100"), tr("48000"), tr("96000")});
     audio_rate_combo_->setCurrentText(tr("48000"));
     style_field(audio_rate_combo_);
-    au->addWidget(make_row(tr("Sample Rate"), audio_rate_combo_));
 
     audio_channels_combo_ = new QComboBox;
     audio_channels_combo_->addItems({tr("Mono"), tr("Stereo"), tr("5.1")});
     audio_channels_combo_->setCurrentText(tr("Stereo"));
     style_field(audio_channels_combo_);
-    au->addWidget(make_row(tr("Channels"), audio_channels_combo_));
+    {
+        auto* sec = make_section(tr("AUDIO"), au);
+        sec->addWidget(export_audio_);
+        sec->addWidget(make_row(tr("Codec"), audio_codec_combo_));
+        sec->addWidget(make_row(tr("Bitrate (Kbps)"), audio_bitrate_));
+        sec->addWidget(make_row(tr("Sample Rate"), audio_rate_combo_));
+        sec->addWidget(make_row(tr("Channels"), audio_channels_combo_));
+    }
 
     au->addStretch(1);
     tabs_->addTab(make_scroll(audio), tr("Audio"));
@@ -385,50 +433,56 @@ void DeliverSettingsPanel::build() {
     pixel_aspect_combo_ = new QComboBox;
     pixel_aspect_combo_->addItems({tr("Square"), tr("Cinemascope")});
     style_field(pixel_aspect_combo_);
-    f->addWidget(make_row(tr("Pixel aspect ratio"), pixel_aspect_combo_));
 
     data_levels_combo_ = new QComboBox;
     data_levels_combo_->addItems({tr("Auto"), tr("Video"), tr("Full")});
     style_field(data_levels_combo_);
-    f->addWidget(make_row(tr("Data Levels"), data_levels_combo_));
 
     retain_sub_black_ = (QCheckBox*)make_check(tr("Retain sub-black and super-white data"));
-    f->addWidget(retain_sub_black_);
 
     color_space_combo_ = new QComboBox;
     color_space_combo_->addItems({tr("Same as project"), tr("Rec.709"), tr("Rec.2020"),
                                   tr("DCI-P3")});
     style_field(color_space_combo_);
-    f->addWidget(make_row(tr("Color Space Tag"), color_space_combo_));
 
     gamma_combo_ = new QComboBox;
     gamma_combo_->addItems({tr("Same as project"), tr("sRGB"), tr("Gamma 2.4")});
     style_field(gamma_combo_);
-    f->addWidget(make_row(tr("Gamma Tag"), gamma_combo_));
 
     data_burn_in_combo_ = new QComboBox;
     data_burn_in_combo_->addItems({tr("Same as project"), tr("Off")});
     style_field(data_burn_in_combo_);
-    f->addWidget(make_row(tr("Data burn-in"), data_burn_in_combo_));
+    {
+        auto* sec = make_section(tr("COLOR & LEVELS"), f);
+        sec->addWidget(make_row(tr("Pixel aspect ratio"), pixel_aspect_combo_));
+        sec->addWidget(make_row(tr("Data Levels"), data_levels_combo_));
+        sec->addWidget(retain_sub_black_);
+        sec->addWidget(make_row(tr("Color Space Tag"), color_space_combo_));
+        sec->addWidget(make_row(tr("Gamma Tag"), gamma_combo_));
+        sec->addWidget(make_row(tr("Data burn-in"), data_burn_in_combo_));
+    }
 
     bypass_reencode_ = (QCheckBox*)make_check(tr("Bypass re-encode when possible"));
     render_all_tracks_ = (QCheckBox*)make_check(tr("Render All Video Tracks"));
     force_sizing_hq_ = (QCheckBox*)make_check(tr("Force sizing to highest quality"));
     force_debayer_hq_ = (QCheckBox*)make_check(tr("Force debayer to highest quality"));
-    f->addWidget(bypass_reencode_);
-    f->addWidget(render_all_tracks_);
-    f->addWidget(force_sizing_hq_);
-    f->addWidget(force_debayer_hq_);
 
     flat_pass_combo_ = new QComboBox;
     flat_pass_combo_->addItems({tr("Off"), tr("On")});
     style_field(flat_pass_combo_);
-    f->addWidget(make_row(tr("Enable Flat Pass"), flat_pass_combo_));
 
     visionos_combo_ = new QComboBox;
     visionos_combo_->addItems({tr("Off"), tr("On")});
     style_field(visionos_combo_);
-    f->addWidget(make_row(tr("visionOS Bypass"), visionos_combo_));
+    {
+        auto* sec = make_section(tr("PROCESSING"), f);
+        sec->addWidget(bypass_reencode_);
+        sec->addWidget(render_all_tracks_);
+        sec->addWidget(force_sizing_hq_);
+        sec->addWidget(force_debayer_hq_);
+        sec->addWidget(make_row(tr("Enable Flat Pass"), flat_pass_combo_));
+        sec->addWidget(make_row(tr("visionOS Bypass"), visionos_combo_));
+    }
 
     auto* buttons = new QHBoxLayout;
     estimate_label_ = new QLabel(tr("Estimated File Size: --"));
@@ -436,13 +490,12 @@ void DeliverSettingsPanel::build() {
     buttons->addWidget(estimate_label_, 1);
 
     auto* add_btn = new QPushButton(tr("Add to Render Queue"));
-    add_btn->setStyleSheet(QStringLiteral("QPushButton{background:#2E6FD8;color:white;border-radius:5px;"
-                                          "padding:6px 12px;} QPushButton:hover{background:#3B7EE8;}"));
+    add_btn->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+    add_btn->setStyleSheet(QStringLiteral("QPushButton{background:#3B82F6;color:white;border-radius:8px;"
+                                          "padding:7px 14px;font-weight:600;}"
+                                          "QPushButton:hover{background:#4C92FF;}"));
     connect(add_btn, &QPushButton::clicked, this, &DeliverSettingsPanel::add_to_queue_clicked);
     buttons->addWidget(add_btn);
-
-    speed_label_ = new QLabel(tr("Render Speed: -- fps"));
-    speed_label_->setStyleSheet(QStringLiteral("color:#9AA0B0;font-size:12px;font-weight:600;"));
 
     auto* footer = new QWidget(this);
     footer->setStyleSheet(QStringLiteral("background:#1A1D27;border-top:1px solid #232833;"));
@@ -450,7 +503,6 @@ void DeliverSettingsPanel::build() {
     fo->setContentsMargins(10, 8, 10, 8);
     fo->setSpacing(4);
     fo->addLayout(buttons);
-    fo->addWidget(speed_label_);
     root->addWidget(footer);
     f->addStretch(1);
     tabs_->addTab(make_scroll(file), tr("File"));
@@ -542,7 +594,7 @@ void DeliverSettingsPanel::rebuild_codec_list() {
 }
 
 void DeliverSettingsPanel::connect_all() {
-    auto onChange = [this] { emit settings_changed(); };
+    auto onChange = [this] { emit settings_changed(); update_estimate(); };
     for (QComboBox* cb : {preset_combo_, scope_combo_, format_combo_, codec_combo_, encoder_combo_,
                           resolution_combo_, profile_combo_, key_frames_combo_,
                           rate_control_combo_, quality_combo_, multi_encode_combo_, preset_q_combo_,
@@ -715,10 +767,86 @@ void DeliverSettingsPanel::set_settings(const canvas::core::DeliverSettings& ds)
     emit settings_changed();
 }
 
-void DeliverSettingsPanel::set_render_speed(double fps, bool gpu) {
-    speed_label_->setText(tr("Render Speed: %1 fps (%2)")
-                              .arg(fps, 0, 'f', 1)
-                              .arg(gpu ? tr("GPU") : tr("CPU")));
+void DeliverSettingsPanel::set_timeline_length(double duration_seconds, double timeline_fps) {
+    duration_seconds_ = duration_seconds;
+    timeline_fps_ = timeline_fps;
+    update_estimate();
+}
+
+void DeliverSettingsPanel::update_estimate() {
+    const auto kColorStyle = QLatin1String("color:#8FCBFF;font-size:11px;");
+    if (!estimate_label_ || duration_seconds_ <= 0.0) {
+        estimate_label_->setText(tr("Estimated File Size: --"));
+        estimate_label_->setStyleSheet(kColorStyle);
+        return;
+    }
+
+    const canvas::core::DeliverSettings ds = settings();
+
+    double video_kbps = 0.0;
+    if (ds.video.export_video) {
+        using RC = canvas::core::RateControl;
+        switch (ds.video.rate_control) {
+            case RC::ConstantBitrate:
+            case RC::VBRTargetKbps:
+                // VBR-target maxes at target_bitrate; use it as the estimate.
+                video_kbps = ds.video.target_bitrate_kbps;
+                break;
+            case RC::ConstantQP:
+            case RC::VBRQuality: {
+                // No target bitrate in quality/CRF modes — guess from a rough
+                // bits-per-pixel-per-frame figure per codec. Estimating is an
+                // art; these land within ~40% for typical content.
+                double bpp = 0.10;
+                using VC = canvas::core::VideoCodec;
+                switch (canvas::core::video_codec_from_string(ds.video.codec)) {
+                    case VC::H264:       bpp = 0.10; break;
+                    case VC::H265:       bpp = 0.065; break;
+                    case VC::AV1:        bpp = 0.055; break;
+                    case VC::ProRes:     bpp = 0.75; break;
+                    case VC::FFV1:       bpp = 1.5; break;
+                    case VC::JPEG2000:   bpp = 0.35; break;
+                    case VC::Uncompressed: bpp = 24.0; break;
+                }
+                // Effective resolution: parse "W x H" from the combo, else fall
+                // back to the custom width/height fields. Vertical mode swaps.
+                long w = ds.video.custom_width;
+                long h = ds.video.custom_height;
+                const std::string res = ds.video.resolution;
+                const std::size_t x = res.find('x');
+                if (x != std::string::npos) {
+                    try {
+                        w = std::stol(res.substr(0, x));
+                        h = std::stol(res.substr(x + 1));
+                    } catch (...) {
+                        // keep the custom fallback
+                    }
+                }
+                if (ds.video.use_vertical_resolution) std::swap(w, h);
+                const long px = std::max(w, 1L) * std::max(h, 1L);
+                const double fps = ds.video.frame_rate == "Timeline Frame Rate"
+                                       ? (timeline_fps_ > 0.0 ? timeline_fps_ : 30.0)
+                                       : (ds.video.custom_fps > 0.0 ? ds.video.custom_fps : 30.0);
+                video_kbps = px * bpp * fps / 1000.0;
+                break;
+            }
+        }
+    }
+
+    double audio_kbps = 0.0;
+    if (ds.audio.export_audio && !ds.audio.codec.empty())
+        audio_kbps = ds.audio.bitrate_kbps;
+
+    const double total_kbps = video_kbps + audio_kbps;
+    const double total_mb = total_kbps * duration_seconds_ / 8.0 / 1024.0;
+
+    QString size_text;
+    if (total_mb >= 1024.0)
+        size_text = tr("%1 GB").arg(total_mb / 1024.0, 0, 'f', 1);
+    else
+        size_text = tr("%1 MB").arg(total_mb, 0, 'f', 1);
+    estimate_label_->setText(tr("Estimated File Size: %1").arg(size_text));
+    estimate_label_->setStyleSheet(kColorStyle);
 }
 
 }  // namespace canvas::gui

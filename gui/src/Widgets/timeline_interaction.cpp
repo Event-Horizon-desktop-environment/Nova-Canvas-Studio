@@ -265,7 +265,12 @@ void TimelineWidget::update_transition_hover(const QPointF& p) {
     // the clip's IN duration; otherwise (Cut / End) from its OUT duration.
     const int64_t seeded = t.edge == Edge::Start ? t.a->transition_in_duration
                                                  : t.a->transition_out_duration;
-    if (transition_editor_.open(t, seeded)) rebuild_transition_handle();
+    if (!transition_editor_.open(t, seeded)) return;
+    if (transition_editor_.has_transition()) {
+        hide_transition_handle();
+        return;
+    }
+    rebuild_transition_handle();
 
     if (transition_editor_.visible() && p.x() <= kSceneMargin + kTrackHeaderWidth) {
         hide_transition_handle();

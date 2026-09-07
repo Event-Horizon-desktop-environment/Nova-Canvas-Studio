@@ -32,7 +32,8 @@ ViewportSelector::ViewportSelector(QWidget* parent) : QWidget(parent) {
     setToolTip(tr("Viewport / timebase selector"));
     setMouseTracking(true);
     QFont f = font();
-    f.setPixelSize(10);
+    // Point size (not pixel size) so the label scales with the display's DPI.
+    f.setPointSizeF(7.5);
     setFont(f);
 }
 

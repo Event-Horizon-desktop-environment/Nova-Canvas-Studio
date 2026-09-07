@@ -132,7 +132,7 @@ QLineEdit* make_readonly_line(QWidget* parent) {
     l->setReadOnly(true);
     l->setStyleSheet(QStringLiteral(
         "QLineEdit { background-color: #141A21; color: #9AA0B0; border: 1px solid #232833;"
-        " border-radius: 4px; padding: 3px 6px; }"));
+        " border-radius: 8px; padding: 3px 6px; }"));
     return l;
 }
 
@@ -140,7 +140,7 @@ QLineEdit* make_editable_line(QWidget* parent) {
     auto* l = new QLineEdit(parent);
     l->setStyleSheet(QStringLiteral(
         "QLineEdit { background-color: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
-        " border-radius: 4px; padding: 3px 6px; }"
+        " border-radius: 8px; padding: 3px 6px; }"
         "QLineEdit:focus { border-color: #3B82F6; }"));
     return l;
 }
@@ -149,10 +149,11 @@ void set_dark_combo(QComboBox* cb, const QStringList& items) {
     cb->addItems(items);
     cb->setStyleSheet(QStringLiteral(
         "QComboBox { background-color: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
-        " border-radius: 4px; padding: 2px 6px; }"
+        " border-radius: 8px; padding: 3px 8px; }"
         "QComboBox::drop-down { border: none; width: 18px; }"
         "QComboBox QAbstractItemView { background-color: #141A21; color: #E8EAF0;"
-        " selection-background-color: #3B82F6; border: 1px solid #2A2F3C; }"));
+        " selection-background-color: #3B82F6; border: 1px solid #2A2F3C;"
+        " border-radius: 8px; padding: 2px; }"));
 }
 
 QLabel* make_readonly_label(QWidget* parent) {
@@ -169,9 +170,15 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     const auto tr = [](const char* s) { return MainWindow::tr(s); };
 
     // ---- Media preview header ----------------------------------------------
+    // Rounded raised card that caps the page, matching the inspector's
+    // semi-rounded category cards below it.
     auto* preview = new QWidget(host);
+    preview->setObjectName(QStringLiteral("inspectorPreviewCard"));
+    preview->setStyleSheet(QStringLiteral(
+        "QWidget#inspectorPreviewCard { background-color: #1A1D27;"
+        " border: 1px solid #232833; border-radius: 12px; }"));
     auto* preview_layout = new QHBoxLayout(preview);
-    preview_layout->setContentsMargins(10, 10, 10, 6);
+    preview_layout->setContentsMargins(12, 10, 10, 10);
     preview_layout->setSpacing(8);
     fc.preview_icon = new QLabel(preview);
     fc.preview_icon->setFixedSize(16, 16);
@@ -295,7 +302,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     fc.ed_notes->setMaximumHeight(72);
     fc.ed_notes->setStyleSheet(QStringLiteral(
         "QPlainTextEdit { background-color: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
-        " border-radius: 4px; padding: 4px 6px; }"
+        " border-radius: 8px; padding: 4px 6px; }"
         "QPlainTextEdit:focus { border-color: #3B82F6; }"));
     meta_body->addWidget(fc.ed_notes);
 
@@ -563,7 +570,7 @@ void update_inspector_file(MainWindow& mw) {
         ch_name->setText(QStringLiteral("Channel %1").arg(ch + 1));
         ch_name->setStyleSheet(QStringLiteral(
             "QLineEdit { background-color: #141A21; color: #C9CDD6; border: 1px solid"
-            " #232833; border-radius: 4px; padding: 3px 6px; }"));
+            " #232833; border-radius: 8px; padding: 3px 6px; }"));
         lay->addWidget(play);
         lay->addWidget(level, 1);
         lay->addWidget(ch_name, 2);

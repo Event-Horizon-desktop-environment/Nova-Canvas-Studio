@@ -7,9 +7,66 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <ctime>
 #include <thread>
 
 namespace canvas::core {
+
+namespace {
+
+// Wall-clock stamp for finished jobs: "HH:MM:SS" (local time) so the queue's
+// finished cards read like Resolve's ("Finished 14:22:03").
+std::string wall_clock_hhmmss() {
+    const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm local{};
+#if defined(_WIN32)
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    char buf[16]{};
+    std::strftime(buf, sizeof(buf), "%H:%M:%S", &local);
+    return std::string(buf);
+}
+
+}  // namespace
+
+RenderJobSnapshot render_job_snapshot(const RenderJob& job) {
+    RenderJobSnapshot s;
+    s.id = job.id;
+    s.name = job.name;
+    s.output_path = job.output_path;
+    s.settings = job.settings;
+    s.total_frames = job.total_frames;
+    s.status = static_cast<int>(job.status);
+    s.progress = job.progress;
+    s.render_fps = job.render_fps;
+    s.error = job.error;
+    s.elapsed_seconds = job.elapsed_seconds;
+    s.frames_rendered = job.frames_rendered;
+    s.finished_at = job.finished_at;
+    return s;
+}
+
+RenderJob render_job_from_snapshot(const RenderJobSnapshot& snap) {
+    RenderJob j;
+    j.id = snap.id;
+    j.name = snap.name;
+    j.output_path = snap.output_path;
+    j.settings = snap.settings;
+    j.total_frames = snap.total_frames;
+    j.status = static_cast<RenderJob::Status>(snap.status);
+    // A job persisted while it was actively rendering cannot resume; stage it
+    // so the user can re-run it (or drop it) with the rest of the queue.
+    if (j.status == RenderJob::Status::Rendering) j.status = RenderJob::Status::Queued;
+    j.progress = snap.progress;
+    j.render_fps = snap.render_fps;
+    j.error = snap.error;
+    j.elapsed_seconds = snap.elapsed_seconds;
+    j.frames_rendered = snap.frames_rendered;
+    j.finished_at = snap.finished_at;
+    return j;
+}
 
 RenderQueue::RenderQueue() {
     running_ = true;
@@ -87,11 +144,34 @@ void RenderQueue::clear_finished() {
     if (on_changed) on_changed();
 }
 
+void RenderQueue::clear_queued() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(),
+                               [](const RenderJob& j) {
+                                   return j.status != RenderJob::Status::Rendering;
+                               }),
+                jobs_.end());
+    if (on_changed) on_changed();
+}
+
 void RenderQueue::cancel(uint64_t id) {
     std::lock_guard<std::mutex> lk(mutex_);
     for (auto& j : jobs_)
         if (j.id == id)
             j.status = RenderJob::Status::Cancelled;
+    if (on_changed) on_changed();
+}
+
+void RenderQueue::remove(uint64_t id) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (auto it = jobs_.begin(); it != jobs_.end(); ++it) {
+        if (it->id != id) continue;
+        if (it->status == RenderJob::Status::Rendering)
+            it->status = RenderJob::Status::Cancelled;
+        else
+            jobs_.erase(it);
+        break;
+    }
     if (on_changed) on_changed();
 }
 
@@ -106,6 +186,16 @@ void RenderQueue::cancel_all() {
 void RenderQueue::clear_all() {
     std::lock_guard<std::mutex> lk(mutex_);
     jobs_.clear();
+    if (on_changed) on_changed();
+}
+
+void RenderQueue::restore(const std::vector<RenderJob>& jobs) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    jobs_ = jobs;
+    uint64_t max_id = 0;
+    for (const auto& j : jobs_) max_id = std::max(max_id, j.id);
+    next_id_.store(max_id + 1);
+    start_requested_ = false;
     if (on_changed) on_changed();
 }
 
@@ -226,6 +316,7 @@ void RenderQueue::worker() {
                 else if (ok) {
                     j.status = RenderJob::Status::Completed;
                     j.progress = 1.0;
+                    j.finished_at = wall_clock_hhmmss();
                 } else {
                     j.status = RenderJob::Status::Failed;
                     j.error = error;

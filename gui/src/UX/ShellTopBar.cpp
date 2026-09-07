@@ -74,6 +74,7 @@ QWidget* build_top_bar(MainWindow& mw) {
             });
     for (auto* b : {quick_export_btn, fullscreen_top_btn, mixer_btn, metadata_btn, inspector_top_btn}) {
         b->setAutoRaise(true);
+        b->setStyleSheet(page_pill_style());
         top_bar_layout->addWidget(b);
     }
 
@@ -136,6 +137,7 @@ void build_page_bar(MainWindow& mw) {
     settings_btn->setIcon(icon("settings"));
     settings_btn->setToolButtonStyle(Qt::ToolButtonIconOnly);
     settings_btn->setAutoRaise(true);
+    settings_btn->setStyleSheet(flat_tool_style());
     page_bar->addWidget(home_btn);
     page_bar->addWidget(settings_btn);
     mw.addToolBar(Qt::BottomToolBarArea, page_bar);

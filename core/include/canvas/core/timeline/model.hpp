@@ -69,12 +69,23 @@ struct Clip {
     TransitionType transition_in = TransitionType::None;
     int64_t transition_in_duration = 0;
 
-    // Transition shaping. `transition_curve_value` is the transition curve
+    // Transition shaping, stored PER EDGE so the inspector's Start (OUT) and
+    // End (IN) sub-tabs are genuinely independent. `curve_value` is the curve
     // position 0..1 (0 = fully the outgoing frame's style, 1 = the incoming);
-    // `transition_ease` 0..1 drives the ease-out/in amount (0 = linear). Stored
-    // per-clip so undo restores them.
-    float transition_curve_value = 0.0f;
-    float transition_ease = 0.0f;
+    // `ease` 0..1 drives the ease amount (0 = linear). `start_ratio`/`end_ratio`
+    // (0..100) carve the fade profile out of the transition window: 0 = the
+    // bubble's left edge, 100 = its right edge, so the default 0/100 spans the
+    // whole window symmetrically. Defaults match the reference inspector: the
+    // OUT (Start) curve resolves fully incoming (1.0), the IN (End) curve stays
+    // outgoing (0.0).
+    float transition_out_curve_value = 1.0f;
+    float transition_out_ease = 0.0f;
+    float transition_in_curve_value = 0.0f;
+    float transition_in_ease = 0.0f;
+    int transition_out_start_ratio = 0;
+    int transition_out_end_ratio = 100;
+    int transition_in_start_ratio = 0;
+    int transition_in_end_ratio = 100;
 
     // Audio mix parameters. `volume_db` is the gain in decibels (0 = unity);
     // `pan` ranges -1.0 (hard left) .. +1.0 (hard right), 0 = center. Applied to
@@ -197,6 +208,10 @@ struct Track {
     // still beats solo). Meaningless for video tracks, which carry no mix.
     bool muted = false;
     bool solo = false;
+    // Post-fade, pre-sum gain applied to every audible clip on this audio track
+    // during playback and export (dB, shared audio_mix law). Meaningless for
+    // video tracks, which carry no audio mix.
+    float gain_db = 0.0f;
     std::vector<Clip> clips;
 
     [[nodiscard]] const Clip* clip_at(int64_t pos) const noexcept;

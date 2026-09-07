@@ -918,6 +918,10 @@ void TimelineWidget::add_transition_bubbles() {
             // Adjacent bubbles on the same track can never overlap: greedily shrink each
             // bubble's left edge so it clears the previous one, keeping its far
             // edge — and thus its anchor boundary — in place.
+            std::sort(local.begin(), local.end(),
+                      [](const TransitionBubble& x, const TransitionBubble& y) {
+                          return x.hit.left() < y.hit.left();
+                      });
             constexpr double kGapPx = 4.0;
             constexpr double kMinBubbleW = 34.0;
             double used_until = -1e9;

@@ -56,6 +56,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     build_ui();
     rebuild_recent_menu();
 
+    // build_ui() creates the Deliver settings panel after the untitled project
+    // above was set up, so seed it with the current timeline length here.
+    if (deliver_settings_) {
+        const double secs = total_frames_ > 0 && fps_ > 0.0
+                                ? static_cast<double>(total_frames_) / fps_
+                                : 0.0;
+        deliver_settings_->set_timeline_length(secs, fps_);
+    }
+
     fps_clock_.start();
     fps_timer_ = new QTimer(this);
     fps_timer_->setInterval(500);
@@ -121,6 +130,12 @@ void MainWindow::refresh_timeline() {
     timeline_->set_sequence(&project_->sequence);
     total_frames_ = project_->sequence.duration_frames();
     scrub_->setRange(0, static_cast<int>(std::max<int64_t>(total_frames_ - 1, 0)));
+    if (deliver_settings_) {
+        const double secs = total_frames_ > 0 && fps_ > 0.0
+                                ? static_cast<double>(total_frames_) / fps_
+                                : 0.0;
+        deliver_settings_->set_timeline_length(secs, fps_);
+    }
 }
 
 void MainWindow::push_snapshot(const int64_t initial_frame) {
@@ -183,21 +198,26 @@ void MainWindow::update_fps_label() {
 
 void MainWindow::on_fps_tick() {
     if (!fps_label_) return;
-    const qint64 ms = fps_clock_.restart();
-    double live = 0.0;
-    if (ms > 0 && fps_frames_ > 0) live = fps_frames_ * 1000.0 / ms;
+    // While a render job is running, the fps readout next to "Edited" doubles
+    // as the encoder-speed meter instead of the playback rate.
+    if (render_fps_ > 0.0) {
+        fps_label_->setText(tr("%1 fps").arg(render_fps_, 0, 'f', 1));
+        fps_label_->setStyleSheet(QStringLiteral("color: #4C92FF; font-size: 11px;"));
+        return;
+    }
+    // The readout is the VIDEO's own frame cadence under the playhead (its
+    // native media fps, 60 for 60fps footage on a 30fps timeline) — not the
+    // present-to-present cadence, which only reflects the timeline's sequence
+    // fps. The content itself strides at its intended rate by construction.
     fps_frames_ = 0;
+    fps_clock_.restart();
 
     QString text;
-    QString color = QStringLiteral("#9AA0B0");
-    if (nominal_fps_ > 0.0 && live > 0.0) {
-        text = QStringLiteral("%1 fps").arg(live, 0, 'f', 0);
-        color = live >= nominal_fps_ - 0.5
-                    ? QStringLiteral("#3DDC84")  // green: at/near full video fps
-                    : QStringLiteral("#FF4B4B");  // red: below the video's fps
+    const QString color = QStringLiteral("#3DDC84");
+    if (nominal_fps_ > 0.0) {
+        text = QStringLiteral("%1 fps").arg(nominal_fps_, 0, 'f', 1);
     } else {
-        text = nominal_fps_ > 0.0 ? tr("%1 fps").arg(nominal_fps_, 0, 'f', 1)
-                                  : tr("-- fps");
+        text = tr("-- fps");
     }
     fps_label_->setText(text);
     fps_label_->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;").arg(color));
@@ -229,18 +249,16 @@ void MainWindow::enter_edit_page() {
 
 void MainWindow::reflect_render_queue() {
     if (deliver_queue_panel_) deliver_queue_panel_->refresh();
-    // Update the running render's speed in the settings panel.
-    const auto jobs = render_queue_.jobs();
-    for (const auto& j : jobs) {
+    // Flag the top-bar fps readout for render-speed mode while a job runs;
+    // on_fps_tick picks it up on its next pulse. The count comes straight from
+    // the queue — no duplicated label in the settings panel anymore.
+    render_fps_ = 0.0;
+    for (const auto& j : render_queue_.jobs()) {
         if (j.status == canvas::core::RenderJob::Status::Rendering) {
-            const bool gpu = j.settings.video.encoder == canvas::core::EncoderBackend::NVIDIA ||
-                             j.settings.video.encoder == canvas::core::EncoderBackend::AMD ||
-                             j.settings.video.encoder == canvas::core::EncoderBackend::Intel;
-            if (deliver_settings_) deliver_settings_->set_render_speed(j.render_fps, gpu);
-            return;
+            render_fps_ = j.render_fps;
+            break;
         }
     }
-    if (deliver_settings_) deliver_settings_->set_render_speed(0.0, false);
 }
 
 void MainWindow::add_current_to_render_queue() {
@@ -319,6 +337,7 @@ void MainWindow::add_current_to_render_queue() {
     }
 
     reflect_render_queue();
+    has_unsaved_changes_ = true;
     status_->showMessage(tr("Added render job(s) to the queue."));
 }
 

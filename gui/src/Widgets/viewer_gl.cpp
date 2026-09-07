@@ -460,11 +460,15 @@ void ViewerGL::upload_frame() {
 }
 
 void ViewerGL::paintGL() {
-    // Ensure the GL viewport tracks the widget's current logical size. Qt
-    // normally calls resizeGL() on widget resize, but on some platforms the
-    // buffer can lag behind (especially with rapid scrub updates) and content
-    // would render into a small top-left box. Re-asserting here is idempotent.
-    glViewport(0, 0, std::max(1, width()), std::max(1, height()));
+    // Ensure the GL viewport tracks the widget's physical size. Qt normally
+    // calls resizeGL() on widget resize, but on some platforms the buffer can
+    // lag behind (especially with rapid scrub updates) and content would render
+    // into a small top-left box. Re-asserting here is idempotent. On HiDPI the
+    // framebuffer is sized in *device* pixels, so `width()` isn't enough —
+    // multiply by the pixel ratio or content renders at a quarter resolution.
+    const qreal dpr = devicePixelRatioF();
+    glViewport(0, 0, std::max(1, static_cast<int>(std::lround(width() * dpr))),
+               std::max(1, static_cast<int>(std::lround(height() * dpr))));
 
     const QColor bg(10, 10, 12);
     glClearColor(bg.redF(), bg.greenF(), bg.blueF(), 1.0f);
@@ -641,11 +645,11 @@ void ViewerGL::paintGL() {
 void ViewerGL::draw_blank() {
     QPainter painter(this);
     painter.fillRect(rect(), QColor(10, 10, 12));
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(40, 44, 50));
+    painter.setPen(QPen(QColor(0x2A, 0x2F, 0x3C), 1.0));
+    painter.setBrush(QColor(0x1A, 0x1D, 0x27));
     const QRectF badge(4, 4, 64, 16);
-    painter.drawRoundedRect(badge, 2, 2);
-    painter.setPen(QColor(220, 220, 225));
+    painter.drawRoundedRect(badge, 8, 8);
+    painter.setPen(QColor(0x9A, 0xA0, 0xB0));
     QFont f = painter.font();
     f.setPointSizeF(8);
     painter.setFont(f);

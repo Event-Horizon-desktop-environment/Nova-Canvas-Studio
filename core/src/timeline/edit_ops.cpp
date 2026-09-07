@@ -41,7 +41,7 @@ std::vector<Clip> clipped_range(const std::vector<Clip>& clips, const int64_t in
 TrackSnapshot snapshot(const Sequence& seq, const Track::Kind kind, const std::size_t index) {
     const Track* t = seq.track(kind, index);
     assert(t);
-    return {kind, index, t->locked, t->muted, t->solo, t->clips};
+    return {kind, index, t->locked, t->muted, t->solo, t->gain_db, t->clips};
 }
 
 void shift_from(std::vector<Clip>& clips, const int64_t from, const int64_t delta) {
@@ -250,6 +250,7 @@ void EditCommand::apply(Sequence& seq, const std::vector<TrackSnapshot>& state) 
         t->locked = snap.locked;
         t->muted = snap.muted;
         t->solo = snap.solo;
+        t->gain_db = snap.gain_db;
         t->clips = snap.clips;
     }
 }
@@ -507,8 +508,16 @@ std::unique_ptr<ICommand> blade_at(Sequence& seq, const Track::Kind kind,
         if (c.id == hit->id) {
             c.tl_out = pos;
             c.src_out = c.src_in + c.duration();
+            // A blade is a plain edit point: the left half's tail is now an
+            // interior cut, so it must not keep an OUT fade that would plant a
+            // transition on the fresh seam.
+            c.transition_out = TransitionType::None;
+            c.transition_out_duration = 0;
             break;
         }
+    // The right half's head is an interior cut too: never inherit an IN fade.
+    right.transition_in = TransitionType::None;
+    right.transition_in_duration = 0;
     target->insert_sorted(std::move(right));
     return edit.finish();
 }
@@ -543,11 +552,15 @@ std::unique_ptr<ICommand> blade_linked_at(Sequence& seq, const Track::Kind kind,
 
     std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
 
-    // Cut the primary clip.
+    // Cut the primary clip. A blade is a plain edit point on BOTH sides of the
+    // cut: the right (new) half's head is an interior cut, so it never inherits
+    // an IN fade (which would plant a transition on the fresh seam).
     Clip right = *hit;
     right.tl_in = pos;
     right.src_in = hit->src_in + (pos - hit->tl_in);
     right.id = seq.next_clip_id++;
+    right.transition_in = TransitionType::None;
+    right.transition_in_duration = 0;
 
     // Cut the linked mate at the same position, if present and unlocked.
     std::optional<Clip> mright;
@@ -556,14 +569,19 @@ std::unique_ptr<ICommand> blade_linked_at(Sequence& seq, const Track::Kind kind,
         mright->tl_in = pos;
         mright->src_in = mate->src_in + (pos - mate->tl_in);
         mright->id = seq.next_clip_id++;
+        mright->transition_in = TransitionType::None;
+        mright->transition_in_duration = 0;
     }
 
     // Shorten the left halves in place. Their links (left video <-> left audio)
-    // are unchanged and remain correct.
+    // are unchanged and remain correct. Each left half's tail is now an
+    // interior cut, so its OUT fade must not linger on the fresh seam.
     for (auto& c : target->clips)
         if (c.id == hit->id) {
             c.tl_out = pos;
             c.src_out = c.src_in + c.duration();
+            c.transition_out = TransitionType::None;
+            c.transition_out_duration = 0;
             break;
         }
     if (mright) {
@@ -571,6 +589,8 @@ std::unique_ptr<ICommand> blade_linked_at(Sequence& seq, const Track::Kind kind,
             if (c.id == mate->id) {
                 c.tl_out = pos;
                 c.src_out = c.src_in + c.duration();
+                c.transition_out = TransitionType::None;
+                c.transition_out_duration = 0;
                 break;
             }
         // Re-pair the two right halves so they link to each other rather than
@@ -1040,6 +1060,23 @@ std::unique_ptr<ICommand> set_track_locked(Sequence& seq, const Track::Kind kind
                                          std::move(before), std::move(after));
 }
 
+std::unique_ptr<ICommand> set_track_gain(Sequence& seq, const Track::Kind kind,
+                                         const std::size_t track_index, const float gain_db) {
+    Track* t = seq.track(kind, track_index);
+    if (!t) return nullptr;
+    std::vector<TrackRef> involved{{kind, track_index}};
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+    if (t->gain_db == gain_db) {
+        std::vector<TrackSnapshot> same = before;
+        return std::make_unique<EditCommand>("set track gain", std::move(before),
+                                             std::move(same));
+    }
+    t->gain_db = gain_db;
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>("set track gain", std::move(before),
+                                         std::move(after));
+}
+
 std::unique_ptr<ICommand> set_clip_transform(Sequence& seq, const Track::Kind kind,
                                              const std::size_t track_index, const ClipId id,
                                              const float scale_x, const float scale_y,
@@ -1217,7 +1254,8 @@ std::unique_ptr<ICommand> set_clip_audio_processing(
 std::unique_ptr<ICommand> set_clip_transition_curve(Sequence& seq, const Track::Kind kind,
                                                     const std::size_t track_index, const ClipId id,
                                                     const bool in_edge, const float ease_amount,
-                                                    const float curve_value) {
+                                                    const float curve_value, const int start_ratio,
+                                                    const int end_ratio) {
     Track* t = seq.track(kind, track_index);
     const Clip* c = t ? t->clip_with_id(id) : nullptr;
     if (!c) return nullptr;
@@ -1234,14 +1272,32 @@ std::unique_ptr<ICommand> set_clip_transition_curve(Sequence& seq, const Track::
 
     std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
 
-    const float n_ease = std::clamp(ease_amount, audio_processing::kTransitionRatioMin,
-                                    audio_processing::kTransitionCurveMax);
-    const float n_curve = std::clamp(curve_value, audio_processing::kTransitionCurveMin,
-                                     audio_processing::kTransitionCurveMax);
-    (void)in_edge;  // v1: curve/ease are shared clip-wide, not per-edge
+    const float n_ease =
+        std::clamp(ease_amount, audio_processing::kTransitionCurveMin,
+                   audio_processing::kTransitionCurveMax);
+    const float n_curve =
+        std::clamp(curve_value, audio_processing::kTransitionCurveMin,
+                   audio_processing::kTransitionCurveMax);
+    const int n_start =
+        std::clamp(start_ratio, static_cast<int>(audio_processing::kTransitionRatioMin),
+                   static_cast<int>(audio_processing::kTransitionRatioMax));
+    const int n_end =
+        std::clamp(end_ratio, static_cast<int>(audio_processing::kTransitionRatioMin),
+                   static_cast<int>(audio_processing::kTransitionRatioMax));
+    // Per-edge shaping: `in_edge` targets the IN fields (End sub-tab), OUT keeps
+    // the distinct default profile the reference inspector expects.
     const auto set_fields = [&](Clip& cc) {
-        cc.transition_curve_value = n_curve;
-        cc.transition_ease = n_ease;
+        if (in_edge) {
+            cc.transition_in_curve_value = n_curve;
+            cc.transition_in_ease = n_ease;
+            cc.transition_in_start_ratio = n_start;
+            cc.transition_in_end_ratio = n_end;
+        } else {
+            cc.transition_out_curve_value = n_curve;
+            cc.transition_out_ease = n_ease;
+            cc.transition_out_start_ratio = n_start;
+            cc.transition_out_end_ratio = n_end;
+        }
     };
     for (auto& cc : t->clips) {
         if (cc.id == id) { set_fields(cc); break; }

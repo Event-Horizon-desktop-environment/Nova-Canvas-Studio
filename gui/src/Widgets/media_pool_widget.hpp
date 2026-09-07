@@ -5,6 +5,7 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QEvent>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QMimeData>
@@ -33,9 +34,16 @@ signals:
     void importRequested();
     // Emitted when media files are dropped onto the pool from a file browser.
     void filesDropped(const QStringList& paths);
+    // Emitted when Delete/Backspace is pressed while pool items are selected.
+    void deleteSelectedRequested();
+    // Emitted when the Del key is pressed while pool items are selected: like
+    // deleteSelectedRequested, but ALSO ripple-deletes the timeline selection.
+    void deleteSelectedWithClipsRequested();
 
 protected:
+    bool event(QEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
     void startDrag(Qt::DropActions) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;

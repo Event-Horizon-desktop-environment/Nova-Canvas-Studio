@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <vector>
 
 namespace canvas::core {
 
@@ -70,6 +72,55 @@ template <typename Container>
     for (const auto& t : tracks)
         if (t.solo) return true;
     return false;
+}
+
+// Adds one interleaved source chunk into `out`, a zero-initialised accumulator
+// of [frames x out_channels] floats. Applies the per-frame fade envelope
+// `gains` (nullptr = unity), the clip volume `vol`, and the track balance
+// `gl`/`gr`. Mono sources are upmixed to the front pair (both channels), a
+// >2ch surround source folds down for a 2-channel bus (rear/side channels at
+// half gain, paired by side) or maps channel c -> min(c, out_channels - 1)
+// for wider buses, and stereo sources stay on the front pair. Shared by
+// playback and export so the two mix identically at any channel count.
+inline void mix_chunk(std::vector<float>& out, int out_channels,
+                      const std::vector<float>& src, int src_ch,
+                      const std::vector<float>* gains, float vol, float gl,
+                      float gr) {
+    if (out_channels <= 0 || src_ch <= 0 || src.empty() || out.empty()) return;
+    const int frames = static_cast<int>(src.size()) / src_ch;
+    if (frames <= 0) return;
+    const std::size_t row = static_cast<std::size_t>(out_channels);
+    for (int k = 0; k < frames; ++k) {
+        const float g = gains ? (*gains)[static_cast<std::size_t>(k)] : 1.0f;
+        const float base = g * vol;
+        const std::size_t base_idx = static_cast<std::size_t>(k) * row;
+        if (src_ch == 1) {
+            const float v = src[static_cast<std::size_t>(k)];
+            out[base_idx] += v * base * (out_channels > 1 ? gl : 1.0f);
+            if (out_channels > 1) out[base_idx + 1] += v * base * gr;
+        } else if (src_ch == 2) {
+            const float l = src[static_cast<std::size_t>(k) * 2];
+            const float r = src[static_cast<std::size_t>(k) * 2 + 1];
+            out[base_idx] += l * base * (out_channels > 1 ? gl : 1.0f);
+            if (out_channels > 1) out[base_idx + 1] += r * base * gr;
+        } else if (out_channels == 2) {
+            const std::size_t so = static_cast<std::size_t>(k) * static_cast<std::size_t>(src_ch);
+            out[base_idx] += src[so] * base * gl;
+            out[base_idx + 1] += src[so + 1] * base * gr;
+            for (int c = 2; c < src_ch; ++c) {
+                const float v = src[so + static_cast<std::size_t>(c)] * base * 0.5f;
+                if (c % 2 == 0) out[base_idx] += v * gl;
+                else out[base_idx + 1] += v * gr;
+            }
+        } else {
+            const std::size_t so = static_cast<std::size_t>(k) * static_cast<std::size_t>(src_ch);
+            for (int c = 0; c < src_ch; ++c) {
+                const std::size_t dst =
+                    c < out_channels ? static_cast<std::size_t>(c) : row - 1;
+                out[base_idx + dst] += src[so + static_cast<std::size_t>(c)] * base;
+            }
+        }
+    }
 }
 
 }  // namespace audio_mix

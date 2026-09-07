@@ -10,6 +10,14 @@
 
 namespace canvas::gui {
 
+// Forward declarations: the seq→media mappers are defined with the other
+// file-local helpers below but used from the decode entry points earlier.
+namespace {
+double media_fps_of(const canvas::core::Project& project, const canvas::core::Clip& clip);
+int64_t seq_to_src_frame(const canvas::core::Project& project, const canvas::core::Clip& clip,
+                         int64_t seq_frame);
+}  // namespace
+
 void TimelineDecoder::add_media(const canvas::core::MediaEntry& entry) {
     auto slot = std::make_unique<DecoderSlot>();
     std::string error;
@@ -85,7 +93,7 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
         return nullptr;
     }
     auto* slot = it->second.get();
-    const int64_t src_frame = clip.src_in + (seq_frame - clip.tl_in);
+    const int64_t src_frame = seq_to_src_frame(project, clip, seq_frame);
 
     // Fast low-res preview path with its own LRU so a reduced frame never
     // displaces (or is returned as) a full-res playback frame.
@@ -184,7 +192,7 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
     // CUDA device pointers, so require hardware decode + a CUDA device.
     if (!slot->decoder.is_hardware() || hw_.device_name() != "cuda") return nullptr;
 
-    const int64_t src_frame = clip.src_in + (seq_frame - clip.tl_in);
+    const int64_t src_frame = seq_to_src_frame(project, clip, seq_frame);
     // Two GPU decode strategies, chosen by path:
     //
     //  Prepared playback (max_dim == 0): sequential-forward when the target is
@@ -263,6 +271,20 @@ double media_fps_of(const canvas::core::Project& project, const canvas::core::Cl
     const auto it = std::find_if(project.media.begin(), project.media.end(),
                                  [&](const canvas::core::MediaEntry& m) { return m.id == clip.media; });
     return (it != project.media.end() && it->fps > 0.0) ? it->fps : 0.0;
+}
+
+// Time-based clip mapping: a seq-frame offset advances the source by the
+// media/sequence fps ratio, so 60fps footage on a 30fps timeline strides two
+// source frames per timeline frame (the clip plays at its intended speed)
+// instead of halving the content. 1:1 whenever the rates match. A clip's
+// src_in/src_out are indices into the SOURCE's own frame rate.
+int64_t seq_to_src_frame(const canvas::core::Project& project, const canvas::core::Clip& clip,
+                         int64_t seq_frame) {
+    const double mf = media_fps_of(project, clip);
+    const double sf = project.sequence.fps;
+    if (mf <= 0.0 || sf <= 0.0) return clip.src_in + (seq_frame - clip.tl_in);
+    return clip.src_in + static_cast<int64_t>(std::llround(
+                             static_cast<double>(seq_frame - clip.tl_in) * mf / sf));
 }
 
 // Maps a core transition kind to the renderable viewer mode. Audio-only
@@ -381,9 +403,15 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
             // reveals live footage instead of a frozen first frame, and B keeps
             // playing seamlessly once the cut lands. Clamp to source 0 when the
             // head was trimmed tight against the media start (no handle to show).
-            int64_t b_src = b->src_in + (seq_frame - tr_out_start) - dur_out;
-            if (b_src < 0) b_src = 0;
-            const int64_t b_seq = b->tl_in + (b_src - b->src_in);
+            // decode() maps seq->media by the media/sequence ratio, so feed it
+            // the inverse-scaled frame: B's seq offset (negative during the
+            // window, before its timeline IN) times seq/media.
+            const double bsf2 = project.sequence.fps;
+            const double bmf2 = media_fps_of(project, *b);
+            const double bratio = (bmf2 > 0.0 && bsf2 > 0.0) ? bsf2 / bmf2 : 1.0;
+            int64_t b_seq = b->tl_in + static_cast<int64_t>(std::llround(
+                (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
+            if (b_seq < 0) b_seq = 0;
             out->b = decode(project, *b, b_seq);
             if (dur_out > 0)
                 out->progress = static_cast<float>(seq_frame - tr_out_start) /
@@ -475,9 +503,12 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
             if (b) break;
         }
         if (b && b != a) {
-            int64_t b_src = b->src_in + (seq_frame - tr_out_start) - dur_out;
-            if (b_src < 0) b_src = 0;
-            const int64_t b_seq = b->tl_in + (b_src - b->src_in);
+            const double bsf2 = project.sequence.fps;
+            const double bmf2 = media_fps_of(project, *b);
+            const double bratio = (bmf2 > 0.0 && bsf2 > 0.0) ? bsf2 / bmf2 : 1.0;
+            int64_t b_seq = b->tl_in + static_cast<int64_t>(std::llround(
+                (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
+            if (b_seq < 0) b_seq = 0;
             out->b = decode(project, *b, b_seq, max_dim);
             if (dur_out > 0) out->progress = static_cast<float>(seq_frame - tr_out_start) /
                                              static_cast<float>(dur_out);

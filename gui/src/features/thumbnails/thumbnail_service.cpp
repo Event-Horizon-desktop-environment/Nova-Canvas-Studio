@@ -75,7 +75,10 @@ QString ThumbnailService::disk_path_thumbnail(const std::string& path, int64_t f
 QString ThumbnailService::disk_path_waveform(const std::string& path, int width, int height,
                                              float src_lo, float src_hi, int gain_pct) const {
     if (cache_dir_.isEmpty()) return QString();
-    const std::string seed = "wf|" + path + "|" + std::to_string(width) + "|" +
+    // "wf2": render-format version bump — old peak-only PNGs (solid full-height
+    // blocks on loud, low-dynamic-range material like heavily-limited music) are
+    // invalidated by the dB-scaled RMS+peak render (see generate).
+    const std::string seed = "wf2|" + path + "|" + std::to_string(width) + "|" +
                              std::to_string(height) + "|" + std::to_string(src_lo) + "|" +
                              std::to_string(src_hi) + "|g" + std::to_string(gain_pct);
     return cache_dir_ + QLatin1Char('/') + cache_file_name(seed, "png");
@@ -380,9 +383,35 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
         const double amp = std::max(1.0, cy - 2.0) * gain;
         p.setPen(QPen(QColor(240, 244, 238, 220), 1));
         const std::size_t n = std::min(wf.peak.size(), static_cast<std::size_t>(req.target_width));
+        // dB-scale so dynamic range survives the draw: a heavily-limited/loud
+        // master (peak ~= 1.0 full-bar every bucket in a linear scale) used to
+        // render as one solid full-height block — "blocky and sharp" next to a
+        // quieter, higher-DR clip that looked "detailed". Mapping both peak and
+        // RMS to a -40 dB..0 dB rack keeps beats/sections visible in loud music,
+        // and drawing the RMS body plus a dim peak cap shows the real envelope
+        // (quiet < loud < transient) instead of a single all-or-nothing spike.
+        const auto amp_db = [](float x) -> double {
+            if (x <= 1e-4f) return 0.0;
+            const double db = 20.0 * std::log10(static_cast<double>(x));
+            return std::clamp((db + 40.0) / 40.0, 0.0, 1.0);
+        };
+        p.setPen(QPen(QColor(140, 150, 160, 110), 1));
         for (std::size_t i = 0; i < n; ++i) {
-            const double h = std::min(1.0, static_cast<double>(wf.peak[i])) * amp;
-            p.drawLine(QPointF(i + 0.5, cy - h), QPointF(i + 0.5, cy + h));
+            const double x = static_cast<double>(i) + 0.5;
+            const double top = cy - amp_db(wf.peak[i]) * amp;
+            const double bot = cy + amp_db(wf.peak[i]) * amp;
+            const double top_r = cy - amp_db(wf.rms[i]) * amp;
+            const double bot_r = cy + amp_db(wf.rms[i]) * amp;
+            // dim peak cap (upper + lower)
+            p.drawLine(QPointF(x, top), QPointF(x, top_r));
+            p.drawLine(QPointF(x, bot_r), QPointF(x, bot));
+        }
+        p.setPen(QPen(QColor(240, 244, 238, 230), 1));
+        for (std::size_t i = 0; i < n; ++i) {
+            const double x = static_cast<double>(i) + 0.5;
+            const double top_r = cy - amp_db(wf.rms[i]) * amp;
+            const double bot_r = cy + amp_db(wf.rms[i]) * amp;
+            p.drawLine(QPointF(x, top_r), QPointF(x, bot_r));
         }
         p.end();
         save_to_disk(disk_path_waveform(req.path, req.target_width, req.max_height,

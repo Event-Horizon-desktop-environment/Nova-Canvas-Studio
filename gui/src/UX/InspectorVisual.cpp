@@ -150,6 +150,8 @@ void build_inspector_visual(MainWindow& mw, QVBoxLayout* video_layout) {
     vc.opacity_slider = new QSlider(Qt::Horizontal, opacity_row);
     vc.opacity_slider->setRange(0, 100);
     vc.opacity_slider->setValue(100);
+    // Compressible so the row fits narrow inspector widths / high DPI.
+    vc.opacity_slider->setMinimumWidth(0);
     vc.opacity_value = new QLabel(QStringLiteral("1.00"), opacity_row);
     vc.opacity_value->setStyleSheet(QStringLiteral("color: #E8EAF0; font-size: 11px;"));
     opacity_layout->addWidget(vc.opacity_slider, 1);

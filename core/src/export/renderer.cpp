@@ -23,15 +23,22 @@ namespace canvas::core {
 
 namespace {
 
-// Timeline frame -> source media frame for a clip.
-int64_t clip_src_frame(const Clip& clip, int64_t tl_frame) {
-    return clip.src_in + (tl_frame - clip.tl_in);
-}
-
 double media_fps_for(const Project& project, const Clip& clip) {
     const MediaEntry* m = project.media_by_id(clip.media);
     if (m && m->fps > 0.0) return m->fps;
     return project.sequence.fps;
+}
+
+// Timeline frame -> source media frame for a clip. Time-based: a seq-frame
+// offset advances the source by the media/sequence fps ratio, so 60fps footage
+// on a 30fps timeline strides two source frames per timeline frame (full
+// intended motion) instead of halving the content. Matches the playback path.
+int64_t clip_src_frame(const Project& project, const Clip& clip, int64_t tl_frame) {
+    const double mf = media_fps_for(project, clip);
+    const double sf = project.sequence.fps;
+    if (mf <= 0.0 || sf <= 0.0) return clip.src_in + (tl_frame - clip.tl_in);
+    return clip.src_in + static_cast<int64_t>(
+                             std::llround(static_cast<double>(tl_frame - clip.tl_in) * mf / sf));
 }
 
 // Returns the first enabled clip on `kind` tracks at `tl_frame`, preferring the
@@ -49,34 +56,12 @@ const Clip* top_clip_at(const Sequence& seq, Track::Kind kind, int64_t tl_frame)
 
 // Adds the interleaved `src` chunk into `out` (a [frames x out_channels]
 // buffer) applying the per-frame transition envelope `gains`, the clip's
-// linear volume `vol` and the stereo pan balance (gl/gr). Mirrors
-// AudioPipeline::apply_mix_gain's fold-down so playback and export sum
-// identically (mono/stereo sources and >2ch surround folds).
+// linear volume `vol` and the stereo pan balance (gl/gr). Mirrors the
+// playback mix so export and playback sum identically at any channel count.
 void mix_audio_chunk(std::vector<float>& out, const std::vector<float>& src, int src_ch,
                      int out_channels, const std::vector<float>& gains, float vol,
                      float gl, float gr) {
-    for (std::size_t s = 0; s < src.size(); ++s) {
-        const std::size_t frame_idx = s / static_cast<std::size_t>(src_ch);
-        const std::size_t src_sc = s % static_cast<std::size_t>(src_ch);
-        const float base = gains[frame_idx] * vol;
-        if (out_channels == 2) {
-            const std::size_t dl = frame_idx * 2u;
-            if (src_sc == 0) {
-                out[dl] += src[s] * base * gl;
-            } else if (src_sc == 1) {
-                out[dl + 1u] += src[s] * base * gr;
-            } else {
-                // Surround fold-down, matching the playback mix.
-                const std::size_t dst = (src_sc % 2u == 0u) ? dl : dl + 1u;
-                out[dst] += src[s] * base * (src_sc % 2u == 0u ? gl : gr) * 0.5f;
-            }
-        } else {
-            const std::size_t dst_sc =
-                std::min<std::size_t>(src_sc, static_cast<std::size_t>(out_channels) - 1);
-            out[frame_idx * static_cast<std::size_t>(out_channels) + dst_sc] +=
-                src[s] * base;
-        }
-    }
+    audio_mix::mix_chunk(out, out_channels, src, src_ch, &gains, vol, gl, gr);
 }
 
 // 2D box blit that composites a decoded source RGBA frame onto a canvas,
@@ -296,7 +281,7 @@ VideoFramePtr render_video_frame(const Project& project, int64_t tl_frame, int w
             continue;
         }
 
-        const int64_t src_frame = clip_src_frame(*clip, tl_frame);
+        const int64_t src_frame = clip_src_frame(project, *clip, tl_frame);
         // Pillarbox/letterbox the source to fit the canvas preserving aspect.
         const double src_ar = dec.width() > 0 && dec.height() > 0
                                   ? static_cast<double>(dec.width()) / dec.height()
@@ -420,7 +405,7 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
             td.active_tl_in = clip->tl_in;
         }
 
-        const int64_t src_frame = clip->src_in + (tl_frame - clip->tl_in);
+        const int64_t src_frame = clip_src_frame(*project_, *clip, tl_frame);
         VideoFramePtr decoded = td.dec->decode_to_frame(src_frame, 0);
         if (!decoded) {
             CANVAS_LOG("RenderSession::frame: decode FAILED track=%zu src_frame=%lld media=%d",
@@ -582,7 +567,7 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
         td->active_tl_in = clip->tl_in;
     }
 
-    const int64_t src_frame = clip->src_in + (tl_frame - clip->tl_in);
+    const int64_t src_frame = clip_src_frame(*project_, *clip, tl_frame);
     const AVFrame* hw = td->dec->decode_to_hw(src_frame);
     if (!hw || !hw->hw_frames_ctx || hw->width <= 0 || hw->height <= 0) {
         CANVAS_LOG("frame_gpu: decode_to_hw FAILED tl_frame=%lld src_frame=%lld hw=%p ctx=%p w=%d h=%d",
@@ -680,11 +665,18 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
         // Frame at the start of this chunk.
         const int64_t start_tl_frame = static_cast<int64_t>(
             std::floor((static_cast<double>(tl_sample) / out_sample_rate) * fps));
-        const int64_t src_frame = clip_src_frame(*clip, start_tl_frame);
+        const int64_t src_frame = clip_src_frame(project, *clip, start_tl_frame);
+        // Audio sample index on the realtime clock: src_in positions the trim in
+        // the source's own media fps, then advance by SEQUENCE time per timeline
+        // frame (mirrors playback, so export audio matches the editor at any
+        // frame-rate mix instead of halving/doubling the stream).
+        const double seq_fps = project.sequence.fps;
         const int64_t start_media_sample =
-            (src_frame >= 0)
+            (start_tl_frame >= clip->tl_in && seq_fps > 0.0)
                 ? static_cast<int64_t>(std::llround(
-                      static_cast<double>(src_frame) / media_fps * out_sample_rate))
+                      (static_cast<double>(clip->src_in) / media_fps +
+                       static_cast<double>(start_tl_frame - clip->tl_in) / seq_fps) *
+                      out_sample_rate))
                 : 0;
 
         auto chunk = dec.decode(start_media_sample, num_frames, out_sample_rate);
@@ -696,19 +688,21 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
 
         const int src_ch = chunk->channels;
         // Per-output-frame gain from the clip's audio IN/OUT transitions
-        // (audio_fade_gain returns 1.0 when no audio fade touches the frame).
+        // (audio_fade_gain returns 1.0 when no audio fade touches the frame) and
+        // the track's post-fade gain (db_to_gain law).
         std::vector<float> gains(static_cast<std::size_t>(num_frames));
         for (int k = 0; k < num_frames; ++k) {
             const int64_t frm = start_tl_frame + static_cast<int64_t>(
                 static_cast<double>(k) / out_sample_rate * fps);
             gains[static_cast<std::size_t>(k)] = audio_fade_gain(*clip, frm);
         }
-        // Mix: sum with the clip's volume and pan balance.
+        // Mix: sum with the clip's volume, the track's gain, and the pan balance.
         float gl = 1.0f;
         float gr = 1.0f;
         audio_mix::pan_gains(clip->pan, gl, gr);
         mix_audio_chunk(out->samples, chunk->samples, src_ch, out_channels, gains,
-                        audio_mix::db_to_gain(clip->volume_db), gl, gr);
+                        audio_mix::db_to_gain(clip->volume_db) * audio_mix::db_to_gain(track.gain_db),
+                        gl, gr);
     }
     return out;
 }
@@ -784,11 +778,14 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
 
         const double media_fps = media_fps_for(*project_, *clip);
         if (media_fps <= 0.0) continue;
-        const int64_t src_frame = clip_src_frame(*clip, start_tl_frame);
+        const int64_t src_frame = clip_src_frame(*project_, *clip, start_tl_frame);
+        const double seq_fps = project_->sequence.fps;
         const int64_t start_media_sample =
-            (src_frame >= 0)
+            (start_tl_frame >= clip->tl_in && seq_fps > 0.0)
                 ? static_cast<int64_t>(std::llround(
-                      static_cast<double>(src_frame) / media_fps * out_sample_rate))
+                      (static_cast<double>(clip->src_in) / media_fps +
+                       static_cast<double>(start_tl_frame - clip->tl_in) / seq_fps) *
+                      out_sample_rate))
                 : 0;
 
         auto chunk = atd.dec->decode(start_media_sample, num_frames, out_sample_rate);
@@ -832,12 +829,13 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
                 static_cast<double>(k) / out_sample_rate * fps);
             gains[static_cast<std::size_t>(k)] = audio_fade_gain(*clip, frm);
         }
-        // Mix: sum with the clip's volume and pan balance.
+        // Mix: sum with the clip's volume, the track's gain, and the pan balance.
         float gl = 1.0f;
         float gr = 1.0f;
         audio_mix::pan_gains(clip->pan, gl, gr);
         mix_audio_chunk(out->samples, chunk->samples, src_ch, out_channels, gains,
-                        audio_mix::db_to_gain(clip->volume_db), gl, gr);
+                        audio_mix::db_to_gain(clip->volume_db) * audio_mix::db_to_gain(track.gain_db),
+                        gl, gr);
     }
     return out;
 }

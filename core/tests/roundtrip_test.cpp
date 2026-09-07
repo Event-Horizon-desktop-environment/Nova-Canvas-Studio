@@ -6,6 +6,7 @@
 #include "canvas/core/media/audio_decoder.hpp"
 #include "canvas/core/media/video_decoder.hpp"
 #include "canvas/core/export/renderer.hpp"
+#include "canvas/core/export/render_queue.hpp"
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/audio_fade.hpp"
 #include "canvas/core/timeline/edit_ops.hpp"
@@ -216,6 +217,43 @@ int main() {
         // Undo everything from the full history to an empty track.
         while (undo.undo(p.sequence)) {}
         check(p.sequence.video_tracks[0].clips.empty(), "unwound to empty track");
+    }
+
+    {   // Blading a fade-bearing clip must not plant a transition on the seam.
+        Project p = make_project();
+        Clip a;
+        a.media = 0;
+        a.name = "FadeOut";
+        a.tl_in = 0;
+        a.src_in = 0;
+        a.src_out = 60;
+        auto cmd = place_clip(p.sequence, Track::Kind::Video, 0, a, Placement::Overwrite);
+        check(cmd != nullptr, "transition-blade: place clip");
+        undo.record(std::move(cmd));
+
+        const ClipId a_id = p.sequence.video_tracks[0].clips[0].id;
+        cmd = set_clip_transition(p.sequence, Track::Kind::Video, 0, a_id,
+                                  TransitionType::CrossDissolve, 14);
+        check(cmd != nullptr, "transition-blade: add OUT fade");
+        undo.record(std::move(cmd));
+        check(p.sequence.video_tracks[0].clips[0].has_transition_out(),
+              "transition-blade: fade is stored on the clip");
+
+        cmd = blade_at(p.sequence, Track::Kind::Video, 0, 15);
+        check(cmd != nullptr, "transition-blade: cut mid-fade clip");
+        undo.record(std::move(cmd));
+
+        const auto& clips = p.sequence.video_tracks[0].clips;
+        check(clips.size() == 2, "transition-blade: clip split in two");
+        if (clips.size() == 2) {
+            // Left half [0,15): its tail is now an interior cut -> no OUT fade.
+            check(!clips[0].has_transition_out(), "transition-blade: seam is a plain cut (left half)");
+            // Right half [15,60): head is an interior cut -> no IN fade; its tail
+            // (the ORIGINAL clip end) keeps the fade-out.
+            check(!clips[1].has_transition_in(), "transition-blade: seam is a plain cut (right half)");
+            check(clips[1].has_transition_out() && clips[1].transition_out_duration == 14,
+                  "transition-blade: fade stays on the original tail");
+        }
     }
 
     {   // Linked audio/video placement, movement, deletion, and unlink.
@@ -917,6 +955,12 @@ int main() {
         check(p.sequence.audio_tracks[0].muted && p.sequence.audio_tracks[0].solo,
               "audio-mix: track carries muted+solo");
 
+        cmd = set_track_gain(p.sequence, Track::Kind::Audio, 0, -9.0f);
+        check(cmd != nullptr, "audio-mix: set_track_gain returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.audio_tracks[0].gain_db == -9.0f,
+              "audio-mix: track carries gain -9 dB");
+
         std::string err;
         check(save_project(p, "/tmp/opencode/media/audio_mix.ehproj", &err),
               "audio-mix: save project");
@@ -929,7 +973,12 @@ int main() {
         check(loaded.sequence.audio_tracks[0].muted &&
                   loaded.sequence.audio_tracks[0].solo,
               "audio-mix: track muted/solo round-trip through serialization");
+        check(loaded.sequence.audio_tracks[0].gain_db == -9.0f,
+              "audio-mix: track gain round-trips through serialization");
 
+        check(undo.undo(p.sequence), "audio-mix: undo gain");
+        check(p.sequence.audio_tracks[0].gain_db == 0.0f,
+              "audio-mix: undo restores the track gain default");
         check(undo.undo(p.sequence), "audio-mix: undo solo");
         check(p.sequence.audio_tracks[0].muted && !p.sequence.audio_tracks[0].solo,
               "audio-mix: undo solo keeps the mute");
@@ -1035,6 +1084,112 @@ int main() {
         check(lp.sequence.audio_tracks[0].clips[0].scale_x == 2.0f &&
                   lp.sequence.audio_tracks[0].clips[0].flip_v,
               "visual: linked audio mate inherits the video transform");
+    }
+
+    {
+        // Deliver context persistence: the panel's expensive deliverables
+        // settings + the render queue (staged jobs and finished cards with
+        // their completion time) save inside the project file and come back
+        // intact, so reopening a project hands you straight back the export.
+        Project p = make_project();
+        DeliverSettings ds;
+        ds.video.codec = "H.265";
+        ds.video.encoder = EncoderBackend::NVIDIA;
+        ds.video.rate_control = RateControl::VBRTargetKbps;
+        ds.video.target_bitrate_kbps = 45000;
+        ds.video.max_bitrate_kbps = 50000;
+        ds.video.custom_fps = 59.94;
+        ds.video.resolution = "2560 x 1440";
+        ds.audio.bitrate_kbps = 320;
+        ds.file.file_name = "final_v2";
+        ds.file.location = "/tmp/opencode/media";
+        p.deliver_settings = ds;
+
+        RenderJobSnapshot staged;
+        staged.id = 7;
+        staged.name = "final_v2";
+        staged.settings = ds;
+        staged.output_path = "/tmp/opencode/media/final_v2.mkv";
+        staged.total_frames = 4500;
+        staged.status = 0;  // Queued
+        p.render_jobs.push_back(staged);
+
+        RenderJobSnapshot finished;
+        finished.id = 8;
+        finished.name = "final_v1";
+        finished.settings = ds;
+        finished.output_path = "/tmp/opencode/media/final_v1.mkv";
+        finished.total_frames = 4500;
+        finished.status = 2;  // Completed
+        finished.progress = 1.0;
+        finished.elapsed_seconds = 42.5;
+        finished.frames_rendered = 4500;
+        finished.finished_at = "14:22:03";
+        p.render_jobs.push_back(finished);
+
+        RenderJobSnapshot failed;
+        failed.id = 9;
+        failed.name = "wrong_codec";
+        failed.settings = ds;
+        failed.status = 3;  // Failed
+        failed.error = "encoder init failed";
+        failed.finished_at = "14:40:11";
+        p.render_jobs.push_back(failed);
+
+        RenderJobSnapshot mid_render;
+        mid_render.id = 10;
+        mid_render.name = "in_flight";
+        mid_render.settings = ds;
+        mid_render.status = 1;  // Rendering — must come back Queued
+        mid_render.progress = 0.4;
+        p.render_jobs.push_back(mid_render);
+
+        std::string derr;
+        check(save_project(p, "/tmp/opencode/media/deliver.ehproj", &derr),
+              "deliver: save project with deliver settings + queue");
+        Project loaded;
+        check(load_project(loaded, "/tmp/opencode/media/deliver.ehproj", &derr),
+              "deliver: load project");
+
+        const auto& ld = loaded.deliver_settings;
+        check(ld.video.codec == "H.265" && ld.video.encoder == EncoderBackend::NVIDIA &&
+                  ld.video.rate_control == RateControl::VBRTargetKbps &&
+                  ld.video.target_bitrate_kbps == 45000 &&
+                  ld.video.max_bitrate_kbps == 50000 &&
+                  ld.video.resolution == "2560 x 1440",
+              "deliver: video settings round-trip");
+        check(ld.audio.bitrate_kbps == 320 && ld.file.file_name == "final_v2" &&
+                  ld.file.location == "/tmp/opencode/media",
+              "deliver: audio/file settings round-trip");
+        check(loaded.render_jobs.size() == 4, "deliver: all four jobs round-trip");
+        if (loaded.render_jobs.size() == 4) {
+            check(loaded.render_jobs[0].id == 7 && loaded.render_jobs[0].status == 0 &&
+                      loaded.render_jobs[0].output_path == "/tmp/opencode/media/final_v2.mkv" &&
+                      loaded.render_jobs[0].settings.video.target_bitrate_kbps == 45000,
+                  "deliver: queued job round-trips with settings");
+            check(loaded.render_jobs[1].status == 2 &&
+                      loaded.render_jobs[1].finished_at == "14:22:03" &&
+                      loaded.render_jobs[1].frames_rendered == 4500,
+                  "deliver: finished card keeps its completion time");
+            check(loaded.render_jobs[2].status == 3 &&
+                      loaded.render_jobs[2].error == "encoder init failed",
+                  "deliver: failed card round-trips its error");
+            // A job saved mid-render must not resurrect as Rendering.
+            const RenderJob resumed = render_job_from_snapshot(loaded.render_jobs[3]);
+            check(resumed.status == RenderJob::Status::Queued &&
+                      resumed.settings.video.codec == "H.265",
+                  "deliver: mid-render snapshot restores as Queued");
+        }
+
+        const RenderJobSnapshot snap = render_job_snapshot([&] {
+            RenderJob j;
+            j.name = "snapshot_check";
+            j.status = RenderJob::Status::Completed;
+            j.finished_at = "15:00:00";
+            return j;
+        }());
+        check(snap.finished_at == "15:00:00" && snap.status == 2,
+              "deliver: render_job_snapshot maps all fields");
     }
 
     if (failures == 0) {

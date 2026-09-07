@@ -29,7 +29,15 @@ struct RenderJob {
     std::string error;
     double elapsed_seconds = 0.0;
     int64_t frames_rendered = 0;
+    std::string finished_at;     // wall clock "HH:MM:SS" stamped on Completion
 };
+
+// Plain-data mirrors used to persist jobs inside the Project (the PROJECTS
+// ship with their render queue). No thread state is carried across.
+RenderJobSnapshot render_job_snapshot(const RenderJob& job);
+// Rebuilds a job from its snapshot; a job persisted mid-render comes back
+// Queued so the user re-runs (or clears) it rather than resuming.
+RenderJob render_job_from_snapshot(const RenderJobSnapshot& snap);
 
 // A background render queue. `start()` runs a worker thread that drains queued
 // jobs (calling export_project with progress/cancel callbacks). Thread-safe.
@@ -57,9 +65,19 @@ public:
                                 project_resolver = {});
     std::size_t size() const;
     void clear_finished();
+    // Removes every job that is not actively Rendering (queued, completed,
+    // failed and cancelled all go), keeping only the in-flight export so the
+    // panel can wipe a staged-but-unrendered queue mid-run.
+    void clear_queued();
     void cancel(uint64_t id);
+    // Removes a specific queued/finished job; a rendering job is cancelled
+    // instead (the worker owns it until it settles).
+    void remove(uint64_t id);
     void cancel_all();
     void clear_all();
+    // Replaces the queue wholesale (used on project open to reinstate the jobs
+    // saved with the project). Rendering statuses are demoted to Queued.
+    void restore(const std::vector<RenderJob>& jobs);
     // Resolves the (weighted) queue progress 0..1.
     double queue_progress() const;
     bool is_busy() const;

@@ -12,7 +12,7 @@ MediaPoolWidget::MediaPoolWidget(QWidget* parent) : QListWidget(parent) {
     setUniformItemSizes(true);
     setResizeMode(QListView::Adjust);
     setMovement(QListView::Static);
-    setSelectionMode(QAbstractItemView::SingleSelection);
+    setSelectionMode(QAbstractItemView::ExtendedSelection);
     setDragEnabled(true);
     setDragDropMode(QAbstractItemView::DragOnly);
     setDefaultDropAction(Qt::CopyAction);
@@ -61,7 +61,7 @@ void MediaPoolWidget::setup_empty_state() {
     import_button_->setCursor(Qt::PointingHandCursor);
     import_button_->setStyleSheet(
         "QPushButton#mediaPoolAddButton {"
-        "  background-color: #3B82F6; color: #FFFFFF; border: none; border-radius: 6px;"
+        "  background-color: #3B82F6; color: #FFFFFF; border: none; border-radius: 8px;"
         "  padding: 8px 14px; font-size: 13px; font-weight: 500;"
         "}"
         "QPushButton#mediaPoolAddButton:hover { background-color: #4C92FF; }"
@@ -97,6 +97,40 @@ void MediaPoolWidget::update_empty_state() {
 void MediaPoolWidget::resizeEvent(QResizeEvent* event) {
     QListWidget::resizeEvent(event);
     update_empty_state();
+}
+
+bool MediaPoolWidget::event(QEvent* event) {
+    // The Trim menu maps the bare Del key to "Ripple Delete" as a window-level
+    // shortcut. A window shortcut fires before the focused widget ever sees the
+    // key, so take the shortcut override when pool items are selected and let
+    // the Del key reach keyPressEvent with its pool+clip meaning instead.
+    if (event->type() == QEvent::ShortcutOverride) {
+        auto* ke = static_cast<QKeyEvent*>(event);
+        if (ke->key() == Qt::Key_Delete && !(ke->modifiers() & Qt::ShiftModifier) &&
+            !selectedItems().isEmpty()) {
+            ke->accept();
+            return true;
+        }
+    }
+    return QListWidget::event(event);
+}
+
+void MediaPoolWidget::keyPressEvent(QKeyEvent* event) {
+    if (!selectedItems().isEmpty()) {
+        if (event->key() == Qt::Key_Delete) {
+            // In the pool the Del key is dual-purpose: drop the selected media
+            // items AND ripple-delete any clip selected on the timeline.
+            emit deleteSelectedWithClipsRequested();
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_Backspace) {
+            emit deleteSelectedRequested();
+            event->accept();
+            return;
+        }
+    }
+    QListWidget::keyPressEvent(event);
 }
 
 void MediaPoolWidget::startDrag(Qt::DropActions supported) {

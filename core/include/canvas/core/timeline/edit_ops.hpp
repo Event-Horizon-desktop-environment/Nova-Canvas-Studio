@@ -15,6 +15,7 @@ struct TrackSnapshot {
     bool locked = false;
     bool muted = false;
     bool solo = false;
+    float gain_db = 0.0f;
     std::vector<Clip> clips;
 };
 
@@ -154,13 +155,15 @@ std::unique_ptr<ICommand> set_clip_transform(Sequence& seq, Track::Kind kind,
 std::unique_ptr<ICommand> set_clip_composite(Sequence& seq, Track::Kind kind,
                                              std::size_t track_index, ClipId id,
                                              float opacity, BlendMode blend_mode);
-// Sets transition curve/ease parameters on a clip's IN or OUT edge. If the clip
-// is linked, the mate's corresponding edge inherits the values. Returns nullptr
-// if the clip is not found.
+// Sets transition shaping on a clip's IN or OUT edge: ease amount, curve value,
+// and the start/end ratio profile (all per-edge). If the clip is linked, the
+// mate's corresponding edge inherits the values. Returns nullptr if the clip is
+// not found.
 std::unique_ptr<ICommand> set_clip_transition_curve(Sequence& seq, Track::Kind kind,
                                                     std::size_t track_index, ClipId id,
                                                     bool in_edge, float ease_amount,
-                                                    float curve_value);
+                                                    float curve_value, int start_ratio,
+                                                    int end_ratio);
 // Sets clip metadata (tag, colour, comments, name). If the clip is linked, the
 // mate inherits tag/colour/comments (name is per-clip). Returns nullptr if the
 // clip is not found.
@@ -178,6 +181,10 @@ std::unique_ptr<ICommand> set_track_solo(Sequence& seq, Track::Kind kind,
                                          std::size_t track_index, bool solo);
 std::unique_ptr<ICommand> set_track_locked(Sequence& seq, Track::Kind kind,
                                            std::size_t track_index, bool locked);
+// Sets an audio track's gain in dB (shared audio_mix law). Returns nullptr if
+// the track index is out of range.
+std::unique_ptr<ICommand> set_track_gain(Sequence& seq, Track::Kind kind,
+                                         std::size_t track_index, float gain_db);
 
 class UndoStack {
 public:

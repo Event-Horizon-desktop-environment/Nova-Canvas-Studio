@@ -580,11 +580,6 @@ void SequenceController::warm_lookahead(const int64_t start_frame) {
     }
 }
 
-double SequenceController::media_rate_at(int64_t seq_frame) const {
-    if (!project_) return fps_.load();
-    return decoder_.media_rate_at(*project_, seq_frame, fps_.load());
-}
-
 void SequenceController::present_next() {
     int64_t want = current_frame_.load() + 1;
     if (want >= total_frames_.load()) {
@@ -602,7 +597,7 @@ void SequenceController::present_next() {
     // samples in one log tick), which the device plays as a chopped/garbled
     // burst. Instead skip the playhead forward to the frame realtime expects and
     // re-anchor the pacing clock.
-    const double rate_at_want = media_rate_at(want);
+    const double rate_at_want = fps_.load();
     if (rate_at_want > 0.0) {
         const auto intv_us =
             std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / rate_at_want));
@@ -681,7 +676,7 @@ void SequenceController::present_next() {
         }
     }
 
-    const double rate = media_rate_at(want);
+    const double rate = fps_.load();
     const auto interval = rate > 0.0
         ? std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / rate))
         : Clock::duration{33333};

@@ -168,6 +168,18 @@ int main() {
     auto fp = decoder.decode(project, clip, 10, 40);
     report(fp && fp->width <= 40 && fp->height <= 40, "decode max_dim caps longest edge");
 
+    // Decode past the media's last frame must CLAMP to the last addressable
+    // source frame instead of walking the GOP chain to EOF (the 78s stall when a
+    // music region extended past a short clip; also a far-forward seek into an
+    // ultra-sparse GOP). Assert the returned frame number is within the source
+    // and the call actually returns a frame within the bounded walk.
+    auto fEnd = decoder.decode(project, clip, 35000);
+    report(fEnd != nullptr && fEnd->frame_number >= 0 && fEnd->frame_number < kFrames,
+           "decode past media end clamps to last source frame (no infinite walk)");
+    auto fEnd2 = decoder.decode(project, clip, kFrames + 5000, 40);
+    report(fEnd2 != nullptr && fEnd2->frame_number >= 0 && fEnd2->frame_number < kFrames,
+           "preview decode past media end clamps to last source frame");
+
     // Full-res and preview timeline assembly return pixels (RGBA or GPU NV12).
     auto rf = decoder.frame(project, 5);
     report(rf && (rf->a || rf->nv12), "frame() assembles pixels at seq_frame");
@@ -191,6 +203,47 @@ int main() {
     report(rate > kFps - 0.5 && rate < kFps + 0.5, "media_rate_at returns media fps");
     const double fallback = decoder.media_rate_at(project, 500, 25.0);
     report(fallback == 25.0, "media_rate_at falls back outside sequence");
+
+    // Mixed frame-rate mapping: a 60fps source on a 30fps timeline strides TWO
+    // source frames per seq-frame (time-based), so the clip plays at its
+    // intended speed instead of half-speed slow motion. Media fps == seq fps
+    // keeps the old 1:1 mapping (covered above at 30/30).
+    const std::string path60 = "/tmp/canvas_td_test_60.mp4";
+    if (make_source(path60, kWidth, kHeight, 60, 48)) {
+        Project p60;
+        p60.name = "decoder-test-60";
+        p60.sequence.fps = 30;
+        p60.sequence.next_clip_id = 1;
+        MediaEntry m60;
+        m60.id = 2;
+        m60.path = path60;
+        m60.fps = 60;
+        m60.width = kWidth;
+        m60.height = kHeight;
+        m60.total_frames = 48;
+        p60.media.push_back(m60);
+        Track t60;
+        t60.kind = Track::Kind::Video;
+        Clip c60;
+        c60.id = p60.sequence.next_clip_id++;
+        c60.media = m60.id;
+        c60.tl_in = 0;
+        c60.tl_out = 24;
+        c60.src_in = 0;
+        c60.src_out = 48;
+        t60.clips.push_back(c60);
+        p60.sequence.video_tracks.push_back(std::move(t60));
+        decoder.add_media(m60);
+
+        auto head = decoder.decode(p60, c60, 0);
+        report(head && head->frame_number == 0, "60fps-in-30fps: seq 0 maps to source 0");
+        auto two = decoder.decode(p60, c60, 10);
+        report(two && two->frame_number == 20, "60fps-in-30fps: seq 10 strides to source 20");
+        auto preview60 = decoder.preview(p60, 10, 40);
+        report(preview60 && (preview60->a || preview60->nv12),
+               "60fps-in-30fps: preview assembles at the mapped source frame");
+        decoder.invalidate(m60.id);
+    }
 
     // invalidation drops the slot + preview entries; decode then yields null.
     decoder.invalidate(media.id);

@@ -1,12 +1,12 @@
 #pragma once
 
-#include "canvas/core/project/project.hpp"
-
 #include <functional>
 #include <string>
 #include <vector>
 
 namespace canvas::core {
+
+struct Project;
 
 // A codec/encoder known to the system, for the "every format" codec list.
 struct CodecInfo {

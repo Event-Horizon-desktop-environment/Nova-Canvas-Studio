@@ -100,7 +100,6 @@ private:
     void handle_seek(int64_t frame_number);
     void handle_seek_preview(int64_t frame_number);
     void warm_lookahead(int64_t start_frame);
-    double media_rate_at(int64_t seq_frame) const;
     void reset_ready();
     void fill_lookahead(int64_t base);
     void present_next();

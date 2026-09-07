@@ -33,9 +33,12 @@ inline constexpr int kEqBandCount = 6;
 
 inline constexpr float kTransitionCurveMin = 0.0f;
 inline constexpr float kTransitionCurveMax = 1.0f;
-inline constexpr float kTransitionCurveDefault = 0.0f;
+inline constexpr float kTransitionCurveDefault = 0.0f;     // IN edge (End sub-tab)
+inline constexpr float kTransitionCurveOutDefault = 1.0f;  // OUT edge (Start sub-tab)
 
 inline constexpr float kTransitionRatioMin = 0.0f;
 inline constexpr float kTransitionRatioMax = 100.0f;
+inline constexpr int kTransitionRatioStartDefault = 0;
+inline constexpr int kTransitionRatioEndDefault = 100;
 
 }  // namespace canvas::core::audio_processing

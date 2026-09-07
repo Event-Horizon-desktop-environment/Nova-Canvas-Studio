@@ -30,8 +30,9 @@ public:
     // Sets the controls from a settings struct (e.g. loading a preset).
     void set_settings(const canvas::core::DeliverSettings& ds);
 
-    // FPS counter for the running render (updated by the queue hook).
-    void set_render_speed(double fps, bool gpu);
+    // Feeds the timeline length so the file-size estimate has a duration and
+    // a frame-rate to derive CRF-bitrate guesses from.
+    void set_timeline_length(double duration_seconds, double timeline_fps);
 
 signals:
     void settings_changed();
@@ -46,6 +47,10 @@ private:
     // Show/hide + relabel the bitrate controls to match the selected rate
     // control mode (CBR -> one "Bit Rate" field; VBR target -> +Max; quality -> none).
     void update_bitrate_visibility();
+    // Recomputes the "Estimated File Size" footer label from the current
+    // settings + timeline length (CBR/VBR-target use the chosen bitrate;
+    // quality/CRF modes use a per-codec bits/pixel heuristic).
+    void update_estimate();
 
     QTabWidget* tabs_ = nullptr;
     QComboBox* preset_combo_ = nullptr;
@@ -114,7 +119,9 @@ private:
     QComboBox* flat_pass_combo_ = nullptr;
     QComboBox* visionos_combo_ = nullptr;
     QLabel* estimate_label_ = nullptr;
-    QLabel* speed_label_ = nullptr;
+
+    double duration_seconds_ = 0.0;
+    double timeline_fps_ = 0.0;
 
     bool building_ = false;
 };

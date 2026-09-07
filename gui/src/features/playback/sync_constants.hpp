@@ -38,6 +38,6 @@ inline constexpr std::int64_t kCommitSeqMaxDelta = 96;
 // Milliseconds of leading audio written ahead of the picture before the first
 // present, to compensate the fixed ALSA device-buffer latency so the audible
 // audio lines up with the frame shown (see AudioPipeline::preroll). Device tunable.
-inline constexpr int kAudioLeadMs = 70;
+inline constexpr int kAudioLeadMs = 120;
 
 }  // namespace canvas::gui

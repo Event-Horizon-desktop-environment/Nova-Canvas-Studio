@@ -2,6 +2,7 @@
 
 #include "canvas/core/export/exporter.hpp"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -199,6 +200,29 @@ struct DeliverSettings {
     DeliverAudioSettings audio;
     DeliverFileSettings file;
     DeliverAdvancedSettings advanced;
+};
+
+// Plain-data mirror of a RenderJob, embedded in the Project so a saved project
+// carries its render queue (staged jobs, finished cards, failures) with it —
+// the Deliver settings power the left panel and each snapshot rebuilds a job
+// on open. Decoupled from the thread-owning RenderQueue by design.
+struct RenderJobSnapshot {
+    uint64_t id = 0;
+    std::string name;
+    std::string output_path;
+    DeliverSettings settings;
+    int64_t total_frames = 0;
+    // Mirrors canvas::core::RenderJob::Status as an int so this header needs no
+    // dependency on the thread class (0=Queued,1=Rendering,2=Completed,3=Failed,4=Cancelled).
+    int status = 0;
+    double progress = 0.0;
+    double render_fps = 0.0;
+    std::string error;
+    double elapsed_seconds = 0.0;
+    int64_t frames_rendered = 0;
+    // Wall-clock completion time ("HH:MM:SS"); empty when not finished. Renders
+    // as the card label on finished jobs ("Finished 14:22:03"), like Resolve.
+    std::string finished_at;
 };
 
 // Nice human labels for enumerations (used by the GUI to populate combo boxes).

@@ -38,10 +38,10 @@ class EqGraphWidget final : public QWidget {
 public:
     explicit EqGraphWidget(QWidget* parent = nullptr) : QWidget(parent) {
         bands_ = canvas::core::Clip::default_eq_bands();
-        setMinimumHeight(96);
+        setMinimumHeight(140);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         setStyleSheet(QStringLiteral("background-color: #0E1117; border: 1px solid #232833;"
-                                     " border-radius: 6px;"));
+                                     " border-radius: 8px;"));
     }
 
     void set_bands(const std::array<canvas::core::Clip::EqBand, 6>& bands) {
@@ -145,6 +145,13 @@ QWidget* make_slider_spin(double min, double max, int decimals, QWidget* parent,
                                             static_cast<double>(slider->value()) / 10000.0);
                      });
 
+    // Seed the knob to match the spin's initial value. The spin starts at its
+    // built-in default (0.0) and the slider at its own default (0 = far-left on
+    // the 0..10000 range), so without this they disagree until the user touches
+    // the spin — e.g. a -100..+100 dB volume row would show 0.00 with the knob
+    // hard against the left end instead of centered.
+    spin_to_slider(spin->value());
+
     lay->addWidget(slider, 1);
     lay->addWidget(spin);
     if (out_slider) *out_slider = slider;
@@ -156,10 +163,11 @@ QComboBox* make_dark_combo(QWidget* parent) {
     auto* cb = new QComboBox(parent);
     cb->setStyleSheet(QStringLiteral(
         "QComboBox { background-color: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
-        "  border-radius: 5px; padding: 2px 4px; font-size: 11px; }"
+        "  border-radius: 8px; padding: 3px 8px; font-size: 11px; }"
         "QComboBox::drop-down { border: none; width: 14px; }"
         "QComboBox QAbstractItemView { background-color: #141A21; color: #E8EAF0;"
-        "  selection-background-color: #3B82F6; border: 1px solid #2A2F3C; }"));
+        "  selection-background-color: #3B82F6; border: 1px solid #2A2F3C;"
+        "  border-radius: 8px; padding: 2px; }"));
     return cb;
 }
 
@@ -173,7 +181,7 @@ QDoubleSpinBox* make_band_spin(double lo, double hi, int decimals, double val, Q
     s->setKeyboardTracking(false);
     s->setStyleSheet(QStringLiteral(
         "QDoubleSpinBox { background-color: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
-        "  border-radius: 5px; padding: 2px 4px; font-size: 11px; }"));
+        "  border-radius: 8px; padding: 3px 8px; font-size: 11px; }"));
     return s;
 }
 
@@ -182,6 +190,7 @@ struct AudioControls {
     QDoubleSpinBox* volume = nullptr;
     QSlider* volume_slider = nullptr;
     QDoubleSpinBox* pan = nullptr;
+    QSlider* pan_slider = nullptr;
 
     QSlider* pitch_semi_slider = nullptr;
     QDoubleSpinBox* pitch_semi = nullptr;
@@ -284,10 +293,20 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
                          [&mw]() { mw.apply_inspector_audio(); });
         add_property_row(audio->body_layout(), tr("Volume (dB)"), vol_row);
     }
-    ac.pan = make_numeric(canvas::core::audio_mix::kPanMin, canvas::core::audio_mix::kPanMax,
-                          0.0, host);
-    ac.pan->setDecimals(2);
-    add_property_row(audio->body_layout(), tr("Pan"), ac.pan);
+    QSlider* pan_slider = nullptr;
+    QDoubleSpinBox* pan_spin = nullptr;
+    auto* pan_row = make_slider_spin(canvas::core::audio_mix::kPanMin,
+                                     canvas::core::audio_mix::kPanMax,
+                                     2, host, &pan_slider, &pan_spin);
+    ac.pan = pan_spin;
+    ac.pan_slider = pan_slider;
+    pan_spin->setSuffix(QStringLiteral(" L/R"));
+    pan_spin->setMaximumWidth(110);
+    // Drag right to pan right, left to pan left; commit once the drag releases
+    // so playback keeps streaming between drag steps.
+    QObject::connect(pan_slider, &QSlider::sliderReleased, &mw,
+                     [&mw]() { mw.apply_inspector_audio(); });
+    add_property_row(audio->body_layout(), tr("Pan"), pan_row);
     audio_layout->addWidget(audio);
     audio_layout->addSpacing(2);
     // Keep MainWindow's legacy mix spins pointing at these so the pre-split
@@ -331,17 +350,24 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     audio_layout->addWidget(ac.speed_cat);
 
     // --- Equalizer ------------------------------------------------------------
-    ac.eq_cat = new InspectorCategory(tr("Equalizer"), false, /*has_enable=*/true, host);
+    // Open by default so the bands are immediately editable — no collapsed/
+    // hidden-by-default state.
+    ac.eq_cat = new InspectorCategory(tr("Equalizer"), /*expanded=*/true, /*has_enable=*/true, host);
     ac.eq_cat->set_feature_toggle_enabled(false);
+    // The EQ section sits at the bottom of the audio tab and gets generous
+    // spacing so every value/suffix stays fully visible at any dock width.
+    ac.eq_cat->body_layout()->setSpacing(12);
     ac.eq_graph = new EqGraphWidget(host);
     ac.eq_cat->body_layout()->addWidget(ac.eq_graph);
 
-    // Band rows: B1..B6 | type | freq | gain | Q.
+    // Band rows: B1..B6 | type | freq | gain | Q. All five columns are always
+    // shown — never folded away per filter type — so the row layout is stable
+    // and no label/value is ever hidden.
     for (int i = 0; i < canvas::core::audio_processing::kEqBandCount; ++i) {
         auto* row = new QWidget(host);
         auto* lay = new QHBoxLayout(row);
         lay->setContentsMargins(0, 0, 0, 0);
-        lay->setSpacing(4);
+        lay->setSpacing(8);
         auto* lbl = new QLabel(QStringLiteral("B%1").arg(i + 1), row);
         lbl->setFixedWidth(22);
         lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 10px;"));
@@ -349,25 +375,18 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         type->addItems({tr("Low Shelf"), tr("Bell"), tr("High Shelf"), tr("Low Pass"),
                         tr("High Pass"), tr("Notch")});
         auto* freq = make_band_spin(canvas::core::audio_processing::kEqFreqMin,
-                                    canvas::core::audio_processing::kEqFreqMax, 0, 1000.0, row, 62);
+                                    canvas::core::audio_processing::kEqFreqMax, 0, 1000.0, row, 78);
         freq->setSuffix(QStringLiteral("Hz"));
         auto* gain = make_band_spin(canvas::core::audio_processing::kEqGainMin,
-                                    canvas::core::audio_processing::kEqGainMax, 1, 0.0, row, 54);
+                                    canvas::core::audio_processing::kEqGainMax, 1, 0.0, row, 66);
         gain->setSuffix(QStringLiteral("dB"));
         auto* q = make_band_spin(canvas::core::audio_processing::kEqQMin,
-                                 canvas::core::audio_processing::kEqQMax, 1, 1.0, row, 44);
+                                 canvas::core::audio_processing::kEqQMax, 1, 1.0, row, 54);
         lay->addWidget(lbl);
         lay->addWidget(type, 1);
         lay->addWidget(freq);
         lay->addWidget(gain);
         lay->addWidget(q);
-        // Some filter types (shelves / pass) have no resonant Q.
-        const auto sync_q_visibility = [q](int type_idx) {
-            q->setVisible(type_idx == 1 /*Bell*/ || type_idx == 4 /*HighPass*/ ||
-                          type_idx == 5 /*Notch*/);
-        };
-        QObject::connect(type, qOverload<int>(&QComboBox::currentIndexChanged), row, sync_q_visibility);
-        sync_q_visibility(type->currentIndex());
 
         ac.eq_type.push_back(type);
         ac.eq_freq.push_back(freq);
@@ -375,7 +394,6 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         ac.eq_q.push_back(q);
         ac.eq_cat->body_layout()->addWidget(row);
     }
-    audio_layout->addWidget(ac.eq_cat);
 
     // --- AI sections (UI placeholders, not wired to the model) ---------------
     const auto make_ai = [&](const QString& title, bool with_amount) -> InspectorCategory* {
@@ -391,6 +409,7 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
             slider->setRange(0, 100);
             slider->setValue(100);
             slider->setEnabled(false);
+            slider->setMinimumWidth(0);
             auto* spin = make_numeric(0.0, 100.0, 100.0, row);
             spin->setDecimals(0);
             spin->setEnabled(false);
@@ -410,6 +429,11 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     ac.ai_vocal = make_ai(tr("AI Voice Isolation"), /*with_amount=*/true);
     ac.ai_leveler = make_ai(tr("AI Dialogue Leveler"), /*with_amount=*/false);
     ac.ai_remix = make_ai(tr("AI Music Remixer"), /*with_amount=*/false);
+
+    // Equalizer sits at the bottom of the audio tab where it has room to
+    // breathe; its extra spacing keeps every band value fully visible.
+    audio_layout->addSpacing(8);
+    audio_layout->addWidget(ac.eq_cat);
 
     if (audio_mode_button) {
         audio_mode_button->setToolTip(MainWindow::tr(

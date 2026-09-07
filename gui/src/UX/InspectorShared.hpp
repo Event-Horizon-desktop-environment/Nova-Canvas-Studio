@@ -33,8 +33,11 @@ public:
 
     InspectorCategory(const QString& title, bool expanded, bool has_enable, QWidget* parent = nullptr)
         : QWidget(parent) {
+        // Semi-rounded floating card: the whole category is one rounded surface,
+        // inset slightly from the page so cards read as separate panels. The
+        // header is the card's top band; the body (when open) its inset well.
         auto* outer = new QVBoxLayout(this);
-        outer->setContentsMargins(0, 0, 0, 0);
+        outer->setContentsMargins(8, 4, 8, 4);
         outer->setSpacing(0);
 
         if (has_enable) {
@@ -66,27 +69,34 @@ public:
         reset->setToolTip(tr("Reset to default"));
 
         auto* header_row = new QWidget(this);
+        header_row->setObjectName(QStringLiteral("inspectorCardHeader"));
         auto* header_layout = new QHBoxLayout(header_row);
-        header_layout->setContentsMargins(0, 0, 4, 0);
+        header_layout->setContentsMargins(0, 0, 2, 0);
         header_layout->setSpacing(0);
         if (enable_) header_layout->addWidget(enable_);
         header_layout->addWidget(header_, 1);
         header_layout->addWidget(reset);
-        header_row->setStyleSheet(QStringLiteral("background-color: #1A1D27; border-bottom: 1px solid #232833;"));
+        // Card top band: rounded top corners (or a full rounded card when the
+        // body is collapsed). Re-applied in the toggle handler below.
+        header_row->setStyleSheet(expanded ? inspector_card_header_open_style()
+                                           : inspector_card_header_closed_style());
 
         body_ = new QWidget(this);
-        body_->setStyleSheet(inspector_body_style());
+        body_->setObjectName(QStringLiteral("inspectorCardBody"));
+        body_->setStyleSheet(inspector_card_body_style());
         body_layout_ = new QVBoxLayout(body_);
-        body_layout_->setContentsMargins(10, 8, 10, 10);
+        body_layout_->setContentsMargins(12, 10, 12, 12);
         body_layout_->setSpacing(8);
         body_->setVisible(expanded);
 
         outer->addWidget(header_row);
         outer->addWidget(body_);
 
-        connect(header_, &QToolButton::toggled, this, [this](bool on) {
+        connect(header_, &QToolButton::toggled, this, [this, header_row](bool on) {
             header_->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
             body_->setVisible(on);
+            header_row->setStyleSheet(on ? inspector_card_header_open_style()
+                                         : inspector_card_header_closed_style());
         });
     }
 

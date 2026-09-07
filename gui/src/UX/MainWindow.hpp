@@ -73,7 +73,8 @@ void build_inspector_audio(MainWindow& main_window, QVBoxLayout* audio_layout,
 void attach_inspector_audio(MainWindow& main_window, TimelineWidget* timeline);
 void update_inspector_audio_full(MainWindow& main_window);
 void apply_inspector_audio_processing(MainWindow& main_window);
-void build_inspector_transition(MainWindow& main_window, QVBoxLayout* transition_layout);
+void build_inspector_transition(MainWindow& main_window, QVBoxLayout* transition_layout,
+                                QToolButton* transition_mode_btn);
 void attach_inspector_transition(MainWindow& main_window, TimelineWidget* timeline);
 void update_inspector_transition(MainWindow& main_window);
 void apply_inspector_transition(MainWindow& main_window);
@@ -136,8 +137,11 @@ private:
     // land in the next mixed buffer as video keeps playing.
     void push_audio_mix_snapshot();
     void delete_selected_clip(bool ripple);
+    void delete_selected_media();
+    void delete_selected_media_and_clips();
     void toggle_disable_selected_clip();
     void toggle_transition_on_selected();
+    void remove_all_transitions();
     void toggle_bookmark_at_playhead();
     void ensure_tracks(std::size_t min_video, std::size_t min_audio);
     bool place_selected_media(canvas::core::Placement mode);
@@ -183,6 +187,7 @@ private:
     QElapsedTimer fps_clock_;
     double nominal_fps_ = 0.0;
     int fps_frames_ = 0;
+    double render_fps_ = 0.0;  // > 0 while a render job is running; the top-bar fps label shows this
     MediaPoolWidget* media_pool_ = nullptr;
     QTreeWidget* bin_tree_ = nullptr;
     QDockWidget* media_dock_ = nullptr;
@@ -213,7 +218,8 @@ private:
     friend void attach_inspector_audio(MainWindow& main_window, TimelineWidget* timeline);
     friend void update_inspector_audio_full(MainWindow& main_window);
     friend void apply_inspector_audio_processing(MainWindow& main_window);
-    friend void build_inspector_transition(MainWindow& main_window, QVBoxLayout* transition_layout);
+    friend void build_inspector_transition(MainWindow& main_window, QVBoxLayout* transition_layout,
+                                           QToolButton* transition_mode_btn);
     friend void attach_inspector_transition(MainWindow& main_window, TimelineWidget* timeline);
     friend void update_inspector_transition(MainWindow& main_window);
     friend void apply_inspector_transition(MainWindow& main_window);

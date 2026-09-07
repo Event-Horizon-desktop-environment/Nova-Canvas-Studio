@@ -25,8 +25,10 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 namespace canvas::gui {
@@ -60,6 +62,12 @@ public:
     // Open (once) the output device at the pipeline rate/channel config.
     void open_output();
     void close_output();
+    // Configure the output channel count BEFORE open_output() (default 2).
+    // No-op once the device is open; re-open for the new layout to apply.
+    void set_channels(int channels) {
+        if (!active_) channels_ = channels > 0 ? channels : 2;
+    }
+    [[nodiscard]] int channels() const { return channels_; }
 
     // Re-arm the output at `seq_frame` for a fresh play run: bump the run id,
     // anchor the audible-position bookkeeping, reset the per-media feed
@@ -107,10 +115,22 @@ public:
     // clock gate to decide whether anything is actually audible at a position.
     canvas::core::MediaId audio_media_at(int64_t seq_frame) const;
 
+    // Diagnostic capture (additive, FROZEN-safe): when a path is set, the exact
+    // interleaved float32 mix this pipeline hands to the device is appended to a
+    // WAV file, so a garbled-audio report can be diffed offline against the
+    // source (clipping, gaps/overlaps, dropouts all become visible sample-data,
+    // not hearsay). Empty path disables; the file is finalized on reset()/dtor.
+    // Falls back to the CANVAS_DEBUG_CAPTURE_WAV env var at first open.
+    void set_wave_capture(const char* path);
+    void close_wave_capture();
+
 private:
     struct AudioSource {
         const canvas::core::Clip* clip = nullptr;
         double fps = 0.0;
+        // The owning audio track's post-fade gain (video-track embedded audio
+        // always contributes at 0 dB).
+        float gain_db = 0.0f;
     };
 
     // The master/reference clip for A/V sync: the first audible source
@@ -134,6 +154,10 @@ private:
     int64_t audio_sample_to_seq_frame(int64_t media_sample) const;
     // Debug: log video position vs audible audio position for A/V sync.
     void log_av_sync(int64_t seq_frame, double video_fps, double step_seconds);
+    // Rewind/anchor the feed WITHOUT taking the lock (the caller already holds
+    // it). Shared by the public rewind() and play_step()'s self-healing
+    // re-anchor when the playhead jumps without a committed seek.
+    void reanchor_locked(int64_t seq_frame);
 
     AudioSink& sink_;
 
@@ -165,12 +189,39 @@ private:
     // keeps its own lead-in.
     std::unordered_map<canvas::core::MediaId, int64_t> feed_watermarks_;
 
+    // Last timeline frame fed to the mix within the current play run, for
+    // play_step()'s self-healing re-anchor: a playhead that moves before the
+    // committed-seek path re-anchored it (transport-wheel scrub, timeline
+    // nudge, preview-only drag release) must re-anchor the feed here or the old
+    // run's front watermark suppresses the mix (`span <= 0`) and the device
+    // drains ahead — the garbled-audio regression in the field log.
+    int64_t last_seq_fed_ = -1;
+
     // UI-thread scrub-audio feed state (feed_scrub_audio): last target fed and
     // when, for throttling to device pace and de-duplication, plus the count of
     // successful audible repositions within the current drag.
     int64_t last_scrub_audio_target_ = -1;
     std::chrono::steady_clock::time_point last_scrub_audio_at_{};
     int scrub_repositions_ = 0;
+
+    // === diagnostic capture + feed ledger ===
+    // WAV writer state for the device-bound mix (owned file handle; closed on
+    // reset/dtor so the header is patched).
+    std::FILE* wav_capture_f_ = nullptr;
+    std::string wav_capture_path_;
+    uint64_t wav_capture_frames_ = 0;
+    // set_wave_capture("") / explicit disable suppresses the env fallback.
+    bool wav_capture_disabled_ = false;
+    // ~1Hz feed-ledger accumulator: frames written into the sink since the last
+    // [audio:feed] line, and the sink's audible position at that line, so a
+    // burst-vs-stall pattern (the listening signature of tearing) is visible.
+    uint64_t feed_ledger_frames_ = 0;
+    std::chrono::steady_clock::time_point feed_ledger_at_{};
+    void maybe_wave_capture_open_locked();
+    void wave_capture_write_locked(const float* data, std::size_t frames);
+    void wave_capture_close_locked();
+    void log_feed_ledger_locked(int64_t seq_frame, int64_t start_sample, int64_t from,
+                                int64_t want, int64_t written);
 };
 
 }  // namespace canvas::gui

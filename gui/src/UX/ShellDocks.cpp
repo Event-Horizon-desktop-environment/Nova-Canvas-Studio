@@ -43,7 +43,16 @@ void build_left_dock(MainWindow& mw) {
     left_tabs->setObjectName(QStringLiteral("leftTabStrip"));
     left_tabs->setTabPosition(QTabWidget::North);
     left_tabs->setMinimumWidth(380);
-    left_tabs->setMaximumWidth(560);
+    left_tabs->setDocumentMode(true);
+    left_tabs->setStyleSheet(QStringLiteral(
+        "QTabWidget#leftTabStrip::pane{background:#11131A;border:none;}"
+        "QTabBar::tab{background:transparent;color:#9AA0B0;padding:6px 10px;"
+        "  border:none;border-radius:8px;font-weight:500;margin:2px 1px;}"
+        "QTabBar::tab:selected{color:#FFFFFF;background:#3B82F6;font-weight:600;}"
+        "QTabBar::tab:hover{color:#E8EAF0;}"
+        "QTabBar::tab:selected:hover{color:#FFFFFF;}"
+        "QTabBar QToolButton{background:transparent;border:none;border-radius:8px;}"
+        "QTabBar QToolButton:hover{background:rgba(255,255,255,0.08);}"));
 
     auto* pool_tab = new QWidget(left_tabs);
     auto* pool_root_layout = new QHBoxLayout(pool_tab);
@@ -56,7 +65,7 @@ void build_left_dock(MainWindow& mw) {
     bins_layout->setContentsMargins(0, 0, 0, 0);
     bins_layout->setSpacing(0);
     auto* bins_label = new QLabel(MainWindow::tr("Bins"), bins_column);
-    bins_label->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 10px; padding: 4px 6px; background-color: #11131A;"));
+    bins_label->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 10px; padding: 4px 8px; background-color: transparent;"));
     auto* bin_tree = new QTreeWidget(bins_column);
     bin_tree->setObjectName(QStringLiteral("binTree"));
     bin_tree->setHeaderHidden(true);
@@ -166,12 +175,19 @@ void build_left_dock(MainWindow& mw) {
     mw.media_pool_->setContextMenuPolicy(Qt::CustomContextMenu);
     mw.media_pool_->setSpacing(6);
     QObject::connect(mw.media_pool_, &MediaPoolWidget::importRequested, &mw, &MainWindow::on_import_media);
+    QObject::connect(mw.media_pool_, &MediaPoolWidget::deleteSelectedRequested, &mw,
+                     &MainWindow::delete_selected_media);
+    QObject::connect(mw.media_pool_, &MediaPoolWidget::deleteSelectedWithClipsRequested, &mw,
+                     &MainWindow::delete_selected_media_and_clips);
     grid_layout->addWidget(mw.media_pool_, 1);
 
     QObject::connect(mw.media_pool_, &QListWidget::customContextMenuRequested, &mw,
             [&mw](const QPoint& pos) {
                 QMenu menu;
                 menu.addAction(MainWindow::tr("Import Media..."), &mw, &MainWindow::on_import_media);
+                menu.addSeparator();
+                menu.addAction(MainWindow::tr("Delete Selected Media"),
+                               &mw, &MainWindow::delete_selected_media);
                 menu.addSeparator();
                 menu.addAction(MainWindow::tr("Create Bin with Selected Clips..."));
                 menu.addAction(MainWindow::tr("New Bin"));
@@ -220,7 +236,9 @@ void build_left_dock(MainWindow& mw) {
     mw.media_dock_->setObjectName(QStringLiteral("mediaDock"));
     auto* media_title = new QWidget(mw.media_dock_);
     media_title->setObjectName(QStringLiteral("mediaDockTitle"));
-    media_title->    setStyleSheet(QStringLiteral("background-color: #1A1D27;"));
+    media_title->setStyleSheet(QStringLiteral(
+        "QWidget#mediaDockTitle { background-color: #1A1D27;"
+        " border-bottom: 1px solid #232833; }"));
     mw.media_dock_->setTitleBarWidget(media_title);
     mw.media_dock_->setWidget(left_tabs);
     mw.media_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
@@ -231,7 +249,9 @@ void build_inspector_dock(MainWindow& mw) {
     mw.inspector_dock_->setObjectName(QStringLiteral("inspectorDock"));
     auto* inspector_title = new QWidget(mw.inspector_dock_);
     inspector_title->setObjectName(QStringLiteral("inspectorDockTitle"));
-    inspector_title->    setStyleSheet(QStringLiteral("background-color: #1A1D27;"));
+    inspector_title->setStyleSheet(QStringLiteral(
+        "QWidget#inspectorDockTitle { background-color: #1A1D27;"
+        " border-bottom: 1px solid #232833; }"));
     mw.inspector_dock_->setTitleBarWidget(inspector_title);
     mw.inspector_dock_->setMinimumWidth(320);
     mw.inspector_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
@@ -243,8 +263,9 @@ void build_inspector_dock(MainWindow& mw) {
     inspector_outer->setSpacing(0);
 
     auto* mode_row = new QWidget(inspector_body);
+    mode_row->setStyleSheet(inspector_tab_track_style());
     auto* mode_row_layout = new QHBoxLayout(mode_row);
-    mode_row_layout->setContentsMargins(6, 6, 6, 6);
+    mode_row_layout->setContentsMargins(4, 4, 4, 4);
     mode_row_layout->setSpacing(2);
     const char* modes[] = {"Video", "Audio", "Effects", "Transition", "Image", "File"};
     auto* mode_group = new QButtonGroup(mode_row);
@@ -257,7 +278,7 @@ void build_inspector_dock(MainWindow& mw) {
         b->setCheckable(true);
         b->setChecked(is_video);
         b->setAutoRaise(true);
-        b->setStyleSheet(page_pill_style());
+        b->setStyleSheet(inspector_tab_style());
         b->setToolTip(MainWindow::tr(m));
         // Allow the pill to shrink below its text width so six mode buttons
         // fit comfortably at any DPI scale and dock width.  A tooltip makes
@@ -280,11 +301,14 @@ void build_inspector_dock(MainWindow& mw) {
     auto* stack = new QStackedWidget(scroll);
     const int video_tab_index = 0;
     const int audio_tab_index = 1;
+    const int transition_tab_index = 3;
 
     // --- Video page ---------------------------------------------------------
     auto* video_page = new QWidget(stack);
     auto* video_layout = new QVBoxLayout(video_page);
-    video_layout->setContentsMargins(0, 0, 0, 0);
+    // Vertical gutters so the floating category cards sit off the page edges
+    // and each card has clear separation from the next.
+    video_layout->setContentsMargins(0, 4, 0, 8);
     video_layout->setSpacing(0);
 
     // Video tab's property categories (Transform/Composite + the reference
@@ -301,42 +325,61 @@ void build_inspector_dock(MainWindow& mw) {
     // feed the legacy member pointers, so the pre-split commit path still works.
     auto* audio_page = new QWidget(stack);
     auto* audio_layout = new QVBoxLayout(audio_page);
-    audio_layout->setContentsMargins(0, 0, 0, 0);
+    audio_layout->setContentsMargins(0, 4, 0, 8);
     audio_layout->setSpacing(0);
     build_inspector_audio(mw, audio_layout, mode_buttons[audio_tab_index]);
     audio_layout->addStretch(1);
     stack->addWidget(audio_page);
 
-    // --- Effects / Image pages (placeholder for now) ------------------------
-    for (const char* m : {"Effects", "Image"}) {
-        auto* page = new QWidget(stack);
-        auto* page_layout = new QVBoxLayout(page);
-        page_layout->setContentsMargins(0, 0, 0, 0);
+    // --- Effects / Image pages (placeholders for now) -----------------------
+    // Pages are added to the stack in the SAME order as the mode pills above
+    // (Video, Audio, Effects, Transition, Image, File); the toggled handler
+    // switches by pill index, so a misplaced page surfaces under the wrong tab.
+    auto* effects_page = new QWidget(stack);
+    {
+        auto* page_layout = new QVBoxLayout(effects_page);
+        page_layout->setContentsMargins(10, 10, 10, 10);
         page_layout->setSpacing(0);
-        auto* hint = new QLabel(MainWindow::tr("%1 properties — not available yet.").arg(MainWindow::tr(m)), page);
+        auto* hint = new QLabel(MainWindow::tr("Effects properties — not available yet."),
+                                effects_page);
         hint->setContentsMargins(10, 10, 10, 10);
         hint->setStyleSheet(QStringLiteral("color: #5F6577; font-size: 11px;"));
         hint->setWordWrap(true);
         page_layout->addWidget(hint);
         page_layout->addStretch(1);
-        stack->addWidget(page);
     }
+    stack->addWidget(effects_page);  // index 2
 
     // --- Transition page ----------------------------------------------------
     // Start/End sub-tabs + Video/Audio categories (InspectorTransition.cpp).
     // Only active while a transition bubble is selected on the timeline.
     auto* transition_page = new QWidget(stack);
     auto* transition_layout = new QVBoxLayout(transition_page);
-    transition_layout->setContentsMargins(0, 0, 0, 0);
+    transition_layout->setContentsMargins(0, 4, 0, 8);
     transition_layout->setSpacing(0);
-    build_inspector_transition(mw, transition_layout);
-    stack->addWidget(transition_page);
+    build_inspector_transition(mw, transition_layout, mode_buttons[transition_tab_index]);
+    stack->addWidget(transition_page);  // index 3
+
+    auto* image_page = new QWidget(stack);
+    {
+        auto* page_layout = new QVBoxLayout(image_page);
+        page_layout->setContentsMargins(10, 10, 10, 10);
+        page_layout->setSpacing(0);
+        auto* hint = new QLabel(MainWindow::tr("Image properties — not available yet."),
+                                image_page);
+        hint->setContentsMargins(10, 10, 10, 10);
+        hint->setStyleSheet(QStringLiteral("color: #5F6577; font-size: 11px;"));
+        hint->setWordWrap(true);
+        page_layout->addWidget(hint);
+        page_layout->addStretch(1);
+    }
+    stack->addWidget(image_page);  // index 4
 
     // --- File page ----------------------------------------------------------
     // Read-only source header info + fully-wired metadata (InspectorFile.cpp).
     auto* file_page = new QWidget(stack);
     auto* file_layout = new QVBoxLayout(file_page);
-    file_layout->setContentsMargins(0, 0, 0, 0);
+    file_layout->setContentsMargins(0, 4, 0, 8);
     file_layout->setSpacing(0);
     build_inspector_file(mw, file_layout);
     stack->addWidget(file_page);

@@ -56,6 +56,9 @@ void build_app_menus(MainWindow& mw) {
     trim->addAction(MainWindow::tr("Lift"), QKeySequence(Qt::SHIFT | Qt::Key_Delete), &mw,
                     [&mw] { mw.delete_selected_clip(/*ripple=*/false); });
     trim->addAction(MainWindow::tr("Cycle Edit Point Side"), QKeySequence(Qt::Key_U));
+    trim->addAction(MainWindow::tr("Remove All Transitions"), &mw, [&mw] {
+        mw.remove_all_transitions();
+    });
 
     auto* timeline_menu = mw.ui->menubar->addMenu(MainWindow::tr("&Timeline"));
     timeline_menu->addAction(MainWindow::tr("Add Edit"), QKeySequence(Qt::CTRL | Qt::Key_Backslash));

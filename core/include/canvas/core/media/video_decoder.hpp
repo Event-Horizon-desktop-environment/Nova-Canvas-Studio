@@ -70,6 +70,10 @@ public:
     [[nodiscard]] double duration_seconds() const { return duration_seconds_; }
     [[nodiscard]] int64_t total_frames() const { return total_frames_; }
     [[nodiscard]] int64_t current_frame() const { return next_frame_; }
+    // Highest valid target frame index for this stream (inclusive), once known.
+    // Returns -1 when the encoded extent is not yet known (no frame decoded and
+    // neither the container nor stream duration is available).
+    [[nodiscard]] int64_t last_frame() const { return last_frame_; }
 
     VideoFramePtr decode_next();
     void set_output_dim(int max_output_dim);
@@ -136,6 +140,13 @@ public:
     // media; 0 = exact/uncapped.
     static const int kPreviewMaxOver = 1200;
 
+    // Fast-over budget for FULL-RES decodes. Steady playback advances 0-1 frames
+    // (sequential), so this only binds far-forward seeks into ultra-sparse GOPs
+    // (a 19k-frame keyframe interval caused a 78 s walk that garbled audio by
+    // letting it pre-roll ahead). A far full-res seek returns the nearest frame
+    // as an approximate still instead of blocking the worker for tens of seconds.
+    static const int kFullResMaxOver = 4000;
+
     // ---- Audio ----
     [[nodiscard]] bool has_audio() const { return audio_stream_ >= 0; }
     [[nodiscard]] int audio_sample_rate() const { return audio_sample_rate_; }
@@ -150,6 +161,16 @@ public:
 
 private:
     void reset_stream_state(int64_t resume_frame);
+    // Clamps `target` into the valid source-frame window [0, last decodeable
+    // frame]. When the encoded extent is still unknown (last_frame_ == -1) the
+    // target is only floored at 0; the clamp becomes effective as soon as one
+    // frame has been decoded or a stream end is observed. This is what stops a
+    // scrub/play call over the media's end (e.g. a long music region past the
+    // clip) from walking the entire GOP chain to EOF.
+    int64_t clamp_target(int64_t target) const;
+    // Refines last_frame_ from the stream's own duration when the container
+    // duration was unknown at open() time. No-op once a value is already known.
+    void refine_last_frame();
     VideoFramePtr make_rgba_frame(const AVFrame* src, int64_t ticks, double seconds, int64_t number);
     // Decodes forward from the current position until it produces `target`,
     // fast-overs (no RGBA conversion, no GPU->CPU copy) every intermediate GOP
@@ -177,6 +198,7 @@ private:
     double frame_rate_ = 0.0;
     double duration_seconds_ = 0.0;
     int64_t total_frames_ = -1;
+    int64_t last_frame_ = -1;
     int64_t next_frame_ = 0;
     bool draining_ = false;
     int out_max_dim_ = 0;

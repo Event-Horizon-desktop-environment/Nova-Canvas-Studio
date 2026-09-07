@@ -616,6 +616,67 @@ bool MainWindow::find_audio_target(canvas::core::Track::Kind& out_kind, std::siz
     return false;
 }
 
+void MainWindow::remove_all_transitions() {
+    if (!project_) return;
+    auto& seq = project_->sequence;
+
+    const auto snapshot_all =
+        [](canvas::core::Sequence& s) -> std::vector<canvas::core::TrackSnapshot> {
+        std::vector<canvas::core::TrackSnapshot> out;
+        const auto collect = [&out](std::vector<canvas::core::Track>& tracks,
+                                    canvas::core::Track::Kind kind) {
+            for (std::size_t i = 0; i < tracks.size(); ++i) {
+                const auto& t = tracks[i];
+                canvas::core::TrackSnapshot snap;
+                snap.kind = kind;
+                snap.index = i;
+                snap.locked = t.locked;
+                snap.muted = t.muted;
+                snap.solo = t.solo;
+                snap.gain_db = t.gain_db;
+                snap.clips = t.clips;
+                out.push_back(std::move(snap));
+            }
+        };
+        collect(s.video_tracks, canvas::core::Track::Kind::Video);
+        collect(s.audio_tracks, canvas::core::Track::Kind::Audio);
+        return out;
+    };
+
+    std::vector<canvas::core::TrackSnapshot> before = snapshot_all(seq);
+
+    std::size_t cleared = 0;
+    const auto clear_track =
+        [&cleared](canvas::core::Sequence& s, std::vector<canvas::core::Track>& tracks,
+                   canvas::core::Track::Kind kind) {
+            for (std::size_t ti = 0; ti < tracks.size(); ++ti) {
+                const std::vector<canvas::core::Clip> clips = tracks[ti].clips;
+                for (const auto& clip : clips) {
+                    if (clip.has_transition_out()) {
+                        if (canvas::core::clear_clip_transition(s, kind, ti, clip.id))
+                            ++cleared;
+                    }
+                    if (clip.has_transition_in()) {
+                        if (canvas::core::clear_clip_transition_in(s, kind, ti, clip.id))
+                            ++cleared;
+                    }
+                }
+            }
+        };
+    clear_track(seq, seq.video_tracks, canvas::core::Track::Kind::Video);
+    clear_track(seq, seq.audio_tracks, canvas::core::Track::Kind::Audio);
+
+    if (cleared == 0) return;
+
+    std::vector<canvas::core::TrackSnapshot> after = snapshot_all(seq);
+    undo_.record(std::make_unique<canvas::core::EditCommand>(
+        "Remove All Transitions", std::move(before), std::move(after)));
+    has_unsaved_changes_ = true;
+    refresh_timeline();
+    push_snapshot();
+    qWarning() << "[edit] REMOVE-ALL-TRANSITIONS cleared=" << cleared;
+}
+
 void MainWindow::update_inspector_audio() {
     if (!project_ || !inspector_audio_volume_ || !inspector_audio_pan_) return;
     canvas::core::Track::Kind kind;

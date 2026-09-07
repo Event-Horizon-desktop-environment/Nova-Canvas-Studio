@@ -1,8 +1,10 @@
 // Transition inspector page. Built once per MainWindow (registry keyed by
 // window), refreshed from the timeline's currently selected transition bubble:
 // Start edits the outgoing clip's OUT edge, End edits the incoming clip's IN
-// edge (or the same clip's IN edge for a single-clip edge bubble). Edits commit
-// through the normal edit_ops path so every change is undoable.
+// edge (or the same clip's IN edge for a single-clip edge bubble). Each side's
+// shaping (curve/ease/ratios) is stored per edge in the model so Start and End
+// keep independent values; alignment is UI-state only. Edits commit through the
+// normal edit_ops path so every change is undoable.
 
 #include "UX/InspectorTransition.hpp"
 
@@ -66,6 +68,9 @@ struct Registry {
     QToolButton* start_btn = nullptr;
     QToolButton* end_btn = nullptr;
     QStackedWidget* stack = nullptr;
+    QToolButton* mode_btn = nullptr;          // the inspector's "Transition" pill
+    QStackedWidget* inspector_stack = nullptr;  // the page-level QStackedWidget
+    int transition_page_index = -1;           // this page's index within it
     SideControls start;
     SideControls end;
     bool updating = false;   // guards against committing while populating
@@ -184,10 +189,11 @@ void set_dark_combo(QComboBox* cb, const QStringList& items) {
     cb->addItems(items);
     cb->setStyleSheet(QStringLiteral(
         "QComboBox { background-color: #141A21; color: #C9CDD6; border: 1px solid #232833;"
-        " border-radius: 4px; padding: 3px 6px; }"
+        " border-radius: 8px; padding: 3px 8px; }"
         "QComboBox::drop-down { border: none; width: 18px; }"
         "QComboBox QAbstractItemView { background-color: #141A21; color: #C9CDD6;"
-        " selection-background-color: #3B82F6; border: 1px solid #232833; }"));
+        " selection-background-color: #3B82F6; border: 1px solid #232833;"
+        " border-radius: 8px; padding: 2px; }"));
 }
 
 QToolButton* make_pill_button(const QString& text) {
@@ -196,15 +202,18 @@ QToolButton* make_pill_button(const QString& text) {
     b->setCheckable(true);
     b->setStyleSheet(QStringLiteral(
         "QToolButton { background-color: #141A21; color: #9AA0B0; border: 1px solid #232833;"
-        " border-radius: 14px; padding: 5px 14px; }"
+        " border-radius: 18px; padding: 6px 18px; font-weight: 500; }"
+        "QToolButton:hover { color: #F0F2F7; border-color: #2A2F3C; }"
         "QToolButton:checked { background-color: #3B82F6; border-color: #3B82F6;"
-        " color: #FFFFFF; }"));
+        " color: #FFFFFF; font-weight: 600; }"));
     return b;
 }
 
 QSlider* make_ratio_slider(QWidget* parent) {
     auto* s = new QSlider(Qt::Horizontal, parent);
     s->setRange(0, 100);
+    // Compressible so the row fits narrow inspector widths / high DPI.
+    s->setMinimumWidth(0);
     s->setStyleSheet(QStringLiteral(
         "QSlider::groove:horizontal { height: 4px; background: #232833; border-radius: 2px; }"
         "QSlider::handle:horizontal { width: 10px; background: #3B82F6; margin: -4px 0;"
@@ -216,9 +225,9 @@ QToolButton* make_ghost_button(const QString& text) {
     auto* b = new QToolButton;
     b->setText(text);
     b->setStyleSheet(QStringLiteral(
-        "QToolButton { color: #8B93A7; border: 1px solid #232833; border-radius: 4px;"
+        "QToolButton { color: #8B93A7; border: 1px solid #232833; border-radius: 8px;"
         " padding: 3px 8px; background: #141A21; }"
-        "QToolButton:hover { color: #C9CDD6; }"
+        "QToolButton:hover { color: #C9CDD6; border-color: #2A2F3C; }"
         "QToolButton:disabled { color: #4A5162; }"));
     return b;
 }
@@ -236,9 +245,10 @@ std::unique_ptr<canvas::core::ICommand> make_transition_cmd(
 
 std::unique_ptr<canvas::core::ICommand> make_curve_cmd(canvas::core::Sequence& seq,
                                                        const Resolved& r, bool in_edge, float ease,
-                                                       float curve_value) {
-    return canvas::core::set_clip_transition_curve(seq, r.kind, r.track, r.clip->id, in_edge, ease,
-                                                   curve_value);
+                                                       float curve_value, int start_ratio,
+                                                       int end_ratio) {
+    return canvas::core::set_clip_transition_curve(seq, r.kind, r.track, r.clip->id, in_edge,
+                                                   ease, curve_value, start_ratio, end_ratio);
 }
 
 // Populates one side (Start or End) from its target clip without committing.
@@ -264,15 +274,21 @@ void populate_side(const canvas::core::Project& proj, const TimelineWidget& time
     sc.video_secs->setValue(secs);
     sc.video_frames->setValue(duration);
 
-    const float curve = clip.transition_curve_value;
-    const int start_pct = static_cast<int>(std::lround(curve * 100.0));
-    sc.start_ratio->setValue(start_pct);
-    sc.start_ratio_spin->setValue(start_pct);
-    sc.end_ratio->setValue(100 - start_pct);
-    sc.end_ratio_spin->setValue(100 - start_pct);
-    sc.curve->setValue(start_pct);
+    const float curve =
+        in_edge ? clip.transition_in_curve_value : clip.transition_out_curve_value;
+    const int64_t start_ratio =
+        in_edge ? clip.transition_in_start_ratio : clip.transition_out_start_ratio;
+    const int64_t end_ratio =
+        in_edge ? clip.transition_in_end_ratio : clip.transition_out_end_ratio;
+    const float ease = in_edge ? clip.transition_in_ease : clip.transition_out_ease;
+    const int curve_pct = static_cast<int>(std::lround(curve * 100.0));
+    sc.start_ratio->setValue(start_ratio);
+    sc.start_ratio_spin->setValue(start_ratio);
+    sc.end_ratio->setValue(end_ratio);
+    sc.end_ratio_spin->setValue(end_ratio);
+    sc.curve->setValue(curve_pct);
     sc.curve_spin->setValue(curve);
-    sc.ease->setCurrentIndex(ease_index_for(clip.transition_ease));
+    sc.ease->setCurrentIndex(ease_index_for(ease));
 
     // Audio half: the linked audio mate carries the fade; if none, disable audio.
     const auto audio = audio_target(proj, *target);
@@ -298,8 +314,16 @@ void populate_side(const canvas::core::Project& proj, const TimelineWidget& time
 
 }  // namespace
 
-void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout) {
+void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
+                                QToolButton* transition_mode_btn) {
     Registry& reg = registry(mw);
+    reg.mode_btn = transition_mode_btn;
+    if (auto* page_widget = transition_layout->parentWidget()) {
+        if (auto* page_stack = qobject_cast<QStackedWidget*>(page_widget->parentWidget())) {
+            reg.inspector_stack = page_stack;
+            reg.transition_page_index = page_stack->indexOf(page_widget);
+        }
+    }
     auto* host = transition_layout->parentWidget();
     const auto tr = [](const char* s) { return MainWindow::tr(s); };
 
@@ -387,7 +411,8 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout) 
             b->setToolTip(tip);
             b->setStyleSheet(QStringLiteral(
                 "QToolButton { background: #141A21; color: #9AA0B0; border: 1px solid #232833;"
-                " border-radius: 4px; min-width: 26px; padding: 3px 0; }"
+                " border-radius: 8px; min-width: 26px; padding: 3px 0; }"
+                "QToolButton:hover { border-color: #2A2F3C; color: #C9CDD6; }"
                 "QToolButton:checked { color: #FFFFFF; border-color: #3B82F6;"
                 " background: #1E293B; }"));
             return b;
@@ -398,7 +423,9 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout) 
         align_group->addButton(sc.align_left);
         align_group->addButton(sc.align_center);
         align_group->addButton(sc.align_right);
-        sc.align_center->setChecked(true);
+        // Reference defaults: the Start (OUT) edge sits flush at the clip's
+        // tail (right-aligned), the End (IN) edge straddles its head (centered).
+        (in_edge ? sc.align_center : sc.align_right)->setChecked(true);
         auto* align_row = new QHBoxLayout;
         align_row->setSpacing(4);
         align_row->addWidget(sc.align_left);
@@ -419,8 +446,11 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout) 
                        {tr("Standard"), tr("Soft"), tr("Smooth"), tr("Sleek"), tr("Glossy")});
         add_property_row(vbody, tr("Style"), sc.style);
 
-        // Start/End ratio + curve all drive the shared transition_curve_value
-        // (symmetric crossfade centre). End Ratio mirrors 100 - Start.
+        // Start/End ratio carve the fade profile out of the transition window
+        // (0 = bubble's left edge, 100 = its right edge, defaults spanning the
+        // whole window). They are independent of the Transition Curve control;
+        // all three commit together as one per-edge shaping edit. Ratio fields
+        // show whole percentages.
         const auto make_ratio_row = [&](SideControls& side, const char* title, QSlider* slider,
                                         QDoubleSpinBox* spin) {
             slider->setRange(0, 100);
@@ -447,8 +477,6 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout) 
         sc.end_ratio = make_ratio_slider(page);
         sc.end_ratio_spin = new QDoubleSpinBox;
         make_ratio_row(sc, "End Ratio", sc.end_ratio, sc.end_ratio_spin);
-        sc.end_ratio->setEnabled(false);  // v1: mirror of the start side
-        sc.end_ratio_spin->setEnabled(false);
 
         sc.ease = new QComboBox;
         set_dark_combo(sc.ease, {tr("None"), tr("Ease In"), tr("Ease Out"), tr("Ease In-Out")});
@@ -583,78 +611,84 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout) 
                                         .arg(sc.video_frames->value()));
         });
 
-        const auto commit_curve_edits = [&mw, &reg, &sc, commit]() {
+        const auto commit_shaping_edits = [&mw, &reg, &sc, commit]() {
             if (reg.updating) return;
             auto r = side_video_target(*mw.project_, *mw.timeline_, sc);
             if (!r) return;
-            const int start_pct = sc.start_ratio->value();
             commit(make_curve_cmd(mw.project_->sequence, *r, sc.in_edge,
                                   ease_amount_from_index(sc.ease->currentIndex()),
-                                  static_cast<float>(start_pct) / 100.0f));
+                                  static_cast<float>(sc.curve->value()) / 100.0f,
+                                  sc.start_ratio->value(), sc.end_ratio->value()));
         };
-        const auto push_curve_ui = [&sc]() {
-            const int start_pct = sc.start_ratio->value();
-            sc.start_ratio_spin->setValue(start_pct);
-            sc.end_ratio->setValue(100 - start_pct);
-            sc.end_ratio_spin->setValue(100 - start_pct);
-            sc.curve->setValue(start_pct);
-            sc.curve_spin->setValue(static_cast<double>(start_pct) / 100.0);
+        // Syncs the numeric fields from whichever slider moved (spins never
+        // commit mid-hand-off).
+        const auto push_shaping_ui = [&sc]() {
+            sc.start_ratio_spin->setValue(sc.start_ratio->value());
+            sc.end_ratio_spin->setValue(sc.end_ratio->value());
+            sc.curve_spin->setValue(static_cast<double>(sc.curve->value()) / 100.0);
         };
-        QObject::connect(sc.start_ratio, &QSlider::sliderReleased, &mw,
-                         [&sc, push_curve_ui, commit_curve_edits]() {
-            push_curve_ui();
-            commit_curve_edits();
-        });
-        QObject::connect(sc.start_ratio_spin, &QDoubleSpinBox::editingFinished, &mw,
-                         [&sc, push_curve_ui, commit_curve_edits]() {
-            sc.start_ratio->setValue(static_cast<int>(std::lround(sc.start_ratio_spin->value())));
-            push_curve_ui();
-            commit_curve_edits();
-        });
+        const auto wire_ratio = [&](QSlider* slider, QDoubleSpinBox* spin) {
+            QObject::connect(slider, &QSlider::sliderReleased, &mw,
+                             [&sc, slider, spin, push_shaping_ui, commit_shaping_edits]() {
+                                 spin->setValue(slider->value());
+                                 push_shaping_ui();
+                                 commit_shaping_edits();
+                             });
+            QObject::connect(spin, &QDoubleSpinBox::editingFinished, &mw,
+                             [&sc, slider, spin, push_shaping_ui, commit_shaping_edits]() {
+                                 slider->setValue(static_cast<int>(std::lround(spin->value())));
+                                 push_shaping_ui();
+                                 commit_shaping_edits();
+                             });
+        };
+        wire_ratio(sc.start_ratio, sc.start_ratio_spin);
+        wire_ratio(sc.end_ratio, sc.end_ratio_spin);
         QObject::connect(sc.curve, &QSlider::sliderReleased, &mw,
-                         [&sc, push_curve_ui, commit_curve_edits]() {
-            sc.start_ratio->setValue(sc.curve->value());
-            push_curve_ui();
-            commit_curve_edits();
-        });
+                         [&sc, push_shaping_ui, commit_shaping_edits]() {
+                             push_shaping_ui();
+                             commit_shaping_edits();
+                         });
         QObject::connect(sc.curve_spin, &QDoubleSpinBox::editingFinished, &mw,
-                         [&sc, push_curve_ui, commit_curve_edits]() {
-            sc.curve->setValue(static_cast<int>(std::lround(sc.curve_spin->value() * 100.0)));
-            push_curve_ui();
-            commit_curve_edits();
-        });
+                         [&sc, push_shaping_ui, commit_shaping_edits]() {
+                             sc.curve->setValue(static_cast<int>(std::lround(sc.curve_spin->value() * 100.0)));
+                             push_shaping_ui();
+                             commit_shaping_edits();
+                         });
         QObject::connect(sc.ease, qOverload<int>(&QComboBox::currentIndexChanged), &mw,
-                         [commit_curve_edits]() { commit_curve_edits(); });
-        const auto apply_style = [&mw, &sc, &reg, push_curve_ui, commit_curve_edits]() {
+                         [commit_shaping_edits]() { commit_shaping_edits(); });
+        const auto apply_style = [&sc, &reg, push_shaping_ui, commit_shaping_edits]() {
             if (reg.updating) return;
-            int start_pct = sc.curve->value();
+            int curve_pct = sc.curve->value();
             int ease_idx = sc.ease->currentIndex();
             switch (sc.style->currentIndex()) {
-                case 1: ease_idx = 2; start_pct = 40; break;  // Soft
-                case 2: ease_idx = 3; start_pct = 50; break;  // Smooth
-                case 3: ease_idx = 1; start_pct = 35; break;  // Sleek
-                case 4: ease_idx = 2; start_pct = 60; break;  // Glossy
+                case 1: ease_idx = 2; curve_pct = 40; break;  // Soft
+                case 2: ease_idx = 3; curve_pct = 50; break;  // Smooth
+                case 3: ease_idx = 1; curve_pct = 35; break;  // Sleek
+                case 4: ease_idx = 2; curve_pct = 60; break;  // Glossy
                 default: break;                               // Standard
             }
             reg.updating = true;  // suppress the intermediate signal commits
             sc.ease->setCurrentIndex(ease_idx);
-            sc.curve->setValue(start_pct);
-            sc.start_ratio->setValue(start_pct);
-            push_curve_ui();
+            sc.curve->setValue(curve_pct);
+            push_shaping_ui();
             reg.updating = false;
-            commit_curve_edits();
+            commit_shaping_edits();
         };
         QObject::connect(sc.style, qOverload<int>(&QComboBox::currentIndexChanged), &mw, apply_style);
 
         QObject::connect(sc.curve_reset, &QToolButton::clicked, &mw,
-                         [&reg, &sc, push_curve_ui, commit_curve_edits]() {
+                         [&sc, &reg, push_shaping_ui, commit_shaping_edits]() {
             reg.updating = true;
             if (sc.style->currentIndex() != 0) sc.style->setCurrentIndex(0);
             if (sc.ease->currentIndex() != 0) sc.ease->setCurrentIndex(0);
-            sc.start_ratio->setValue(50);
-            push_curve_ui();
+            // Restore this edge's reference defaults: curve 1.000 on the Start
+            // (OUT) view / 0.000 on the End (IN) view, ratios spanning the window.
+            sc.curve->setValue(sc.in_edge ? 0 : 100);
+            sc.start_ratio->setValue(0);
+            sc.end_ratio->setValue(100);
+            push_shaping_ui();
             reg.updating = false;
-            commit_curve_edits();
+            commit_shaping_edits();
         });
 
         const auto sync_audio_duration = [&sc](double fps) {
@@ -718,6 +752,9 @@ void attach_inspector_transition(MainWindow& mw, TimelineWidget* timeline) {
                      });
     QObject::connect(timeline, &TimelineWidget::transition_selection_cleared, &mw,
                      [&mw]() { update_inspector_transition(mw); });
+    // Initial state: with no bubble selected the Transition pill stays disabled
+    // until the user actually picks a transition.
+    update_inspector_transition(mw);
 }
 
 void update_inspector_transition(MainWindow& mw) {
@@ -728,7 +765,15 @@ void update_inspector_transition(MainWindow& mw) {
     reg.stack->setEnabled(active);
     if (reg.start_btn) reg.start_btn->setEnabled(active);
     if (reg.end_btn) reg.end_btn->setEnabled(active);
-    if (!active) return;
+    if (reg.mode_btn) reg.mode_btn->setEnabled(active);
+    if (!active) {
+        // The tab is only usable while a transition bubble is selected; when the
+        // bubble goes away, hop back to the Video page rather than stranding a
+        // disabled page on screen.
+        if (reg.inspector_stack && reg.inspector_stack->currentIndex() == reg.transition_page_index)
+            reg.inspector_stack->setCurrentIndex(0);
+        return;
+    }
     if (!mw.project_ || !mw.timeline_) return;
 
     if (reg.stack->currentIndex() == 0)
