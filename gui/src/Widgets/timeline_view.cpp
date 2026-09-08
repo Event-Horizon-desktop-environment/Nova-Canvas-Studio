@@ -773,7 +773,7 @@ void TimelineWidget::draw_tracks() {
             outline->setZValue(2.0);
             outline->setAcceptedMouseButtons(Qt::NoButton);
 
-            // Semi-rounded label bar: flat muted blue strip with link icon + filename,
+            // Semi-rounded label bar: flat muted blue strip with the clip filename,
             // hugging the bottom of the clip.
             auto* label_bar = scene_.addPath(
                 rounded_rect_path(QRectF(0, body_h, cw, label_h), 6),
@@ -783,13 +783,12 @@ void TimelineWidget::draw_tracks() {
 
             QGraphicsTextItem* text = nullptr;
             if (cw > 60.0) {
-                add_icon(scene_, QStringLiteral("link"), cx + 4, cy + body_h + 3.5, t.ink_muted, 11);
                 text = scene_.addText(QString::fromStdString(clip.name));
                 text->setDefaultTextColor(t.ink);
                 QFont tf = text->font();
                 tf.setPointSizeF(7.5);
                 text->setFont(tf);
-                text->setPos(QPointF(cx + 17, cy + body_h + 1));
+                text->setPos(QPointF(cx + 4, cy + body_h + 1));
                 text->setZValue(2);
                 text->setAcceptedMouseButtons(Qt::NoButton);
             }
@@ -1126,7 +1125,11 @@ void TimelineWidget::refresh_transition_bubble(TransitionBubble& b, int64_t dura
     // no duration text on the canvas — the pill shape carries the info.
     if (!b.pill) return;
     const ThemeTokens& t = tokens();
-    const double w = std::round(std::max(44.0, duration_frames / frames_per_pixel_));
+    // Width tracks the transition's real span at the current zoom (dur/fpp) so
+    // the pill grows and shrinks with zoom-in/out; only a thin clickable floor
+    // keeps it grabbable at extreme zoom-out instead of a fat invariant bubble.
+    constexpr double kMinPillW = 10.0;
+    const double w = std::round(std::max(kMinPillW, duration_frames / frames_per_pixel_));
     const double bx = kSceneMargin + kTrackHeaderWidth + b.frame / frames_per_pixel_;
     const double x = std::round(b.cut ? bx - w / 2.0 : (b.in_edge ? bx : bx - w));
     const QRectF r(x, std::round(b.y), w, std::round(b.h));
@@ -1225,7 +1228,7 @@ void TimelineWidget::add_transition_bubbles() {
                           return x.hit.left() < y.hit.left();
                       });
             constexpr double kGapPx = 4.0;
-            constexpr double kMinBubbleW = 34.0;
+            constexpr double kMinBubbleW = 10.0;
             double used_until = -1e9;
             for (auto& b : local) {
                 QRectF r = b.hit;
