@@ -30,6 +30,7 @@
 
 #include "UX/InspectorShared.hpp"
 #include "UX/MainWindow.hpp"
+#include "UX/theme.hpp"
 #include "Widgets/timeline_widget.hpp"
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/edit_ops.hpp"
@@ -58,6 +59,90 @@ uint8_t color_index_for(uint8_t color) {
 
 QColor color_for(uint8_t color) {
     return color == 0 ? QColor() : kClipColors[color - 1];
+}
+
+QString muted_label_style() {
+    return QStringLiteral("color: %1; font-size: 11px;").arg(css(tokens().ink_muted));
+}
+
+QString faint_label_style() {
+    return QStringLiteral("color: %1; font-size: 11px;").arg(css(tokens().ink_faint));
+}
+
+QString readonly_line_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QLineEdit { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 3px 6px; }")
+        .arg(css(t.surface_low), css(t.ink_muted), css(t.border_soft));
+}
+
+QString editable_line_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QLineEdit { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 3px 6px; }"
+               "QLineEdit:focus { border-color: %4; }")
+        .arg(css(t.surface_higher), css(t.ink), css(t.border), css(t.accent));
+}
+
+QString notes_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QPlainTextEdit { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 4px 6px; }"
+               "QPlainTextEdit:focus { border-color: %4; }")
+        .arg(css(t.surface_higher), css(t.ink), css(t.border), css(t.accent));
+}
+
+QString combo_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QComboBox { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 3px 8px; }"
+               "QComboBox::drop-down { border: none; width: 18px; }"
+               "QComboBox QAbstractItemView { background-color: %4; color: %2;"
+               " selection-background-color: %5; border: 1px solid %3;"
+               " border-radius: 8px; padding: 2px; }")
+        .arg(css(t.surface_higher), css(t.ink), css(t.border), css(t.surface_low),
+             css(t.accent));
+}
+
+QString preview_name_style() {
+    return QStringLiteral("color: %1; font-size: 12px; font-weight: 600;")
+        .arg(css(tokens().ink));
+}
+
+QString preview_card_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral("QWidget#inspectorPreviewCard { background-color: %1;"
+                          " border: 1px solid %2; border-radius: 12px; }")
+        .arg(css(t.surface_raised), css(t.border_soft));
+}
+
+QString no_color_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QToolButton { background: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 4px; font-size: 9px; }"
+               "QToolButton:hover { color: %4; }")
+        .arg(css(t.surface_raised), css(t.ink_faint), css(t.border_soft), css(t.ink));
+}
+
+QString progress_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QProgressBar { border: none; background: %1; border-radius: 3px; }"
+               "QProgressBar::chunk { background: %2; border-radius: 3px; }")
+        .arg(css(t.surface_low), css(t.accent));
+}
+
+QString channel_name_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QLineEdit { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 3px 6px; }")
+        .arg(css(t.surface_low), css(t.ink_muted), css(t.border_soft));
 }
 
 QString short_media_name(const Clip& clip, const MediaEntry* media) {
@@ -130,35 +215,24 @@ FileControls* file_lookup(MainWindow& mw) {
 QLineEdit* make_readonly_line(QWidget* parent) {
     auto* l = new QLineEdit(parent);
     l->setReadOnly(true);
-    l->setStyleSheet(QStringLiteral(
-        "QLineEdit { background-color: #141A21; color: #9AA0B0; border: 1px solid #232833;"
-        " border-radius: 8px; padding: 3px 6px; }"));
+    apply_theme_style(l, &readonly_line_style);
     return l;
 }
 
 QLineEdit* make_editable_line(QWidget* parent) {
     auto* l = new QLineEdit(parent);
-    l->setStyleSheet(QStringLiteral(
-        "QLineEdit { background-color: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
-        " border-radius: 8px; padding: 3px 6px; }"
-        "QLineEdit:focus { border-color: #3B82F6; }"));
+    apply_theme_style(l, &editable_line_style);
     return l;
 }
 
 void set_dark_combo(QComboBox* cb, const QStringList& items) {
     cb->addItems(items);
-    cb->setStyleSheet(QStringLiteral(
-        "QComboBox { background-color: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
-        " border-radius: 8px; padding: 3px 8px; }"
-        "QComboBox::drop-down { border: none; width: 18px; }"
-        "QComboBox QAbstractItemView { background-color: #141A21; color: #E8EAF0;"
-        " selection-background-color: #3B82F6; border: 1px solid #2A2F3C;"
-        " border-radius: 8px; padding: 2px; }"));
+    apply_theme_style(cb, &combo_style);
 }
 
 QLabel* make_readonly_label(QWidget* parent) {
     auto* l = new QLabel(parent);
-    l->setStyleSheet(QStringLiteral("color: #C9CDD6; font-size: 11px;"));
+    apply_theme_style(l, &muted_label_style);
     return l;
 }
 
@@ -174,9 +248,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     // semi-rounded category cards below it.
     auto* preview = new QWidget(host);
     preview->setObjectName(QStringLiteral("inspectorPreviewCard"));
-    preview->setStyleSheet(QStringLiteral(
-        "QWidget#inspectorPreviewCard { background-color: #1A1D27;"
-        " border: 1px solid #232833; border-radius: 12px; }"));
+    apply_theme_style(preview, &preview_card_style);
     auto* preview_layout = new QHBoxLayout(preview);
     preview_layout->setContentsMargins(12, 10, 10, 10);
     preview_layout->setSpacing(8);
@@ -184,8 +256,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     fc.preview_icon->setFixedSize(16, 16);
     fc.preview_icon->setPixmap(icon("app_icon").pixmap(16, 16));
     fc.preview_name = new QLabel(tr("Select a clip to inspect"), preview);
-    fc.preview_name->setStyleSheet(QStringLiteral(
-        "color: #E8EAF0; font-size: 12px; font-weight: 600;"));
+    apply_theme_style(fc.preview_name, &preview_name_style);
     fc.preview_name->setTextInteractionFlags(Qt::TextSelectableByMouse);
     fc.open_folder = new QToolButton(preview);
     fc.open_folder->setIcon(icon("viewport"));
@@ -206,7 +277,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
         row->setSpacing(6);
         auto* lbl = new QLabel(MainWindow::tr(label));
         lbl->setMinimumWidth(88);
-        lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+        apply_theme_style(lbl, &muted_label_style);
         row->addWidget(lbl);
         row->addWidget(out, 1);
         info_body->addLayout(row);
@@ -229,7 +300,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     tc_row->setSpacing(6);
     auto* tc_lbl = new QLabel(MainWindow::tr("Timecode"));
     tc_lbl->setMinimumWidth(88);
-    tc_lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+    apply_theme_style(tc_lbl, &muted_label_style);
     fc.ed_timecode = make_editable_line(host);
     tc_row->addWidget(tc_lbl);
     tc_row->addWidget(fc.ed_timecode, 1);
@@ -239,7 +310,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     tag_row->setSpacing(6);
     auto* tag_lbl = new QLabel(MainWindow::tr("Tag"));
     tag_lbl->setMinimumWidth(88);
-    tag_lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+    apply_theme_style(tag_lbl, &muted_label_style);
     fc.ed_tag = new QComboBox(host);
     set_dark_combo(fc.ed_tag, {tr("None"), tr("Good Take"), tr("Rejected")});
     fc.tag_swatch = new QLabel(host);
@@ -253,7 +324,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
 
     auto* color_lbl = new QLabel(MainWindow::tr("Colour"));
     color_lbl->setMinimumWidth(88);
-    color_lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+    apply_theme_style(color_lbl, &muted_label_style);
     fc.swatch_row = new QWidget(host);
     auto* swatch_layout = new QHBoxLayout(fc.swatch_row);
     swatch_layout->setContentsMargins(0, 0, 0, 0);
@@ -262,18 +333,17 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     no_color->setText(QStringLiteral("\u2715"));
     no_color->setFixedSize(16, 16);
     no_color->setToolTip(tr("No colour"));
-    no_color->setStyleSheet(QStringLiteral(
-        "QToolButton { background: #1A1D27; color: #5F6577; border: 1px solid #232833;"
-        " border-radius: 4px; font-size: 9px; }"
-        "QToolButton:hover { color: #E8EAF0; }"));
+    apply_theme_style(no_color, &no_color_style);
     swatch_layout->addWidget(no_color);
     for (int i = 0; i < 12; ++i) {
         auto* sw = new QToolButton(fc.swatch_row);
         sw->setFixedSize(16, 16);
         sw->setToolTip(QStringLiteral("#%1").arg(kClipColors[i].name()));
-        sw->setStyleSheet(QStringLiteral(
-                              "background-color: %1; border: 1px solid #232833; border-radius: 4px;")
-                              .arg(kClipColors[i].name()));
+        apply_theme_style(sw, [i] {
+            return QStringLiteral(
+                       "background-color: %1; border: 1px solid %2; border-radius: 4px;")
+                .arg(kClipColors[i].name(), css(tokens().border_soft));
+        });
         fc.swatches.push_back(sw);
         swatch_layout->addWidget(sw);
     }
@@ -288,22 +358,19 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     name_row->setSpacing(6);
     auto* name_lbl = new QLabel(MainWindow::tr("Clip Name"));
     name_lbl->setMinimumWidth(88);
-    name_lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+    apply_theme_style(name_lbl, &muted_label_style);
     fc.ed_name = make_editable_line(host);
     name_row->addWidget(name_lbl);
     name_row->addWidget(fc.ed_name, 1);
     meta_body->addLayout(name_row);
 
     auto* notes_lbl = new QLabel(MainWindow::tr("Notes"));
-    notes_lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+    apply_theme_style(notes_lbl, &muted_label_style);
     meta_body->addWidget(notes_lbl);
     fc.ed_notes = new QPlainTextEdit(host);
     fc.ed_notes->setPlaceholderText(tr("Add notes about this clip..."));
     fc.ed_notes->setMaximumHeight(72);
-    fc.ed_notes->setStyleSheet(QStringLiteral(
-        "QPlainTextEdit { background-color: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
-        " border-radius: 8px; padding: 4px 6px; }"
-        "QPlainTextEdit:focus { border-color: #3B82F6; }"));
+    apply_theme_style(fc.ed_notes, &notes_style);
     meta_body->addWidget(fc.ed_notes);
 
     auto* checks_row = new QHBoxLayout;
@@ -311,7 +378,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     fc.auto_select = new QCheckBox(tr("Auto Select"), host);
     fc.next_box = new QCheckBox(tr("Next"), host);
     for (QCheckBox* cb : {fc.auto_select, fc.next_box})
-        cb->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+        apply_theme_style(cb, &muted_label_style);
     checks_row->addWidget(fc.auto_select);
     checks_row->addWidget(fc.next_box);
     checks_row->addStretch(1);
@@ -325,7 +392,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
         tr("No audio channels for this source — drag an audio clip to the timeline first."),
         host);
     fc.audio_hint->setWordWrap(true);
-    fc.audio_hint->setStyleSheet(QStringLiteral("color: #5F6577; font-size: 11px;"));
+    apply_theme_style(fc.audio_hint, &faint_label_style);
     fc.audio_body->addWidget(fc.audio_hint);
     file_layout->addWidget(audio);
 
@@ -342,7 +409,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
         row->setSpacing(6);
         auto* lbl = new QLabel(MainWindow::tr(label));
         lbl->setMinimumWidth(88);
-        lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+        apply_theme_style(lbl, &muted_label_style);
         row->addWidget(lbl);
         row->addWidget(field, 1);
         tc_body->addLayout(row);
@@ -563,14 +630,10 @@ void update_inspector_file(MainWindow& mw) {
         level->setValue(0);
         level->setTextVisible(false);
         level->setFixedHeight(6);
-        level->setStyleSheet(QStringLiteral(
-            "QProgressBar { border: none; background: #141A21; border-radius: 3px; }"
-            "QProgressBar::chunk { background: #3B82F6; border-radius: 3px; }"));
+        apply_theme_style(level, &progress_style);
         auto* ch_name = new QLineEdit(row);
         ch_name->setText(QStringLiteral("Channel %1").arg(ch + 1));
-        ch_name->setStyleSheet(QStringLiteral(
-            "QLineEdit { background-color: #141A21; color: #C9CDD6; border: 1px solid"
-            " #232833; border-radius: 8px; padding: 3px 6px; }"));
+        apply_theme_style(ch_name, &channel_name_style);
         lay->addWidget(play);
         lay->addWidget(level, 1);
         lay->addWidget(ch_name, 2);

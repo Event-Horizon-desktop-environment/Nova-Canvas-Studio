@@ -1,4 +1,4 @@
-find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets Svg)
+find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets Svg Test)
 
 include(GNUInstallDirs)
 get_filename_component(CANVAS_SOURCE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
@@ -37,6 +37,7 @@ qt_add_executable(canvas
     src/Widgets/timeline_selection.cpp
     src/Widgets/timeline_drag.cpp
     src/Widgets/transition_handle_editor.cpp
+    src/Widgets/timeline_volume_line.cpp
     src/UX/theme.cpp
     src/UX/horizon_style.cpp
     ui/MainWindow.ui
@@ -44,6 +45,7 @@ qt_add_executable(canvas
     src/features/app/AppActions.cpp
     src/features/project/ProjectActions.cpp
     src/features/timeline/TimelineActions.cpp
+    src/features/timeline/audio_targets.cpp
 
     src/features/playback/sequence_controller.cpp
     src/features/playback/audio_pipeline.cpp

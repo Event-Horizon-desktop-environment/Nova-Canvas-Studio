@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "Widgets/timeline_widget.hpp"
+#include "features/timeline/audio_targets.hpp"
 
 namespace canvas::gui {
 
@@ -40,8 +41,12 @@ public:
         bands_ = canvas::core::Clip::default_eq_bands();
         setMinimumHeight(140);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        setStyleSheet(QStringLiteral("background-color: #0E1117; border: 1px solid #232833;"
-                                     " border-radius: 8px;"));
+        apply_theme_style(this, [] {
+            const ThemeTokens& t = tokens();
+            return QStringLiteral("background-color: %1; border: 1px solid %2;"
+                                  " border-radius: 8px;")
+                .arg(css(t.surface_low), css(t.border_soft));
+        });
     }
 
     void set_bands(const std::array<canvas::core::Clip::EqBand, 6>& bands) {
@@ -69,16 +74,17 @@ protected:
         };
 
         // Grid: reference Hz ticks + 0 dB axis.
-        p.setPen(QPen(QColor(QStringLiteral("#232833")), 1));
+        const ThemeTokens& t = tokens();
+        p.setPen(QPen(t.border_soft, 1));
         for (const double hz : {62.0, 250.0, 1000.0, 4000.0, 16000.0}) {
             const double x = x_for(hz);
             p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()));
         }
-        p.setPen(QPen(QColor(QStringLiteral("#2A2F3C")), 1));
+        p.setPen(QPen(t.border, 1));
         p.drawLine(QPointF(r.left(), y_for(0.0)), QPointF(r.right(), y_for(0.0)));
 
         // Axes labels.
-        p.setPen(QColor(QStringLiteral("#5F6577")));
+        p.setPen(t.ink_faint);
         p.setFont(QFont(QStringLiteral("DejaVu Sans"), 7));
         p.drawText(QPointF(r.left() + 1, r.bottom() - 1), QStringLiteral("20"));
         p.drawText(QPointF(r.right() - 14, r.bottom() - 1), QStringLiteral("20K"));
@@ -97,11 +103,11 @@ protected:
                 path.lineTo(pt);
             }
         }
-        p.setPen(QPen(QColor(QStringLiteral("#3B82F6")), 2));
+        p.setPen(QPen(t.accent, 2));
         p.drawPath(path);
 
         // Band markers.
-        p.setBrush(QColor(QStringLiteral("#3B82F6")));
+        p.setBrush(t.accent);
         p.setPen(Qt::NoPen);
         for (const auto& b : bands_)
             p.drawEllipse(QPointF(x_for(b.frequency), y_for(b.gain)), 3.0, 3.0);
@@ -161,13 +167,18 @@ QWidget* make_slider_spin(double min, double max, int decimals, QWidget* parent,
 
 QComboBox* make_dark_combo(QWidget* parent) {
     auto* cb = new QComboBox(parent);
-    cb->setStyleSheet(QStringLiteral(
-        "QComboBox { background-color: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
-        "  border-radius: 8px; padding: 3px 8px; font-size: 11px; }"
-        "QComboBox::drop-down { border: none; width: 14px; }"
-        "QComboBox QAbstractItemView { background-color: #141A21; color: #E8EAF0;"
-        "  selection-background-color: #3B82F6; border: 1px solid #2A2F3C;"
-        "  border-radius: 8px; padding: 2px; }"));
+    apply_theme_style(cb, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral(
+                   "QComboBox { background-color: %1; color: %2; border: 1px solid %3;"
+                   "  border-radius: 8px; padding: 3px 8px; font-size: 11px; }"
+                   "QComboBox::drop-down { border: none; width: 14px; }"
+                   "QComboBox QAbstractItemView { background-color: %4; color: %2;"
+                   "  selection-background-color: %5; border: 1px solid %3;"
+                   "  border-radius: 8px; padding: 2px; }")
+            .arg(css(t.surface_higher), css(t.ink), css(t.border), css(t.surface_low),
+                 css(t.accent));
+    });
     return cb;
 }
 
@@ -179,9 +190,13 @@ QDoubleSpinBox* make_band_spin(double lo, double hi, int decimals, double val, Q
     s->setDecimals(decimals);
     s->setMaximumWidth(width);
     s->setKeyboardTracking(false);
-    s->setStyleSheet(QStringLiteral(
-        "QDoubleSpinBox { background-color: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
-        "  border-radius: 8px; padding: 3px 8px; font-size: 11px; }"));
+    apply_theme_style(s, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral(
+                   "QDoubleSpinBox { background-color: %1; color: %2; border: 1px solid %3;"
+                   "  border-radius: 8px; padding: 3px 8px; font-size: 11px; }")
+            .arg(css(t.surface_higher), css(t.ink), css(t.border));
+    });
     return s;
 }
 
@@ -191,6 +206,7 @@ struct AudioControls {
     QSlider* volume_slider = nullptr;
     QDoubleSpinBox* pan = nullptr;
     QSlider* pan_slider = nullptr;
+    QLabel* multi_hint = nullptr;
 
     QSlider* pitch_semi_slider = nullptr;
     QDoubleSpinBox* pitch_semi = nullptr;
@@ -291,6 +307,11 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         // releases so playback keeps streaming between drag steps.
         QObject::connect(vol_slider, &QSlider::sliderReleased, &mw,
                          [&mw]() { mw.apply_inspector_audio(); });
+        // Live spectrum feedback: every drag/typing step re-renders the selected
+        // clip's waveform at the knob's gain (no undo/commit per step); the
+        // release handler above still records the one real volume edit.
+        QObject::connect(vol_spin, &QDoubleSpinBox::valueChanged, &mw,
+                         [&mw](double vol_db) { mw.preview_inspector_volume(static_cast<float>(vol_db)); });
         add_property_row(audio->body_layout(), tr("Volume (dB)"), vol_row);
     }
     QSlider* pan_slider = nullptr;
@@ -307,6 +328,19 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     QObject::connect(pan_slider, &QSlider::sliderReleased, &mw,
                      [&mw]() { mw.apply_inspector_audio(); });
     add_property_row(audio->body_layout(), tr("Pan"), pan_row);
+    {
+        // Multi-clip selection hint: Volume/Pan edits below apply to every
+        // selected audio clip (Phase 4). Hidden for single-clip selections.
+        auto* hint = new QLabel(host);
+        apply_theme_style(hint, [] {
+            return QStringLiteral("color: %1; font-size: 10px; padding: 0 4px;")
+                .arg(css(tokens().ink_muted));
+        });
+        hint->setWordWrap(true);
+        hint->setVisible(false);
+        ac.multi_hint = hint;
+        audio->body_layout()->addWidget(hint);
+    }
     audio_layout->addWidget(audio);
     audio_layout->addSpacing(2);
     // Keep MainWindow's legacy mix spins pointing at these so the pre-split
@@ -370,7 +404,10 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         lay->setSpacing(8);
         auto* lbl = new QLabel(QStringLiteral("B%1").arg(i + 1), row);
         lbl->setFixedWidth(22);
-        lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 10px;"));
+        apply_theme_style(lbl, [] {
+            return QStringLiteral("color: %1; font-size: 10px;")
+                .arg(css(tokens().ink_muted));
+        });
         auto* type = make_dark_combo(row);
         type->addItems({tr("Low Shelf"), tr("Bell"), tr("High Shelf"), tr("Low Pass"),
                         tr("High Pass"), tr("Notch")});
@@ -500,12 +537,10 @@ void update_inspector_audio_full(MainWindow& mw) {
     AudioControls* ac = audio_lookup(mw);
     if (!ac || !ac->volume || !mw.project_) return;
 
-    canvas::core::Track::Kind kind;
-    std::size_t index;
-    canvas::core::Clip clip;
-    const bool has_audio = mw.find_audio_target(kind, index, clip);
+    const auto targets = resolve_audio_targets(mw.project_->sequence, mw.selected_clip_ids_);
+    const bool has_audio = !targets.empty();
 
-    if (has_audio) populate_from_clip(*ac, clip);
+    if (has_audio) populate_from_clip(*ac, targets.front().clip);
 
     // Enabled for audio clips and for video clips with a linked audio mate.
     if (ac->mode_button) ac->mode_button->setEnabled(has_audio);
@@ -513,6 +548,16 @@ void update_inspector_audio_full(MainWindow& mw) {
     if (ac->volume) ac->volume->setEnabled(has_audio);
     if (ac->volume_slider) ac->volume_slider->setEnabled(has_audio);
     if (ac->pan) ac->pan->setEnabled(has_audio);
+
+    // Multi-selection hint: values shown are the FIRST target's, but Volume/Pan
+    // commits land on every resolved audio clip.
+    if (ac->multi_hint) {
+        const int n = static_cast<int>(targets.size());
+        ac->multi_hint->setVisible(n > 1);
+        if (n > 1)
+            ac->multi_hint->setText(
+                MainWindow::tr("%1 clips selected — Volume/Pan apply to all").arg(n));
+    }
 }
 
 void apply_inspector_audio_processing(MainWindow& mw) {

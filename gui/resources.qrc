@@ -1,4 +1,9 @@
 <RCC>
+    <qresource prefix="/fonts">
+        <file alias="Geist-Variable.ttf">resources/fonts/Geist-Variable.ttf</file>
+        <file alias="GeistMono-Variable.ttf">resources/fonts/GeistMono-Variable.ttf</file>
+        <file alias="OFL.txt">resources/fonts/OFL.txt</file>
+    </qresource>
     <qresource prefix="/icons">
         <file alias="app_icon.svg">resources/icons/app_icon.svg</file>
         <file alias="add_marker.svg">resources/icons/add_marker.svg</file>
@@ -29,6 +34,8 @@
         <file alias="mode.svg">resources/icons/mode.svg</file>
         <file alias="mute.svg">resources/icons/mute.svg</file>
         <file alias="next_edit.svg">resources/icons/next_edit.svg</file>
+        <file alias="folder.svg">resources/icons/folder.svg</file>
+        <file alias="search.svg">resources/icons/search.svg</file>
         <file alias="play.svg">resources/icons/play.svg</file>
         <file alias="pause.svg">resources/icons/pause.svg</file>
         <file alias="reorder.svg">resources/icons/reorder.svg</file>

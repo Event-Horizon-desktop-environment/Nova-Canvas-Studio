@@ -94,3 +94,55 @@ canvas_add_headless_test(transition_handle_editor_test
     transition_handle_editor_test.cpp
     ../src/Widgets/transition_handle_editor.cpp
 )
+
+# audio_targets_test: mixer-target resolution for multi-clip Volume/Pan edits
+# (audio clip direct, linked video->audio mate, no-audio skip, linked-pair
+# de-dup, selection-order + duplicate collapse). Compiles audio_targets.cpp
+# directly (Qt-free seam enforced by the build).
+canvas_add_headless_test(audio_targets_test
+    audio_targets_test.cpp
+    ../src/features/timeline/audio_targets.cpp
+)
+
+# timeline_volume_line_test: audio volume-line math (db<->y law, band clamping,
+# monotonicity, degenerate boxes). Compiles timeline_volume_line.cpp directly
+# (Qt-free seam enforced by the build).
+canvas_add_headless_test(timeline_volume_line_test
+    timeline_volume_line_test.cpp
+    ../src/Widgets/timeline_volume_line.cpp
+)
+
+# volume_line_drag_qt_test: full-widget (Qt) regression test that drives the
+# audio volume-line drag through the real press/move/release handlers and checks
+# the emitted preview/commit dB values stay inside the audio law band and point
+# the RIGHT way (up = louder, down = quieter). Qt-linked on purpose.
+qt_add_executable(volume_line_drag_qt_test
+    qt/volume_line_drag_qt_test.cpp
+    ../resources.qrc
+    ../src/Widgets/timeline_widget.cpp
+    ../src/Widgets/timeline_view.cpp
+    ../src/Widgets/timeline_interaction.cpp
+    ../src/Widgets/timeline_thumbnails.cpp
+    ../src/Widgets/timeline_snap.cpp
+    ../src/Widgets/timeline_selection.cpp
+    ../src/Widgets/timeline_drag.cpp
+    ../src/Widgets/transition_handle_editor.cpp
+    ../src/Widgets/timeline_volume_line.cpp
+    ../src/UX/theme.cpp
+    ../src/UX/horizon_style.cpp
+    ../src/features/thumbnails/thumbnail_service.cpp
+)
+target_include_directories(volume_line_drag_qt_test PRIVATE
+    ${CANVAS_GUI_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../core/include
+)
+target_link_libraries(volume_line_drag_qt_test PRIVATE
+    Qt6::Widgets
+    Qt6::Svg
+    Qt6::Test
+    canvas_core
+)
+set_target_properties(volume_line_drag_qt_test PROPERTIES AUTOMOC ON AUTORCC ON AUTOUIC OFF)
+add_test(NAME volume_line_drag_qt_test COMMAND volume_line_drag_qt_test)
+set_tests_properties(volume_line_drag_qt_test PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

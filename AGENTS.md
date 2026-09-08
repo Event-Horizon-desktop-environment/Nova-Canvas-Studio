@@ -9,11 +9,12 @@ Mid-refactor: `splitplan.md` is a 40-phase plan to split the codebase into small
 ## Build, run, test
 
 - **Build:** `./build.sh` (also `-d` install deps, `-c` clean, `-t Debug`). Binary → `build/gui/canvas`. Auto-detects distro, prefers Ninja.
-- **Clean code only, zero warnings:** every build — Debug, Release, `build-release/` — must be warning-free. Treat any compiler warning as a build failure before handing off. No `-Werror` on the GUI app target (only on the headless module targets, since Phase 21/38), so discipline on the GUI side is manual.
-- **Test:** `ctest --test-dir build`. **13 tests** (verified passing on this machine):
+- **Clean code only, zero warnings:** every build — Debug, Release, `build-release/` — must be warning-free. Treat any compiler warning as a build failure before handing off. NOTE: `-Werror` is **not enabled on any target yet** (splitplan Phase 38 is open; audited 2026-09-07), so zero-warning discipline is manual everywhere — treat every warning as a failure.
+- **Test:** `ctest --test-dir build`. **16 tests** (verified passing on this machine):
   - **Core (4, in `core/tests/`):** `roundtrip` (edit-op + project JSON round-trip; an edge in this test used to SEGFAULT on a stale timeline model until `EqBand::operator==` was added — it now passes), `export_sweep` (every valid codec×container combo; skip=2 if no libx264), `scrub_bench` (p95 scrub-preview latency budget; skip=2 if no libx264), `visual_render_test` (eye: identity video render is byte-identical to the legacy fast path, plus flip/scale/opacity actually change output pixels; synthesizes its own h264 source at runtime).
-  - **GUI-headless (9, in `gui/tests/`, registered in `gui/tests/CMakeLists.txt`):** `sync_constants_test`, `timeline_decoder_test`, `audio_pipeline_test`, `sonicsync_test`, `av_reanchor_test` (seek-hold vs. audio-feed integration), `timeline_snap_test`, `timeline_selection_test`, `timeline_drag_test`, `transition_handle_editor_test`.
-  - If you quote a test count elsewhere, assume these 13 and re-verify with `ctest --test-dir build` before quoting.
+  - **GUI-headless (11, in `gui/tests/`):** `sync_constants_test`, `timeline_decoder_test`, `audio_pipeline_test`, `sonicsync_test`, `av_reanchor_test` (seek-hold vs. audio-feed integration), `timeline_snap_test`, `timeline_selection_test`, `timeline_drag_test`, `transition_handle_editor_test`, `audio_targets_test` (multi-select audio-target resolution), `timeline_volume_line_test` (audio volume-line dB↔y law).
+  - **GUI Qt-linked (1, in `gui/tests/qt/`):** `volume_line_drag_qt_test` — drives the real `TimelineWidget` press/move/release handlers in an offscreen session (the only Qt-linked test; `scripts/check_qtdep.sh` exempts `gui/tests/qt/` by design).
+  - If you quote a test count elsewhere, assume these 16 and re-verify with `ctest --test-dir build` before quoting.
 - **`scripts/check_qtdep.sh`** — static guard for the headless invariant below (`-q` for exit-code-only, used by CI/`build.sh`). Also enforced at compile time: `canvas_add_headless_test()` targets link no Qt, so a stray `<Q...>` include fails the build outright.
 - **System deps:** Qt6 (Widgets/OpenGLWidgets/Svg), FFmpeg (libavformat/codec/util/swscale/swresample), nlohmann-json (system header, no explicit CMake dep), optional CUDA 12/13 (`nvcc` → `CANVAS_HAVE_CUDA`), PipeWire + ALSA (optional, pkg-config-detected).
 
@@ -21,7 +22,7 @@ Mid-refactor: `splitplan.md` is a 40-phase plan to split the codebase into small
 
 > A headless module may include ONLY `<system>`, `<canvas/core/...>`, and other headless modules. Never `<Q...>`. If a module needs Qt, it is NOT headless and needs a thin Qt adapter around it instead.
 
-The current headless surface (besides all of `core/`): `sync_constants.hpp`, `audio_sink.hpp`, `audio_pipeline.hpp/.cpp`, `sonicsync.hpp/.cpp`, `timeline_decoder.hpp/.cpp` (all in `gui/src/features/playback/`), and `timeline_snap.hpp/.cpp`, `timeline_selection.hpp/.cpp`, `timeline_drag.hpp/.cpp`, `transition_handle_editor.hpp/.cpp` (all in `gui/src/Widgets/`). Run `./scripts/check_qtdep.sh` after touching any of these.
+The current headless surface (besides all of `core/`): `sync_constants.hpp`, `audio_sink.hpp`, `audio_pipeline.hpp/.cpp`, `sonicsync.hpp/.cpp`, `timeline_decoder.hpp/.cpp` (all in `gui/src/features/playback/`), `audio_targets.hpp/.cpp` (in `gui/src/features/timeline/`), and `timeline_snap.hpp/.cpp`, `timeline_selection.hpp/.cpp`, `timeline_drag.hpp/.cpp`, `transition_handle_editor.hpp/.cpp`, `timeline_volume_line.hpp/.cpp` (all in `gui/src/Widgets/`). Run `./scripts/check_qtdep.sh` after touching any of these — the script's allowlist is the authoritative list, keep it in sync.
 
 **FROZEN APIs (splitplan Phase 22):** `TimelineDecoder`, `AudioPipeline`, and `SonicSync`'s public surfaces are the stable playback seam. Don't change existing signatures without checking `splitplan.md`'s sign-off note; additive methods are fine.
 
@@ -50,9 +51,11 @@ scripts/
   split-snapshot.sh      pre-phase backup utility for the refactor
 splitplan.md             the 40-phase refactor plan + running log (source of truth for phase status)
 docs/                    ARCHITECTURE.md, BUILDING.md, DEPENDENCIES.md, CURRENT-STATE.md — current
-roadmap.md / ux.md / "plan .md" / n.md   pre-rename design docs — historical, skim for intent only
+splitplan.md             the 40-phase refactor plan + running log + Annex A feature-work log
+a.plan.md / inspector.md / %08Video-Editor*/   pre-rename design docs + a stale duplicate
+                         checkout — historical, skim for intent only (Phase 36 cleanup targets)
 ```
-`build/`, `*.log` (`canvas_debug.log`, `run_*.log`) are transient/disposable.
+`build/`, `*.log` (`canvas_debug.log`, `run_*.log`) are transient/disposable. `features.md` was retired 2026-09-07 (all its phases done); its log now lives in `splitplan.md` Annex A.
 
 ## core/ — engine (no Qt)
 
@@ -60,7 +63,7 @@ roadmap.md / ux.md / "plan .md" / n.md   pre-rename design docs — historical, 
 - `model.hpp` — THE data model. `Sequence { fps, video_tracks, audio_tracks, bookmarks, next_clip_id }` → `Track { Kind{Video,Audio}, name, locked, solo, clips }` → `Clip { media, tl_in/out, src_in/out, linked_id, enabled, transition_out/in, volume_db, pan, scale_x/y, pos_x/y, rotation_deg, anchor_dx/dy, opacity, blend_mode }` → `MediaId` into `Project::media`. `MediaId=int`, `ClipId=uint64_t`, positions are `int64_t` frames. `Track::solo` and the per-clip audio-mix (`volume_db`, `pan`) and visual-transform/composite fields back the Inspector's Audio and Video tabs — see `audio_mix.hpp`/`visual.hpp` below for the shared ranges/laws.
 - `edit_ops.hpp` + `edit_ops.cpp` — undoable edit API. Everything returns `std::unique_ptr<ICommand>` (snapshot-based undo via `TrackSnapshot`): `place_clip/place_linked_clip/unlink_clip/link_clip/lift_range/ripple_delete_range/blade_at/move_clip/set_clip_transition(_in)/delete_through_edit` + `UndoStack`. Linked A/V pairs move/delete/transition together.
 - `audio_fade.hpp` — Qt-free audio-transition gain envelopes (`audio_fade_gain(clip, tl_frame)`). Renders the audible ramp for `AudioFadeConstantGain/Exponential/ConstantPower` IN/OUT windows; ignores video-only transition types. Single-clip ramps only — no two-clip overlap crossfade math.
-- `audio_mix.hpp` — per-clip volume/pan laws shared by playback (`AudioPipeline`), export (`renderer.cpp`), and the Inspector, so the gain math is identical everywhere: `db_to_gain` (dBFS → linear, floor at `kMinVolumeDb = -60`, ceiling `kMaxVolumeDb = +24`), `pan_gains` (linear stereo BALANCE law: pan 0 = both channels unity, moving the control rides the opposite channel down), `any_solo(tracks)`.
+- `audio_mix.hpp` — per-clip volume/pan laws shared by playback (`AudioPipeline`), export (`renderer.cpp`), and the Inspector, so the gain math is identical everywhere: `db_to_gain` (dBFS → linear, floor at `kMinVolumeDb = -100` = digital silence, ceiling `kMaxVolumeDb = +24`), `pan_gains` (linear stereo BALANCE law: pan 0 = both channels unity, moving the control rides the opposite channel down), `any_solo(tracks)`.
 - `visual.hpp` — shared numeric ranges for the per-clip Transform/Composite properties (Zoom 0..10, Position/Anchor ±4096 px, Rotation ±360°, Opacity 0..1, 5 blend modes) so `edit_ops` clamping and the Inspector's spin boxes never diverge.
 
 ### Media pipeline (`media/`)
@@ -102,7 +105,8 @@ roadmap.md / ux.md / "plan .md" / n.md   pre-rename design docs — historical, 
 - `src/features/`:
   - `app/AppActions.cpp` — keyboard, close-event unsaved prompt, clip enable/transition toggles, media placement.
   - `project/ProjectActions.cpp` — import/new/open/save (`*.ehproj`, legacy extension name kept), recent files (QSettings `"recentProjects"`, cap 10).
-  - `timeline/TimelineActions.cpp` — `connect_timeline()`: every timeline-widget signal → core edit op, undo recording.
+  - `timeline/TimelineActions.cpp` — `connect_timeline()`: every timeline-widget signal → core edit op, undo recording. Trim (`clip_trimmed`), multi-clip moves (`clips_moved`), and volume-line commits (`set_clip_audio` over `resolve_audio_targets`) all land here.
+  - `timeline/audio_targets.hpp/.cpp` — **headless.** `resolve_audio_targets(seq, ids)` → one `AudioTarget {kind, track, id, full Clip}` per audio clip a selection owns (direct / linked video→audio mate / second-track; pairs de-duped, order preserved); backs multi-select Inspector volume + the volume-line commit loop.
   - `playback/sequence_controller.hpp/.cpp` — **now a thin coordinator**, not the ~1770-line monolith this file used to describe. It owns the command queue/worker thread and composes `TimelineDecoder` (video decode/composite), `AudioPipeline` (audio decode/feed/A-V-sync bookkeeping, talks to the device only through the abstract `AudioSink`), and `SonicSync` (drop-to-realtime cap policy). `playback_controller.hpp/.cpp` — older single-file rendition, still compiled but superseded; slated for removal (splitplan Phase 34).
   - `playback/timeline_decoder.hpp/.cpp` — **headless.** Owns the per-media `VideoDecoder`+`FrameCache` slots, the low-res scrub-preview LRU, the shared `HwDeviceManager`, and the GPU NV12 fast path. Public surface: `add_media`, `close`, `invalidate`, `decode`, `decode_nv12`, `frame`, `preview`, `media_rate_at`, `make_black_frame`, `hw`, `is_loaded`/`is_hardware`. FROZEN API.
   - `playback/audio_pipeline.hpp/.cpp` — **headless.** Owns the per-media `AudioDecoder` set, playhead↔sample math, A/V-sync run anchors, feed watermarks, scrub-audio grains/reposition feed, and the mixed-source write path (now applying per-clip volume/pan via `audio_mix.hpp` and the fade envelopes via `audio_fade.hpp` before summing). Talks to the device only through `AudioSink` — never a concrete `AudioOutput` — so it can run against a fake sink in tests. FROZEN API.
@@ -110,16 +114,18 @@ roadmap.md / ux.md / "plan .md" / n.md   pre-rename design docs — historical, 
   - `playback/sonicsync.hpp/.cpp` — **headless.** A/V sync drop-to-realtime cap policy (`reconcile`), unchanged in spirit from before the split, now living alongside its siblings. FROZEN API.
   - `playback/sync_constants.hpp` — **headless.** `kLookahead`, `kScrubPrecache`, `kPreviewMaxDim`, `kCommitSeqMaxDelta`, `kAudioLeadMs`.
   - `playback/audio_output.hpp/.cpp` — ALSA w/ PipeWire fallback, float PCM, two writer threads, stat counters. `flush()` must join the ALSA thread before dropping (documented stale-audio bug/workaround).
-  - `thumbnails/thumbnail_service.hpp/.cpp` — 4 worker threads, in-memory LRU + disk cache, waveform PNG + raw `.ehwf`.
+  - `thumbnails/thumbnail_service.hpp/.cpp` — 4 worker threads, in-memory LRU + disk cache, waveform PNG + raw `.ehwf`. Decodes thumbnail frames at the `kPreviewMaxDim` (640) preview cap so zoom-out filmstrip rebuilds (hundreds of cells) stream in at ms cost instead of full-res decodes.
   - `deliver/deliver_settings_panel.*` + `render_queue_panel.*` — Deliver page UI bound to core `RenderQueue`. Splitting the codec/container list builders out into a Qt-free `DeliverSettingsModel` is splitplan Phase 31 — **not done yet**.
 - `src/Widgets/`:
-  - `timeline_widget.hpp/.cpp` — `QGraphicsView` facade + geometry constants + signals. Still ~530 lines (Phase 32's "drop dead members, get under ~150 lines" cleanup hasn't run yet — don't assume it's a thin facade until that phase lands).
+  - `timeline_widget.hpp/.cpp` — `QGraphicsView` facade + geometry constants + signals. Still ~740 lines (Phase 32's "drop dead members, get under ~150 lines" cleanup hasn't run yet — don't assume it's a thin facade until that phase lands).
   - `timeline_view.cpp` — scene: minimap, ruler, tracks, filmstrip thumbnails, waveform pixmaps, playhead.
-  - `timeline_interaction.cpp` — mouse/drag/blade/select/transition/scrub/drop handling; delegates the extracted math below rather than doing it inline. Grew rather than shrank across the split (now ~1400 lines) — it picked up new interaction surface (e.g. the viewport selector wiring) even as pure math moved out, so don't use line count alone as a split-progress signal here.
-  - `timeline_drag.hpp/.cpp` — **headless.** `timeline_drag::DragController`: clip-drag session state (grab-frame offset frozen at press, same-kind-track targeting, snap-aware commit decision).
+  - `timeline_thumbnails.cpp` — TimelineWidget-side thumbnail/waveform routing: `request_clip_thumbnails` (per-clip filmstrip cells), `on_thumbnail_ready` cell placement + `scaled_fill`, waveform paint.
+  - `timeline_interaction.cpp` — mouse/drag/blade/select/transition/scrub/drop handling; delegates the extracted math below rather than doing it inline. Grew rather than shrank across the split (now ~2000 lines) — it picked up new interaction surface (viewport selector wiring, trim + volume-line + snap-target plumbing) even as pure math moved out, so don't use line count alone as a split-progress signal here.
+  - `timeline_drag.hpp/.cpp` — **headless.** `timeline_drag::DragController`: clip-drag session state (grab-frame offset frozen at press, same-kind-track targeting, snap-aware commit decision). `move()`/`commit()` take `std::span<const int64_t>` snap targets.
   - `timeline_selection.hpp/.cpp` — **headless.** `timeline_selection`: range-membership queries + linked-mate expansion + an owning `SelectionState`.
-  - `timeline_snap.hpp/.cpp` — **headless.** `timeline_snap::grid_step`/`snap_to_grid`: zoom-dependent power-of-two grid quantization.
+  - `timeline_snap.hpp/.cpp` — **headless.** Resolve-style magnetic snapping: `kSnapRadiusPx = 10`, `snap_frame_to_edges` (nearest edge/bookmark within the pixel-derived radius), `snap_dragged_edges` (drags make BOTH clip edges compete, closer wins), plus the zoom-dependent power-of-two grid fallback `grid_step`/`snap_to_grid`. Radius is `llround(10 × frames_per_pixel)` frames — frames-per-pixel, so it tracks the on-screen magnet size at every zoom.
   - `transition_handle_editor.hpp/.cpp` — **headless.** `transition_editor::Editor`: the full transition-handle drag session (open/seed/clamp, begin/move/end drag, favourite-preset snap). Known latent bug, left in place on purpose: the preset-snap loop seeds `best = dur` instead of `INT64_MAX`, so no preset ever beats the live duration — snapping is currently a no-op. One-line fix (`best = INT64_MAX`) is a good small follow-up; don't "fix" it silently inside an unrelated change, since the current behavior is locked by a test that encodes it.
+  - `timeline_volume_line.hpp/.cpp` — **headless.** Audio-clip volume line laws: `volume_line_y(db, body_h)`/`db_from_volume_line_y` (+clamp to the `[-60,+24]` display band... actually the whole law band `[-60,+24]` maps edge-to-edge with `kVolumeLineDragExponent`-curved sensitivity), `volume_waveform_scale(db)` (monotonic, floored) so the waveform visibly grows/shrinks with gain.
   - `viewer_gl.hpp/.cpp` — OpenGL preview widget, transition shader.
   - `viewport_selector.hpp/.cpp` — hand-painted (no QComboBox) transport-bar timebase selector; paints its own popup so nothing draws over the label/chevron.
   - `media_pool_widget.hpp/.cpp` — media grid; drag mime `application/x-eh-media-id` (legacy mime string kept), drops emit `filesDropped`.
@@ -127,17 +133,19 @@ roadmap.md / ux.md / "plan .md" / n.md   pre-rename design docs — historical, 
 
 ## Key flows
 
-- **Editing:** timeline widget → `TimelineActions` → core edit op (returns `ICommand`) → `UndoStack::record` + `push_snapshot()` (deep copy of Project → passed to `SequenceController` so the worker reads an immutable copy).
+- **Editing:** timeline widget → `TimelineActions` → core edit op (returns `ICommand`) → `UndoStack::record` + `push_snapshot()` (deep copy of Project → passed to `SequenceController` so the worker reads an immutable copy). Clip drags/trims/playhead scrub are magnetically snapped (`timeline_snap`; toggle via the transport Snap button → `set_snap_enabled`), and the playhead follows the timeline only while `follow_playhead_` is on (explicit jumps re-arm it).
 - **Playback:** `SequenceController` worker pops commands, delegates video to `TimelineDecoder`, audio to `AudioPipeline` (which mixes per-clip volume/pan/fades before writing), presents on `ViewerGL`; `SonicSync` caps how far video can run ahead of the audible position.
 - **Export:** Deliver panel → `DeliverSettings` → `to_export_settings()` → `RenderQueue` worker → `export_project()` → `RenderSession` renders frames (now including per-clip mix/transform/composite, CUDA NV12 fast path when possible) → FFmpeg mux.
 - **HW decode:** `HwDeviceManager` (now owned by `TimelineDecoder`, shared across its decoder slots); `video_decoder` hw-decodes and downloads via `av_hwframe_transfer_data`, or hands back a borrowed device plane for the GPU composite path.
 
 ## Gotchas & conventions
 
-- `core/` has **zero Qt** dependency (deliberate); so do the extracted `gui/src/features/playback/*` and `gui/src/Widgets/timeline_{snap,selection,drag}.*` + `transition_handle_editor.*` modules listed above — run `./scripts/check_qtdep.sh` after touching any of them.
+- `core/` has **zero Qt** dependency (deliberate); so do the extracted `gui/src/features/playback/*`, `gui/src/features/timeline/audio_targets.*`, and `gui/src/Widgets/timeline_{snap,selection,drag}.*`, `transition_handle_editor.*`, `timeline_volume_line.*` modules listed above — run `./scripts/check_qtdep.sh` after touching any of them.
 - Two decoders overlap: `VideoDecoder::decode_audio` vs standalone `AudioDecoder` — know which one a caller uses. Playback uses `AudioDecoder` (via `AudioPipeline`); de-duplicating this is splitplan Phase 33, **not done**.
 - GPU optional everywhere: guard with `CANVAS_HAVE_CUDA` / `cuda_available()`; never assume NVENC.
 - CMake: AUTOMOC/AUTORCC/AUTOUIC on for the GUI target; off for `canvas_core` and the headless test targets. `-Werror` is on for headless module targets only (Phase 38), not the GUI app — manual discipline there.
+
+Wait — that is the claim this file was audited on and **it is false today**: no CMake target has `-Werror` (audited 2026-09-07; Phase 38 is open). Zero-warning discipline is manual on EVERY target.
 - Timeline tracks are `std::vector<Track>` (not maps); lookups are linear (`clip_at`, `clip_with_id`).
 - C++20, no exceptions in the edit path (`std::optional` everywhere); transitions live on the clip itself.
 - Per-clip audio mix and visual transform now live directly on `Clip` (`volume_db`, `pan`, `scale_x/y`, `pos_x/y`, `rotation_deg`, `anchor_dx/dy`, `opacity`, `blend_mode`) — always route new gain/transform math through `audio_mix.hpp`/`visual.hpp` rather than re-deriving the laws locally, so playback/export/Inspector never drift.

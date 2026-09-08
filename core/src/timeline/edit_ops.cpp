@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <limits>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 
 namespace canvas::core {
@@ -235,6 +237,129 @@ void log_deleted_clips(const std::vector<TrackSnapshot>& before,
                        (long long)c.tl_out, (long long)c.linked_id);
         }
     }
+}
+
+enum class TrimEdge { Head, Tail };
+
+// One clip's allowable edge position for a head/tail trim: the range [lo, hi]
+// the moving edge may land in without overlapping a neighbor or running past
+// the available source content. For the head, extending left is bounded by 0,
+// the track's left neighbor, and src_in reaching the source start. For the
+// tail, extending right is bounded by `media_frames` and the right neighbor.
+struct TrimRange {
+    int64_t lo = 0;
+    int64_t hi = 0;
+};
+
+TrimRange head_trim_range(const std::vector<Clip>& clips, const Clip& c) {
+    int64_t prev_out = 0;
+    for (const auto& o : clips) {
+        if (o.id == c.id || o.tl_out > c.tl_in) continue;
+        prev_out = std::max(prev_out, o.tl_out);
+    }
+    // src_in' = src_in + delta must stay >= 0 -> new_tl_in >= tl_in - src_in.
+    const int64_t src_low = c.tl_in - c.src_in;
+    return {std::max(std::max<int64_t>(0, prev_out), src_low), c.tl_out - 1};
+}
+
+TrimRange tail_trim_range(const std::vector<Clip>& clips, const Clip& c,
+                          const int64_t media_frames) {
+    int64_t next_in = std::numeric_limits<int64_t>::max();
+    for (const auto& o : clips) {
+        if (o.id == c.id || o.tl_in < c.tl_out) continue;
+        next_in = std::min(next_in, o.tl_in);
+    }
+    // src_out' = src_out + delta must stay <= media_frames -> new_tl_out <= tl_out + (media_frames - src_out).
+    const int64_t src_high = media_frames > 0 ? c.tl_out + (media_frames - c.src_out) : c.tl_out;
+    return {c.tl_in + 1, std::min(next_in, src_high)};
+}
+
+// Shared implementation for trim_clip_head/trim_clip_tail. Applies the same
+// frame delta to the clip and (if any) its linked mate on its own track,
+// clamping via each clip's own range and intersecting the two so the A/V pair
+// always moves together.
+std::unique_ptr<ICommand> trim_clip_edge(Sequence& seq, const TrimEdge edge, const Track::Kind kind,
+                                         const std::size_t track_index, const ClipId id,
+                                         const int64_t new_edge, const int64_t media_frames) {
+    Track* t = seq.track(kind, track_index);
+    const Clip* c = t ? t->clip_with_id(id) : nullptr;
+    if (!c || t->locked) return nullptr;
+
+    const auto edge_of = [edge](const Clip& cc) {
+        return edge == TrimEdge::Head ? cc.tl_in : cc.tl_out;
+    };
+
+    // Per-clip allowable delta range (lo may exceed hi when a clip sits against
+    // a fixed neighbor and its own source limit that leaves no room either way).
+    auto delta_range = [&](const std::vector<Clip>& clips, const Clip& cc) {
+        const TrimRange r = edge == TrimEdge::Head ? head_trim_range(clips, cc)
+                                                   : tail_trim_range(clips, cc, media_frames);
+        return std::pair<int64_t, int64_t>{r.lo - edge_of(cc), r.hi - edge_of(cc)};
+    };
+
+    int64_t lo = 0;
+    int64_t hi = 0;
+    std::tie(lo, hi) = delta_range(t->clips, *c);
+    if (c->linked_id != 0) {
+        Track* mt = nullptr;
+        const Clip* mate = nullptr;
+        if (const auto ref = find_clip_ref(seq, c->linked_id, &mt)) {
+            mate = mt->clip_with_id(c->linked_id);
+            if (mate && !mt->locked) {
+                const auto [mlo, mhi] = delta_range(mt->clips, *mate);
+                lo = std::max(lo, mlo);
+                hi = std::min(hi, mhi);
+            }
+        }
+    }
+    if (lo > hi) {
+        CANVAS_LOG("trim: %s kind=%d track=%zu id=%lld edge=%lld REJECTED (no room)",
+               edge == TrimEdge::Head ? "head" : "tail", static_cast<int>(kind), track_index,
+               (long long)id, (long long)new_edge);
+        return nullptr;
+    }
+
+    const int64_t delta = std::clamp(new_edge - edge_of(*c), lo, hi);
+    if (delta == 0) {
+        CANVAS_LOG("trim: %s kind=%d track=%zu id=%lld edge=%lld unchanged (delta=0)",
+               edge == TrimEdge::Head ? "head" : "tail", static_cast<int>(kind), track_index,
+               (long long)id, (long long)new_edge);
+        return nullptr;
+    }
+
+    std::vector<TrackRef> involved{{kind, track_index}};
+    Track* mate_track = nullptr;
+    ClipId mate_id = 0;
+    if (c->linked_id != 0) {
+        if (const auto ref = find_clip_ref(seq, c->linked_id, &mate_track)) {
+            collect_track(involved, seq, *ref);
+            mate_id = c->linked_id;
+        }
+    }
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+
+    const auto apply = [&](Clip& cc) {
+        if (edge == TrimEdge::Head) {
+            cc.tl_in += delta;
+            cc.src_in += delta;
+        } else {
+            cc.tl_out += delta;
+            cc.src_out += delta;
+        }
+    };
+    for (auto& cc : t->clips)
+        if (cc.id == id) { apply(cc); break; }
+    if (mate_track && mate_id != 0) {
+        for (auto& mc : mate_track->clips)
+            if (mc.id == mate_id) { apply(mc); break; }
+    }
+
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    CANVAS_LOG("trim: %s kind=%d track=%zu id=%lld new_edge=%lld delta=%lld linked=%lld",
+           edge == TrimEdge::Head ? "head" : "tail", static_cast<int>(kind), track_index,
+           (long long)id, (long long)new_edge, (long long)delta, (long long)mate_id);
+    return std::make_unique<EditCommand>(edge == TrimEdge::Head ? "trim head" : "trim tail",
+                                         std::move(before), std::move(after));
 }
 
 }  // namespace
@@ -763,6 +888,119 @@ std::unique_ptr<ICommand> move_clip(Sequence& seq, const Track::Kind src_kind,
 
     std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
     return std::make_unique<EditCommand>("move", std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> move_clips_batch(Sequence& seq, const std::vector<BatchMove>& moves) {
+    if (moves.empty()) return nullptr;
+
+    // Resolve every entry's source/mate BEFORE mutating anything: the whole set
+    // is extracted first, then placed, so dragged clips never clip each other.
+    struct Planned {
+        Clip copy;
+        Track::Kind dst_kind;
+        std::size_t dst_index;
+        int64_t new_tl_in;
+        int64_t delta = 0;
+        TrackRef src_ref{Track::Kind::Video, 0};
+        Clip mate_copy;
+        bool has_mate = false;
+        TrackRef mate_ref{Track::Kind::Video, 0};
+    };
+    std::vector<TrackRef> involved;
+    std::vector<Planned> planned;
+    std::unordered_set<ClipId> moving_ids;
+    for (const auto& m : moves)
+        moving_ids.insert(m.id);
+
+    for (const auto& m : moves) {
+        Track* src = nullptr;
+        const auto src_ref = find_clip_ref(seq, m.id, &src);
+        Track* dst = seq.track(m.kind, m.track_index);
+        if (!src_ref || !src || !dst || src->locked || dst->locked) continue;
+        collect_track(involved, seq, *src_ref);
+        collect_track(involved, seq, TrackRef{m.kind, m.track_index});
+
+        Planned p;
+        p.copy = *src->clip_with_id(m.id);
+        p.dst_kind = m.kind;
+        p.dst_index = m.track_index;
+        p.new_tl_in = m.new_tl_in;
+        p.delta = m.new_tl_in - p.copy.tl_in;
+        p.src_ref = *src_ref;
+
+        if (p.copy.linked_id != 0 && !moving_ids.count(p.copy.linked_id)) {
+            Track* mate_track = nullptr;
+            if (const auto mref = find_clip_ref(seq, p.copy.linked_id, &mate_track)) {
+                if (mate_track && !mate_track->locked) {
+                    p.has_mate = true;
+                    p.mate_copy = *mate_track->clip_with_id(p.copy.linked_id);
+                    p.mate_ref = *mref;
+                    collect_track(involved, seq, *mref);
+                }
+            }
+        }
+        planned.push_back(std::move(p));
+    }
+    if (planned.empty()) return nullptr;
+
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+
+    // Phase 1 — pull every moved clip out of its source track.
+    for (const auto& p : planned) {
+        Track* t = seq.track(p.src_ref.kind, p.src_ref.index);
+        if (!t) continue;
+        t->clips.erase(
+            std::remove_if(t->clips.begin(), t->clips.end(),
+                           [id = p.copy.id](const Clip& c) { return c.id == id; }),
+            t->clips.end());
+        if (p.has_mate) {
+            Track* mt = seq.track(p.mate_ref.kind, p.mate_ref.index);
+            if (mt) {
+                mt->clips.erase(
+                    std::remove_if(mt->clips.begin(), mt->clips.end(),
+                                   [id = p.mate_copy.id](const Clip& c) { return c.id == id; }),
+                    mt->clips.end());
+            }
+        }
+    }
+
+    // Phase 2 — place every entry at its target; the destination now contains
+    // only stationary clips, so clipped_range trims just true overlaps.
+    for (const auto& p : planned) {
+        Track* dst = seq.track(p.dst_kind, p.dst_index);
+        if (!dst) continue;
+        Clip placed = p.copy;
+        placed.tl_in = p.new_tl_in;
+        placed.tl_out = p.new_tl_in + p.copy.duration();
+        dst->clips = clipped_range(dst->clips, placed.tl_in, placed.tl_out);
+        dst->insert_sorted(std::move(placed));
+
+        if (p.has_mate) {
+            Track* mt = seq.track(p.mate_ref.kind, p.mate_ref.index);
+            if (!mt) continue;
+            const int64_t mate_new = std::max<int64_t>(0, p.mate_copy.tl_in + p.delta);
+            Clip mm = p.mate_copy;
+            mm.tl_in = mate_new;
+            mm.tl_out = mate_new + p.mate_copy.duration();
+            mt->clips = clipped_range(mt->clips, mm.tl_in, mm.tl_out);
+            mt->insert_sorted(std::move(mm));
+        }
+    }
+
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>("move clips", std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> trim_clip_head(Sequence& seq, const Track::Kind kind,
+                                         const std::size_t track_index, const ClipId id,
+                                         const int64_t new_tl_in, const int64_t media_frames) {
+    return trim_clip_edge(seq, TrimEdge::Head, kind, track_index, id, new_tl_in, media_frames);
+}
+
+std::unique_ptr<ICommand> trim_clip_tail(Sequence& seq, const Track::Kind kind,
+                                         const std::size_t track_index, const ClipId id,
+                                         const int64_t new_tl_out, const int64_t media_frames) {
+    return trim_clip_edge(seq, TrimEdge::Tail, kind, track_index, id, new_tl_out, media_frames);
 }
 
 std::unique_ptr<ICommand> create_top_track_move(Sequence& seq, const ClipId id,

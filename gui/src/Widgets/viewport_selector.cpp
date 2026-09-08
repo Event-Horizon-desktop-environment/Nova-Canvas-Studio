@@ -18,11 +18,6 @@ constexpr int kH = 24;
 constexpr int kRadius = 8;
 constexpr int kTextLeft = 10;
 constexpr int kChevronRight = 4;
-constexpr QColor kFill(0x2E, 0x3A, 0x52);
-constexpr QColor kFillHover(0x35, 0x43, 0x5C);
-constexpr QColor kOutline(0x3A, 0x41, 0x50);
-constexpr QColor kOutlineHover(0x5A, 0x63, 0x75);
-constexpr QColor kInk(0xE8, 0xEA, 0xF0);
 
 }  // namespace
 
@@ -42,11 +37,12 @@ void ViewportSelector::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing, true);
 
     const QRectF box = QRectF(0.5, 0.5, kW - 1.0, kH - 1.0);
-    p.setPen(QPen(hovered_ ? kOutlineHover : kOutline, 2.0));
-    p.setBrush(hovered_ ? kFillHover : kFill);
+    const ThemeTokens& t = tokens();
+    p.setPen(QPen(hovered_ ? t.border : t.border_soft, 2.0));
+    p.setBrush(hovered_ ? t.surface_higher : t.surface_raised);
     p.drawRoundedRect(box, kRadius, kRadius);
 
-    p.setPen(kInk);
+    p.setPen(t.ink);
     const QFontMetrics fm(font());
     const QRect text_rect(kTextLeft, 0, kW - kTextLeft - 20, kH);
     p.setFont(font());

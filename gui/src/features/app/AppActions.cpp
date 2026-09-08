@@ -4,6 +4,7 @@
 #include <QCloseEvent>
 #include <QKeyEvent>
 #include <QMessageBox>
+#include <QResizeEvent>
 
 #include <algorithm>
 #include <cstdint>
@@ -335,6 +336,35 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         }
     }
     event->accept();
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event) {
+    const auto rz_t0 = std::chrono::steady_clock::now();
+    QMainWindow::resizeEvent(event);
+    // Whole-window resize cost, UI thread. The timeline's own relayout is a
+    // TL relayout log; this band catches everything ELSE each resize cycle
+    // (dock/QSplitter layout, sibling widget resizes, style polish) — the part
+    // the eventloop lag probe attributes back to a ~60ms block.
+    const double rz_ms = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - rz_t0).count();
+    static auto s_at = std::chrono::steady_clock::now();
+    static int s_n = 0;
+    static double s_ms = 0.0, s_max = 0.0;
+    ++s_n;
+    s_ms += rz_ms;
+    s_max = std::max(s_max, rz_ms);
+    const auto now = std::chrono::steady_clock::now();
+    if (s_n == 1 || now - s_at >= std::chrono::seconds(1)) {
+        s_at = now;
+        qWarning().nospace()
+            << "[ui:window] resize ms_avg=" << QString::number(s_ms / s_n, 'f', 2)
+            << " ms_last=" << QString::number(rz_ms, 'f', 2)
+            << " ms_max=" << QString::number(s_max, 'f', 2)
+            << " n=" << s_n;
+        s_n = 0;
+        s_ms = 0.0;
+        s_max = 0.0;
+    }
 }
 
 }  // namespace canvas::gui

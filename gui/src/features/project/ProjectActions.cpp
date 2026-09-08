@@ -1,6 +1,7 @@
 #include "UX/MainWindow.hpp"
 #include "UX/InspectorAudio.hpp"
 #include "UX/InspectorFile.hpp"
+#include "UX/theme.hpp"
 #include "Logging.hpp"
 
 #include "Widgets/media_pool_widget.hpp"
@@ -159,14 +160,34 @@ void MainWindow::refresh_media_pool() {
         const auto& m = project_->media[i];
         if (bin != QString::fromStdString(m.bin)) continue;
         auto* item = new QListWidgetItem;
-        item->setData(Qt::UserRole, static_cast<qlonglong>(i));
+        item->setData(kPoolMediaIndexRole, static_cast<qlonglong>(i));
         item->setText(QFileInfo(QString::fromStdString(m.path)).completeBaseName());
         item->setTextAlignment(Qt::AlignHCenter | Qt::AlignBottom);
-        item->setSizeHint(QSize(120, 96));
+        item->setSizeHint(QSize(124, 110));
         QFont f = item->font();
         f.setPointSizeF(8);
         item->setFont(f);
-        item->setForeground(QColor(220, 225, 230));
+        item->setForeground(canvas::gui::tokens().ink);
+
+        const bool is_video = m.width > 0 && m.height > 0;
+        item->setData(kPoolIsVideoRole, is_video);
+        item->setData(kPoolResolutionRole,
+                      is_video
+                          ? QStringLiteral("%1×%2 · %3")
+                                .arg(m.width)
+                                .arg(m.height)
+                                .arg(QString::number(m.fps, 'g', 3))
+                          : QString());
+        if (m.fps > 0.0 && m.total_frames > 0) {
+            const double secs = static_cast<double>(m.total_frames) / m.fps;
+            const int64_t total = static_cast<int64_t>(std::llround(secs));
+            const int64_t h = total / 3600, mn = (total % 3600) / 60, s = total % 60;
+            item->setData(kPoolDurationRole,
+                          QStringLiteral("%1:%2:%3")
+                              .arg(h, 2, 10, QLatin1Char('0'))
+                              .arg(mn, 2, 10, QLatin1Char('0'))
+                              .arg(s, 2, 10, QLatin1Char('0')));
+        }
         media_pool_->addItem(item);
 
         if (m.has_audio || (m.width <= 0 && m.height <= 0)) {
@@ -269,16 +290,38 @@ void MainWindow::refresh_bin_tree() {
     if (!bin_tree_ || !project_) return;
     bin_tree_->blockSignals(true);
     bin_tree_->clear();
-    QIcon bin_icon(QStringLiteral(":/icons/vhs.svg"));
+    QIcon bin_icon = icon("folder");
+    // The Master bin's icon is the studio's VHS tape (the legacy Event-Horizon
+    // mascot kept in the redesign). It is raster art, so it loads raw rather
+    // than through the tinted SVG engine.
+    QIcon master_icon(QStringLiteral(":/icons/vhs.svg"));
+
+    auto count_in_bin = [this](const QString& bin) {
+        return static_cast<int>(std::count_if(
+            project_->media.begin(), project_->media.end(),
+            [&](const canvas::core::MediaEntry& m) {
+                return QString::fromStdString(m.bin) == bin;
+            }));
+    };
+    auto make_count_font = [] {
+        QFont f;
+        f.setFamily(canvas::gui::tokens().font_mono);
+        f.setPointSizeF(9);
+        return f;
+    };
+
     auto* master = new QTreeWidgetItem(bin_tree_, QStringList{tr("Master")});
     master->setData(0, Qt::UserRole, QString());
-    master->setIcon(0, bin_icon);
+    master->setIcon(0, master_icon);
+    master->setFirstColumnSpanned(true);
     for (const auto& b : project_->bins) {
         QString name = QString::fromStdString(b);
         auto* item = new QTreeWidgetItem(bin_tree_, QStringList{name});
         item->setData(0, Qt::UserRole, name);
         item->setFlags(item->flags() | Qt::ItemIsEditable);
         item->setIcon(0, bin_icon);
+        item->setText(1, QString::number(count_in_bin(name)));
+        item->setFont(1, make_count_font());
     }
     bin_tree_->expandAll();
     // Re-select the current bin, defaulting to Master.

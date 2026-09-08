@@ -16,10 +16,20 @@
 #include <QVBoxLayout>
 #include <QVariant>
 
+// Item roles carried by every pool item so the tile delegate can paint a card
+// (duration + resolution + type) without touching the model. The media index is
+// kept at kPoolMediaIndexRole (Qt::UserRole) for the existing drag/delete paths.
+enum MediaPoolRoles {
+    kPoolMediaIndexRole = Qt::UserRole,   // index into Project::media
+    kPoolIsVideoRole    = Qt::UserRole + 1,
+    kPoolResolutionRole = Qt::UserRole + 2,
+    kPoolDurationRole   = Qt::UserRole + 3,
+};
+
 // Media pool grid. Subclasses QListWidget (IconMode) so the rest of the app can
-// keep using addItem()/item()/clear() unchanged, but overlays a Material 3
-// "empty state" (title + subtitle + blue accent CTA) whenever the pool has no
-// clips, the familiar "no clips in media pool" empty state, so nobody's
+// keep using addItem()/item()/clear() unchanged, but overlays a themed empty
+// state (title + subtitle + accent CTA) whenever the pool has no clips. Each
+// item is painted as a card tile by MediaPoolTileDelegate (see the .cpp).
 class MediaPoolWidget : public QListWidget {
     Q_OBJECT
 public:

@@ -78,6 +78,41 @@ std::unique_ptr<ICommand> ripple_delete_clip(Sequence& seq, Track::Kind kind,
 std::unique_ptr<ICommand> move_clip(Sequence& seq, Track::Kind src_kind, std::size_t src_track,
                                     ClipId id, Track::Kind dst_kind, std::size_t dst_track,
                                     int64_t new_tl_in);
+// A single clip destination for a batch move: the clip `id` ends on the track
+// `kind`/`track_index` at `new_tl_in`. Track indices are PER-KIND (audio entries
+// index into audio_tracks).
+struct BatchMove {
+    ClipId id = 0;
+    Track::Kind kind = Track::Kind::Video;
+    std::size_t track_index = 0;
+    int64_t new_tl_in = 0;
+};
+// Atomically moves several clips at once (one undo command). All moved clips are
+// extracted from their source tracks FIRST, then each is placed at its target, so
+// the group never clips or consumes its own members the way sequential move_clip
+// calls would; only stationary (non-dragged) clips get trimmed by a final
+// overlap. Linked clips missing from `moves` follow their rep by the same tl_in
+// delta, matching move_clip's mate semantics. Returns nullptr if `moves` is
+// empty; entries whose source/destination track is locked or whose clip cannot
+// be found are skipped.
+std::unique_ptr<ICommand> move_clips_batch(Sequence& seq, const std::vector<BatchMove>& moves);
+// Trims a clip's HEAD (left edge) to `new_tl_in`. `src_in` follows in lockstep
+// so the pictured content moves with the edge; the edge can be dragged back to
+// extend the clip but is clamped so it never goes below 0 or overlaps the track's
+// left neighbor, and never pushes src_in below the source start. If the clip is
+// linked, the mate's head trims by the same frame delta (clamped to its own
+// limits so the pair stays mated). `media_frames` is the clip's media duration
+// (total_frames) used to bound source-based clamps; pass 0 to allow no source
+// extension. Returns nullptr if the clip is not found, the track is locked, or
+// the requested position is already at the current edge.
+std::unique_ptr<ICommand> trim_clip_head(Sequence& seq, Track::Kind kind, std::size_t track_index,
+                                         ClipId id, int64_t new_tl_in, int64_t media_frames);
+// Same as trim_clip_head but for the clip's TAIL (right edge) at `new_tl_out`;
+// `src_out` follows in lockstep and can never exceed `media_frames` or overlap
+// the track's right neighbor. This enables "regrow" after a blade+delete: the
+// source window extends back into the deleted region.
+std::unique_ptr<ICommand> trim_clip_tail(Sequence& seq, Track::Kind kind, std::size_t track_index,
+                                         ClipId id, int64_t new_tl_out, int64_t media_frames);
 // Auto-creates a new topmost video track (index 0) and a new topmost audio track
 // (index 0), then moves the clip `id` onto the new video track at `new_tl_in`.
 // If the clip is linked, its linked mate moves to the new audio track, keeping

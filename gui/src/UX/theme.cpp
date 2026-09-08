@@ -8,55 +8,106 @@
 #include <QPainter>
 #include <QPalette>
 #include <QPixmap>
+#include <QPixmapCache>
+#include <QStyle>
 #include <QStyleFactory>
 #include <QSvgRenderer>
+#include <QWidget>
 
 #include <utility>
+#include <vector>
 
 namespace canvas::gui {
 
 namespace {
 
 // ---------------------------------------------------------------------------
-// Horizon design tokens — the dark, slightly blue-tinted palette shared by the
-// Event-Horizon apps, with the Nova-Canvas-Studio blue kept as the accent.
+// Active appearance state. The token sets are built once per mode; switching
+// re-applies palette + global stylesheet and runs registered re-apply
+// callbacks (per-widget style builders).
 // ---------------------------------------------------------------------------
-constexpr const char* kSurface        = "#11131A";  // window / deepest base
-constexpr const char* kSurfaceLow     = "#141A21";  // recessed wells
-constexpr const char* kSurfaceRaised  = "#1A1D27";  // panels, cards, buttons
-constexpr const char* kSurfaceHigher  = "#20242F";  // hovered raised surfaces
-constexpr const char* kSurfaceHighest = "#272C39";  // menus / popups
-constexpr const char* kBorder         = "#2A2F3C";  // strong separators
-constexpr const char* kBorderSoft     = "#232833";  // hairlines
+bool g_light = false;
+QApplication* g_app = nullptr;
+std::vector<std::function<void()>> g_reapply;
 
-constexpr const char* kInk        = "#E8EAF0";  // primary text
-constexpr const char* kInkMuted   = "#9AA0B0";  // secondary text
-constexpr const char* kInkFaint   = "#5F6577";  // tertiary text
+ThemeTokens makeTokens(bool light) {
+    ThemeTokens t;
+    if (light) {
+        t.surface        = QColor(0xF5, 0xF6, 0xFA);
+        t.surface_low    = QColor(0xFF, 0xFF, 0xFF);
+        t.surface_raised = QColor(0xFF, 0xFF, 0xFF);
+        t.surface_higher = QColor(0xEB, 0xEF, 0xF6);
+        t.surface_highest = QColor(0xFF, 0xFF, 0xFF);
+        t.border         = QColor(0xD6, 0xDC, 0xE6);
+        t.border_soft    = QColor(0xE3, 0xE8, 0xF0);
+        t.border_hi      = QColor(0xEE, 0xF2, 0xF8);
+        t.ink            = QColor(0x1B, 0x23, 0x33);
+        t.ink_muted      = QColor(0x5B, 0x64, 0x78);
+        t.ink_faint      = QColor(0x8B, 0x95, 0xA6);
+        t.accent         = QColor(0x10, 0xB9, 0x81);
+        t.accent_hover   = QColor(0x0D, 0x9F, 0x6E);
+        t.accent_press   = QColor(0x0B, 0x8A, 0x5F);
+        t.on_accent      = QColor(0x04, 0x2E, 0x1F);
+        t.accent_text    = QColor(0x0E, 0x7B, 0x57);
+        t.playhead       = QColor(0x6C, 0x55, 0xFF);
+        t.clip_video     = QColor(0xC9, 0xD4, 0xE0);
+        t.clip_audio     = QColor(0xD4, 0xDC, 0xC8);
+        t.clip_label     = QColor(0xB9, 0xC6, 0xD4);
+        t.danger         = QColor(0xE5, 0x48, 0x4D);
+        t.warn           = QColor(0xB4, 0x53, 0x09);
+        t.focus_ring     = QColor(0x0E, 0x7B, 0x57);
+        t.font_ui        = QStringLiteral("Geist");
+        t.font_mono      = QStringLiteral("Geist Mono");
+    } else {
+        t.surface        = QColor(0x11, 0x13, 0x1A);
+        t.surface_low    = QColor(0x14, 0x1A, 0x21);
+        t.surface_raised = QColor(0x1A, 0x1D, 0x27);
+        t.surface_higher = QColor(0x20, 0x24, 0x2F);
+        t.surface_highest = QColor(0x27, 0x2C, 0x39);
+        t.border         = QColor(0x2A, 0x2F, 0x3C);
+        t.border_soft    = QColor(0x23, 0x28, 0x33);
+        t.border_hi      = QColor(0x3A, 0x40, 0x4E);
+        t.ink            = QColor(0xE8, 0xEA, 0xF0);
+        t.ink_muted      = QColor(0x9A, 0xA0, 0xB0);
+        t.ink_faint      = QColor(0x5F, 0x65, 0x77);
+        t.accent         = QColor(0x10, 0xB9, 0x81);
+        t.accent_hover   = QColor(0x34, 0xD3, 0x99);
+        t.accent_press   = QColor(0x0E, 0x9C, 0x6F);
+        t.on_accent      = QColor(0x05, 0x2E, 0x21);
+        t.accent_text    = QColor(0x8F, 0xD9, 0xC0);
+        t.playhead       = QColor(0x6C, 0x55, 0xFF);
+        t.clip_video     = QColor(0x2A, 0x35, 0x40);
+        t.clip_audio     = QColor(0x5A, 0x6B, 0x4A);
+        t.clip_label     = QColor(0x3D, 0x5A, 0x73);
+        t.danger         = QColor(0xF0, 0x71, 0x7A);
+        t.warn           = QColor(0xFB, 0xBF, 0x24);
+        t.focus_ring     = QColor(0x8F, 0xD9, 0xC0);
+        t.font_ui        = QStringLiteral("Geist");
+        t.font_mono      = QStringLiteral("Geist Mono");
+    }
+    t.accent_soft    = with_alpha(t.accent, 40);
+    t.accent_line    = with_alpha(t.accent, 128);
+    t.playhead_soft  = with_alpha(t.playhead, 64);
+    t.danger_soft    = with_alpha(t.danger, 38);
+    t.state_hover    = with_alpha(t.ink, 20);
+    t.state_press    = with_alpha(t.ink, 30);
+    t.state_selected = with_alpha(t.accent, 51);
+    return t;
+}
 
-constexpr const char* kPrimary       = "#3B82F6";  // blue accent (studio)
-constexpr const char* kPrimaryHover  = "#4C92FF";
-constexpr const char* kPrimaryPress  = "#2F6FED";
-constexpr const char* kOnAccent      = "#FFFFFF";  // text on accent fills
-constexpr const char* kAccentSoft    = "rgba(59,130,246,0.16)";  // translucent accent fill
-constexpr const char* kAccentText    = "#A6C7FF";  // accent-colored text on surfaces
+const ThemeTokens& builtTokens() {
+    static const ThemeTokens dark = makeTokens(false);
+    static const ThemeTokens light = makeTokens(true);
+    return g_light ? light : dark;
+}
 
-constexpr const char* kError   = "#F0717A";
-constexpr const char* kErrorSoft = "rgba(240,113,122,0.15)";
-
-// State-layer fills (Material-style overlays).
-constexpr const char* kStateHover    = "rgba(255,255,255,0.08)";
-constexpr const char* kStatePress    = "rgba(255,255,255,0.12)";
-constexpr const char* kStateSelected = "rgba(59,130,246,0.20)";
-
-constexpr const char* kFocusRing = "#A6C7FF";
-
-// Shape (Horizon / M3 shape scale).
-constexpr int kShapeSmall  = 8;
-constexpr int kShapeMedium = 12;
-constexpr int kShapeLarge  = 16;
-constexpr int kShapePill   = 999;  // pill (radius = height/2 at draw time)
-
+// ---------------------------------------------------------------------------
 // Tints for the bundled monochrome SVG icons, mapped per QIcon mode.
+// ---------------------------------------------------------------------------
+// Reserved accent: SVGs that paint a region in this red (e.g. the horseshoe
+// magnet's pole tips) keep it as-authored while the rest of the ink is
+// theme-tinted, so two-tone icons stay two-tone across dark and light tokens.
+const QColor kReservedAccent(0xE5, 0x48, 0x4D);
 class SvgIconEngine : public QIconEngine {
 public:
     explicit SvgIconEngine(QString file, QColor normal = QColor(), bool tint = true)
@@ -116,20 +167,63 @@ public:
             tp.drawPixmap(0, 0, pm);
             tp.end();
             pm = colored;
+            // Two-tone support: restore any reserved-accent glyph region (pole
+            // tips etc.) from the supersampled render so the accent survives
+            // the theme tint AND the smooth downscale.
+            QPixmap accent;
+            if (extractReservedAccent(hi, &accent)) {
+                QPainter ov(&pm);
+                ov.setRenderHint(QPainter::SmoothPixmapTransform);
+                ov.drawPixmap(QRectF(QPointF(0, 0), QSizeF(px)), accent,
+                              QRectF(QPointF(0, 0), QSizeF(big)));
+                ov.end();
+            }
         }
         return pm;
     }
 
+    // Scans `src` (the supersampled vector render) for reserved-accent pixels
+    // and, if any exist, produces a same-size layer holding ONLY those pixels
+    // at their authored color. Returns false (leaving `out` untouched) when the
+    // icon has no accent, so plain monochrome icons take the fast single-tint
+    // path with zero extra cost beyond one scan.
+    static bool extractReservedAccent(const QPixmap& src, QPixmap* out) {
+        const QImage img = src.toImage().convertToFormat(QImage::Format_ARGB32);
+        QImage sel(img.size(), QImage::Format_ARGB32);
+        sel.fill(Qt::transparent);
+        const QRgb accent = kReservedAccent.rgba();
+        bool any = false;
+        for (int y = 0; y < img.height(); ++y) {
+            const QRgb* row = reinterpret_cast<const QRgb*>(img.constScanLine(y));
+            QRgb* srow = reinterpret_cast<QRgb*>(sel.scanLine(y));
+            for (int x = 0; x < img.width(); ++x) {
+                const QRgb c = row[x];
+                const int r = qRed(c), g = qGreen(c), b = qBlue(c);
+                // The reserved accent red: saturated, clearly red-dominant.
+                // Anti-aliased blends stay below this bar, so only the solid
+                // accent core is preserved and the rest tints with the theme.
+                if (r >= 140 && (r - g) > 120 && (r - b) > 120) {
+                    srow[x] = qRgba(qRed(accent), qGreen(accent), qBlue(accent), qAlpha(c));
+                    any = true;
+                }
+            }
+        }
+        if (!any) return false;
+        *out = QPixmap::fromImage(sel);
+        return true;
+    }
+
 private:
     static QColor modeColor(QIcon::Mode mode) {
+        const ThemeTokens& t = tokens();
         switch (mode) {
             case QIcon::Normal:
             case QIcon::Selected:
-                return QColor(0x9A, 0xA0, 0xB0);  // muted ink, icon idle
+                return t.ink_muted;
             case QIcon::Active:
-                return QColor(kInk);              // brighten on hover/active
+                return t.ink;
             case QIcon::Disabled:
-                return QColor(0x5F, 0x65, 0x77);  // faint ink, disabled
+                return t.ink_faint;
         }
         return QColor(Qt::transparent);
     }
@@ -142,6 +236,7 @@ private:
 // Global stylesheet for the flat controls only. Buttons, tool bars and panels
 // are intentionally left OUT so HorizonStyle's glassy painting owns them.
 QString make_flat_controls_qss() {
+    const ThemeTokens& t = tokens();
     return QStringLiteral(
       "QWidget { color: %1; }"
       "QToolTip { background-color: %2; color: %1; border: 1px solid %3;"
@@ -149,21 +244,32 @@ QString make_flat_controls_qss() {
       "QMenuBar { background: transparent; color: %1; }"
       "QMenuBar::item { background: transparent; border-radius: 8px; padding: 4px 10px; }"
       "QMenuBar::item:selected { background: %4; }"
-      "QMenuBar::item:pressed { background: rgba(255,255,255,0.12); }"
-      // Floating menu card: one raised semi-rounded popup surface matching the
-      // app's card language, with pill-shaped hover items and a blue check
+      "QMenuBar::item:pressed { background: %5; }"
+      // Floating glass docks: the body is transparent so the workspace's mint
+      // radial glow shows around the floating panels.
+      "QDockWidget { background: transparent; color: %1; }"
+      // Floating menu card: one raised glass popup matching the app's panel
+      // language — lit top hairline catchlight, soft hairline border, generous
+      // r radius — with pill-shaped hover items and a mint accent check
       // indicator for checkable actions (right-click / bar menus alike).
-      "QMenu { background: #20242F; color: #E8EAF0; border: 1px solid #2A2F3C;"
-      "  border-radius: 12px; padding: 6px; }"
-      "QMenu::item { padding: 5px 24px 5px 12px; border-radius: 8px; margin: 1px 4px; }"
-      "QMenu::item:selected { background: rgba(255,255,255,0.08); color: #FFFFFF; }"
-      "QMenu::item:disabled { color: #5F6577; }"
-      "QMenu::separator { height: 1px; background: #2A2F3C; margin: 5px 8px; }"
-      "QMenu::indicator { width: 16px; height: 16px; margin: 0 4px; }"
-      "QMenu::indicator:checked { background: #3B82F6; border-radius: 4px;"
-      "  image: url(:/icons/check.svg); }"
-      "QMenu::icon { margin-left: 4px; margin-right: 8px; }"
+      "QMenu { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+      "  stop:0 %2, stop:1 %16); color: %1;"
+      "  border: 1px solid %3; border-top: 1px solid %15;"
+      "  border-radius: 14px; padding: 6px; }"
+      "QMenu::item { padding: 6px 28px 6px 12px; border-radius: 9px;"
+      "  margin: 1px 3px 1px 4px; }"
+      "QMenu::item:selected { background: %4; color: %1; }"
+      "QMenu::item:selected:disabled { background: transparent; color: %6; }"
+      "QMenu::item:checked { color: %8; font-weight: 600; }"
+      "QMenu::item:disabled { color: %6; }"
+      "QMenu::separator { height: 1px; background: %3; margin: 6px 12px; }"
       "QMenu::separator:horizontal { height: 1px; }"
+      "QMenu::indicator { width: 16px; height: 16px; margin: 0 2px; }"
+      "QMenu::indicator:checked { background: %13; border-radius: 4px;"
+      "  image: url(:/icons/check.svg); }"
+      "QMenu::right-arrow { image: url(:/icons/chevron_right.svg);"
+      "  width: 12px; height: 12px; margin-right: 5px; }"
+      "QMenu::icon { margin-left: 2px; margin-right: 8px; }"
       "QStatusBar { color: %7; }"
       "QTabBar::tab { background: transparent; color: %7; padding: 6px 14px;"
       "  border-bottom: 2px solid transparent; }"
@@ -172,8 +278,8 @@ QString make_flat_controls_qss() {
       "QTabBar::scroller { width: 32px; }"
       "QTabBar QToolButton { min-width: 18px; min-height: 18px; max-width: 22px;"
       "  max-height: 22px; border-radius: 9px; background: transparent; }"
-      "QTabBar QToolButton:hover { background: rgba(255,255,255,0.08); }"
-      "QTabBar QToolButton:pressed { background: rgba(255,255,255,0.12); }"
+      "QTabBar QToolButton:hover { background: %4; }"
+      "QTabBar QToolButton:pressed { background: %5; }"
       "QScrollArea { background: transparent; border: none; }"
       "QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }"
       "QScrollBar::handle:vertical { background: %10; border-radius: 5px; min-height: 24px; }"
@@ -213,44 +319,99 @@ QString make_flat_controls_qss() {
       "QDoubleSpinBox::down-button, QSpinBox::down-button { width: 16px;"
       "  background: transparent; border: none; margin: 1px; }"
     )
-      .arg(kInk, kSurfaceHighest, kBorder,
-           kStateHover, kStateSelected, kInkFaint,
-           kInkMuted, kAccentText,
-           kPrimary, kSurfaceHigher, kSurfaceHighest,
-           kPrimaryHover, kPrimary, kOnAccent);
+      .arg(css(t.ink), css(t.surface_highest), css(t.border),
+           css(t.state_hover), css(t.state_selected), css(t.ink_faint),
+           css(t.ink_muted), css(t.accent_text),
+css(t.accent), css(t.surface_higher), css(t.surface_highest),
+       css(t.accent_hover), css(t.accent_press), css(t.on_accent),
+       css(t.border_hi), css(t.surface_raised));
 }
 
 }  // namespace
 
+QColor with_alpha(const QColor& c, int alpha) {
+    QColor out = c;
+    out.setAlpha(alpha);
+    return out;
+}
+
+static QPalette makeHorizonPalette();
+
+const ThemeTokens& tokens() { return builtTokens(); }
+
+bool is_light() { return g_light; }
+
+QString css(const QColor& c) {
+    if (c.alpha() >= 255)
+        return c.name();
+    return QStringLiteral("rgba(%1,%2,%3,%4)")
+        .arg(c.red())
+        .arg(c.green())
+        .arg(c.blue())
+        .arg(double(c.alpha()) / 255.0, 0, 'f', 2);
+}
+
+void register_theme_reapply(std::function<void()> fn) {
+    g_reapply.push_back(std::move(fn));
+}
+
+void apply_theme_style(QWidget* w, const std::function<QString()>& style) {
+    w->setStyleSheet(style());
+    register_theme_reapply([w, style] { w->setStyleSheet(style()); });
+}
+
+void set_light(bool light) {
+    if (g_light == light)
+        return;
+    g_light = light;
+    if (g_app) {
+        g_app->setPalette(makeHorizonPalette());
+        g_app->setStyleSheet(make_flat_controls_qss());
+        // Icon pixmaps are cached per QIcon; drop the whole cache so the next
+        // paint re-renders every tinted glyph against the new token set.
+        QPixmapCache::clear();
+        for (QWidget* w : g_app->allWidgets()) {
+            w->update();
+            w->style()->unpolish(w);
+            w->style()->polish(w);
+        }
+    }
+    for (const auto& fn : g_reapply)
+        fn();
+}
+
 // ---------------------------------------------------------------------------
-// Horizon-based QPalette. Blue accent maps onto Highlight/Accent; surfaces are
-// the dark blue-tinted Horizon family.
+// Horizon-based QPalette. Mint accent maps onto Highlight/Accent; surfaces are
+// the active token family (dark blue-tinted or clean light).
 // ---------------------------------------------------------------------------
-QPalette makeHorizonPalette() {
+static QPalette makeHorizonPalette() {
+    const ThemeTokens& t = tokens();
     QPalette p;
-    p.setColor(QPalette::Window,        QColor(kSurface));
-    p.setColor(QPalette::WindowText,    QColor(kInk));
-    p.setColor(QPalette::Base,          QColor(kSurfaceLow));
-    p.setColor(QPalette::AlternateBase, QColor(kSurfaceRaised));
-    p.setColor(QPalette::Text,          QColor(kInk));
-    p.setColor(QPalette::Button,        QColor(kSurfaceRaised));
-    p.setColor(QPalette::ButtonText,    QColor(kInk));
-    p.setColor(QPalette::BrightText,    QColor(kError));
-    p.setColor(QPalette::Highlight,     QColor(kPrimary));
-    p.setColor(QPalette::HighlightedText, QColor(kOnAccent));
-    p.setColor(QPalette::PlaceholderText, QColor(kInkFaint));
-    p.setColor(QPalette::ToolTipBase,   QColor(kSurfaceHighest));
-    p.setColor(QPalette::ToolTipText,   QColor(kInk));
-    p.setColor(QPalette::Link,          QColor(kAccentText));
-    p.setColor(QPalette::Disabled, QPalette::Text,       QColor(kInkFaint));
-    p.setColor(QPalette::Disabled, QPalette::WindowText, QColor(kInkFaint));
-    p.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(kInkFaint));
-    p.setColor(QPalette::Disabled, QPalette::Highlight,  QColor(kSurfaceHigher));
-    p.setColor(QPalette::Disabled, QPalette::HighlightedText, QColor(kInkFaint));
+    p.setColor(QPalette::Window,        t.surface);
+    p.setColor(QPalette::WindowText,    t.ink);
+    p.setColor(QPalette::Base,          t.surface_low);
+    p.setColor(QPalette::AlternateBase, t.surface_raised);
+    p.setColor(QPalette::Text,          t.ink);
+    p.setColor(QPalette::Button,        t.surface_raised);
+    p.setColor(QPalette::ButtonText,    t.ink);
+    p.setColor(QPalette::BrightText,    t.danger);
+    p.setColor(QPalette::Highlight,     t.accent);
+    p.setColor(QPalette::HighlightedText, t.on_accent);
+    p.setColor(QPalette::PlaceholderText, t.ink_faint);
+    p.setColor(QPalette::ToolTipBase,   t.surface_highest);
+    p.setColor(QPalette::ToolTipText,   t.ink);
+    p.setColor(QPalette::Link,          t.accent_text);
+    p.setColor(QPalette::Disabled, QPalette::Text,       t.ink_faint);
+    p.setColor(QPalette::Disabled, QPalette::WindowText, t.ink_faint);
+    p.setColor(QPalette::Disabled, QPalette::ButtonText, t.ink_faint);
+    p.setColor(QPalette::Disabled, QPalette::Highlight,  t.surface_higher);
+    p.setColor(QPalette::Disabled, QPalette::HighlightedText, t.ink_faint);
     return p;
 }
 
-void apply_theme(QApplication& app) {
+void apply_theme(QApplication& app, bool light) {
+    g_app = &app;
+    g_light = light;
     QStyle* fusion = QStyleFactory::create(QStringLiteral("Fusion"));
     app.setStyle(new HorizonStyle(fusion));
     app.setPalette(makeHorizonPalette());
@@ -258,150 +419,313 @@ void apply_theme(QApplication& app) {
 }
 
 // ---------------------------------------------------------------------------
-// App-specific chrome. These per-widget stylesheets layer Horizon variants on
+// App-specific chrome. These per-widget stylesheets layer token variants on
 // top of the global sheet and HorizonStyle, applied to individual widgets.
 // ---------------------------------------------------------------------------
-constexpr const char* kTransportBarQss = "background-color: #11131A; border-top: 1px solid #232833;";
-constexpr const char* kTimelineToolsQss = "background-color: transparent;";
-constexpr const char* kPageSwitcherQss = "background-color: #11131A; border-top: 1px solid #232833;";
-constexpr const char* kTimeLabelQss = "font-family: monospace; color: #E8EAF0;";
-constexpr const char* kMediaPoolQss =
-    "QListWidget { background-color: #141A21; border: none; }"
-    "QListWidget::item { background: transparent; color: #E8EAF0; padding: 5px 8px;"
-    "  border-radius: 8px; margin: 1px 4px; }"
-    "QListWidget::item:hover { background-color: rgba(255,255,255,0.08); }"
-    "QListWidget::item:selected { background-color: #3B82F6; color: #FFFFFF; }";
+QString transport_bar_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 %1, stop:0.5 %2, stop:1 %2);"
+        " border-top: 1px solid %3;")
+        .arg(css(t.surface_raised), css(t.surface), css(t.border_hi));
+}
 
-constexpr const char* kViewerFrameQss =
-    "QFrame#viewerFrame, QFrame#timelineFrame { background-color: #141A21;"
-    " border: 1px solid #232833; border-radius: 12px; }";
+QString timeline_tools_style() {
+    return QStringLiteral("background-color: transparent;");
+}
 
-constexpr const char* kTimelineFrameQss =
-    "QFrame#timelineFrame { background-color: #11131A; border: 1px solid #232833;"
-    " border-radius: 12px; }";
+QString page_switcher_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 %1, stop:1 %2);"
+        " border-top: 1px solid %3;")
+        .arg(css(t.surface_raised), css(t.surface), css(t.border_hi));
+}
 
-constexpr const char* kTimelineDockTitleQss =
-    "QWidget#timelineDockTitle { background-color: #141A21; }";
+QString time_label_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral("font-family: %1; color: %2;")
+        .arg(t.font_mono, css(t.ink));
+}
 
-constexpr const char* kGlobalToolbarQss = "background-color: #11131A;";
+QString media_pool_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QListWidget { background-color: %1; border: none; }"
+        "QListWidget::item { background: transparent; color: %2; padding: 0px;"
+        "  border: none; margin: 0px; }"
+        "QListWidget::item:hover { background: transparent; }"
+        "QListWidget::item:selected { background: transparent; color: %2; }")
+        .arg(css(t.surface_low), css(t.ink));
+}
 
-constexpr const char* kTopStatusBarQss = "background-color: #11131A; border-bottom: 1px solid #232833;";
+// Floating glass panels: a vertical glass gradient (lit at the top, easing to
+// the surface), a hairline border with the brighter border_hi catch-light on
+// the top edge, and a generous r-xl radius so the panels read as rounded.
+QString viewer_frame_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QFrame#viewerFrame { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 %1, stop:0.18 %2, stop:1 %3);"
+        " border: 1px solid %4; border-top: 1px solid %5;"
+        " border-radius: 16px; }")
+        .arg(css(t.surface_highest), css(t.surface_raised), css(t.surface_low),
+             css(t.border_soft), css(t.border_hi));
+}
 
-constexpr const char* kBigTimecodeQss =
-    "font-family: monospace; font-size: 15px; color: #F0F2F7; background: transparent;";
+QString timeline_frame_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QFrame#timelineFrame { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 %1, stop:0.15 %2, stop:1 %3);"
+        " border: 1px solid %4; border-top: 1px solid %5;"
+        " border-radius: 16px; }")
+        .arg(css(t.surface_higher), css(t.surface_raised), css(t.surface),
+             css(t.border_soft), css(t.border_hi));
+}
 
-constexpr const char* kBinTreeQss =
-    "QTreeWidget { background-color: #11131A; border: none; color: #E8EAF0; }"
-    "QTreeWidget::branch { background: transparent; }"
-    "QTreeWidget::item { padding: 3px 2px; border-radius: 8px; }"
-    "QTreeWidget::item:hover { background-color: rgba(255,255,255,0.08); }"
-    "QTreeWidget::item:selected { background-color: rgba(255,255,255,0.14); color: #FFFFFF; }"
-    "QTreeWidget::item:selected:hover { background-color: rgba(255,255,255,0.20); }";
+// Mint radial workspace glow for a dock's backdrop. Painted by the QDockWidget
+// itself so it shows around the floating glass card and through the transparent
+// title strip (the dock-side mirror of QWidget#viewerColumn in ShellCenter.cpp).
+QString dock_glow_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral("QDockWidget { background:"
+                          " qradialgradient(cx:0.5, cy:0.0, radius:1.8, fx:0.5, fy:0.0,"
+                          " stop:0 %1, stop:0.5 %2, stop:1 %3); }")
+        .arg(css(with_alpha(t.accent, 20)), css(with_alpha(t.accent, 6)),
+             css(t.surface));
+}
+
+// Floating glass card that carries a dock's content: the viewer/timeline frame
+// recipe, plus a small margin so the workspace glow shows around the panel.
+QString dock_panel_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QWidget#dockGlassCard { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 %1, stop:0.18 %2, stop:1 %3);"
+        " border: 1px solid %4; border-top: 1px solid %5;"
+        " border-radius: 16px; margin: 8px 6px; }")
+        .arg(css(t.surface_highest), css(t.surface_raised), css(t.surface_low),
+             css(t.border_soft), css(t.border_hi));
+}
+
+QString global_toolbar_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral("background-color: %1;").arg(css(t.surface));
+}
+
+QString top_status_bar_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 %1, stop:1 %2); border-bottom: 1px solid %3;")
+        .arg(css(t.surface_raised), css(t.surface), css(t.border));
+}
+
+QString big_timecode_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral("font-family: %1; font-size: 15px; color: %2; background: transparent;")
+        .arg(t.font_mono, css(t.ink));
+}
+
+QString bin_tree_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QTreeWidget { background-color: %1; border: none; color: %2; }"
+        "QTreeWidget::branch { background: transparent; }"
+        "QTreeWidget::item { padding: 3px 2px; border-radius: 8px; }"
+        "QTreeWidget::item:hover { background-color: %3; }"
+        "QTreeWidget::item:selected { background-color: %4; color: %5; }"
+        "QTreeWidget::item:selected:hover { background-color: %6; }")
+        .arg(css(t.surface), css(t.ink), css(t.state_hover),
+             css(t.accent_soft), css(t.accent_text), css(t.accent_soft));
+}
 
 // Semi-rounded inspector category card: the header is the raised top band (or
 // the whole card when collapsed), the body the inset content well. Radii match
 // the card shape; the seam between the two is the header's bottom hairline.
-constexpr const char* kInspectorCategoryHeaderQss =
-    "QToolButton { background: transparent; border: none;"
-    " padding: 8px 10px; text-align: left; color: #E8EAF0; font-weight: 600;"
-    " border-radius: 8px; }"
-    "QToolButton:hover { background-color: rgba(255,255,255,0.08); }";
+QString inspector_category_header_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QToolButton { background: transparent; border: none;"
+        " padding: 8px 10px; text-align: left; color: %1; font-weight: 600;"
+        " border-radius: 8px; }"
+        "QToolButton:hover { background-color: %2; }")
+        .arg(css(t.ink), css(t.state_hover));
+}
 
 // Header row (the card's top band). Two shapes: OPEN rounds the top corners
 // (the body below rounds the bottom); CLOSED rounds all four corners. Scoped
 // by objectName so the border never cascades onto the child toggle/reset.
-constexpr const char* kInspectorCardHeaderOpenQss =
-    "QWidget#inspectorCardHeader { background-color: #1A1D27;"
-    " border: 1px solid #232833;"
-    " border-top-left-radius: 12px; border-top-right-radius: 12px; }";
-constexpr const char* kInspectorCardHeaderClosedQss =
-    "QWidget#inspectorCardHeader { background-color: #1A1D27;"
-    " border: 1px solid #232833; border-radius: 12px; }";
-constexpr const char* kInspectorCardBodyQss =
-    "QWidget#inspectorCardBody { background-color: #141A21;"
-    " border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;"
-    " border-left: 1px solid #232833; border-right: 1px solid #232833;"
-    " border-bottom: 1px solid #232833; }";
+QString inspector_card_header_open_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QWidget#inspectorCardHeader {"
+        " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        "  stop:0 %1, stop:1 %2);"
+        " border: 1px solid %3; border-top: 1px solid %4;"
+        " border-top-left-radius: 16px; border-top-right-radius: 16px; }")
+        .arg(css(t.surface_highest), css(t.surface_raised),
+             css(t.border_soft), css(t.border_hi));
+}
 
-constexpr const char* kPagePillQss =
-    // Raised pill with a soft border — visible but not loud.  Selected glows
-    // with the accent so the active page is immediately readable.
-    "QToolButton { color: #9AA0B0; padding: 5px 10px; border-radius: 8px;"
-    " background-color: #1A1D27; border: 1px solid #232833; }"
-    "QToolButton:checked { color: #FFFFFF; background-color: rgba(59,130,246,0.16);"
-    " border: 1px solid rgba(59,130,246,0.50); font-weight: 600; }"
-    "QToolButton:hover:!checked { color: #F0F2F7; background-color: #20242F;"
-    " border-color: #2A2F3C; }"
-    "QToolButton:pressed { background-color: #2A2F3C; }";
+QString inspector_card_header_closed_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QWidget#inspectorCardHeader {"
+        " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        "  stop:0 %1, stop:1 %2);"
+        " border: 1px solid %3; border-top: 1px solid %4;"
+        " border-radius: 16px; }")
+        .arg(css(t.surface_highest), css(t.surface_raised),
+             css(t.border_soft), css(t.border_hi));
+}
+
+QString inspector_card_body_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QWidget#inspectorCardBody { background-color: %1;"
+        " border-bottom-left-radius: 16px; border-bottom-right-radius: 16px;"
+        " border-left: 1px solid %2; border-right: 1px solid %2;"
+        " border-bottom: 1px solid %2; }")
+        .arg(css(t.surface_low), css(t.border_soft));
+}
+
+// Segmented pill in a recessed track (the page/deliver switcher bar): inactive
+// members float transparently on the recessed well; the active member is a
+// raised glass segment with a lit top edge and accent-tinted text.
+QString page_pill_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QToolButton { color: %1; padding: 5px 10px; border-radius: 10px;"
+        " background: transparent; border: 1px solid transparent; }"
+        "QToolButton:hover:!checked { color: %2; background-color: %3; }"
+        "QToolButton:pressed { background-color: %4; }"
+        "QToolButton:checked { color: %2; background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 %5, stop:1 %6); border: 1px solid %7; border-top: 1px solid %8;"
+        " font-weight: 600; }")
+        .arg(css(t.ink_muted), css(t.ink), css(t.state_hover),
+             css(t.state_press), css(t.surface_highest), css(t.surface_raised),
+             css(t.border), css(t.border_hi));
+}
 
 // Inspector mode tabs: a recessed semi-rounded segmented track (the pill row's
-// container) with individual pills that read as one segmented control.
-constexpr const char* kInspectorTabTrackQss =
-    "QWidget { background-color: #0E1117;"
-    " border: 1px solid #232833; border-radius: 12px; }";
+// container) with individual pills that read as one segmented control. The
+// active segment is a raised glass pill with accent-tinted text.
+QString inspector_tab_track_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QWidget { background-color: %1;"
+        " border: 1px solid %2; border-radius: 14px; }")
+        .arg(css(t.surface_low), css(t.border_soft));
+}
 
-constexpr const char* kInspectorTabQss =
-    "QToolButton { color: #9AA0B0; background: transparent; border: none;"
-    " border-radius: 9px; padding: 5px 4px; font-weight: 500; }"
-    "QToolButton:checked { color: #FFFFFF; background-color: #3B82F6; font-weight: 600; }"
-    "QToolButton:hover:!checked { color: #F0F2F7; background-color: rgba(255,255,255,0.08); }";
+QString inspector_tab_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QToolButton { color: %1; background: transparent; border: none;"
+        " border-radius: 11px; padding: 5px 4px; font-weight: 500; }"
+        "QToolButton:hover:!checked { color: %2; background-color: %3; }"
+        "QToolButton:checked { color: %4; background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 %5, stop:1 %6); border: 1px solid %7; font-weight: 600; }")
+        .arg(css(t.ink_muted), css(t.ink), css(t.state_hover),
+             css(t.accent_text), css(t.surface_highest), css(t.surface_raised),
+             css(t.accent_line));
+}
+
+// Left "Media Pool / Sync Bin / ..." tab strip: the pane is transparent so the
+// floating glass card behind it shows through; tabs are raised glass pills (the
+// page_pill/inspector_tab idiom) instead of the global underline style.
+QString left_tab_strip_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QTabWidget#leftTabStrip::pane{background:transparent;border:none;}"
+        "QTabBar::tab{background:transparent;color:%1;padding:6px 12px;"
+        "  border:none;border-radius:10px;font-weight:500;margin:2px 1px;}"
+        "QTabBar::tab:hover{color:%2;background-color:%3;}"
+        "QTabBar::tab:selected{color:%4;background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        "  stop:0 %5, stop:1 %6);border:1px solid %7;border-top:1px solid %8;"
+        "  font-weight:600;}"
+        "QTabBar::tab:selected:hover{color:%4;}"
+        "QTabBar QToolButton{background:transparent;border:none;border-radius:8px;}"
+        "QTabBar QToolButton:hover{background:%3;}")
+        .arg(css(t.ink_muted), css(t.ink), css(t.state_hover),
+             css(t.accent_text), css(t.surface_highest), css(t.surface_raised),
+             css(t.accent_line), css(t.border_hi));
+}
 
 // Flat icon toolbar buttons — every icon button now has a subtle raised surface
 // so the whole chrome feels physical, not invisible-until-hovered.
-constexpr const char* kFlatToolQss =
-    "QToolButton { background: #1A1D27; border: 1px solid #232833; border-radius: 6px;"
-    " padding: 4px; }"
-    "QToolButton:hover { background: #20242F; border-color: #2A2F3C; }"
-    "QToolButton:pressed { background: #2A2F3C; }"
-    "QToolButton:checked { background: rgba(59,130,246,0.20);"
-    " border: 1px solid rgba(59,130,246,0.40); }";
+QString flat_tool_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QToolButton { background: %1; border: 1px solid %2; border-radius: 6px;"
+        " padding: 4px; }"
+        "QToolButton:hover { background: %3; border-color: %4; }"
+        "QToolButton:pressed { background: %4; }"
+        "QToolButton:checked { background: %5;"
+        " border: 1px solid %6; }")
+        .arg(css(t.surface_raised), css(t.border_soft), css(t.surface_higher),
+             css(t.border), css(t.state_selected), css(t.accent_line));
+}
 
 // "Bracket-pill" edit-tool cluster (select/trim/blade/mode): raised members
-// with a cohesive border, active member shows a soft blue fill.
-constexpr const char* kToolClusterQss =
-    "QToolButton { background: #1A1D27; border: 1px solid #232833; border-radius: 6px;"
-    " padding: 4px; }"
-    "QToolButton:hover { background: #20242F; border-color: #2A2F3C; }"
-    "QToolButton:checked { background: rgba(59,130,246,0.20);"
-    " border: 1px solid rgba(59,130,246,0.40); border-radius: 6px; }";
+// with a cohesive border, active member shows a soft accent fill.
+QString tool_cluster_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QToolButton { background: %1; border: 1px solid %2; border-radius: 6px;"
+        " padding: 4px; }"
+        "QToolButton:hover { background: %3; border-color: %4; }"
+        "QToolButton:checked { background: %5;"
+        " border: 1px solid %6; border-radius: 6px; }")
+        .arg(css(t.surface_raised), css(t.border_soft), css(t.surface_higher),
+             css(t.border), css(t.state_selected), css(t.accent_line));
+}
 
 // Semi-rounded outlined button (DIM) — raised surface with a colored border.
-constexpr const char* kOutlinePillQss =
-    "QToolButton { color: #C7CCD8; background: #1A1D27; border: 1px solid #3A4150;"
-    " border-radius: 8px; padding: 3px 12px; font-size: 10px; }"
-    "QToolButton:hover { border-color: #5A6375; color: #FFFFFF; background: #20242F; }"
-    "QToolButton:checked { border-color: #EF4444; color: #FCA5A5; background: rgba(239,68,68,0.18); }";
+QString outline_pill_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QToolButton { color: %1; background: %2; border: 1px solid %3;"
+        " border-radius: 8px; padding: 3px 12px; font-size: 10px; }"
+        "QToolButton:hover { border-color: %4; color: %5; background: %6; }"
+        "QToolButton:checked { border-color: %7; color: %8; background: %9; }")
+        .arg(css(t.ink), css(t.surface_raised), css(t.border),
+             css(t.ink_muted), css(t.ink), css(t.surface_higher),
+             css(t.danger), css(t.danger), css(t.danger_soft));
+}
 
 // Semi-rounded sliders: pill groove, round handle — never square.
-constexpr const char* kSliderQss =
-    "QSlider::groove:horizontal { height: 4px; background: #2A2F3C; border-radius: 2px; }"
-    "QSlider::sub-page:horizontal { background: #3B82F6; border-radius: 2px; }"
-    "QSlider::handle:horizontal { width: 16px; height: 16px; margin: -6px 0; background: #E8EAF0;"
-    " border: none; border-radius: 8px; }"
-    "QSlider::handle:horizontal:hover { background: #FFFFFF; }";
+QString slider_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QSlider::groove:horizontal { height: 4px; background: %1; border-radius: 2px; }"
+        "QSlider::sub-page:horizontal { background: %2; border-radius: 2px; }"
+        "QSlider::handle:horizontal { width: 16px; height: 16px; margin: -6px 0; background: %3;"
+        " border: none; border-radius: 8px; }"
+        "QSlider::handle:horizontal:hover { background: %4; }")
+        .arg(css(t.border), css(t.accent), css(t.ink), css(t.surface_highest));
+}
 
-QString transport_bar_style() { return QString::fromLatin1(kTransportBarQss); }
-QString timeline_tools_style() { return QString::fromLatin1(kTimelineToolsQss); }
-QString page_switcher_style() { return QString::fromLatin1(kPageSwitcherQss); }
-QString time_label_style() { return QString::fromLatin1(kTimeLabelQss); }
-QString media_pool_style() { return QString::fromLatin1(kMediaPoolQss); }
-QString viewer_frame_style() { return QString::fromLatin1(kViewerFrameQss); }
-QString timeline_frame_style() { return QString::fromLatin1(kTimelineFrameQss); }
-QString global_toolbar_style() { return QString::fromLatin1(kGlobalToolbarQss); }
-QString top_status_bar_style() { return QString::fromLatin1(kTopStatusBarQss); }
-QString big_timecode_style() { return QString::fromLatin1(kBigTimecodeQss); }
-QString bin_tree_style() { return QString::fromLatin1(kBinTreeQss); }
-QString inspector_category_header_style() { return QString::fromLatin1(kInspectorCategoryHeaderQss); }
-QString inspector_card_header_open_style() { return QString::fromLatin1(kInspectorCardHeaderOpenQss); }
-QString inspector_card_header_closed_style() { return QString::fromLatin1(kInspectorCardHeaderClosedQss); }
-QString inspector_card_body_style() { return QString::fromLatin1(kInspectorCardBodyQss); }
-QString inspector_tab_track_style() { return QString::fromLatin1(kInspectorTabTrackQss); }
-QString inspector_tab_style() { return QString::fromLatin1(kInspectorTabQss); }
-QString page_pill_style() { return QString::fromLatin1(kPagePillQss); }
-QString flat_tool_style() { return QString::fromLatin1(kFlatToolQss); }
-QString tool_cluster_style() { return QString::fromLatin1(kToolClusterQss); }
-QString outline_pill_style() { return QString::fromLatin1(kOutlinePillQss); }
-QString slider_style() { return QString::fromLatin1(kSliderQss); }
+// Circular mint play button: a round accent disc with a lit top edge and a
+// soft mint halo (approximated with a bright rim + gradient) so it reads as the
+// glowing transport control from the Alt-html design.
+QString transport_play_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QToolButton { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 %1, stop:1 %2); border: 1px solid %3;"
+        " border-top: 1px solid %4; border-radius: 50%; min-width: 30px;"
+        " max-width: 30px; min-height: 30px; max-height: 30px; }"
+        "QToolButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        " stop:0 %5, stop:1 %2); }"
+        "QToolButton:pressed { background: %6; }")
+        .arg(css(t.accent_hover), css(t.accent_press), css(t.accent_line),
+             css(t.accent_hover), css(t.accent), css(t.accent_press));
+}
 
 QIcon icon(const char* name) { return QIcon(new SvgIconEngine(QString::fromLatin1(name))); }
 

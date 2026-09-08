@@ -40,6 +40,12 @@ public:
     // playback or tearing down decoders/audio, so audio edits (volume/pan/
     // pitch/speed/EQ) reach the next mixed buffer as the video keeps playing.
     void update_audio_mix(std::shared_ptr<const canvas::core::Project> project);
+    // Realtime audible volume override during an Inspector drag: re-mixes a
+    // clip at `volume_db` WITHOUT touching the model (no undo, no snapshot).
+    // Pairs with apply_inspector_audio()'s committed edit on drag release.
+    void set_live_clip_gain(canvas::core::ClipId id, float volume_db) { audio_.set_live_clip_gain(id, volume_db); }
+    void clear_live_clip_gain(canvas::core::ClipId id) { audio_.clear_live_clip_gain(id); }
+    void clear_live_clip_gains() { audio_.clear_live_clip_gains(); }
     void add_media(const canvas::core::MediaEntry& entry);
     void play();
     void pause();

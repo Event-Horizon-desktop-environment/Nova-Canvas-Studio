@@ -1,5 +1,6 @@
 #include "viewer_gl.hpp"
 #include "Logging.hpp"
+#include "UX/theme.hpp"
 
 #include "canvas/core/gpu/colorspace.hpp"
 
@@ -403,6 +404,86 @@ void ViewerGL::upload_frame() {
         }
     };
 
+    // RGBA upload helper (owned-copy upscale + (re)allocate + setData). Defined
+    // before the NV12 block so the small-frame CPU-conversion path below can
+    // upload its result IN THE SAME PASS instead of deferring to a follow-up
+    // paint (which continuous playback starves, leaving the viewer black).
+    auto upload = [this](std::unique_ptr<QOpenGLTexture>& tex, const canvas::core::VideoFramePtr& f,
+                     int& tw, int& th, bool& valid) {
+        if (!f || f->rgba.empty()) return;
+        int w = f->width;
+        int h = f->height;
+        const uint8_t* data = f->rgba.data();
+        std::size_t stride = f->stride;
+        // Owned copy kept alive through setData() below whenever we upscale.
+        QImage upscaled;
+
+        // The scrub-preview texture is decoded small (640px) for speed; if the
+        // player widget is larger, upscale in software so the frame fills the
+        // media window even on drivers whose GL magnification misbehaves.
+        // Aspect is preserved; the letterbox quad in paintGL then leaves at
+        // most thin symmetrical black bars.
+        const int vw = std::max(1, width());
+        const int vh = std::max(1, height());
+        if (w > 0 && h > 0 && (vw > w || vh > h) &&
+            vw > 2 && vh > 2 && static_cast<std::size_t>(w) * h * 4ULL <= f->rgba.size()) {
+            const double scale = std::min(static_cast<double>(vw) / w,
+                                          static_cast<double>(vh) / h);
+            int dw = std::max(1, static_cast<int>(std::llround(w * scale)));
+            int dh = std::max(1, static_cast<int>(std::llround(h * scale)));
+            if (dw != w || dh != h) {
+                // Copy into an owned QImage (RGBA8888) and smooth-scale to fill.
+                static int upscale_log_ = 0;
+                if ((upscale_log_++ % 12) == 0)
+                    qWarning() << "[viewer] UPSCALE"
+                               << "src=" << w << "x" << h
+                               << "dst=" << dw << "x" << dh
+                               << "widget=" << std::max(1, width()) << "x" << std::max(1, height());
+                QImage src(w, h, QImage::Format_RGBA8888);
+                const std::size_t dstride = static_cast<std::size_t>(src.bytesPerLine());
+                const std::size_t row = std::min(static_cast<std::size_t>(stride),
+                                                 static_cast<std::size_t>(dstride));
+                for (int y = 0; y < h && y < src.height(); ++y)
+                    std::memcpy(src.bits() + static_cast<std::size_t>(y) * dstride,
+                                data + static_cast<std::size_t>(y) * stride, row);
+                QImage dst = src.scaled(QSize(dw, dh), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                if (dst.width() == dw && dst.height() == dh &&
+                    dst.format() == QImage::Format_RGBA8888) {
+                    upscaled = std::move(dst);   // keep pixels alive for setData
+                    w = dw;
+                    h = dh;
+                    data = upscaled.constBits();
+                    stride = static_cast<std::size_t>(dw) * 4;
+                }
+            }
+        }
+
+        const bool realloc = !tex->isStorageAllocated() || tw != w || th != h;
+        if (realloc) ++up_realloc_cnt;
+        static int64_t tex_log_ = 0;
+        if ((tex_log_++ % 16) == 0)
+            qWarning() << "[viewer] rgba_upload"
+                       << "tex=" << w << "x" << h
+                       << "src_frame=" << f->width << "x" << f->height
+                       << "upscaled=" << (w != f->width || h != f->height ? "yes" : "no")
+                       << "widget=" << std::max(1, width()) << "x" << std::max(1, height());
+        if (realloc) {
+            // Qt forbids setSize/setFormat once storage is allocated; a size
+            // change needs a fresh texture object instead.
+            tex = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+            tex->setMinificationFilter(QOpenGLTexture::Linear);
+            tex->setMagnificationFilter(QOpenGLTexture::Linear);
+            tex->setWrapMode(QOpenGLTexture::ClampToEdge);
+            tex->setSize(w, h);
+            tex->setFormat(QOpenGLTexture::RGBA8_UNorm);
+            tex->allocateStorage();
+            tw = w;
+            th = h;
+        }
+        tex->setData(0, 0, 0, w, h, 1, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, data);
+        valid = true;
+    };
+
     // NV12 GPU fast path: upload the two planes as R8 (luma) + RG8 (CbCr)
     // textures; the BT.601 YUV->RGB conversion is applied in the fragment
     // shader.
@@ -413,8 +494,10 @@ void ViewerGL::upload_frame() {
 
         // Small previews (scrub) don't magnify reliably in GL on some drivers, so
         // when the NV12 plane is smaller than the player, convert to CPU RGBA
-        // and fall through to the RGBA path below. Full-res playback keeps the
-        // fast NV12 texture path.
+        // and upload THAT now (same pass). Full-res playback keeps the fast NV12
+        // texture path. Deferring the upload to a follow-up paint pass is a
+        // black-frame under playback: a fresh NV12 frame re-arms the cvt before
+        // the follow-up runs, so the viewer never draws anything but blank.
         if (w > 0 && h > 0 && (w < width() || h < height())) {
             static int64_t nv12cvt_log_ = 0;
             if ((nv12cvt_log_++ % 16) == 0)
@@ -454,9 +537,18 @@ void ViewerGL::upload_frame() {
             rf->fade_to_black = frame_->fade_to_black;
             frame_ = std::move(rf);
             nv12_valid_ = false;
+            // Upload in this same pass so playback never draws a blank frame.
+            upload(texture_, frame_->a, tex_w_, tex_h_, texture_valid_);
+            texture_second_valid_ = false;
+            if (frame_->b && frame_->b->rgba.size() >= frame_->b->stride * frame_->b->height) {
+                int bw = 0;
+                int bh = 0;
+                upload(texture_b_, frame_->b, bw, bh, texture_second_valid_);
+            }
             ++up_cvt_cnt;
+            texture_dirty_ = false;
             up_mark("r");
-            return;   // no texture yet; paintGL calls upload_frame again for RGBA
+            return;
         }
 
         const bool y_realloc = !texture_nv12_y_->isStorageAllocated() || tex_w_ != w ||
@@ -568,82 +660,6 @@ void ViewerGL::upload_frame() {
         up_mark("r");
         return;
     }
-
-    auto upload = [this](std::unique_ptr<QOpenGLTexture>& tex, const canvas::core::VideoFramePtr& f,
-                     int& tw, int& th, bool& valid) {
-        if (!f || f->rgba.empty()) return;
-        int w = f->width;
-        int h = f->height;
-        const uint8_t* data = f->rgba.data();
-        std::size_t stride = f->stride;
-        // Owned copy kept alive through setData() below whenever we upscale.
-        QImage upscaled;
-
-        // The scrub-preview texture is decoded small (640px) for speed; if the
-        // player widget is larger, upscale in software so the frame fills the
-        // media window even on drivers whose GL magnification misbehaves.
-        // Aspect is preserved; the letterbox quad in paintGL then leaves at
-        // most thin symmetrical black bars.
-        const int vw = std::max(1, width());
-        const int vh = std::max(1, height());
-        if (w > 0 && h > 0 && (vw > w || vh > h) &&
-            vw > 2 && vh > 2 && static_cast<std::size_t>(w) * h * 4ULL <= f->rgba.size()) {
-            const double scale = std::min(static_cast<double>(vw) / w,
-                                          static_cast<double>(vh) / h);
-            int dw = std::max(1, static_cast<int>(std::llround(w * scale)));
-            int dh = std::max(1, static_cast<int>(std::llround(h * scale)));
-            if (dw != w || dh != h) {
-                // Copy into an owned QImage (RGBA8888) and smooth-scale to fill.
-                static int upscale_log_ = 0;
-                if ((upscale_log_++ % 12) == 0)
-                    qWarning() << "[viewer] UPSCALE"
-                               << "src=" << w << "x" << h
-                               << "dst=" << dw << "x" << dh
-                               << "widget=" << std::max(1, width()) << "x" << std::max(1, height());
-                QImage src(w, h, QImage::Format_RGBA8888);
-                const std::size_t dstride = static_cast<std::size_t>(src.bytesPerLine());
-                const std::size_t row = std::min(static_cast<std::size_t>(stride),
-                                                 static_cast<std::size_t>(dstride));
-                for (int y = 0; y < h && y < src.height(); ++y)
-                    std::memcpy(src.bits() + static_cast<std::size_t>(y) * dstride,
-                                data + static_cast<std::size_t>(y) * stride, row);
-                QImage dst = src.scaled(QSize(dw, dh), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-                if (dst.width() == dw && dst.height() == dh &&
-                    dst.format() == QImage::Format_RGBA8888) {
-                    upscaled = std::move(dst);   // keep pixels alive for setData
-                    w = dw;
-                    h = dh;
-                    data = upscaled.constBits();
-                    stride = static_cast<std::size_t>(dw) * 4;
-                }
-            }
-        }
-
-        const bool realloc = !tex->isStorageAllocated() || tw != w || th != h;
-        if (realloc) ++up_realloc_cnt;
-        static int64_t tex_log_ = 0;
-        if ((tex_log_++ % 16) == 0)
-            qWarning() << "[viewer] rgba_upload"
-                       << "tex=" << w << "x" << h
-                       << "src_frame=" << f->width << "x" << f->height
-                       << "upscaled=" << (w != f->width || h != f->height ? "yes" : "no")
-                       << "widget=" << std::max(1, width()) << "x" << std::max(1, height());
-        if (realloc) {
-            // Qt forbids setSize/setFormat once storage is allocated; a size
-            // change needs a fresh texture object instead.
-            tex = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
-            tex->setMinificationFilter(QOpenGLTexture::Linear);
-            tex->setMagnificationFilter(QOpenGLTexture::Linear);
-            tex->setWrapMode(QOpenGLTexture::ClampToEdge);
-            tex->setSize(w, h);
-            tex->setFormat(QOpenGLTexture::RGBA8_UNorm);
-            tex->allocateStorage();
-            tw = w;
-            th = h;
-        }
-        tex->setData(0, 0, 0, w, h, 1, QOpenGLTexture::RGBA, QOpenGLTexture::UInt8, data);
-        valid = true;
-    };
 
     upload(texture_, frame_->a, tex_w_, tex_h_, texture_valid_);
 
@@ -915,13 +931,14 @@ void ViewerGL::paintGL() {
 }
 
 void ViewerGL::draw_blank() {
+    const ThemeTokens& t = tokens();
     QPainter painter(this);
-    painter.fillRect(rect(), QColor(10, 10, 12));
-    painter.setPen(QPen(QColor(0x2A, 0x2F, 0x3C), 1.0));
-    painter.setBrush(QColor(0x1A, 0x1D, 0x27));
+    painter.fillRect(rect(), t.surface);
+    painter.setPen(QPen(t.border, 1.0));
+    painter.setBrush(t.surface_low);
     const QRectF badge(4, 4, 64, 16);
     painter.drawRoundedRect(badge, 8, 8);
-    painter.setPen(QColor(0x9A, 0xA0, 0xB0));
+    painter.setPen(t.ink_muted);
     QFont f = painter.font();
     f.setPointSizeF(8);
     painter.setFont(f);

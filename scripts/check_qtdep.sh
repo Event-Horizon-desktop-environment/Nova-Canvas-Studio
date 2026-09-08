@@ -42,6 +42,8 @@ HEADLESS=(
     "gui/src/features/playback/sonicsync.cpp"
     "gui/src/features/playback/timeline_decoder.hpp"
     "gui/src/features/playback/timeline_decoder.cpp"
+    "gui/src/features/timeline/audio_targets.hpp"
+    "gui/src/features/timeline/audio_targets.cpp"
     "gui/src/Widgets/timeline_snap.hpp"
     "gui/src/Widgets/timeline_snap.cpp"
     "gui/src/Widgets/timeline_selection.hpp"
@@ -50,6 +52,8 @@ HEADLESS=(
     "gui/src/Widgets/timeline_drag.cpp"
     "gui/src/Widgets/transition_handle_editor.hpp"
     "gui/src/Widgets/transition_handle_editor.cpp"
+    "gui/src/Widgets/timeline_volume_line.hpp"
+    "gui/src/Widgets/timeline_volume_line.cpp"
     "gui/tests"
 )
 
@@ -59,7 +63,16 @@ for path in "${HEADLESS[@]}"; do
     [[ -e "$target" ]] || continue
     # <Qt...> and <Q...> includes (anchor to the opening <Q so e.g. <queue>,
     # <chrono>, <qlabel> std headers are not false-flagged).
-    hits=$(grep -rnE '#[[:space:]]*include[[:space:]]*<Q' "$target" || true)
+    #
+    # gui/tests/qt/ holds Qt-LINKED widget tests by design (they drive real
+    # QGraphicsView event handlers); they are exempt from the Qt-free scan.
+    if [[ -d "$target" ]]; then
+        hits=$(find "$target" -type f \( -name '*.cpp' -o -name '*.hpp' \) \
+                   -not -path '*/qt/*' -print0 \
+               | xargs -0 grep -nE '#[[:space:]]*include[[:space:]]*<Q' 2>/dev/null || true)
+    else
+        hits=$(grep -nE '#[[:space:]]*include[[:space:]]*<Q' "$target" || true)
+    fi
     if [[ -n "$hits" ]]; then
         OFFENDING=1
         if [[ "$QUIET" -eq 0 ]]; then

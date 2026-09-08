@@ -1,8 +1,10 @@
 #include "UX/MainWindow.hpp"
+#include "UX/theme.hpp"
 #include "ui_MainWindow.h"
 
-#include <QApplication>
 #include <QAction>
+#include <QActionGroup>
+#include <QApplication>
 #include <QKeySequence>
 #include <QMenu>
 #include <QMenuBar>
@@ -95,6 +97,28 @@ void build_app_menus(MainWindow& mw) {
                         [&mw] { mw.controller_.seek(0); });
     playback->addAction(MainWindow::tr("Go &to End"), QKeySequence(Qt::Key_End),
                         [&mw] { mw.controller_.seek(mw.total_frames_ - 1); });
+
+    auto* appearance = mw.ui->menubar->addMenu(MainWindow::tr("A&ppearance"));
+    auto* appearance_group = new QActionGroup(appearance);
+    appearance_group->setExclusive(true);
+    const bool light_mode = is_light();
+    auto* dark_action = appearance->addAction(MainWindow::tr("&Dark"));
+    dark_action->setCheckable(true);
+    dark_action->setChecked(!light_mode);
+    auto* light_action = appearance->addAction(MainWindow::tr("&Light"));
+    light_action->setCheckable(true);
+    light_action->setChecked(light_mode);
+    appearance_group->addAction(dark_action);
+    appearance_group->addAction(light_action);
+    const auto persist_mode = [](bool light) {
+        set_light(light);
+        QSettings().setValue(QStringLiteral("appearance/theme"),
+                             light ? QStringLiteral("light") : QStringLiteral("dark"));
+    };
+    QObject::connect(dark_action, &QAction::triggered, &mw,
+                     [persist_mode] { persist_mode(false); });
+    QObject::connect(light_action, &QAction::triggered, &mw,
+                     [persist_mode] { persist_mode(true); });
 
     for (const char* name : {"Fusion", "Color", "Fairlight", "Workspace", "Help"}) {
         auto* m = mw.ui->menubar->addMenu(MainWindow::tr(name));

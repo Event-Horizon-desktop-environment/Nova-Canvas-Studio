@@ -35,6 +35,63 @@ QString format_duration(double secs) {
     return QString::fromLatin1(buf);
 }
 
+QString grip_pixmap_color() {
+    return css(tokens().ink_faint);
+}
+
+QString rq_list_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QListWidget{background:%1;border:1px solid %2;border-radius:8px;color:%3;}"
+               "QListWidget::item{border-radius:8px;margin:2px 3px;background:transparent;}"
+               "QListWidget::item:selected{background:%4;}")
+        .arg(css(t.surface_low), css(t.border_soft), css(t.ink), css(t.accent_soft));
+}
+
+QString rq_progress_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QProgressBar{background:%1;border:none;border-radius:3px;}"
+               "QProgressBar::chunk{background:%2;border-radius:3px;}")
+        .arg(css(t.surface_low), css(t.accent));
+}
+
+QString rq_render_btn_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QPushButton{background:%1;color:%2;"
+               "border-radius:8px;padding:7px 14px;font-weight:600;}"
+               "QPushButton:hover{background:%3;}")
+        .arg(css(t.accent), css(t.on_accent), css(t.accent_hover));
+}
+
+QString rq_cancel_btn_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QPushButton{background:%1;color:%2;border:1px solid %3;"
+               "border-radius:8px;padding:7px 14px;}"
+               "QPushButton:hover{background:%4;color:%5;}")
+        .arg(css(t.danger_soft), css(t.danger), css(t.danger),
+             css(t.danger), css(t.on_accent));
+}
+
+QString rq_clear_btn_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QPushButton{background:%1;color:%2;"
+               "border:1px solid %3;border-radius:8px;padding:7px 14px;}"
+               "QPushButton:hover{background:%4;border-color:%5;}")
+        .arg(css(t.surface_raised), css(t.ink_muted), css(t.border_soft),
+             css(t.surface_higher), css(t.border));
+}
+
+QString rq_row_action_style() {
+    return QStringLiteral(
+               "QToolButton{background:transparent;border:none;border-radius:5px;}"
+               "QToolButton:hover{background:%1;}")
+        .arg(css(tokens().state_hover));
+}
+
 // Single status field, reused per job state: a live time-remaining estimate
 // (plus render speed) while rendering, total elapsed time once settled.
 QString status_text(const canvas::core::RenderJob& j) {
@@ -77,7 +134,7 @@ QPixmap grip_pixmap() {
     pm.fill(Qt::transparent);
     QPainter p(&pm);
     p.setPen(Qt::NoPen);
-    p.setBrush(QColor(QStringLiteral("#5F6577")));
+    p.setBrush(QColor(grip_pixmap_color()));
     for (int row = 0; row < 3; ++row)
         for (int col = 0; col < 2; ++col)
             p.drawEllipse(QPoint(3 + col * 8, 4 + row * 6), 2, 2);
@@ -92,23 +149,32 @@ RenderQueuePanel::RenderQueuePanel(QWidget* parent) : QWidget(parent) {
 }
 
 void RenderQueuePanel::build() {
+    setAutoFillBackground(false);
+    apply_theme_style(this, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral("QWidget{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                              " stop:0 %1, stop:0.5 %2, stop:1 %2);}")
+            .arg(css(t.surface_raised), css(t.surface));
+    });
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(10, 10, 10, 10);
     root->setSpacing(8);
 
     auto* title = new QLabel(tr("Render Queue"));
-    title->setStyleSheet(QStringLiteral("color:#E8EAF0;font-size:13px;font-weight:600;"));
+    apply_theme_style(title, [] {
+        return QStringLiteral("color:%1;font-size:13px;font-weight:600;")
+            .arg(css(tokens().ink));
+    });
     root->addWidget(title);
 
     summary_ = new QLabel(tr("No jobs in queue."));
-    summary_->setStyleSheet(QStringLiteral("color:#9AA0B0;font-size:11px;"));
+    apply_theme_style(summary_, [] {
+        return QStringLiteral("color:%1;font-size:11px;").arg(css(tokens().ink_muted));
+    });
     root->addWidget(summary_);
 
     list_ = new QListWidget(this);
-    list_->setStyleSheet(QStringLiteral(
-        "QListWidget{background:#0C0E14;border:1px solid #232833;border-radius:8px;color:#E8EAF0;}"
-        "QListWidget::item{border-radius:8px;margin:2px 3px;background:transparent;}"
-        "QListWidget::item:selected{background:rgba(59,130,246,0.08);}"));
+    apply_theme_style(list_, &rq_list_style);
     list_->setSelectionMode(QAbstractItemView::SingleSelection);
     list_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     root->addWidget(list_, 1);
@@ -121,12 +187,12 @@ void RenderQueuePanel::build() {
     overall_->setValue(0);
     overall_->setTextVisible(false);
     overall_->setFixedHeight(6);
-    overall_->setStyleSheet(QStringLiteral(
-        "QProgressBar{background:#0C0E14;border:none;border-radius:3px;}"
-        "QProgressBar::chunk{background:#3B82F6;border-radius:3px;}"));
+    apply_theme_style(overall_, &rq_progress_style);
     progress_row->addWidget(overall_, 1);
     overall_pct_ = new QLabel(QStringLiteral("0%"), this);
-    overall_pct_->setStyleSheet(QStringLiteral("color:#9AA0B0;font-size:11px;"));
+    apply_theme_style(overall_pct_, [] {
+        return QStringLiteral("color:%1;font-size:11px;").arg(css(tokens().ink_muted));
+    });
     overall_pct_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     progress_row->addWidget(overall_pct_);
     root->addLayout(progress_row);
@@ -134,20 +200,12 @@ void RenderQueuePanel::build() {
     auto* buttons = new QHBoxLayout;
     buttons->setSpacing(6);
     render_all_ = new QPushButton(tr("Render"));
-    render_all_->setStyleSheet(QStringLiteral("QPushButton{background:#3B82F6;color:white;"
-                                              "border-radius:8px;padding:7px 14px;font-weight:600;}"
-                                              "QPushButton:hover{background:#4C92FF;}"));
+    apply_theme_style(render_all_, &rq_render_btn_style);
     auto* cancel_all = new QPushButton(tr("Cancel All"));
-    cancel_all->setStyleSheet(QStringLiteral("QPushButton{background:rgba(240,113,122,0.15);"
-                                             "color:#FCA5A5;border:1px solid rgba(240,113,122,0.55);"
-                                             "border-radius:8px;padding:7px 14px;}"
-                                             "QPushButton:hover{background:rgba(240,113,122,0.28);"
-                                             "color:#FFB9BE;}"));
+    apply_theme_style(cancel_all, &rq_cancel_btn_style);
     auto* clear = new QPushButton(tr("Clear Queue"));
     clear->setToolTip(tr("Remove every job that isn't currently rendering."));
-    clear->setStyleSheet(QStringLiteral("QPushButton{background:#1A1D27;color:#C6CAD6;"
-                                        "border:1px solid #232833;border-radius:8px;padding:7px 14px;}"
-                                        "QPushButton:hover{background:#20242F;border-color:#2A2F3C;}"));
+    apply_theme_style(clear, &rq_clear_btn_style);
     // Keep the buttons at their natural size — without this they absorb all the
     // slack when the dock is resized and stretch absurdly wide.
     for (QPushButton* b : {render_all_, cancel_all, clear})
@@ -173,9 +231,7 @@ QToolButton* make_row_action(const QString& icon_name, const QString& tip) {
     b->setCursor(Qt::PointingHandCursor);
     b->setFixedSize(20, 20);
     b->setAutoRaise(true);
-    b->setStyleSheet(QStringLiteral(
-        "QToolButton{background:transparent;border:none;border-radius:5px;}"
-        "QToolButton:hover{background:rgba(255,255,255,0.10);}"));
+    apply_theme_style(b, &rq_row_action_style);
     return b;
 }
 
@@ -193,7 +249,8 @@ void create_row(RenderQueuePanel::JobRow& r, const canvas::core::RenderJob& j,
     grip->setPixmap(grip_pixmap());
     header->addWidget(grip);
     auto* job_label = new QLabel(RenderQueuePanel::tr("Job %1").arg(j.id), widget);
-    job_label->setStyleSheet(QStringLiteral("color:#E8EAF0;font-size:12px;font-weight:700;"));
+    job_label->setStyleSheet(QStringLiteral("color:%1;font-size:12px;font-weight:700;")
+                                     .arg(css(tokens().ink)));
     header->addWidget(job_label);
     header->addStretch(1);
     r.status = new QLabel(widget);
@@ -215,10 +272,12 @@ void create_row(RenderQueuePanel::JobRow& r, const canvas::core::RenderJob& j,
     auto* txt = new QVBoxLayout;
     txt->setSpacing(1);
     r.primary = new QLabel(widget);
-    r.primary->setStyleSheet(QStringLiteral("color:#E8EAF0;font-size:12px;font-weight:600;"));
+    r.primary->setStyleSheet(QStringLiteral("color:%1;font-size:12px;font-weight:600;")
+                                        .arg(css(tokens().ink)));
     txt->addWidget(r.primary);
     r.path = new QLabel(widget);
-    r.path->setStyleSheet(QStringLiteral("color:#9AA0B0;font-size:10px;"));
+    r.path->setStyleSheet(QStringLiteral("color:%1;font-size:10px;")
+                                    .arg(css(tokens().ink_muted)));
     r.path->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     txt->addWidget(r.path);
     content->addLayout(txt, 1);
@@ -266,13 +325,16 @@ void RenderQueuePanel::refresh() {
         r.status->setText(status_text(j));
         switch (j.status) {
             case canvas::core::RenderJob::Status::Rendering:
-                r.status->setStyleSheet(QStringLiteral("color:#8FCBFF;font-size:11px;"));
+                r.status->setStyleSheet(QStringLiteral("color:%1;font-size:11px;")
+                                            .arg(css(tokens().accent_text)));
                 break;
             case canvas::core::RenderJob::Status::Failed:
-                r.status->setStyleSheet(QStringLiteral("color:#FCA5A5;font-size:11px;"));
+                r.status->setStyleSheet(QStringLiteral("color:%1;font-size:11px;")
+                                            .arg(css(tokens().danger)));
                 break;
             default:
-                r.status->setStyleSheet(QStringLiteral("color:#9AA0B0;font-size:11px;"));
+                r.status->setStyleSheet(QStringLiteral("color:%1;font-size:11px;")
+                                            .arg(css(tokens().ink_muted)));
                 break;
         }
         r.path->setToolTip(QString::fromStdString(j.output_path));

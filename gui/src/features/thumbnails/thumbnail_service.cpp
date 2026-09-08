@@ -24,6 +24,9 @@
 #include "canvas/core/media/hw_device.hpp"
 #include "canvas/core/media/video_decoder.hpp"
 
+#include "features/playback/sync_constants.hpp"
+#include "UX/theme.hpp"
+
 namespace canvas::gui {
 
 namespace {
@@ -190,12 +193,12 @@ void ThumbnailService::request_waveform(uint64_t id, std::string path, int width
 
 void ThumbnailService::submit(ThumbRequest req) {
     const bool audio = req.is_audio;
-    // Volume gain quantized to whole percents: bounds the cache/disk space a
-    // handful of volume variants takes while staying visually granular.
-    const int gain_pct = audio
-                             ? std::clamp(static_cast<int>(std::lround(req.gain * 100.0f)), 0, 100)
-                             : 100;
-    req.gain = static_cast<float>(gain_pct) / 100.0f;
+    // Waveforms are content displays: they are NEVER scaled by clip volume (that
+    // used to flatten them into a line at low gain and make disk/cache keys vary
+    // per gain percent), so the quantized key component is a constant 100 and a
+    // clip's spectrum is identical at every volume setting.
+    const int gain_pct = 100;
+    req.gain = 1.0f;
     {
         QMutexLocker lock(&mutex_);
         const CacheKey key{req.path, req.frame, req.target_width, audio, req.src_lo, req.src_hi,
@@ -414,12 +417,12 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
         img.fill(Qt::transparent);
         QPainter p(&img);
         const double cy = img.height() / 2.0;
-        // Height scale = half the row; volume gain (0..1, quantized to percent
-        // in submit) shrinks every bar so the timeline waveform visibly reflects
-        // the clip's volume_dB.
-        const double gain = static_cast<double>(req.gain);
-        const double amp = std::max(1.0, cy - 2.0) * gain;
-        p.setPen(QPen(QColor(240, 244, 238, 220), 1));
+        // Height scale = half the row, full content amplitude. The waveform is a
+        // content readout and deliberately ignores clip volume (which is told by
+        // the volume line) — scaling bars by gain made quiet clips flatten into a
+        // single horizontal line, i.e. the "spectrum stops showing changes" bug.
+        const double amp = std::max(1.0, cy - 2.0);
+        p.setPen(QPen(tokens().ink, 1));
         const std::size_t n = std::min(wf.peak.size(), static_cast<std::size_t>(req.target_width));
         // dB-scale so dynamic range survives the draw: a heavily-limited/loud
         // master (peak ~= 1.0 full-bar every bucket in a linear scale) used to
@@ -433,7 +436,9 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
             const double db = 20.0 * std::log10(static_cast<double>(x));
             return std::clamp((db + 40.0) / 40.0, 0.0, 1.0);
         };
-        p.setPen(QPen(QColor(140, 150, 160, 110), 1));
+        QColor peak_dim = tokens().ink_muted;
+        peak_dim.setAlpha(110);
+        p.setPen(QPen(peak_dim, 1));
         for (std::size_t i = 0; i < n; ++i) {
             const double x = static_cast<double>(i) + 0.5;
             const double top = cy - amp_db(wf.peak[i]) * amp;
@@ -444,7 +449,7 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
             p.drawLine(QPointF(x, top), QPointF(x, top_r));
             p.drawLine(QPointF(x, bot_r), QPointF(x, bot));
         }
-        p.setPen(QPen(QColor(240, 244, 238, 230), 1));
+        p.setPen(QPen(tokens().ink, 1));
         for (std::size_t i = 0; i < n; ++i) {
             const double x = static_cast<double>(i) + 0.5;
             const double top_r = cy - amp_db(wf.rms[i]) * amp;
@@ -476,7 +481,11 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
 
     const int64_t source_frame = std::max<int64_t>(0, req.frame);
     const auto t_dec0 = std::chrono::steady_clock::now();
-    auto frame = decoder.decode_to_frame(source_frame);
+    // Cap to the shared preview dimension: the timeline rescales each cell to a
+    // handful of pixels (<=192 wide), and zoom-out films trip over HUNDREDS of
+    // clip cells at once — a full-res frame per request swamps the 4 workers and
+    // the strip stays blank for ages. 640px max-dim decodes land in ms.
+    auto frame = decoder.decode_to_frame(source_frame, kPreviewMaxDim);
     const auto t_dec1 = std::chrono::steady_clock::now();
     if (!frame || frame->rgba.empty()) {
         if (debug_enabled())

@@ -73,7 +73,7 @@ void build_center_workspace(MainWindow& mw) {
     auto* contextual_bar = new QToolBar(MainWindow::tr("Editing Tools"), &mw);
     contextual_bar->setMovable(false);
     contextual_bar->setObjectName(QStringLiteral("contextualTools"));
-    contextual_bar->setStyleSheet(timeline_tools_style());
+    apply_theme_style(contextual_bar, &timeline_tools_style);
     contextual_bar->setIconSize(QSize(16, 16));
 
     // Flat icon tool button factory: no persistent border/background; state is
@@ -86,7 +86,7 @@ void build_center_workspace(MainWindow& mw) {
         b->setToolTip(MainWindow::tr(tip));
         b->setCheckable(checkable);
         b->setAutoRaise(true);
-        b->setStyleSheet(flat_tool_style());
+        apply_theme_style(b, &flat_tool_style);
         bar->addWidget(b);
         return b;
     };
@@ -108,7 +108,7 @@ void build_center_workspace(MainWindow& mw) {
     tool_select->setCheckable(true);
     tool_select->setChecked(true);
     tool_select->setAutoRaise(true);
-    tool_select->setStyleSheet(flat_tool_style());
+    apply_theme_style(tool_select, &flat_tool_style);
     contextual_bar->addWidget(tool_select);
 
     auto* tool_trim = new QToolButton(contextual_bar);
@@ -117,7 +117,7 @@ void build_center_workspace(MainWindow& mw) {
     tool_trim->setToolTip(MainWindow::tr("Trim (T)"));
     tool_trim->setCheckable(true);
     tool_trim->setAutoRaise(true);
-    tool_trim->setStyleSheet(tool_cluster_style());
+    apply_theme_style(tool_trim, &tool_cluster_style);
     contextual_bar->addWidget(tool_trim);
     auto* tool_blade = new QToolButton(contextual_bar);
     tool_blade->setIcon(icon("razor_blade"));
@@ -125,7 +125,7 @@ void build_center_workspace(MainWindow& mw) {
     tool_blade->setToolTip(MainWindow::tr("Blade (B)"));
     tool_blade->setCheckable(true);
     tool_blade->setAutoRaise(true);
-    tool_blade->setStyleSheet(tool_cluster_style());
+    apply_theme_style(tool_blade, &tool_cluster_style);
     contextual_bar->addWidget(tool_blade);
     auto* tool_mode = new QToolButton(contextual_bar);
     tool_mode->setIcon(icon("mode"));
@@ -133,7 +133,7 @@ void build_center_workspace(MainWindow& mw) {
     tool_mode->setToolTip(MainWindow::tr("Edit mode"));
     tool_mode->setCheckable(true);
     tool_mode->setAutoRaise(true);
-    tool_mode->setStyleSheet(tool_cluster_style());
+    apply_theme_style(tool_mode, &tool_cluster_style);
     contextual_bar->addWidget(tool_mode);
 
     contextual_bar->addSeparator();
@@ -144,7 +144,7 @@ void build_center_workspace(MainWindow& mw) {
     linked_sel->setChecked(true);
     linked_sel->setToolTip(MainWindow::tr("Linked selection"));
     linked_sel->setAutoRaise(true);
-    linked_sel->setStyleSheet(flat_tool_style());
+    apply_theme_style(linked_sel, &flat_tool_style);
     contextual_bar->addWidget(linked_sel);
     auto* sync_lock = new QToolButton(contextual_bar);
     sync_lock->setIcon(icon("sync_lock"));
@@ -152,7 +152,7 @@ void build_center_workspace(MainWindow& mw) {
     sync_lock->setCheckable(true);
     sync_lock->setToolTip(MainWindow::tr("Track lock"));
     sync_lock->setAutoRaise(true);
-    sync_lock->setStyleSheet(flat_tool_style());
+    apply_theme_style(sync_lock, &flat_tool_style);
     contextual_bar->addWidget(sync_lock);
 
     contextual_bar->addSeparator();
@@ -164,13 +164,13 @@ void build_center_workspace(MainWindow& mw) {
     marker_color->setIconSize(QSize(14, 14));
     marker_color->setToolTip(MainWindow::tr("Marker color"));
     marker_color->setAutoRaise(true);
-    marker_color->setStyleSheet(flat_tool_style());
+    apply_theme_style(marker_color, &flat_tool_style);
     contextual_bar->addWidget(marker_color);
     auto* marker_down = new QToolButton(contextual_bar);
     marker_down->setIcon(icon("chevron_down", QColor(0xC9, 0x86, 0x3A)));
     marker_down->setToolTip(MainWindow::tr("Marker color"));
     marker_down->setAutoRaise(true);
-    marker_down->setStyleSheet(flat_tool_style());
+    apply_theme_style(marker_down, &flat_tool_style);
     contextual_bar->addWidget(marker_down);
 
     auto* bar_spacer = new QWidget(contextual_bar);
@@ -183,25 +183,25 @@ void build_center_workspace(MainWindow& mw) {
     zoom_fit->setIconSize(QSize(16, 16));
     zoom_fit->setToolTip(MainWindow::tr("Zoom to fit"));
     zoom_fit->setAutoRaise(true);
-    zoom_fit->setStyleSheet(flat_tool_style());
+    apply_theme_style(zoom_fit, &flat_tool_style);
     contextual_bar->addWidget(zoom_fit);
     auto* zoom_out = new QToolButton(contextual_bar);
     zoom_out->setIcon(icon("zoom_out"));
     zoom_out->setIconSize(QSize(16, 16));
     zoom_out->setAutoRaise(true);
-    zoom_out->setStyleSheet(flat_tool_style());
+    apply_theme_style(zoom_out, &flat_tool_style);
     contextual_bar->addWidget(zoom_out);
     auto* zoom_slider = new QSlider(Qt::Horizontal, contextual_bar);
     zoom_slider->setRange(0, 100);
-    zoom_slider->setValue(33); // 100% baseline of the 50%..200% band
+    zoom_slider->setValue(4); // 100% baseline of the 4%..2500% band
     zoom_slider->setFixedWidth(140);
-    zoom_slider->setStyleSheet(slider_style());
+    apply_theme_style(zoom_slider, &slider_style);
     contextual_bar->addWidget(zoom_slider);
     auto* zoom_in = new QToolButton(contextual_bar);
     zoom_in->setIcon(icon("zoom_in"));
     zoom_in->setIconSize(QSize(16, 16));
     zoom_in->setAutoRaise(true);
-    zoom_in->setStyleSheet(flat_tool_style());
+    apply_theme_style(zoom_in, &flat_tool_style);
     contextual_bar->addWidget(zoom_in);
 
     auto* volume_icon = new QToolButton(contextual_bar);
@@ -209,13 +209,13 @@ void build_center_workspace(MainWindow& mw) {
     volume_icon->setIconSize(QSize(16, 16));
     volume_icon->setToolTip(MainWindow::tr("Monitoring volume"));
     volume_icon->setAutoRaise(true);
-    volume_icon->setStyleSheet(flat_tool_style());
+    apply_theme_style(volume_icon, &flat_tool_style);
     contextual_bar->addWidget(volume_icon);
     auto* volume_slider = new QSlider(Qt::Horizontal, contextual_bar);
     volume_slider->setRange(0, 100);
     volume_slider->setValue(80);
     volume_slider->setFixedWidth(90);
-    volume_slider->setStyleSheet(slider_style());
+    apply_theme_style(volume_slider, &slider_style);
     contextual_bar->addWidget(volume_slider);
 
     auto* dim_btn = new QToolButton(contextual_bar);
@@ -223,17 +223,16 @@ void build_center_workspace(MainWindow& mw) {
     dim_btn->setToolTip(MainWindow::tr("Temporarily dip monitoring volume"));
     dim_btn->setAutoRaise(true);
     dim_btn->setCheckable(true);
-    dim_btn->setStyleSheet(outline_pill_style());
+    apply_theme_style(dim_btn, &outline_pill_style);
     contextual_bar->addWidget(dim_btn);
 
     const auto sync_zoom_slider = [&mw, zoom_slider, zoom_in, zoom_out] {
         if (!mw.timeline_) return;
-        const double pct =
-            std::clamp(mw.timeline_->zoom_percent(), TimelineWidget::kZoomMinPercent,
-                       TimelineWidget::kZoomMaxPercent);
+        const double min_pct = mw.timeline_->interactive_floor_percent();
+        const double max_pct = TimelineWidget::kZoomMaxPercent;
+        const double pct = std::clamp(mw.timeline_->zoom_percent(), min_pct, max_pct);
         const int v = static_cast<int>(std::round(
-            (pct - TimelineWidget::kZoomMinPercent) /
-            (TimelineWidget::kZoomMaxPercent - TimelineWidget::kZoomMinPercent) * 100.0));
+            (pct - min_pct) / (max_pct - min_pct) * 100.0));
         QSignalBlocker blocker(zoom_slider);
         zoom_slider->setValue(std::clamp(v, 0, 100));
         const int show_pct = static_cast<int>(std::round(pct));
@@ -254,9 +253,10 @@ void build_center_workspace(MainWindow& mw) {
         sync_zoom_slider();
     });
     QObject::connect(zoom_slider, &QSlider::valueChanged, &mw, [&mw](int v) {
-        const double pct =
-            TimelineWidget::kZoomMinPercent +
-            (TimelineWidget::kZoomMaxPercent - TimelineWidget::kZoomMinPercent) * v / 100.0;
+        if (!mw.timeline_) return;
+        const double min_pct = mw.timeline_->interactive_floor_percent();
+        const double max_pct = TimelineWidget::kZoomMaxPercent;
+        const double pct = min_pct + (max_pct - min_pct) * v / 100.0;
         mw.timeline_->set_zoom_percent(pct);
     });
 
@@ -299,7 +299,7 @@ void build_center_workspace(MainWindow& mw) {
     // Viewer bounding frame.
     auto* viewer_frame = new QFrame(&mw);
     viewer_frame->setObjectName(QStringLiteral("viewerFrame"));
-    viewer_frame->setStyleSheet(viewer_frame_style());
+    apply_theme_style(viewer_frame, &viewer_frame_style);
     auto* viewer_frame_layout = new QVBoxLayout(viewer_frame);
     viewer_frame_layout->setContentsMargins(6, 6, 6, 6);
     viewer_frame_layout->addWidget(mw.viewer_, 1);
@@ -312,8 +312,19 @@ void build_center_workspace(MainWindow& mw) {
     auto* top_bar = build_top_bar(mw);
 
     // Assemble the viewer column: top scrub bar > top status bar > viewer(frame)
-    // > contextual tools > transport.
+    // > contextual tools > transport. The column's own background carries the
+    // workspace's soft mint radial glow (the Alt-html "grad-workspace"), which
+    // shows around the floating rounded panels; opaque bars/panels cover it.
     auto* viewer_column = new QWidget(&mw);
+    viewer_column->setObjectName(QStringLiteral("viewerColumn"));
+    apply_theme_style(viewer_column, [] {
+        const auto& t = tokens();
+        return QStringLiteral("QWidget#viewerColumn { background:"
+                              " qradialgradient(cx:0.72, cy:0.0, radius:1.6, fx:0.72, fy:0.0,"
+                              " stop:0 %1, stop:0.5 %2, stop:1 %3); }")
+            .arg(css(with_alpha(t.accent, 20)), css(with_alpha(t.accent, 6)),
+                 css(t.surface));
+    });
     auto* viewer_layout = new QVBoxLayout(viewer_column);
     viewer_layout->setContentsMargins(0, 0, 0, 0);
     viewer_layout->setSpacing(0);
@@ -322,8 +333,10 @@ void build_center_workspace(MainWindow& mw) {
     // on the left, the overview scrubber in the middle, a lock icon far right.
     auto* top_scrub = new QWidget(viewer_column);
     top_scrub->setObjectName(QStringLiteral("topScrubBar"));
-    top_scrub->setStyleSheet(QStringLiteral(
-        "QWidget#topScrubBar { background: #11131A; border-bottom: 1px solid #232833; }"));
+    apply_theme_style(top_scrub, [] {
+        return QStringLiteral("QWidget#topScrubBar { background: %1; border-bottom: 1px solid %2; }")
+            .arg(css(tokens().surface), css(tokens().border));
+    });
     auto* top_scrub_layout = new QHBoxLayout(top_scrub);
     top_scrub_layout->setContentsMargins(10, 4, 10, 4);
     top_scrub_layout->setSpacing(8);
@@ -340,7 +353,7 @@ void build_center_workspace(MainWindow& mw) {
     scrub_lock->setIconSize(QSize(16, 16));
     scrub_lock->setCheckable(true);
     scrub_lock->setAutoRaise(true);
-    scrub_lock->setStyleSheet(flat_tool_style());
+    apply_theme_style(scrub_lock, &flat_tool_style);
     scrub_lock->setToolTip(MainWindow::tr("Lock timeline"));
     top_scrub_layout->addWidget(scrub_lock);
     viewer_layout->addWidget(top_scrub);
@@ -369,27 +382,41 @@ void build_center_workspace(MainWindow& mw) {
 
     auto* timeline_frame = new QFrame(&mw);
     timeline_frame->setObjectName(QStringLiteral("timelineFrame"));
-    timeline_frame->setStyleSheet(timeline_frame_style());
+    apply_theme_style(timeline_frame, &timeline_frame_style);
     auto* timeline_frame_layout = new QVBoxLayout(timeline_frame);
     timeline_frame_layout->setContentsMargins(6, 6, 6, 4);
     timeline_frame_layout->addWidget(mw.timeline_, 1);
 
     auto* timeline_dock = mw.ui->timelineDock;
     timeline_dock->setObjectName(QStringLiteral("timelineDock"));
+    apply_theme_style(timeline_dock, &dock_glow_style);
     auto* timeline_title = new QWidget(timeline_dock);
     timeline_title->setObjectName(QStringLiteral("timelineDockTitle"));
-    timeline_title->setStyleSheet(QStringLiteral(
-        "QWidget#timelineDockTitle { background-color: #1A1D27;"
-        " border-bottom: 1px solid #232833; }"));
+    apply_theme_style(timeline_title, [] {
+        return QStringLiteral("QWidget#timelineDockTitle { background: transparent;"
+                              " border: none; }");
+    });
     timeline_dock->setTitleBarWidget(timeline_title);
     timeline_dock->setWidget(timeline_frame);
     timeline_dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
     timeline_dock->setMinimumHeight(140);
-    // Open compact: Qt's default dock height lands the timeline tall on every
-    // first launch (the user has to shrink it each time). Pin an explicit
-    // initial height so the media space above keeps most of the window. (There
-    // is no saveState/restoreState yet, so this is the standing default.)
-    mw.resizeDocks({timeline_dock}, {265}, Qt::Vertical);
+    // Auto-grow the dock so the timeline height follows its channel count:
+    // every channel stays flush and reachable instead of being severed inside a
+    // fixed-height dock. The signal only fires when the channel count (or track
+    // heights) actually change, so scrub/zoom/edits never yank the user's dock
+    // size around.
+    QObject::connect(mw.timeline_, &TimelineWidget::content_height_changed, &mw,
+            [&mw, timeline_dock](int height_px) {
+                // Never let the auto-fit swallow more than ~3/4 of the window.
+                const int cap = std::max(265, static_cast<int>(mw.height() * 3 / 4));
+                mw.resizeDocks({timeline_dock}, {std::min(height_px, cap)}, Qt::Vertical);
+            });
+    // Open at a dock height that fits the initial channel stack (265px floor so
+    // an empty project still opens compact; taller timelines open showing every
+    // channel). (There is no saveState/restoreState yet, so this is the standing
+    // default.)
+    const int initial_height = mw.timeline_->desired_timeline_height();
+    mw.resizeDocks({timeline_dock}, {std::max(initial_height, 265)}, Qt::Vertical);
 
     // Central workspace = the viewer column (regions lock into place around it).
     if (QWidget* vf = mw.ui->viewerFrame) {
@@ -488,7 +515,9 @@ void build_center_workspace(MainWindow& mw) {
     };
 
     mw.status_ = mw.ui->statusbar;
-    mw.status_->setStyleSheet(QStringLiteral("background-color: #11131A; color: #9AA0B0;"));
+    const ThemeTokens& t = tokens();
+    mw.status_->setStyleSheet(QStringLiteral("background-color: %1; color: %2; border-top: 1px solid %3;")
+                                  .arg(css(t.surface), css(t.ink_muted), css(t.border_soft)));
     mw.status_->addPermanentWidget(new QLabel(MainWindow::tr("Nova Canvas Studio"), mw.status_));
 
     mw.connect_timeline();

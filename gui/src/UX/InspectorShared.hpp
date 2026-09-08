@@ -45,17 +45,20 @@ public:
             enable_->setCheckable(true);
             enable_->setChecked(true);
             enable_->setFixedSize(18, 18);
-            enable_->setStyleSheet(
-                QStringLiteral(
-                    "QToolButton { border-radius: 9px; border: 1px solid #2A2F3C;"
-                    "  background-color: #141A21; }"
-                    "QToolButton:checked { background-color: #3B82F6; border-color: #3B82F6; }"));
+            apply_theme_style(enable_, [] {
+                const ThemeTokens& t = tokens();
+                return QStringLiteral(
+                           "QToolButton { border-radius: 9px; border: 1px solid %1;"
+                           "  background-color: %2; }"
+                           "QToolButton:checked { background-color: %3; border-color: %3; }")
+                    .arg(css(t.border), css(t.surface_low), css(t.accent));
+            });
             connect(enable_, &QToolButton::toggled, this,
                     [this](bool on) { emit feature_toggled(on); });
         }
 
         header_ = new QToolButton(this);
-        header_->setStyleSheet(inspector_category_header_style());
+        apply_theme_style(header_, &inspector_category_header_style);
         header_->setToolButtonStyle(Qt::ToolButtonTextOnly);
         header_->setCheckable(true);
         header_->setChecked(expanded);
@@ -77,17 +80,20 @@ public:
         header_layout->addWidget(header_, 1);
         header_layout->addWidget(reset);
         // Card top band: rounded top corners (or a full rounded card when the
-        // body is collapsed). Re-applied in the toggle handler below.
-        header_row->setStyleSheet(expanded ? inspector_card_header_open_style()
-                                           : inspector_card_header_closed_style());
-
+        // body is collapsed). Re-applied in the toggle handler and on theme
+        // changes (the lambda reflects the current open/collapsed state).
         body_ = new QWidget(this);
         body_->setObjectName(QStringLiteral("inspectorCardBody"));
-        body_->setStyleSheet(inspector_card_body_style());
+        apply_theme_style(body_, &inspector_card_body_style);
         body_layout_ = new QVBoxLayout(body_);
         body_layout_->setContentsMargins(12, 10, 12, 12);
         body_layout_->setSpacing(8);
         body_->setVisible(expanded);
+
+        apply_theme_style(header_row, [this] {
+            return body_->isVisible() ? inspector_card_header_open_style()
+                                      : inspector_card_header_closed_style();
+        });
 
         outer->addWidget(header_row);
         outer->addWidget(body_);
@@ -128,7 +134,10 @@ inline void add_property_row(QVBoxLayout* body, const QString& label, QWidget* f
     row->setSpacing(6);
     auto* lbl = new QLabel(label);
     lbl->setMinimumWidth(78);
-    lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+    apply_theme_style(lbl, [] {
+        return QStringLiteral("color: %1; font-size: 11px;")
+            .arg(css(tokens().ink_muted));
+    });
     row->addWidget(lbl);
     row->addWidget(field, 1);
     if (with_reset) {

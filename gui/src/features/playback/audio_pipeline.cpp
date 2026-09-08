@@ -82,11 +82,13 @@ void compute_fade_gains(const canvas::core::Clip& clip, const int64_t from_sampl
 // + track gain into `out` (frames x out_channels). Uses the shared
 // audio_mix::mix_chunk law so playback/export/scrub mix identically: mono is
 // upmixed to the front pair, >2ch sources fold down for stereo buses or map
-// channel-for-channel for wider ones.
+// channel-for-channel for wider ones. `volume_db` is the clip's mix gain (the
+// live-drag override when one is active, else the clip's own volume_db).
 void mix_source_chunk(std::vector<float>& out, const int out_channels,
                       const canvas::core::Clip& clip, const float track_gain_db,
-                      const canvas::core::AudioChunkPtr& chunk, const int64_t from_sample,
-                      const int out_rate, const double src_fps, const double seq_fps) {
+                      const float volume_db, const canvas::core::AudioChunkPtr& chunk,
+                      const int64_t from_sample, const int out_rate, const double src_fps,
+                      const double seq_fps) {
     const int src_ch = chunk->channels > 0 ? chunk->channels : 1;
     const int frames = static_cast<int>(chunk->samples.size()) / src_ch;
     if (frames <= 0) return;
@@ -94,7 +96,7 @@ void mix_source_chunk(std::vector<float>& out, const int out_channels,
     compute_fade_gains(clip, from_sample, out_rate, src_fps, seq_fps, frames, &gains);
     float gl = 1.0f, gr = 1.0f;
     canvas::core::audio_mix::pan_gains(clip.pan, gl, gr);
-    const float vol = canvas::core::audio_mix::db_to_gain(clip.volume_db) *
+    const float vol = canvas::core::audio_mix::db_to_gain(volume_db) *
                       canvas::core::audio_mix::db_to_gain(track_gain_db);
     canvas::core::audio_mix::mix_chunk(out, out_channels, chunk->samples, src_ch,
                                        gains.empty() ? nullptr : &gains, vol, gl, gr);
@@ -156,6 +158,29 @@ void AudioPipeline::reset() {
     feed_ledger_at_ = {};
     last_primary_clip_ = -1;
     cut_diag_ = 0;
+    live_gain_db_.clear();
+}
+
+void AudioPipeline::set_live_clip_gain(canvas::core::ClipId id, float volume_db) {
+    std::lock_guard lock(mutex_);
+    live_gain_db_[id] = volume_db;
+}
+
+void AudioPipeline::clear_live_clip_gain(canvas::core::ClipId id) {
+    std::lock_guard lock(mutex_);
+    live_gain_db_.erase(id);
+}
+
+void AudioPipeline::clear_live_clip_gains() {
+    std::lock_guard lock(mutex_);
+    live_gain_db_.clear();
+}
+
+// Clip's effective mix gain: the live drag override when one is active for the
+// clip, else the clip's own volume_db. Callers hold mutex_ (all mix paths do).
+float AudioPipeline::effective_clip_volume_db(const canvas::core::Clip& clip) const {
+    const auto it = live_gain_db_.find(clip.id);
+    return it != live_gain_db_.end() ? it->second : clip.volume_db;
 }
 
 void AudioPipeline::open_output() {
@@ -399,8 +424,8 @@ void AudioPipeline::play_scrub_grain(int64_t seq_frame) {
     const int f = static_cast<int>(s->samples.size() / s->channels);
     if (f <= 0) return;
     std::vector<float> grain(static_cast<std::size_t>(f) * channels_, 0.0f);
-    mix_source_chunk(grain, channels_, *clip, sources[0].gain_db, s, base_sample, rate_, fps_v,
-                     seq_fps);
+    mix_source_chunk(grain, channels_, *clip, sources[0].gain_db,
+                     effective_clip_volume_db(*clip), s, base_sample, rate_, fps_v, seq_fps);
     if (!sink_.write_float(grain.data(), f))
         ::canvas::core::log::log_warning("[scrub] GRAIN dropped (overflow) at frame=%lld frames=%d",
                                      static_cast<long long>(seq_frame), f);
@@ -550,7 +575,8 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
                 static_cast<long long>(feed_watermarks_[clip.id]),
                 static_cast<long long>(src_out_sample));
 
-        mix_source_chunk(mix, channels_, clip, src.gain_db, chunk, from, rate_, src.fps, seq_fps);
+        mix_source_chunk(mix, channels_, clip, src.gain_db, effective_clip_volume_db(clip), chunk,
+                         from, rate_, src.fps, seq_fps);
         out_frames = std::max(out_frames, static_cast<int64_t>(frames));
     }
     step_mix_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - mix_t0).count();
@@ -1044,8 +1070,8 @@ void AudioPipeline::feed_scrub_audio(int64_t target) {
     bool ok = false;
     if (sink_.is_open()) {
         std::vector<float> chunk_mix(static_cast<std::size_t>(frames) * channels_, 0.0f);
-        mix_source_chunk(chunk_mix, channels_, *clip, sources[0].gain_db, s, base_sample,
-                         rate_, fps_v, seq_fps);
+        mix_source_chunk(chunk_mix, channels_, *clip, sources[0].gain_db,
+                         effective_clip_volume_db(*clip), s, base_sample, rate_, fps_v, seq_fps);
         ok = sink_.reposition_enqueue(chunk_mix.data(), frames);
     }
     const std::size_t pending_after = sink_.pending_frames();

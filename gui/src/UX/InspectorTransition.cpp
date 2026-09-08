@@ -38,6 +38,66 @@ using canvas::core::Clip;
 using canvas::core::ClipId;
 using canvas::core::Track;
 
+QString muted_label_style() {
+    return QStringLiteral("color: %1; font-size: 11px;").arg(css(tokens().ink_muted));
+}
+
+QString trans_combo_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QComboBox { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 3px 8px; }"
+               "QComboBox::drop-down { border: none; width: 18px; }"
+               "QComboBox QAbstractItemView { background-color: %1; color: %2;"
+               " selection-background-color: %4; border: 1px solid %3;"
+               " border-radius: 8px; padding: 2px; }")
+        .arg(css(t.surface_low), css(t.ink_muted), css(t.border_soft), css(t.accent));
+}
+
+QString pill_button_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QToolButton { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 18px; padding: 6px 18px; font-weight: 500; }"
+               "QToolButton:hover { color: %4; border-color: %5; }"
+               "QToolButton:checked { background-color: %6; border-color: %6;"
+               " color: %7; font-weight: 600; }")
+        .arg(css(t.surface_low), css(t.ink_muted), css(t.border_soft), css(t.ink),
+             css(t.border), css(t.accent), css(t.on_accent));
+}
+
+QString ratio_slider_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QSlider::groove:horizontal { height: 4px; background: %1; border-radius: 2px; }"
+               "QSlider::handle:horizontal { width: 10px; background: %2; margin: -4px 0;"
+               " border-radius: 5px; }")
+        .arg(css(t.border_soft), css(t.accent));
+}
+
+QString ghost_button_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QToolButton { color: %1; border: 1px solid %2; border-radius: 8px;"
+               " padding: 3px 8px; background: %3; }"
+               "QToolButton:hover { color: %4; border-color: %5; }"
+               "QToolButton:disabled { color: %6; }")
+        .arg(css(t.ink_faint), css(t.border_soft), css(t.surface_low), css(t.ink_muted),
+             css(t.border), css(t.ink_muted));
+}
+
+QString align_button_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QToolButton { background: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; min-width: 26px; padding: 3px 0; }"
+               "QToolButton:hover { border-color: %4; color: %5; }"
+               "QToolButton:checked { color: %6; border-color: %7;"
+               " background: %8; }")
+        .arg(css(t.surface_low), css(t.ink_muted), css(t.border_soft), css(t.border),
+             css(t.ink_muted), css(t.on_accent), css(t.accent), css(t.surface_higher));
+}
+
 // One half of the selected transition (Start = OUT edge, End = IN edge).
 struct SideControls {
     InspectorCategory* video_cat = nullptr;
@@ -187,25 +247,14 @@ int ease_index_for(float amount) {
 
 void set_dark_combo(QComboBox* cb, const QStringList& items) {
     cb->addItems(items);
-    cb->setStyleSheet(QStringLiteral(
-        "QComboBox { background-color: #141A21; color: #C9CDD6; border: 1px solid #232833;"
-        " border-radius: 8px; padding: 3px 8px; }"
-        "QComboBox::drop-down { border: none; width: 18px; }"
-        "QComboBox QAbstractItemView { background-color: #141A21; color: #C9CDD6;"
-        " selection-background-color: #3B82F6; border: 1px solid #232833;"
-        " border-radius: 8px; padding: 2px; }"));
+    apply_theme_style(cb, &trans_combo_style);
 }
 
 QToolButton* make_pill_button(const QString& text) {
     auto* b = new QToolButton;
     b->setText(text);
     b->setCheckable(true);
-    b->setStyleSheet(QStringLiteral(
-        "QToolButton { background-color: #141A21; color: #9AA0B0; border: 1px solid #232833;"
-        " border-radius: 18px; padding: 6px 18px; font-weight: 500; }"
-        "QToolButton:hover { color: #F0F2F7; border-color: #2A2F3C; }"
-        "QToolButton:checked { background-color: #3B82F6; border-color: #3B82F6;"
-        " color: #FFFFFF; font-weight: 600; }"));
+    apply_theme_style(b, &pill_button_style);
     return b;
 }
 
@@ -214,21 +263,14 @@ QSlider* make_ratio_slider(QWidget* parent) {
     s->setRange(0, 100);
     // Compressible so the row fits narrow inspector widths / high DPI.
     s->setMinimumWidth(0);
-    s->setStyleSheet(QStringLiteral(
-        "QSlider::groove:horizontal { height: 4px; background: #232833; border-radius: 2px; }"
-        "QSlider::handle:horizontal { width: 10px; background: #3B82F6; margin: -4px 0;"
-        " border-radius: 5px; }"));
+    apply_theme_style(s, &ratio_slider_style);
     return s;
 }
 
 QToolButton* make_ghost_button(const QString& text) {
     auto* b = new QToolButton;
     b->setText(text);
-    b->setStyleSheet(QStringLiteral(
-        "QToolButton { color: #8B93A7; border: 1px solid #232833; border-radius: 8px;"
-        " padding: 3px 8px; background: #141A21; }"
-        "QToolButton:hover { color: #C9CDD6; border-color: #2A2F3C; }"
-        "QToolButton:disabled { color: #4A5162; }"));
+    apply_theme_style(b, &ghost_button_style);
     return b;
 }
 
@@ -377,7 +419,7 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
 
         auto* dur_lbl = new QLabel(tr("Duration"));
         dur_lbl->setMinimumWidth(78);
-        dur_lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+        apply_theme_style(dur_lbl, &muted_label_style);
         auto* dur_row = new QHBoxLayout;
         dur_row->setSpacing(6);
         sc.video_secs = new QDoubleSpinBox;
@@ -409,12 +451,7 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
             b->setText(glyph);
             b->setCheckable(true);
             b->setToolTip(tip);
-            b->setStyleSheet(QStringLiteral(
-                "QToolButton { background: #141A21; color: #9AA0B0; border: 1px solid #232833;"
-                " border-radius: 8px; min-width: 26px; padding: 3px 0; }"
-                "QToolButton:hover { border-color: #2A2F3C; color: #C9CDD6; }"
-                "QToolButton:checked { color: #FFFFFF; border-color: #3B82F6;"
-                " background: #1E293B; }"));
+            apply_theme_style(b, &align_button_style);
             return b;
         };
         sc.align_left = make_align(QStringLiteral("\u25C4"), tr("Align Left"));
@@ -434,7 +471,7 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
         align_row->addStretch(1);
         auto* align_lbl = new QLabel(tr("Alignment"));
         align_lbl->setMinimumWidth(78);
-        align_lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+        apply_theme_style(align_lbl, &muted_label_style);
         auto* align_outer = new QHBoxLayout;
         align_outer->setSpacing(6);
         align_outer->addWidget(align_lbl);
@@ -464,7 +501,7 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
             ratio_row->addWidget(spin);
             auto* lbl = new QLabel(MainWindow::tr(title));
             lbl->setMinimumWidth(78);
-            lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+apply_theme_style(lbl, &muted_label_style);
             auto* outer = new QHBoxLayout;
             outer->setSpacing(6);
             outer->addWidget(lbl);
@@ -495,7 +532,7 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
         curve_row->addWidget(sc.curve_spin);
         auto* curve_lbl = new QLabel(tr("Transition Curve"));
         curve_lbl->setMinimumWidth(78);
-        curve_lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+        apply_theme_style(curve_lbl, &muted_label_style);
         auto* curve_outer = new QHBoxLayout;
         curve_outer->setSpacing(6);
         curve_outer->addWidget(curve_lbl);
@@ -539,7 +576,7 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
 
         auto* adur_lbl = new QLabel(tr("Duration"));
         adur_lbl->setMinimumWidth(78);
-        adur_lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+        apply_theme_style(adur_lbl, &muted_label_style);
         auto* adur_row = new QHBoxLayout;
         adur_row->setSpacing(6);
         sc.audio_secs = new QDoubleSpinBox;

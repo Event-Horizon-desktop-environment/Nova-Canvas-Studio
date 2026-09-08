@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "canvas/core/media/video_decoder.hpp"
 #include "canvas/core/project/project.hpp"
@@ -111,6 +112,7 @@ public:
 protected:
     void keyPressEvent(QKeyEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private slots:
     void on_import_media();
@@ -165,6 +167,10 @@ private:
     // edit (set_clip_audio), then refreshes the timeline.
     void update_inspector_audio();
     void apply_inspector_audio();
+    // Live-only waveform feedback for the volume knob: re-renders the selected
+    // clip's timeline spectrum at `vol_db` without committing an edit; the
+    // actual volume command still lands from apply_inspector_audio() on release.
+    void preview_inspector_volume(float vol_db);
     // Locates the selected clip in the sequence; returns its kind/index.
     bool find_selected_clip(canvas::core::Track::Kind& out_kind, std::size_t& out_index,
                             canvas::core::Clip& out_clip) const;
@@ -242,6 +248,10 @@ private:
     int64_t current_frame_ = 0;
     bool has_unsaved_changes_ = false;
     canvas::core::ClipId selected_clip_ = 0;
+    // The full visible selection (ids, incl. linked mates) from the timeline —
+    // PRIMARY clip drives the Visual inspector, the whole set drives mixer
+    // edits (Phase 4): Volume/Pan apply to every resolved audio target.
+    std::vector<canvas::core::ClipId> selected_clip_ids_;
     QDoubleSpinBox* inspector_audio_volume_ = nullptr;
     QDoubleSpinBox* inspector_audio_pan_ = nullptr;
 };

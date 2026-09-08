@@ -153,7 +153,9 @@ void build_inspector_visual(MainWindow& mw, QVBoxLayout* video_layout) {
     // Compressible so the row fits narrow inspector widths / high DPI.
     vc.opacity_slider->setMinimumWidth(0);
     vc.opacity_value = new QLabel(QStringLiteral("1.00"), opacity_row);
-    vc.opacity_value->setStyleSheet(QStringLiteral("color: #E8EAF0; font-size: 11px;"));
+    apply_theme_style(vc.opacity_value, [] {
+        return QStringLiteral("color: %1; font-size: 11px;").arg(css(tokens().ink));
+    });
     opacity_layout->addWidget(vc.opacity_slider, 1);
     opacity_layout->addWidget(vc.opacity_value);
     add_property_row(composite->body_layout(), tr("Opacity"), opacity_row);

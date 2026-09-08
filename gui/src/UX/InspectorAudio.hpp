@@ -31,8 +31,10 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
 void attach_inspector_audio(MainWindow& mw, TimelineWidget* timeline);
 
 // Refreshes the Audio tab's widgets from the selected clip and enables the tab
-// only while an Audio-track clip is selected. Replaces the older
-// MainWindow::update_inspector_audio (Volume/Pan) — call this instead.
+// only while an Audio-track clip is selected. With a multi-clip selection it
+// populates from the FIRST resolved audio target and flags the count in a hint,
+// so Volume/Pan edits (which commit to every target) stay legible. Replaces the
+// older MainWindow::update_inspector_audio (Volume/Pan) — call this instead.
 void update_inspector_audio_full(MainWindow& mw);
 
 // Commits the wired audio-processing controls (pitch/speed/EQ) for the selected

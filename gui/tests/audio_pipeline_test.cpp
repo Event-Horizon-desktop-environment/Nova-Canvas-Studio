@@ -247,12 +247,12 @@ int main() {
               "A: preroll writes exactly the lead");
         h.play(0, 10);
         const uint64_t total = h.sink.written_total_;
-        check(total == static_cast<uint64_t>(3360 + 1440 + 1600 * 7),
-              "A: preroll(3.36k)+catchup(1.44k)+steady(7*1.6k) == 16k frames");
+        check(total == static_cast<uint64_t>(3360 + 1440 + 1600 * 8),
+              "A: preroll(3.36k)+catchup(1.44k)+steady(8*1.6k) == 17.6k frames");
         check(region_matches(h.sink.all_, 0, static_cast<std::size_t>(total) * 2, 0),
-              "A: entire received stream equals source samples [0,16k)");
+              "A: entire received stream equals source samples [0,17.6k)");
         check(h.sink.pending_frames() == static_cast<std::size_t>(total),
-              "A: unfushed device still holds all 16k frames pending");
+              "A: unfushed device still holds all 17.6k frames pending");
     }
 
     // --- B. rewind re-anchors: a second run rewrites the same region ----------
@@ -282,11 +282,11 @@ int main() {
         h.pipe.preroll(0, 70, true);
         h.play(0, 10);
         const uint64_t total = h.sink.written_total_;
-        check(total == static_cast<uint64_t>(16000),
-              "C: trimmed run writes 16k frames (3360+1440+7*1600)");
+        check(total == static_cast<uint64_t>(3360 + 1440 + 1600 * 8),
+              "C: trimmed run writes 17.6k frames (3360+1440+8*1600)");
         const int64_t head_sample = 32 * kPerFrame;  // 51200
         check(region_matches(h.sink.all_, 0, static_cast<std::size_t>(total) * 2, head_sample),
-              "C: trimmed clip serves the TRIM region [51200,67200), not the file start");
+              "C: trimmed clip serves the TRIM region [51200,68800), not the file start");
     }
 
     // --- D. audible scrub grain + media queries ---------------------------------
@@ -306,9 +306,9 @@ int main() {
     {
         Harness h(32, 180);
         h.pipe.rewind(30, true);   // anchor = (32+30)*1600 = 99200
-        h.play(60, 3);             // 3 frames = 4800 base + lead pre-fill (5760 total)
-        check(h.pipe.audible_seq_frame(70) == 34,
-              "E: audible_seq_frame maps audible sample 104960 back to seq 34");
+        h.play(60, 3);             // 3 frames = 4800; zero-latency sink (audible==written)
+        check(h.pipe.audible_seq_frame(70) == 33,
+              "E: audible_seq_frame maps audible sample 104000 (= anchor 99200 + 4800) back to seq 33");
         check(h.pipe.audible_seq_frame(148) == -1,
               "E: nothing audible past the clip end -> -1");
     }

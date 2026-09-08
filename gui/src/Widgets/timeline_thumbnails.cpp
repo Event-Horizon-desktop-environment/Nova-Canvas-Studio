@@ -69,11 +69,7 @@ void TimelineWidget::request_clip_thumbnails() {
                 hi = static_cast<float>(std::clamp(static_cast<double>(item.clip->src_out) * inv, 0.0, 1.0));
             }
             thumbnail_service_->request_waveform(id, it->second.path, static_cast<int>(cw), clip_h,
-                                                 lo, hi,
-                                                 std::clamp(
-                                                     canvas::core::audio_mix::db_to_gain(
-                                                         item.clip->volume_db),
-                                                     0.0f, 1.0f));
+                                                 lo, hi, 1.0f);
             total_requests++;
             continue;
         }
@@ -138,6 +134,11 @@ void TimelineWidget::on_waveform_ready(uint64_t id, const QImage& image) {
         const int ch = std::max(1, static_cast<int>(r.height() - kClipLabelHeight - 4.0));
         item.cells[0].item->setPixmap(QPixmap::fromImage(image).scaled(
             cw, ch, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+        // Render the freshly-set waveform at the clip's COMMITTED volume (a
+        // rebuild re-rendered the pixmap, so this is the point where the
+        // spectrum re-syncs with the gain; live drag updates come from
+        // set_live_clip_gain's apply_waveform_volume_scale instead).
+        apply_waveform_volume_scale(item, static_cast<float>(item.clip->volume_db));
         return;
     }
 }

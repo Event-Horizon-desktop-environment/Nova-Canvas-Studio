@@ -1,5 +1,7 @@
 #include "Widgets/timeline_widget.hpp"
 #include "Logging.hpp"
+#include "UX/theme.hpp"
+#include "timeline_volume_line.hpp"
 
 #include "core/timecode.hpp"
 
@@ -25,6 +27,7 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QSvgRenderer>
+#include <QTransform>
 
 #include <algorithm>
 #include <cmath>
@@ -33,6 +36,7 @@
 namespace canvas::gui {
 
 void TimelineWidget::rebuild_timeline() {
+    const ThemeTokens& t = tokens();
     const auto rebuild_t0 = std::chrono::steady_clock::now();
     // Whole-scene teardown+rebuild. This is the dominant timeline UX cost on
     // every edit/scrub/resize: bytes of scene items reallocated per second is
@@ -56,6 +60,7 @@ void TimelineWidget::rebuild_timeline() {
     timecode_item_ = nullptr;
     // scene_.clear() above deleted the previous pinned ruler/minimap group.
     top_pinned_ = nullptr;
+    chrome_ = nullptr;
     blade_preview_item_ = nullptr;
     snap_indicator_item_ = nullptr;
 
@@ -97,8 +102,20 @@ void TimelineWidget::rebuild_timeline() {
     const double height = std::max(content_height, vp_h) + kVerticalPanTailMin;
 
     scene_.setSceneRect(kSceneMargin, kSceneMargin, width, height);
-    scene_.addRect(QRectF(kSceneMargin, kSceneMargin, width, height), QPen(Qt::NoPen),
-                   QBrush(QColor(0x11, 0x13, 0x1A)));
+
+    // Unpinned scene chrome that scales with the scene rect (full-scene
+    // background, ruler gridlines, header divider) lives in a group at a low z
+    // so clip/track items always paint above it. relayout_scene() re-renders
+    // this group on resize without touching the clip items.
+    chrome_ = new QGraphicsItemGroup();
+    chrome_->setAcceptedMouseButtons(Qt::NoButton);
+    chrome_->setHandlesChildEvents(false);
+    chrome_->setZValue(-1.0);
+    scene_.addItem(chrome_);
+    QGraphicsRectItem* bg = scene_.addRect(
+        QRectF(kSceneMargin, kSceneMargin, width, height), QPen(Qt::NoPen), QBrush(t.surface));
+    bg->setAcceptedMouseButtons(Qt::NoButton);
+    chrome_->addToGroup(bg);
 
     // Ruler + minimap live in a viewport-pinned overlay group: the track content
     // pans underneath while the timecode strip stays glued to the top.
@@ -121,11 +138,28 @@ void TimelineWidget::rebuild_timeline() {
     apply_selection_highlight();
     // Park the channels under the ruler strip and set that as the UP LIMIT: the
     // scroll range keeps the parked value as its top, pulling down sinks
-    // through the whole room below it.
+    // through the whole room below it. When the channel stack is taller than the
+    // viewport the range extends so every channel stays reachable. A rebuild
+    // must NOT stomp the user's scroll: re-park only on a structural change
+    // (channel count / empty->content transition) or while still following the
+    // playhead; plain edits/zoom rebuilds otherwise preserve the scroll.
+    const bool content_transitioned = has_content != last_had_content_;
+    const bool structural = track_count_changed_ || content_transitioned;
+    last_had_content_ = has_content;
     const int park = static_cast<int>(lround(pan_down_room_ + track_v_pad_top_));
-    verticalScrollBar()->setRange(0, std::max(park, 0));
-    verticalScrollBar()->setValue(park);
+    const int reach = std::max(park, static_cast<int>(lround(kSceneMargin + content_height - vp_h)));
+    verticalScrollBar()->setRange(0, std::max(reach, 0));
+    if (structural || follow_playhead_) verticalScrollBar()->setValue(park);
     if (top_pinned_) top_pinned_->setPos(0.0, static_cast<double>(verticalScrollBar()->value()));
+    // Refit the dock only on structural changes: a channel-count change or the
+    // empty->content transition. Track-height drags (rebuild per pixel with the
+    // same channel count / content state) must not resize the dock underneath
+    // the user's drag.
+    if (structural) {
+        track_count_changed_ = false;
+        if (has_content)
+            emit content_height_changed(desired_timeline_height());
+    }
     if (debug_enabled()) {
         QString sel;
         for (const auto id : selection_.ids())
@@ -152,18 +186,136 @@ void TimelineWidget::rebuild_timeline() {
     }
 }
 
+void TimelineWidget::relayout_scene() {
+    // View-only relayout on a pure viewport resize. Unlike rebuild_timeline(),
+    // this recomputes the scene rect and re-renders ONLY the view chrome (scene
+    // background, ruler/minimap/timecode strip, gridlines, divider, playhead).
+    // Clip items, track headers, filmstrip/waveform pixmaps and their pending
+    // thumbnail requests all survive: their geometry is anchored to timeline
+    // coords (frame + track height), never to the viewport size, so a height
+    // change with a clip-heavy timeline is now O(viewport chrome) instead of a
+    // full scene_ teardown + thumbnail re-request.
+    const ThemeTokens& t = tokens();
+    if (!sequence_) return;
+    // The empty-state placeholder is a scene-level rect (not in chrome_), so a
+    // width resize wouldn't re-draw it; an empty timeline is trivially cheap to
+    // fully rebuild anyway.
+    if (!has_timeline_content()) {
+        rebuild_timeline();
+        return;
+    }
+    const auto rl_t0 = std::chrono::steady_clock::now();
+    const double dur_frames = static_cast<double>(sequence_->duration_frames());
+    const double content_end = kSceneMargin + kTrackHeaderWidth + dur_frames / frames_per_pixel_;
+    const double visible_end = kSceneMargin + viewport()->width();
+    const double width = std::max(content_end, visible_end) - kSceneMargin + 400.0;
+    const int v_count = sequence_ ? static_cast<int>(sequence_->video_tracks.size()) : 1;
+    const int a_count = sequence_ ? static_cast<int>(sequence_->audio_tracks.size()) : 0;
+    const bool has_content = has_timeline_content();
+    const double content_height = has_content
+        ? tracks_content_height(v_count, a_count)
+        : (tracks_stack_top() - static_cast<double>(kSceneMargin)) + kEmptyStateHeight
+              + track_v_pad_bottom_;
+    const double vp_h = static_cast<double>(viewport()->height());
+    pan_down_room_ = kPanDownRoomMin;
+    const double height = std::max(content_height, vp_h) + kVerticalPanTailMin;
+
+    scene_.setSceneRect(kSceneMargin, kSceneMargin, width, height);
+
+    // Tear down ONLY the chrome (background + pinned strip + gridlines), leaving
+    // every clip/track/filmstrip item and its decoded pixmaps in the scene.
+    if (chrome_) {
+        scene_.removeItem(chrome_);
+        delete chrome_;
+        chrome_ = nullptr;
+    }
+    if (top_pinned_) {
+        scene_.removeItem(top_pinned_);
+        delete top_pinned_;
+        top_pinned_ = nullptr;
+    }
+    timecode_item_ = nullptr;
+    minimap_background_ = nullptr;
+    minimap_viewport_ = nullptr;
+    if (selection_rect_) {
+        scene_.removeItem(selection_rect_);
+        delete selection_rect_;
+        selection_rect_ = nullptr;
+    }
+
+    chrome_ = new QGraphicsItemGroup();
+    chrome_->setAcceptedMouseButtons(Qt::NoButton);
+    chrome_->setHandlesChildEvents(false);
+    chrome_->setZValue(-1.0);
+    scene_.addItem(chrome_);
+    QGraphicsRectItem* bg = scene_.addRect(
+        QRectF(kSceneMargin, kSceneMargin, width, height), QPen(Qt::NoPen), QBrush(t.surface));
+    bg->setAcceptedMouseButtons(Qt::NoButton);
+    chrome_->addToGroup(bg);
+
+    top_pinned_ = new QGraphicsItemGroup();
+    top_pinned_->setAcceptedMouseButtons(Qt::NoButton);
+    top_pinned_->setHandlesChildEvents(false);
+    top_pinned_->setZValue(400);
+    scene_.addItem(top_pinned_);
+
+    draw_timecode_bar();
+    draw_minimap();
+    draw_ruler();
+
+    // Playhead survived the chrome teardown; re-anchor it to the new scene rect
+    // and re-park the channels under the ruler strip (reach extends to keep
+    // every channel scrollable when the stack is taller than the viewport).
+    // The re-park is follow-only: a pure resize must not stomp the vertical
+    // scroll of a user who has scrolled away.
+    update_playhead_position(playhead_frame_);
+    const int park = static_cast<int>(lround(pan_down_room_ + track_v_pad_top_));
+    const int reach = std::max(park, static_cast<int>(lround(kSceneMargin + content_height - vp_h)));
+    verticalScrollBar()->setRange(0, std::max(reach, 0));
+    if (follow_playhead_) verticalScrollBar()->setValue(park);
+    if (top_pinned_) top_pinned_->setPos(0.0, static_cast<double>(verticalScrollBar()->value()));
+
+    // Per-relayout cost of the chrome-only resize fast path. This is the number
+    // to watch when a dock/viewer resize feels sticky: if this stays low but
+    // [ui:timeline] resize is high, the fat is elsewhere in resizeEvent (or a
+    // full rebuild is sneaking back in).
+    const double rl_ms = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - rl_t0).count();
+    static auto s_rl_at = std::chrono::steady_clock::now();
+    static int s_rl_n = 0;
+    static double s_rl_ms = 0.0, s_max_ms = 0.0;
+    ++s_rl_n;
+    s_rl_ms += rl_ms;
+    s_max_ms = std::max(s_max_ms, rl_ms);
+    const auto rl_now = std::chrono::steady_clock::now();
+    if (s_rl_n == 1 || rl_now - s_rl_at >= std::chrono::seconds(1)) {
+        s_rl_at = rl_now;
+        qWarning() << "[ui:timeline] relayout ms_avg=" << QString::number(s_rl_ms / s_rl_n, 'f', 2)
+                   << "ms_last=" << QString::number(rl_ms, 'f', 2)
+                   << "ms_max=" << QString::number(s_max_ms, 'f', 2)
+                   << "relayouts/s=" << s_rl_n
+                   << "items=" << scene_.items().size()
+                   << "scene_w=" << QString::number(scene_.sceneRect().width(), 'f', 0)
+                   << "scene_h=" << QString::number(scene_.sceneRect().height(), 'f', 0);
+        s_rl_n = 0;
+        s_rl_ms = 0.0;
+        s_max_ms = 0.0;
+    }
+}
+
 void TimelineWidget::draw_timecode_bar() {
+    const ThemeTokens& t = tokens();
     // Pinned "current time" bar: a persistent playhead readout at the very top of
     // the timeline (above the minimap), refreshed whenever the playhead moves.
     auto* bg = scene_.addRect(
         QRectF(kSceneMargin, 0.0, scene_.sceneRect().width(), kTimecodeBarHeight),
-        QPen(QColor(0x2A, 0x2F, 0x3C)), QBrush(QColor(0x1A, 0x1D, 0x27)));
+        QPen(t.border), QBrush(t.surface_raised));
     bg->setAcceptedMouseButtons(Qt::NoButton);
     top_pinned_->addToGroup(bg);
 
     timecode_item_ = scene_.addText(timecode(playhead_frame_, fps_));
     timecode_item_->setAcceptedMouseButtons(Qt::NoButton);
-    timecode_item_->setDefaultTextColor(QColor(0xE8, 0xEC, 0xF2));
+    timecode_item_->setDefaultTextColor(t.ink);
     QFont f = timecode_item_->font();
     f.setFamily(QStringLiteral("Monospace"));
     f.setBold(true);
@@ -174,12 +326,13 @@ void TimelineWidget::draw_timecode_bar() {
 }
 
 void TimelineWidget::draw_minimap() {
+    const ThemeTokens& t = tokens();
     const double left = kSceneMargin;
     const double top = kTimecodeBarHeight + kSceneMargin;
     const double width = scene_.sceneRect().width();
     minimap_background_ = scene_.addRect(
         QRectF(left, top, width, kMinimapHeight),
-        QPen(QColor(0x2A, 0x2F, 0x3C)), QBrush(QColor(0x1A, 0x1D, 0x27)));
+        QPen(t.border), QBrush(t.surface_raised));
     if (top_pinned_) {
         minimap_background_->setAcceptedMouseButtons(Qt::NoButton);
         top_pinned_->addToGroup(minimap_background_);
@@ -194,7 +347,7 @@ void TimelineWidget::draw_minimap() {
             const double cw = std::max(1.0, strip_w * clip.duration() / dur);
             const double cx = left + kTrackHeaderWidth + strip_w * (clip.tl_in / static_cast<double>(dur));
             auto* mini = scene_.addRect(QRectF(cx, top + 2, cw, kMinimapHeight - 4), QPen(Qt::NoPen),
-                                        QBrush(QColor(0x3B, 0x82, 0xF6)));
+                                        QBrush(t.accent));
             if (top_pinned_) {
                 mini->setAcceptedMouseButtons(Qt::NoButton);
                 top_pinned_->addToGroup(mini);
@@ -208,7 +361,7 @@ void TimelineWidget::draw_minimap() {
     const double vp_w = std::max(4.0, strip_w * (scene_visible_frames / dur));
     minimap_viewport_ = scene_.addRect(
         QRectF(vp_x, top, std::min(vp_w, width - kTrackHeaderWidth - vp_x), kMinimapHeight),
-        QPen(QColor(0x6F, 0xB0, 0xFF)), QBrush(QColor(0x3B, 0x82, 0xF6, 70)));
+        QPen(t.playhead), QBrush(t.playhead_soft));
     minimap_viewport_->setZValue(50);
     if (top_pinned_) {
         minimap_viewport_->setAcceptedMouseButtons(Qt::NoButton);
@@ -234,65 +387,164 @@ void TimelineWidget::update_minimap_viewport() {
                                       kMinimapHeight));
 }
 
+namespace {
+
+// Shared ruler tick geometry: minor ticks land every `step` frames (~8-18px on
+// screen at the current zoom); every `major_mod`-th tick is a major tick with a
+// full-height gridline + timecode label (~90px label spacing so they never
+// collide). Both procedural painters below use this so gridlines and ruler
+// marks can never drift from each other.
+void compute_ruler_steps(const double fpp, double& step, int& major_mod) {
+    step = 1.0;
+    while (step / fpp < 8.0) step *= 2.0;
+    while (step / fpp > 18.0) step /= 2.0;
+    major_mod = std::max(1, static_cast<int>(std::ceil(90.0 / (step / fpp))));
+}
+
+}  // namespace
+
+class TimelineWidget::RulerMarksItem : public QGraphicsItem {
+public:
+    explicit RulerMarksItem(TimelineWidget* owner) : owner_(owner) {
+        setAcceptedMouseButtons(Qt::NoButton);
+        setHandlesChildEvents(false);
+    }
+
+    QRectF boundingRect() const override {
+        const double top = kMinimapHeight + kSceneMargin
+                           + kTimecodeBarHeight;
+        return QRectF(kSceneMargin, top,
+                      owner_->scene_.sceneRect().width() - kSceneMargin,
+                      kRulerHeight);
+    }
+
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget*) override {
+        if (owner_->frames_per_pixel_ <= 0.0) return;
+        // Draw ONLY the ticks/labels inside the exposed (visible) x-range. At
+        // 100% zoom a ~2k-px viewport exposes ~125 ticks — not the ~10k ticks
+        // that a 125k-px scene would otherwise allocate as scene items.
+        double step = 0.0;
+        int major_mod = 1;
+        compute_ruler_steps(owner_->frames_per_pixel_, step, major_mod);
+        const double top = kMinimapHeight + kSceneMargin
+                           + kTimecodeBarHeight;
+        const double x0 = kSceneMargin + kTrackHeaderWidth;
+        const double fpp = owner_->frames_per_pixel_;
+        const double left = std::max(option->exposedRect.left(), x0);
+        const double right = std::min(option->exposedRect.right(),
+                                      owner_->scene_.sceneRect().right());
+        if (right <= left) return;
+
+        const ThemeTokens& t = tokens();
+        QColor major_color = t.ink_muted; major_color.setAlpha(170);
+        const QPen major_pen(major_color);
+        QColor minor_color = t.ink_muted; minor_color.setAlpha(90);
+        const QPen minor_pen(minor_color);
+        QFont label_font;
+        label_font.setPointSizeF(8);
+
+        // First tick index whose x >= exposed left.
+        const double i_max = (right - x0) * fpp / step;
+        int64_t i = std::max<int64_t>(
+            0, static_cast<int64_t>(std::ceil((left - x0) * fpp / step)));
+        for (; i <= static_cast<int64_t>(i_max) + 1; ++i) {
+            const double x = x0 + i * step / fpp;
+            if (x > right) break;
+            const bool major = (i % major_mod) == 0;
+            if (major) {
+                painter->setPen(major_pen);
+                painter->drawLine(QLineF(x, top, x, top + (i == 0 ? 16.0 : 12.0)));
+                painter->setPen(t.ink_muted);
+                painter->setFont(label_font);
+                // Vertically center the label in the gap between the longest
+                // major tick (top+16) and the minor ticks (top+22): the clean
+                // band with no tick marks, matching where the numbers used to
+                // read against the old ruler padding.
+                const QString label = timecode(static_cast<int64_t>(i * step), owner_->fps_);
+                const double gap_top = top + 16.0;
+                const double gap_bot = top + kRulerHeight - 8.0;
+                const double gap_cy = (gap_top + gap_bot) * 0.5;
+                const double label_h = QFontMetricsF(label_font).height();
+                painter->drawText(QPointF(x + 2, gap_cy - label_h * 0.5), label);
+            } else {
+                painter->setPen(minor_pen);
+                painter->drawLine(QLineF(x, top + kRulerHeight - 8, x,
+                                         top + kRulerHeight));
+            }
+        }
+    }
+
+private:
+    TimelineWidget* owner_;
+};
+
+class TimelineWidget::GridlinesItem : public QGraphicsItem {
+public:
+    explicit GridlinesItem(TimelineWidget* owner) : owner_(owner) {
+        setAcceptedMouseButtons(Qt::NoButton);
+        setHandlesChildEvents(false);
+    }
+
+    QRectF boundingRect() const override { return owner_->scene_.sceneRect(); }
+
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget*) override {
+        if (owner_->frames_per_pixel_ <= 0.0) return;
+        double step = 0.0;
+        int major_mod = 1;
+        compute_ruler_steps(owner_->frames_per_pixel_, step, major_mod);
+        const double top = kMinimapHeight + kSceneMargin
+                           + kTimecodeBarHeight;
+        const double bottom = owner_->scene_.sceneRect().bottom();
+        const double x0 = kSceneMargin + kTrackHeaderWidth;
+        const double fpp = owner_->frames_per_pixel_;
+        const double left = std::max(option->exposedRect.left(), x0);
+        const double right = std::min(option->exposedRect.right(),
+                                      owner_->scene_.sceneRect().right());
+        if (right <= left) return;
+
+        const ThemeTokens& t = tokens();
+        QColor grid_color = t.border; grid_color.setAlpha(110);
+        const QPen grid_pen(grid_color);
+        painter->setPen(grid_pen);
+        const double i_max = (right - x0) * fpp / step;
+        int64_t i = std::max<int64_t>(
+            0, static_cast<int64_t>(std::ceil((left - x0) * fpp / step)));
+        for (; i <= static_cast<int64_t>(i_max) + 1; ++i) {
+            const double x = x0 + i * step / fpp;
+            if (x > right) break;
+            if (i % major_mod) continue;
+            painter->drawLine(QLineF(x, top, x, bottom));
+        }
+    }
+
+private:
+    TimelineWidget* owner_;
+};
+
 void TimelineWidget::draw_ruler() {
+    const ThemeTokens& t = tokens();
     const double top = kMinimapHeight + kSceneMargin + kTimecodeBarHeight;
-    const double scene_bottom = scene_.sceneRect().bottom();
     auto* bg = scene_.addRect(
         QRectF(kSceneMargin, top, scene_.sceneRect().width(), kRulerHeight),
-        QPen(QColor(0x2A, 0x2F, 0x3C)), QBrush(QColor(0x1A, 0x1D, 0x27)));
+        QPen(t.border), QBrush(t.surface_raised));
     if (top_pinned_) {
         bg->setAcceptedMouseButtons(Qt::NoButton);
         top_pinned_->addToGroup(bg);
     }
 
-    const double fpp = frames_per_pixel_;
-
-    // Minor ticks (short marks inside the ruler only), spaced ~8-18px apart.
-    double step = 1.0;
-    while (step / fpp < 8.0) step *= 2.0;
-    while (step / fpp > 18.0) step /= 2.0;
-
-    // Major ticks (full-height gridline + timecode label) spaced so labels
-    // don't collide (~90px on screen).
-    const int major_mod = std::max(1, static_cast<int>(std::ceil(90.0 / (step / fpp))));
-
-    const double left = scene_.sceneRect().left();
-    const double right = scene_.sceneRect().right();
-    const QPen grid_pen(QColor(0x2A, 0x2F, 0x3C, 110));
-    const QPen minor_pen(QColor(0x9A, 0xA0, 0xB0, 90));
-    const QPen major_pen(QColor(0x9A, 0xA0, 0xB0, 170));
-    int tick_i = 0;
-    for (double frame = 0.0; left + kTrackHeaderWidth + frame / fpp <= right; frame += step, ++tick_i) {
-        const double x = kSceneMargin + kTrackHeaderWidth + frame / fpp;
-        const bool major = (tick_i % major_mod) == 0;
-        if (major) {
-            // Full-height gridline down through every track — lives in the SCENE
-            // (unpinned) so it never shifts with vertical pannin.
-            scene_.addLine(QLineF(x, top, x, scene_bottom), grid_pen);
-            // The ruler's own tick + timecode label are pinned with the strip.
-            auto* tick = scene_.addLine(QLineF(x, top, x, top + (frame == 0.0 ? 16.0 : 12.0)), major_pen);
-            if (top_pinned_) {
-                tick->setAcceptedMouseButtons(Qt::NoButton);
-                top_pinned_->addToGroup(tick);
-            }
-            auto* label = scene_.addText(timecode(static_cast<int64_t>(frame), fps_));
-            label->setDefaultTextColor(QColor(0x9A, 0xA0, 0xB0));
-            QFont f = label->font();
-            f.setPointSizeF(8);
-            label->setFont(f);
-            label->setPos(QPointF(x + 2, top + 2));
-            if (top_pinned_) {
-                label->setAcceptedMouseButtons(Qt::NoButton);
-                top_pinned_->addToGroup(label);
-            }
-        } else {
-            // Small minor tick in the ruler only (no gridline).
-            auto* tick = scene_.addLine(QLineF(x, top + kRulerHeight - 8, x, top + kRulerHeight), minor_pen);
-            if (top_pinned_) {
-                tick->setAcceptedMouseButtons(Qt::NoButton);
-                top_pinned_->addToGroup(tick);
-            }
-        }
+    // Procedural chrome: one item paints the pinned ruler ticks + timecode
+    // labels, one paints the full-height major gridlines behind the tracks.
+    // Both repaint only the exposed x-range (see compute_ruler_steps), so these
+    // two items replace the ~10k+ QGraphicsLineItem/QGraphicsTextItem the old
+    // per-tick loop allocated across the whole scene width on every rebuild AND
+    // every relayout — the root of "resizing is slow" on wide timelines.
+    if (top_pinned_) {
+        auto* marks = new RulerMarksItem(this);
+        top_pinned_->addToGroup(marks);
+    }
+    if (chrome_) {
+        auto* grids = new GridlinesItem(this);
+        chrome_->addToGroup(grids);
     }
 
     // Bookmarks (Mark > Add Marker, M): small amber diamonds in the ruler.
@@ -300,7 +552,7 @@ void TimelineWidget::draw_ruler() {
         const QPen bk_pen(QColor(0xFF, 0xC1, 0x07), 1);
         const QBrush bk_brush(QColor(0xFF, 0xC1, 0x07));
         for (const auto& b : sequence_->bookmarks) {
-            const double bx = kSceneMargin + kTrackHeaderWidth + b.frame / fpp;
+            const double bx = kSceneMargin + kTrackHeaderWidth + b.frame / frames_per_pixel_;
             auto* bk = scene_.addRect(QRectF(bx - 3, top + kRulerHeight - 14, 6, 6),
                                       bk_pen, bk_brush);
             if (top_pinned_) {
@@ -311,9 +563,11 @@ void TimelineWidget::draw_ruler() {
     }
 
     // Continuous vertical divider between the header column and the scrollable
-    // track area, running through every track (unpinned).
-    scene_.addLine(QLineF(kSceneMargin + kTrackHeaderWidth, top, kSceneMargin + kTrackHeaderWidth, scene_bottom),
-                   QPen(QColor(0x2A, 0x2F, 0x3C)));
+    // track area, running through every track (unpinned, in the chrome group).
+    auto* divider = scene_.addLine(
+        QLineF(kSceneMargin + kTrackHeaderWidth, top, kSceneMargin + kTrackHeaderWidth, scene_.sceneRect().bottom()),
+        QPen(t.border));
+    if (chrome_) chrome_->addToGroup(divider);
 }
 
 namespace {
@@ -382,13 +636,14 @@ struct TrackBadge {
 }  // namespace
 
 void TimelineWidget::draw_tracks() {
+    const ThemeTokens& t = tokens();
     const int v_count = sequence_ ? static_cast<int>(sequence_->video_tracks.size()) : 1;
     const int a_count = sequence_ ? static_cast<int>(sequence_->audio_tracks.size()) : 0;
 
     const double left = kSceneMargin;
-    constexpr QColor kIconColor(0x9A, 0xA0, 0xB0);       // muted ink for icons
-    constexpr QColor kIconColorDim(0x5F, 0x65, 0x77);    // faint ink for dim icons
-    constexpr QColor kIconAccent(0x4C, 0x92, 0xFF);      // active-state ink (lock/mute/solo)
+    const QColor kIconColor = t.ink_muted;        // muted ink for icons
+    const QColor kIconColorDim = t.ink_faint;     // faint ink for dim icons
+    const QColor kIconAccent = t.accent_text;     // active-state ink (lock/mute/solo)
 
     // With no clips yet the header column and rows stay hidden; a single
     // placeholder panel explains the empty state instead.
@@ -404,10 +659,10 @@ void TimelineWidget::draw_tracks() {
     const double h_top = tracks_stack_top();
     const double h_bot = tracks_stack_bottom(v_count, a_count);
     scene_.addRect(QRectF(left, h_top, kTrackHeaderWidth, h_bot - h_top),
-                   QPen(Qt::NoPen), QBrush(QColor(0x16, 0x1A, 0x22)))->setZValue(0);
+                   QPen(Qt::NoPen), QBrush(t.surface_low))->setZValue(0);
     scene_.addLine(QLineF(left + kTrackHeaderWidth, h_top,
                           left + kTrackHeaderWidth, h_bot),
-                   QPen(QColor(0x2A, 0x2F, 0x3C)))->setZValue(0);
+                   QPen(t.border))->setZValue(0);
 
     for (int i = 0; i < v_count; ++i) {
         const double y = track_top(i, v_count);
@@ -423,13 +678,13 @@ void TimelineWidget::draw_tracks() {
         // Semi-rounded pill, auto-sized to the bold label and text-centered.
         const QString badge_text = tname.isEmpty() ? QStringLiteral("V%1").arg(i + 1) : tname;
         const double badge_top = full ? y + 8.0 : y + (th - 15.0) / 2.0;
-        TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 8, badge_top), QColor(0x3B, 0x82, 0xF6));
+        TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 8, badge_top), t.accent);
         auto* badge_pill = tb.pill;
         auto* badge = tb.text;
 
         // Thin full-height accent bar on the far-left edge (per-track-type code).
         scene_.addRect(QRectF(left, y + 1, 3, th - 2), QPen(Qt::NoPen),
-                       QBrush(QColor(0x3B, 0x82, 0xF6)))->setZValue(1);
+                       QBrush(t.accent))->setZValue(1);
 
         // Reorder / lock / view-mode icon row, right-aligned in the header.
         QGraphicsPixmapItem* lock_icon = nullptr;
@@ -455,7 +710,7 @@ void TimelineWidget::draw_tracks() {
         QGraphicsTextItem* label = nullptr;
         if (full && th >= 56.0) {
             label = scene_.addText(QStringLiteral("Video %1").arg(i + 1));
-            label->setDefaultTextColor(QColor(0x9A, 0xA0, 0xB0));
+            label->setDefaultTextColor(t.ink_muted);
             QFont lf = label->font();
             lf.setPointSizeF(9);
             lf.setBold(true);
@@ -469,7 +724,7 @@ void TimelineWidget::draw_tracks() {
         QGraphicsTextItem* count = nullptr;
         if (full) {
             count = scene_.addText(QStringLiteral("%1 Clips").arg(sequence_->video_tracks[i].clips.size()));
-            count->setDefaultTextColor(QColor(0x5F, 0x65, 0x77));
+            count->setDefaultTextColor(t.ink_faint);
             QFont cf = count->font();
             cf.setPointSizeF(8);
             count->setFont(cf);
@@ -507,31 +762,30 @@ void TimelineWidget::draw_tracks() {
             // stroke is inset by pen/2 so its outer edge lands on the clip's edge.
             auto* shell = scene_.addPath(
                 rounded_rect_path(QRectF(0, 0, cw, ch), 6),
-                QPen(Qt::NoPen), QBrush(QColor(0x2A, 0x35, 0x40)));
+                QPen(Qt::NoPen), QBrush(t.clip_video));
             shell->setPos(QPointF(cx, cy));
             shell->setAcceptedMouseButtons(Qt::NoButton);
             auto* outline = scene_.addPath(
                 rounded_rect_path(QRectF(kClipOutlineW / 2.0, kClipOutlineW / 2.0,
                                          cw - kClipOutlineW, ch - kClipOutlineW), 6),
-                QPen(QColor(0x4C, 0x92, 0xFF), kClipOutlineW), QBrush(Qt::NoBrush));
+                QPen(t.accent_hover, kClipOutlineW), QBrush(Qt::NoBrush));
             outline->setPos(QPointF(cx, cy));
             outline->setZValue(2.0);
             outline->setAcceptedMouseButtons(Qt::NoButton);
 
             // Semi-rounded label bar: flat muted blue strip with link icon + filename,
             // hugging the bottom of the clip.
-            const QColor kLabelBlue(0x3D, 0x5A, 0x73);
             auto* label_bar = scene_.addPath(
                 rounded_rect_path(QRectF(0, body_h, cw, label_h), 6),
-                QPen(Qt::NoPen), QBrush(kLabelBlue));
+                QPen(Qt::NoPen), QBrush(t.clip_label));
             label_bar->setPos(QPointF(cx, cy));
             label_bar->setZValue(0);
 
             QGraphicsTextItem* text = nullptr;
             if (cw > 60.0) {
-                add_icon(scene_, QStringLiteral("link"), cx + 4, cy + body_h + 3.5, QColor(0xD0, 0xD8, 0xDF), 11);
+                add_icon(scene_, QStringLiteral("link"), cx + 4, cy + body_h + 3.5, t.ink_muted, 11);
                 text = scene_.addText(QString::fromStdString(clip.name));
-                text->setDefaultTextColor(QColor(0xE3, 0xE8, 0xED));
+                text->setDefaultTextColor(t.ink);
                 QFont tf = text->font();
                 tf.setPointSizeF(7.5);
                 text->setFont(tf);
@@ -648,7 +902,7 @@ void TimelineWidget::draw_tracks() {
         QGraphicsTextItem* label = nullptr;
         if (full && th >= 56.0) {
             label = scene_.addText(QStringLiteral("Audio %1").arg(i + 1));
-            label->setDefaultTextColor(QColor(0x9A, 0xA0, 0xB0));
+            label->setDefaultTextColor(t.ink_muted);
             QFont lf = label->font();
             lf.setPointSizeF(9);
             lf.setBold(true);
@@ -661,7 +915,7 @@ void TimelineWidget::draw_tracks() {
         QGraphicsTextItem* count = nullptr;
         if (full) {
             count = scene_.addText(QStringLiteral("%1 Clips").arg(sequence_->audio_tracks[i].clips.size()));
-            count->setDefaultTextColor(QColor(0x5F, 0x65, 0x77));
+            count->setDefaultTextColor(t.ink_faint);
             QFont cf = count->font();
             cf.setPointSizeF(8);
             count->setFont(cf);
@@ -672,7 +926,7 @@ void TimelineWidget::draw_tracks() {
         QGraphicsTextItem* channel_badge = nullptr;
         if (full) {
             channel_badge = scene_.addText(QStringLiteral("2.0"));
-            channel_badge->setDefaultTextColor(QColor(0x5F, 0x65, 0x77));
+            channel_badge->setDefaultTextColor(t.ink_faint);
             QFont chf = channel_badge->font();
             chf.setPointSizeF(7);
             channel_badge->setFont(chf);
@@ -712,13 +966,13 @@ void TimelineWidget::draw_tracks() {
             // inset by pen/2 so it never overhangs into an abutting clip.
             auto* shell = scene_.addPath(
                 rounded_rect_path(QRectF(0, 0, cw, ch), 6),
-                QPen(Qt::NoPen), QBrush(QColor(0x5A, 0x6B, 0x4A)));
+                QPen(Qt::NoPen), QBrush(t.clip_audio));
             shell->setPos(QPointF(cx, cy));
             shell->setAcceptedMouseButtons(Qt::NoButton);
             auto* outline = scene_.addPath(
                 rounded_rect_path(QRectF(kClipOutlineW / 2.0, kClipOutlineW / 2.0,
                                          cw - kClipOutlineW, ch - kClipOutlineW), 6),
-                QPen(QColor(0x4C, 0x92, 0xFF), kClipOutlineW), QBrush(Qt::NoBrush));
+                QPen(t.accent_hover, kClipOutlineW), QBrush(Qt::NoBrush));
             outline->setPos(QPointF(cx, cy));
             outline->setZValue(2.0);
             outline->setAcceptedMouseButtons(Qt::NoButton);
@@ -726,7 +980,7 @@ void TimelineWidget::draw_tracks() {
             QGraphicsTextItem* text = nullptr;
             if (cw > 60.0) {
                 text = scene_.addText(QString::fromStdString(clip.name));
-                text->setDefaultTextColor(QColor(0xE3, 0xE8, 0xED));
+                text->setDefaultTextColor(t.ink);
                 QFont tf = text->font();
                 tf.setPointSizeF(7.5);
                 text->setFont(tf);
@@ -738,6 +992,20 @@ void TimelineWidget::draw_tracks() {
             wf->setPos(cx + 2, cy + 2);
             wf->setZValue(1);
             wf->setAcceptedMouseButtons(Qt::NoButton);
+
+            // Persistent audio volume line (Phase 5): a luminous hairline at the
+            // clip's current gain. It doubles as a drag handle (see the volume
+            // drag session in timeline_interaction) and a readout. The travel
+            // box spans the FULL clip body (2px inset like the waveform top),
+            // so the lowest volume lands on the clip's very bottom edge — not
+            // stopping above the label strip where the name is drawn.
+            const double vol_y0 = cy + 2.0;  // matches the waveform pixmap's box
+            const double vol_h = std::max(1.0, ch - 4.0);
+            const double vol_y = vol_y0 + timeline_volume_line::volume_line_y(clip.volume_db, vol_h);
+            auto* vol = scene_.addLine(QLineF(cx + 2.5, vol_y, cx + cw - 2.5, vol_y),
+                                       QPen(t.playhead, 2.0));
+            vol->setZValue(1.5);
+            vol->setAcceptedMouseButtons(Qt::NoButton);
 
             // AUDIO fade indicator: audio transitions get their own teal badge so a
             // linked video+audio pair carries the indicator on BOTH clips.
@@ -762,11 +1030,14 @@ void TimelineWidget::draw_tracks() {
             item.clip = &clip;
             item.track_index = v_count + track_index;
             item.track_kind = canvas::core::Track::Kind::Audio;
+            item.volume_line = vol;
+            item.volume_y0 = vol_y0;
+            item.volume_h = vol_h;
 
             // Clip every child to the clip's own rect (see video branch).
             auto* clip_group = new ClipClipGroup(QRectF(cx, cy, cw, ch));
             scene_.addItem(clip_group);
-            for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{rect, shell, outline, text})
+            for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{rect, shell, outline, text, vol})
                 if (child) child->setParentItem(clip_group);
             for (const auto& cell : item.cells)
                 if (cell.item) cell.item->setParentItem(clip_group);
@@ -778,7 +1049,7 @@ void TimelineWidget::draw_tracks() {
     // hairline below V1 is skipped: the Video/Audio divider band takes over.
     const int total_t = v_count + a_count;
     const double right_edge = scene_.sceneRect().right();
-    const QPen row_pen(QColor(0x23, 0x28, 0x33));
+    const QPen row_pen(t.border_soft);
     for (int t = 0; t < total_t; ++t) {
         if (t == v_count - 1 && a_count > 0) continue;  // video/audio boundary
         const double bottom = track_top(t, v_count) + track_height(t, v_count);
@@ -794,20 +1065,21 @@ void TimelineWidget::draw_tracks() {
         const double band_bot = edge_y(v_count + 1, v_count, a_count);
         const double band_w = std::max(0.0, right_edge - left);
         scene_.addRect(QRectF(left, band_top, band_w, band_bot - band_top),
-                       QPen(Qt::NoPen), QBrush(QColor(0x14, 0x17, 0x1F)))->setZValue(0);
+                       QPen(Qt::NoPen), QBrush(t.surface_low))->setZValue(0);
         const double mid = (band_top + band_bot) / 2.0;
         scene_.addLine(QLineF(left, mid - 1, right_edge, mid - 1),
-                       QPen(QColor(0x4C, 0x92, 0xFF), 2.0))->setZValue(1);
+                       QPen(t.accent, 2.0))->setZValue(1);
+        QColor grip_pen_c = t.accent; grip_pen_c.setAlpha(150);
         auto* grip = scene_.addRect(QRectF(left + (kTrackHeaderWidth - 34.0) / 2.0,
                                            mid - kResizeGrabHalf, 34.0, 2.0 * kResizeGrabHalf),
-                                    QPen(QColor(0x4C, 0x92, 0xFF, 150)),
-                                    QBrush(QColor(0x16, 0x1A, 0x22)));
+                                    QPen(grip_pen_c),
+                                    QBrush(t.surface_low));
         grip->setZValue(2);
         grip->setAcceptedMouseButtons(Qt::NoButton);
         // Notch tick at the exact center of the band's grab zone.
         scene_.addLine(QLineF(left + kTrackHeaderWidth / 2.0, mid - 3,
                               left + kTrackHeaderWidth / 2.0, mid + 3),
-                       QPen(QColor(0x4C, 0x92, 0xFF, 150)))->setZValue(3);
+                       QPen(grip_pen_c))->setZValue(3);
     }
 }
 
@@ -821,15 +1093,16 @@ bool TimelineWidget::has_timeline_content() const {
 }
 
 void TimelineWidget::draw_empty_state() {
+    const ThemeTokens& t = tokens();
     const double x = kSceneMargin;
     const double top = tracks_stack_top();
     const double w = std::max(0.0, scene_.sceneRect().right() - x);
 
     scene_.addRect(QRectF(x, top, w, kEmptyStateHeight),
-                   QPen(QColor(0x2A, 0x2F, 0x3C)), QBrush(QColor(0x12, 0x15, 0x1C)));
+                   QPen(t.border), QBrush(t.surface_low));
 
     auto* title = scene_.addText(tr("Drag video or audio clips here to start"));
-    title->setDefaultTextColor(QColor(0x6B, 0x72, 0x85));
+    title->setDefaultTextColor(t.ink_muted);
     QFont tf = title->font();
     tf.setPointSizeF(10);
     tf.setBold(true);
@@ -839,7 +1112,7 @@ void TimelineWidget::draw_empty_state() {
 
     auto* hint = scene_.addText(
         tr("Drop clips from the Media Pool into the timeline, or import a file"));
-    hint->setDefaultTextColor(QColor(0x4A, 0x50, 0x60));
+    hint->setDefaultTextColor(t.ink_faint);
     QFont sf = hint->font();
     sf.setPointSizeF(8);
     hint->setFont(sf);
@@ -852,16 +1125,17 @@ void TimelineWidget::refresh_transition_bubble(TransitionBubble& b, int64_t dura
     // Anchored to the cut (spanning both clips) or the clip's IN/OUT edge;
     // no duration text on the canvas — the pill shape carries the info.
     if (!b.pill) return;
+    const ThemeTokens& t = tokens();
     const double w = std::round(std::max(44.0, duration_frames / frames_per_pixel_));
     const double bx = kSceneMargin + kTrackHeaderWidth + b.frame / frames_per_pixel_;
     const double x = std::round(b.cut ? bx - w / 2.0 : (b.in_edge ? bx : bx - w));
     const QRectF r(x, std::round(b.y), w, std::round(b.h));
 
     b.pill->setPath(rounded_rect_path(r, 6.0));
-    b.pill->setPen(QPen(QColor(255, 255, 255, 255), 1.8));
-    // Faint frost fill — nearly clear white, just enough tint to blur softly
-    // behind the crisp outline while still letting the clip thumbnails read.
-    b.pill->setBrush(QColor(255, 255, 255, 28));
+    b.pill->setPen(QPen(t.ink, 1.8));
+    // Faint frost fill — nearly clear, just enough tint to soften the pill's
+    // edge while still letting the clip thumbnails read behind it.
+    b.pill->setBrush(t.state_hover);
     b.hit = r;
 }
 
@@ -926,6 +1200,7 @@ void TimelineWidget::add_transition_bubbles() {
                 b.cut = (bn.left != nullptr && bn.right != nullptr);
                 b.clip_id = bn.left ? bn.left->id : bn.right->id;
                 b.b_clip_id = b.cut ? bn.right->id : 0;
+                b.dur = bn.dur;
 
                 auto* pill = scene_.addPath(QPainterPath());
                 pill->setZValue(50);
@@ -983,6 +1258,76 @@ void TimelineWidget::add_transition_bubbles() {
     }
 }
 
+void TimelineWidget::shift_transition_bubbles(
+    const std::unordered_set<canvas::core::ClipId>& dragging) {
+    const double left_edge = kSceneMargin + kTrackHeaderWidth;
+    for (auto& b : transition_bubbles_) {
+        canvas::core::ClipId anchor = b.clip_id;
+        bool from_left = true;
+        if (!dragging.count(anchor)) {
+            if (b.cut && b.b_clip_id != 0 && dragging.count(b.b_clip_id)) {
+                anchor = b.b_clip_id;
+                from_left = false;
+            } else {
+                continue;
+            }
+        }
+        const ClipItem* item = find_clip_item(anchor);
+        if (!item || !item->rect) continue;
+        const double x = item->rect->scenePos().x();
+        const int64_t cur_in =
+            static_cast<int64_t>(std::llround((x - left_edge) * frames_per_pixel_));
+        if (from_left && !b.in_edge && !b.cut) {
+            // Single out-edge: pill hugs the clip's CURRENT right edge.
+            b.frame = cur_in + (item->clip ? item->clip->duration() : 0);
+        } else if (from_left && b.cut) {
+            // Cut carried by its left clip: edit point = its current tl_out.
+            b.frame = cur_in + (item->clip ? item->clip->duration() : 0);
+        } else {
+            // In-edge single, or cut carried by its right clip: the anchor's
+            // current tl_in IS the edit point.
+            b.frame = cur_in;
+        }
+        refresh_transition_bubble(b, b.dur);
+    }
+}
+
+void TimelineWidget::set_live_clip_gain(canvas::core::ClipId id, float db) {
+    // Live volume-line move: re-anchor the clip's gain line at `db` within its
+    // stored waveform box. The model is untouched — the commit arrives from
+    // volume_line_committed on release. Scene-space: the line is a child of the
+    // (0,0)-positioned clip group, so its line coordinates ARE scene coords.
+    ClipItem* item = find_clip_item(id);
+    if (!item || !item->volume_line || !item->rect) return;
+    const QLineF cur = item->volume_line->line();
+    const double y = item->volume_y0 + timeline_volume_line::volume_line_y(db, item->volume_h);
+    item->volume_line->setLine(QLineF(cur.x1(), y, cur.x2(), y));
+    // Keep the spectrum in step with the line while dragging (floored scale, so
+    // the readout can never collapse into a line).
+    apply_waveform_volume_scale(*item, db);
+}
+
+void TimelineWidget::apply_waveform_volume_scale(ClipItem& item, float db) {
+    // Scales the audio clip's waveform pixmap vertically, about the box's
+    // vertical center, by the floored gain law (timeline_volume_line). The
+    // spectrum therefore tracks the volume up/down without flattening — and the
+    // item's filled height stays inside the waveform box.
+    if (item.track_kind != canvas::core::Track::Kind::Audio || item.cells.empty()) return;
+    QGraphicsPixmapItem* wf = item.cells[0].item;
+    if (!wf || wf->pixmap().isNull()) return;
+    const double h = wf->pixmap().height();
+    if (h <= 1.0) return;
+    const double s = timeline_volume_line::volume_waveform_scale(db);
+    // Scale about the vertical center so the bars stay anchored to the 0 dB
+    // midline of the box (louder = taller above AND below it, quieter = shorter
+    // both ways — the same meaning the gain line itself carries).
+    QTransform t;
+    t.translate(0.0, h / 2.0);
+    t.scale(1.0, s);
+    t.translate(0.0, -h / 2.0);
+    wf->setTransform(t);
+}
+
 void TimelineWidget::draw_disabled_marks() {
     // Dim disabled clips (toggled with Ctrl+D) so they read as muted/offline.
     for (const auto& item : clip_items_) {
@@ -998,10 +1343,11 @@ void TimelineWidget::draw_disabled_marks() {
 }
 
 void TimelineWidget::draw_playhead() {
+    const ThemeTokens& t = tokens();
     const double x = kSceneMargin + kTrackHeaderWidth + playhead_frame_ / frames_per_pixel_;
     playhead_item_ = scene_.addLine(
         QLineF(x, kSceneMargin, x, scene_.sceneRect().bottom()),
-        QPen(QColor(0x4C, 0x92, 0xFF), 1));
+        QPen(t.playhead, 1));
     playhead_item_->setZValue(500);
 }
 
@@ -1011,7 +1357,9 @@ void TimelineWidget::update_playhead_position(int64_t frame) {
     playhead_item_->setLine(QLineF(x, kSceneMargin, x, scene_.sceneRect().bottom()));
     if (timecode_item_) timecode_item_->setPlainText(timecode(frame, fps_));
     const QRectF visible = mapToScene(viewport()->rect()).boundingRect();
-    if (x < visible.left() || x > visible.right()) {
+    // Follow only while the user hasn't scrolled away: manual scroll/zoom turns
+    // follow_playhead_ off, and an explicit playhead jump re-enables it.
+    if (follow_playhead_ && (x < visible.left() || x > visible.right())) {
         // Scroll horizontally to follow the playhead, keeping the current
         // vertical position (the scene extends far into the pan room and tail,
         // so vertical centering would fling the tracks out of view).

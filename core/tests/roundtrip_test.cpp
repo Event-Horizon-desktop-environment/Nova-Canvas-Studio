@@ -1192,6 +1192,238 @@ int main() {
               "deliver: render_job_snapshot maps all fields");
     }
 
+    {
+        // Clip trim/extend edit ops. Head/tail trims move the source window with
+        // the edge; the tail can grow back into the deleted region after a
+        // blade+delete ("regrow"), and clamps keep edges off neighbors and within
+        // the media duration.
+        Project p = make_project();
+        Clip a;
+        a.media = 0;
+        a.name = "A";
+        a.tl_in = 0;
+        a.src_in = 0;
+        a.src_out = 30;
+        auto cmd = place_clip(p.sequence, Track::Kind::Video, 0, a, Placement::Overwrite);
+        check(cmd != nullptr, "trim: place clip");
+        undo.record(std::move(cmd));
+        const ClipId id = p.sequence.video_tracks[0].clips[0].id;
+
+        // Regrow the tail: media has 300 frames, so the clip can extend to 300.
+        cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, id, 60, 300);
+        check(cmd != nullptr, "trim: tail regrow returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.video_tracks[0].clips[0].tl_out == 60 &&
+                  p.sequence.video_tracks[0].clips[0].src_out == 60,
+              "trim: tail regrow extends tl_out and src_out together");
+
+        // Request beyond the media duration clamps to the media end.
+        cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, id, 10000, 300);
+        check(cmd != nullptr, "trim: over-long tail request returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.video_tracks[0].clips[0].tl_out == 300 &&
+                  p.sequence.video_tracks[0].clips[0].src_out == 300,
+              "trim: tail clamps to the media duration");
+
+        // A right neighbor blocks further tail growth. First shrink the clip so
+        // its source window has room left beyond the neighbor (otherwise the
+        // media-duration clamp, not the neighbor, bounds the trim).
+        cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, id, 200, 300);
+        check(cmd != nullptr, "trim: shrink tail returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.video_tracks[0].clips[0].tl_out == 200 &&
+                  p.sequence.video_tracks[0].clips[0].src_out == 200,
+              "trim: tail shrink moves src_out with the edge");
+        Clip b;
+        b.media = 0;
+        b.name = "B";
+        b.tl_in = 210;
+        b.src_in = 0;
+        b.src_out = 30;
+        cmd = place_clip(p.sequence, Track::Kind::Video, 0, b, Placement::Overwrite);
+        check(cmd != nullptr, "trim: place right neighbor");
+        undo.record(std::move(cmd));
+        cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, id, 10000, 300);
+        check(cmd != nullptr, "trim: neighbor-blocked tail returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.video_tracks[0].clips[0].tl_out == 210,
+              "trim: tail clamps to the right neighbor's start");
+
+        // Head extension (regrow left) pulls src_in with the edge.
+        cmd = trim_clip_head(p.sequence, Track::Kind::Video, 0, id, 20, 300);
+        check(cmd != nullptr, "trim: head regrow returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.video_tracks[0].clips[0].tl_in == 20 &&
+                  p.sequence.video_tracks[0].clips[0].src_in == 20,
+              "trim: head regrow extends tl_in and src_in together");
+
+        // ...but only as far back as the source allows (src_in >= 0).
+        cmd = trim_clip_head(p.sequence, Track::Kind::Video, 0, id, -500, 300);
+        check(cmd != nullptr, "trim: over-long head request returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.video_tracks[0].clips[0].tl_in == 0 &&
+                  p.sequence.video_tracks[0].clips[0].src_in == 0,
+              "trim: head clamps to the source start");
+
+        // No-op edge (same position) yields no command.
+        cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, id, 210, 300);
+        check(cmd == nullptr, "trim: same-position tail is a no-op");
+
+        // Undo unwinds the trim history back to the original [0,30).
+        check(undo.undo(p.sequence), "trim: undo over-long head");
+        check(p.sequence.video_tracks[0].clips[0].tl_in == 20, "trim: undo restores head");
+        check(undo.undo(p.sequence), "trim: undo head regrow");
+        check(undo.undo(p.sequence), "trim: undo neighbor-blocked tail");
+        check(undo.undo(p.sequence), "trim: undo place neighbor");
+        check(undo.undo(p.sequence), "trim: undo shrink tail");
+        check(undo.undo(p.sequence), "trim: undo over-long tail");
+        check(undo.undo(p.sequence), "trim: undo tail regrow");
+        check(p.sequence.video_tracks[0].clips[0].tl_out == 30 &&
+                  p.sequence.video_tracks[0].clips[0].src_out == 30,
+              "trim: undo full history restores the original [0,30)");
+
+        // Locked tracks reject trims.
+        Track& v1 = p.sequence.video_tracks[0];
+        v1.locked = true;
+        cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, id, 60, 300);
+        check(cmd == nullptr, "trim: locked track returns nullptr");
+        v1.locked = false;
+    }
+
+    {
+        // Linked A/V pair: trimming one edge moves the mate by the same delta,
+        // and the pair's shared limit is the intersection of both clips' ranges.
+        Project p = make_project();
+        Clip v;
+        v.media = 0;
+        v.name = "V";
+        v.tl_in = 30;
+        v.src_in = 30;
+        v.src_out = 60;
+        Clip au = v;
+        auto cmd = place_linked_clip(p.sequence, 0, 0, v, au, Placement::Overwrite);
+        check(cmd != nullptr, "trim-linked: place linked pair");
+        undo.record(std::move(cmd));
+        const ClipId vid = p.sequence.video_tracks[0].clips[0].id;
+
+        // An audio clip sitting right after the mate's audio space limits the pair.
+        Clip constrict;
+        constrict.media = 0;
+        constrict.name = "CONSTRICT";
+        constrict.tl_in = 70;
+        constrict.src_in = 0;
+        constrict.src_out = 10;
+        cmd = place_clip(p.sequence, Track::Kind::Audio, 0, constrict, Placement::Overwrite);
+        check(cmd != nullptr, "trim-linked: place constricting audio clip");
+        undo.record(std::move(cmd));
+
+        // Video alone could reach 300, but the audio mate stops at its neighbor
+        // (tl_in 70), so both clips stop at 70.
+        cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, vid, 200, 300);
+        check(cmd != nullptr, "trim-linked: mate-constrained tail returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.video_tracks[0].clips[0].tl_out == 70 &&
+                  p.sequence.audio_tracks[0].clips[0].tl_out == 70,
+              "trim-linked: pair tail clamps to the mate's neighbor");
+        check(p.sequence.video_tracks[0].clips[0].src_out == 70 &&
+                  p.sequence.audio_tracks[0].clips[0].src_out == 70,
+              "trim-linked: pair src_out follows in lockstep");
+
+        // A mate-constrained HEAD trim behaves symmetrically: the audio mate ends
+        // up pinned at 20 by its left neighbor (which ends at 20), so the video
+        // cannot go past it.
+        Clip head_limit;
+        head_limit.media = 0;
+        head_limit.name = "HEADLIMIT";
+        head_limit.tl_in = 10;
+        head_limit.src_in = 0;
+        head_limit.src_out = 10;
+        cmd = place_clip(p.sequence, Track::Kind::Audio, 0, head_limit, Placement::Overwrite);
+        check(cmd != nullptr, "trim-linked: place head-limiting audio clip");
+        undo.record(std::move(cmd));
+        cmd = trim_clip_head(p.sequence, Track::Kind::Video, 0, vid, -500, 300);
+        check(cmd != nullptr, "trim-linked: mate-constrained head returns command");
+        undo.record(std::move(cmd));
+        const Clip& mate = *p.sequence.audio_tracks[0].clip_with_id(
+            p.sequence.video_tracks[0].clips[0].linked_id);
+        check(p.sequence.video_tracks[0].clips[0].tl_in == 20 &&
+                  p.sequence.video_tracks[0].clips[0].src_in == 20 &&
+                  mate.tl_in == 20 && mate.src_in == 20,
+              "trim-linked: pair head clamps to the audio mate's neighbor");
+    }
+
+    // Batch-capable atomic group move.
+    {
+        Project p = make_project();
+        Clip a;
+        a.media = 0;
+        a.name = "BATH_A";
+        a.tl_in = 0;
+        a.src_in = 0;
+        a.src_out = 30;
+        Clip b;
+        b.media = 0;
+        b.name = "BATH_B";
+        b.tl_in = 30;
+        b.src_in = 0;
+        b.src_out = 30;
+        auto cmd = place_clip(p.sequence, Track::Kind::Video, 0, a, Placement::Overwrite);
+        check(cmd != nullptr, "batch-move: place A");
+        undo.record(std::move(cmd));
+        cmd = place_clip(p.sequence, Track::Kind::Video, 0, b, Placement::Overwrite);
+        check(cmd != nullptr, "batch-move: place B");
+        undo.record(std::move(cmd));
+        const ClipId ia = p.sequence.video_tracks[0].clips[0].id;
+        const ClipId ib = p.sequence.video_tracks[0].clips[1].id;
+
+        // Moving the pair +40 as one atomic op must NOT let the first placement
+        // trim the second (sequential move_clip would shrink B to [120,160] until
+        // its own rep ran — or outright delete it when fully covered).
+        cmd = move_clips_batch(p.sequence, {{ia, Track::Kind::Video, 0, 40},
+                                            {ib, Track::Kind::Video, 0, 70}});
+        check(cmd != nullptr, "batch-move: atomic move returns command");
+        undo.record(std::move(cmd));
+        const Clip* ca = p.sequence.video_tracks[0].clip_with_id(ia);
+        const Clip* cb = p.sequence.video_tracks[0].clip_with_id(ib);
+        check(ca && cb, "batch-move: both clips survive the commit");
+        check(ca && ca->tl_in == 40 && ca->tl_out == 70 && ca->duration() == 30,
+              "batch-move: A keeps its full size at the target");
+        check(cb && cb->tl_in == 70 && cb->tl_out == 100 && cb->duration() == 30,
+              "batch-move: B keeps its full size and spacing after A");
+        check(p.sequence.video_tracks[0].clips.size() == 2,
+              "batch-move: no clip is lost or duplicated");
+
+        // A stationary clip partially overlapped by the final group is still
+        // overwritten at the boundary (intended) — and ONLY the stationary clip
+        // loses frames; the dragged group keeps its exact size.
+        Clip c;
+        c.media = 0;
+        c.name = "BATH_C";
+        c.tl_in = 130;
+        c.src_in = 0;
+        c.src_out = 90;
+        cmd = place_clip(p.sequence, Track::Kind::Video, 0, c, Placement::Overwrite);
+        check(cmd != nullptr, "batch-move: place stationary C");
+        undo.record(std::move(cmd));
+        const ClipId ic = [&] {
+            for (const auto& cl : p.sequence.video_tracks[0].clips)
+                if (cl.name == "BATH_C") return cl.id;
+            return ClipId{0};
+        }();
+        check(ic != 0, "batch-move: C is on the timeline");
+        cmd = move_clips_batch(p.sequence, {{ia, Track::Kind::Video, 0, 120},
+                                            {ib, Track::Kind::Video, 0, 150}});
+        check(cmd != nullptr, "batch-move: overlap-into-stationary returns command");
+        undo.record(std::move(cmd));
+        const Clip* cc = p.sequence.video_tracks[0].clip_with_id(ic);
+        const Clip* ca2 = p.sequence.video_tracks[0].clip_with_id(ia);
+        const Clip* cb2 = p.sequence.video_tracks[0].clip_with_id(ib);
+        check(cc && cc->tl_in == 180 && cc->duration() == 40,
+              "batch-move: stationary clip is trimmed only at the overwrite boundary");
+        check(ca2 && cb2 && ca2->tl_in == 120 && ca2->duration() == 30 && cb2->duration() == 30,
+              "batch-move: dragged clips keep their exact size and relative spacing");
+    }
+
     if (failures == 0) {
         std::printf("ALL TESTS PASSED\n");
         return 0;

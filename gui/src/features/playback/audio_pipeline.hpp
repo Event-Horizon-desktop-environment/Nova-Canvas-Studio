@@ -69,6 +69,15 @@ public:
     }
     [[nodiscard]] int channels() const { return channels_; }
 
+    // Realtime audible preview (additive, FROZEN-safe): override a clip's
+    // volume during an Inspector drag WITHOUT touching the model or emitting an
+    // edit command. Consulted at mix time (play + scrub grains); clear with
+    // clear_live_clip_gain()/clear_live_clip_gains() (the committed edit lands
+    // via apply_inspector_audio() and clears the override). reset() drops all.
+    void set_live_clip_gain(canvas::core::ClipId id, float volume_db);
+    void clear_live_clip_gain(canvas::core::ClipId id);
+    void clear_live_clip_gains();
+
     // Re-arm the output at `seq_frame` for a fresh play run: bump the run id,
     // anchor the audible-position bookkeeping, reset the per-media feed
     // watermark, reset all decoders, and flush the device so playback resumes
@@ -150,6 +159,9 @@ private:
 
     const canvas::core::Project* project_ = nullptr;
     const canvas::core::Clip* clip_at_any_track(int64_t seq_frame) const;
+    // Clip's mix volume_db honoring a live-drag override (set_live_clip_gain).
+    // Callers must hold mutex_ (all mix paths do).
+    float effective_clip_volume_db(const canvas::core::Clip& clip) const;
     int64_t playhead_to_audio_sample(int64_t seq_frame) const;
     int64_t audio_sample_to_seq_frame(int64_t media_sample) const;
     // Debug: log video position vs audible audio position for A/V sync.
@@ -170,6 +182,11 @@ private:
     int rate_ = 48000;
     int channels_ = 2;
     bool active_ = false;
+
+    // Live clip-gain override map (set_live_clip_gain): clip id -> effective
+    // volume_db used at mix time. Consulted (under mutex_) by the mix paths;
+    // cleared by reset()/clear_live_clip_gains().
+    std::unordered_map<canvas::core::ClipId, float> live_gain_db_;
 
     // A/V sync diagnostic anchors (protected by mutex_). Each time audio is
     // re-armed we record the media sample the run starts at and the device's

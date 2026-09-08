@@ -1,4 +1,5 @@
 #include "UX/MainWindow.hpp"
+#include "UX/theme.hpp"
 #include "Logging.hpp"
 
 #include "ui_MainWindow.h"
@@ -114,14 +115,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     resize(1440, 860);
     status_->showMessage(tr("Import media with File > Import Media (Ctrl+I)"));
 
-    // Keep the dock chrome (separators, drop-shadows, dock title areas) dark.
-    // Scoped to this window only; a blanket app-level sheet would be too broad.
-    setStyleSheet(QStringLiteral(
-        "QMainWindow { background: #11131A; }"
-        "QMainWindow::separator { background: #2A2F3C; width: 2px; height: 2px; }"
-        "QDockWidget { background: #141A21; color: #E8EAF0; }"
-        "QDockWidget::title { background: #1A1D27; color: #E8EAF0; padding: 4px 8px; "
-        "border: none; text-align: center; }"));
+    // Keep the dock chrome (separators, drop-shadows, dock title areas) in
+    // sync with the active appearance tokens. Scoped to this window only; a
+    // blanket app-level sheet would be too broad.
+    apply_theme_style(this, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral(
+            "QMainWindow { background: %1; }"
+            "QMainWindow::separator { background: %2; width: 2px; height: 2px; }"
+            "QDockWidget { background: %3; color: %4; }"
+            "QDockWidget::title { background: %5; color: %4; padding: 4px 8px; "
+            "border: none; text-align: center; }")
+            .arg(css(t.surface), css(t.border), css(t.surface_low), css(t.ink),
+                 css(t.surface_raised));
+    });
 }
 
 MainWindow::~MainWindow() { delete ui; }
@@ -175,6 +182,10 @@ void MainWindow::on_position_changed(const int64_t frame_number) {
 }
 
 void MainWindow::on_playback_changed(const bool playing) {
+    // Starting playback is an explicit jump: if the user had scrolled away,
+    // the playhead is centered under it again (per-frame position updates do
+    // NOT re-enable follow, so a plain scroll mid-playback stays put).
+    if (playing) timeline_->set_follow_playhead(true);
     const QString icon_path = playing ? QStringLiteral(":/icons/pause.svg")
                                       : QStringLiteral(":/icons/play.svg");
     play_button_->setIcon(QIcon(icon_path));
@@ -234,7 +245,8 @@ void MainWindow::on_fps_tick() {
     // as the encoder-speed meter instead of the playback rate.
     if (render_fps_ > 0.0) {
         fps_label_->setText(tr("%1 fps").arg(render_fps_, 0, 'f', 1));
-        fps_label_->setStyleSheet(QStringLiteral("color: #4C92FF; font-size: 11px;"));
+        fps_label_->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;")
+                                      .arg(css(tokens().accent_hover)));
         return;
     }
     // The readout is the VIDEO's own frame cadence under the playhead (its
@@ -245,7 +257,7 @@ void MainWindow::on_fps_tick() {
     fps_clock_.restart();
 
     QString text;
-    const QString color = QStringLiteral("#3DDC84");
+    const QString color = css(tokens().accent);
     if (nominal_fps_ > 0.0) {
         text = QStringLiteral("%1 fps").arg(nominal_fps_, 0, 'f', 1);
     } else {

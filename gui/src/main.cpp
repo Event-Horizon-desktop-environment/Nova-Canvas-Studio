@@ -1,6 +1,9 @@
 #include <QApplication>
 #include <QCoreApplication>
+#include <QFont>
+#include <QFontDatabase>
 #include <QMetaObject>
+#include <QSettings>
 #include <QtCore/Qt>
 
 #include "Logging.hpp"
@@ -98,7 +101,20 @@ int main(int argc, char* argv[]) {
         << " cpus=" << av_cpu_count()
         << " probe_ms=" << QString::number(env_probe_ms, 'f', 0);
 
-    canvas::gui::apply_theme(app);
+    // Register the bundled Geist variable fonts; the app falls back to the
+    // platform default family if either fails to load (missing/corrupt asset).
+    if (QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/Geist-Variable.ttf")) == -1)
+        qWarning() << "[font] Geist-Variable.ttf failed to load";
+    if (QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/GeistMono-Variable.ttf")) == -1)
+        qWarning() << "[font] GeistMono-Variable.ttf failed to load";
+    QFont ui_font = app.font();
+    ui_font.setFamily(QStringLiteral("Geist"));
+    app.setFont(ui_font);
+
+    const bool light_theme = QSettings()
+        .value(QStringLiteral("appearance/theme"), QStringLiteral("dark"))
+        .toString() == QStringLiteral("light");
+    canvas::gui::apply_theme(app, light_theme);
 
     canvas::gui::MainWindow window;
     QApplication::setWindowIcon(canvas::gui::raw_icon("app_icon"));
