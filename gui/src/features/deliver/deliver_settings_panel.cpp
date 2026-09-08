@@ -1,5 +1,6 @@
 #include "features/deliver/deliver_settings_panel.hpp"
 
+#include "features/deliver/deliver_settings_model.hpp"
 #include "UX/theme.hpp"
 
 #include <QCheckBox>
@@ -183,9 +184,8 @@ void DeliverSettingsPanel::build() {
     auto* preset_lbl = new QLabel(tr("Preset"));
     apply_theme_style(preset_lbl, &muted_lbl_style);
     preset_combo_ = new QComboBox(header);
-    preset_combo_->addItems({tr("Custom Export"), tr("YouTube 2160p"), tr("YouTube 1440p"),
-                             tr("YouTube 1080p"), tr("Vimeo 4K"), tr("H.265 MKV Best"),
-                             tr("H.264 MP4 Web")});
+    for (const std::string& p : deliver_model::preset_names())
+        preset_combo_->addItem(tr(p.c_str()));
     style_field(preset_combo_);
     preset_row->addWidget(preset_lbl);
     preset_row->addWidget(preset_combo_, 1);
@@ -582,52 +582,23 @@ void DeliverSettingsPanel::build() {
 }
 
 void DeliverSettingsPanel::rebuild_encoder_list() {
-    const QString cur = encoder_combo_ ? encoder_combo_->currentText() : QString();
+    if (!encoder_combo_) return;
+    const QString cur = encoder_combo_->currentText();
     encoder_combo_->clear();
-    for (const auto& e : canvas::core::deliver_encoders()) encoder_combo_->addItem(QString::fromStdString(e));
+    for (const std::string& e : deliver_model::encoder_backends())
+        encoder_combo_->addItem(QString::fromStdString(e));
     if (!cur.isEmpty()) encoder_combo_->setCurrentText(cur);
 }
 
 namespace {
 
-// Codecs that can actually go in a given container (validated against FFmpeg).
-// This mirrors what real NLEs expose: the codec list is restricted so users
-// can't pick a combination the muxer rejects (WebM+H.264, MP4+ProRes, ...).
-QStringList video_codecs_for_format(const QString& format) {
-    const QString fmt = format.toLower();
-    if (fmt.contains("mkv"))
-        return {"H.264", "H.265", "AV1", "Apple ProRes", "FFV1", "JPEG 2000", "Uncompressed"};
-    if (fmt.contains("mp4"))
-        return {"H.264", "H.265", "AV1"};
-    if (fmt.contains("quicktime") || fmt == "mov")
-        return {"H.264", "H.265", "Apple ProRes", "FFV1", "Uncompressed"};
-    if (fmt == "webm")
-        return {"AV1"};  // WebM allows VP8/VP9/AV1; we expose AV1 here.
-    if (fmt.contains("avi"))
-        return {"H.264", "H.265", "FFV1", "Uncompressed"};
-    if (fmt.contains("mxf") || fmt.contains("imf"))
-        return {"H.264", "H.265"};
-    if (fmt.contains("mpeg-2") || fmt == "mpeg")
-        return {"H.264"};
-    // Image-sequence formats: codec is irrelevant at the muxer level.
-    if (fmt.contains("png") || fmt.contains("dpx") || fmt.contains("exr") ||
-        fmt.contains("jpeg") || fmt.contains("tiff") || fmt.contains("webp") ||
-        fmt.contains("gif"))
-        return {"Uncompressed"};
-    return {"H.264", "H.265", "AV1"};
-}
-
-QStringList audio_codecs_for_format(const QString& format) {
-    const QString fmt = format.toLower();
-    if (fmt == "webm")
-        return {"Opus", "Vorbis"};
-    if (fmt.contains("mpeg-2") || fmt == "mpeg")
-        return {"MP3"};
-    if (fmt.contains("avi"))
-        return {"PCM", "MP3"};
-    if (fmt.contains("mxf") || fmt.contains("imf"))
-        return {"PCM"};
-    return {"AAC", "MP3", "PCM", "FLAC", "Opus", "Vorbis"};
+// <Q...>-free combo populators over the deliver_model policy lists. Kept local
+// so the panel's Qt types never leak into the Qt-free module.
+template <typename Container>
+QStringList to_string_list(const Container& c) {
+    QStringList out;
+    for (const std::string& s : c) out << QString::fromStdString(s);
+    return out;
 }
 
 }  // namespace
@@ -635,11 +606,11 @@ QStringList audio_codecs_for_format(const QString& format) {
 void DeliverSettingsPanel::rebuild_codec_list() {
     if (!format_combo_ || !codec_combo_) return;
 
-    const QString fmt = format_combo_->currentText();
+    const std::string fmt = format_combo_->currentText().toStdString();
     const QString cur_v = codec_combo_->currentText();
 
     codec_combo_->clear();
-    const QStringList vcs = video_codecs_for_format(fmt);
+    const QStringList vcs = to_string_list(deliver_model::video_codecs_for_format(fmt));
     for (const QString& c : vcs) codec_combo_->addItem(c);
     if (!cur_v.isEmpty() && vcs.contains(cur_v))
         codec_combo_->setCurrentText(cur_v);
@@ -649,7 +620,7 @@ void DeliverSettingsPanel::rebuild_codec_list() {
     if (audio_codec_combo_) {
         const QString cur_a = audio_codec_combo_->currentText();
         audio_codec_combo_->clear();
-        const QStringList acs = audio_codecs_for_format(fmt);
+        const QStringList acs = to_string_list(deliver_model::audio_codecs_for_format(fmt));
         for (const QString& c : acs) audio_codec_combo_->addItem(c);
         if (!cur_a.isEmpty() && acs.contains(cur_a))
             audio_codec_combo_->setCurrentText(cur_a);
@@ -706,20 +677,16 @@ void DeliverSettingsPanel::connect_all() {
 
 void DeliverSettingsPanel::update_bitrate_visibility() {
     if (!bitrate_spin_ || !max_bitrate_spin_) return;
-    const int rc = rate_control_combo_->currentIndex();
-    // RateControl: 0=ConstantQP, 1=VBR(Quality), 2=VBR(Target), 3=ConstantBitrate.
-    const bool show_bitrate = (rc == 2 || rc == 3);
-    const bool show_max = (rc == 2);
-    if (rc == 3) {
-        bitrate_label_->setText(tr("Bit Rate"));
+    const deliver_model::BitrateVisibility v =
+        deliver_model::bitrate_visibility(rate_control_combo_->currentIndex());
+    if (rate_control_combo_->currentIndex() == 3) {
+        // Constant bitrate: keep the single "Bit Rate" field; its value is also
+        // the max (the two never diverge in CBR).
         max_bitrate_spin_->setValue(bitrate_spin_->value());
-    } else if (rc == 2) {
-        bitrate_label_->setText(tr("Target (Kbps)"));
-    } else {
-        bitrate_label_->setText(tr("Bit Rate"));
     }
-    bitrate_row_->setVisible(show_bitrate);
-    max_bitrate_row_->setVisible(show_max);
+    bitrate_label_->setText(tr(v.bitrate_label));
+    bitrate_row_->setVisible(v.show_bitrate);
+    max_bitrate_row_->setVisible(v.show_max);
 }
 
 canvas::core::DeliverSettings DeliverSettingsPanel::settings() const {

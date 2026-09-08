@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <unordered_set>
@@ -413,7 +414,7 @@ void UndoStack::clear() {
 
 std::unique_ptr<ICommand> place_clip(Sequence& seq, const Track::Kind kind,
                                      const std::size_t track_index, Clip clip,
-                                     const Placement mode) {
+                                     const Placement mode, const double media_fps) {
     if (mode == Placement::PlaceOnTop && kind == Track::Kind::Video) {
         for (std::size_t i = seq.video_tracks.size(); i-- > 0;) {
             const Track& t = seq.video_tracks[i];
@@ -423,14 +424,14 @@ std::unique_ptr<ICommand> place_clip(Sequence& seq, const Track::Kind kind,
                     free = false;
                     break;
                 }
-            if (free) return place_clip(seq, kind, i, std::move(clip), Placement::Overwrite);
+            if (free) return place_clip(seq, kind, i, std::move(clip), Placement::Overwrite, media_fps);
         }
         Track extra;
         extra.kind = Track::Kind::Video;
         extra.name = "V" + std::to_string(seq.video_tracks.size() + 1);
         const std::size_t new_index = seq.video_tracks.size();
         seq.video_tracks.push_back(std::move(extra));
-        return place_clip(seq, kind, new_index, std::move(clip), Placement::Overwrite);
+        return place_clip(seq, kind, new_index, std::move(clip), Placement::Overwrite, media_fps);
     }
 
     Track* target = seq.track(kind, track_index);
@@ -439,7 +440,11 @@ std::unique_ptr<ICommand> place_clip(Sequence& seq, const Track::Kind kind,
     if (mode == Placement::AppendAtEnd) clip.tl_in = target->end_frame();
 
     SingleTrackEdit edit(seq, kind, track_index, "place clip");
-    clip.tl_out = clip.tl_in + (clip.src_out - clip.src_in);
+    // Time-based duration: see the declaration. Frame-for-frame (media_fps ==
+    // seq.fps or the 0.0 default) keeps the historical law; fps-mismatched media
+    // spans its real length instead of overclaiming by the fps ratio.
+    const double ratio = seq.fps > 0.0 && media_fps > 0.0 ? seq.fps / media_fps : 1.0;
+    clip.tl_out = clip.tl_in + std::llround((clip.src_out - clip.src_in) * ratio);
 
     if (mode == Placement::Insert) {
         shift_from(target->clips, clip.tl_in, clip.duration());
@@ -454,7 +459,7 @@ std::unique_ptr<ICommand> place_clip(Sequence& seq, const Track::Kind kind,
 
 std::unique_ptr<ICommand> place_linked_clip(Sequence& seq, const std::size_t video_track,
                                             const std::size_t audio_track, Clip video, Clip audio,
-                                            const Placement mode) {
+                                            const Placement mode, const double media_fps) {
     Track* vt = seq.track(Track::Kind::Video, video_track);
     Track* at = seq.track(Track::Kind::Audio, audio_track);
     std::size_t vindex = video_track;
@@ -486,8 +491,11 @@ std::unique_ptr<ICommand> place_linked_clip(Sequence& seq, const std::size_t vid
     audio.id = seq.next_clip_id++;
     video.linked_id = audio.id;
     audio.linked_id = video.id;
-    video.tl_out = video.tl_in + (video.src_out - video.src_in);
-    audio.tl_out = audio.tl_in + (audio.src_out - audio.src_in);
+    // Time-based duration shared by both halves (linked clips come from the same
+    // source media; see place_clip for the fps law).
+    const double ratio = seq.fps > 0.0 && media_fps > 0.0 ? seq.fps / media_fps : 1.0;
+    video.tl_out = video.tl_in + std::llround((video.src_out - video.src_in) * ratio);
+    audio.tl_out = audio.tl_in + std::llround((audio.src_out - audio.src_in) * ratio);
 
     if (mode == Placement::Insert) {
         shift_from(vt->clips, video.tl_in, video.duration());

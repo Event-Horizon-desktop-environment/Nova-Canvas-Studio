@@ -473,6 +473,12 @@ void build_center_workspace(MainWindow& mw) {
                                   Qt::QueuedConnection);
     };
 
+    // While a job is being exported, park the thumbnail workers so their
+    // full-res NVDEC decodes don't steal the render's GPU/disk bandwidth.
+    // set_paused is atomic + CV-notified, so it can be driven straight from
+    // the worker thread; requests queue up meanwhile and flush on finish.
+    mw.render_queue_.on_job_started = [&mw](uint64_t) { mw.thumbnails_.set_paused(true); };
+
     // Pop a dialog when a render job fails, so the user isn't left guessing at
     // a bare "Failed" status. Errors are categorized so each kind of failure
     // gets its own popup type instead of a single generic message:
@@ -482,6 +488,7 @@ void build_center_workspace(MainWindow& mw) {
     //     FFmpeg detail.
     //   - Anything unexpected is shown as a Critical error.
     mw.render_queue_.on_job_finished = [&mw](uint64_t id) {
+        mw.thumbnails_.set_paused(false);
         QMetaObject::invokeMethod(&mw, [&mw, id] {
             for (const auto& j : mw.render_queue_.jobs()) {
                 if (j.id != id) continue;

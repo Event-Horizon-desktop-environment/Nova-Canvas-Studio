@@ -34,7 +34,9 @@ int64_t snap_to_grid(int64_t frame, double frames_per_pixel);
 // on, the nearest boundary within a pixel-derived radius wins FIRST.
 
 // Magnetic radius in screen pixels, converted to a frame delta by the callers
-// (radius / frames_per_pixel). Edges pull only while their target is within
+// (radius * frames_per_pixel — frames-per-pixel, so the magnet matches the
+// on-screen pixel size at every zoom; a pre-fix divide made it a ~1-frame dead
+// zone at mid/zoomed-out zoom). Edges pull only while their target is within
 // this many pixels, so zooming in gives a wide magnet and zooming out naturally
 // disables it — matching NLE feel at every zoom level.
 inline constexpr double kSnapRadiusPx = 10.0;

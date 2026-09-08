@@ -56,6 +56,7 @@ qt_add_executable(canvas
     src/features/thumbnails/thumbnail_service.cpp
 
     src/features/deliver/deliver_settings_panel.cpp
+    src/features/deliver/deliver_settings_model.cpp
     src/features/deliver/render_queue_panel.cpp
 
     src/Widgets/viewer_gl.cpp

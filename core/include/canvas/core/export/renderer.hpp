@@ -74,6 +74,9 @@ public:
         int dstH = 0;
         int dx = 0;
         int dy = 0;
+        // Whole-canvas edge-fade gain toward black (same law as the CPU
+        // compositor's single-clip transition factor; 1.0 = no fade).
+        float fade = 1.0f;
         bool valid = false;
     };
 

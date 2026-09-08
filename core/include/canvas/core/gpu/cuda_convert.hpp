@@ -20,10 +20,10 @@ inline bool convert_rgba_to_nv12(const uint8_t*, int, int, uint8_t*, std::size_t
                                  std::size_t, int, int) { return false; }
 inline bool convert_nv12_resize(const uint8_t*, const uint8_t*, int, int, std::size_t,
                                 std::size_t, uint8_t*, std::size_t, uint8_t*, std::size_t, int, int,
-                                int, int, int, int) { return false; }
+                                int, int, int, int, float = 1.0f) { return false; }
 inline bool convert_nv12_resize_async(const uint8_t*, const uint8_t*, int, int, std::size_t,
                                       std::size_t, uint8_t*, std::size_t, uint8_t*, std::size_t,
-                                      int, int, int, int, int, int) { return false; }
+                                      int, int, int, int, int, int, float = 1.0f) { return false; }
 inline bool convert_nv12_record_event(void**) { return false; }
 inline bool convert_nv12_wait_event(void*) { return true; }
 inline void convert_nv12_destroy_event(void*) {}
@@ -47,12 +47,14 @@ bool convert_rgba_to_nv12(const uint8_t* rgba, int src_w, int src_h,
 
 // Bilinear-resizes an existing GPU NV12 frame into a letterboxed rectangle on
 // a GPU NV12 target, writing every target pixel (content and black bars).
+// `fade` in (0,1] dips the content toward black (whole-canvas edge-fade blend,
+// matching the CPU compositor's per-clip transition factor); 1.0 is identity.
 bool convert_nv12_resize(const uint8_t* srcY, const uint8_t* srcUV, int src_w, int src_h,
                          std::size_t src_y_pitch, std::size_t src_uv_pitch,
                          uint8_t* dY, std::size_t yPitch,
                          uint8_t* dUV, std::size_t uvPitch,
                          int out_w, int out_h, int dst_w, int dst_h,
-                         int dx, int dy);
+                         int dx, int dy, float fade = 1.0f);
 
 // Asynchronous variant of convert_nv12_resize.
 bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int src_w, int src_h,
@@ -60,7 +62,7 @@ bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int sr
                                uint8_t* dY, std::size_t yPitch,
                                uint8_t* dUV, std::size_t uvPitch,
                                int out_w, int out_h, int dst_w, int dst_h,
-                               int dx, int dy);
+                               int dx, int dy, float fade = 1.0f);
 bool convert_nv12_record_event(void** out);
 bool convert_nv12_wait_event(void* ev);
 void convert_nv12_destroy_event(void* ev);

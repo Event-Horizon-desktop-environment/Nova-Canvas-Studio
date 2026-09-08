@@ -109,7 +109,8 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
         aclip.src_out = src_out;
         aclip.name = base + " Audio";
         auto cmd = canvas::core::place_clip(project_->sequence, canvas::core::Track::Kind::Audio,
-                                        static_cast<std::size_t>(lane), std::move(aclip), mode);
+                                        static_cast<std::size_t>(lane), std::move(aclip), mode,
+                                        found->fps);
         if (!cmd) return false;
         qWarning() << "[edit] PLACE-AUDIO media=" << media_id << "track=" << lane
                    << "at=" << frame << "mode=" << static_cast<int>(mode)
@@ -140,7 +141,7 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
     ensure_tracks_at(canvas::core::Track::Kind::Audio, 0);
 
     auto cmd = canvas::core::place_linked_clip(project_->sequence, static_cast<std::size_t>(lane), 0,
-                                           std::move(clip), std::move(aclip), mode);
+                                           std::move(clip), std::move(aclip), mode, found->fps);
     if (!cmd) return false;
     qWarning() << "[edit] PLACE media=" << media_id << "v_track=" << lane << "at=" << frame
                << "mode=" << static_cast<int>(mode)

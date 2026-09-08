@@ -51,6 +51,11 @@ public:
     // Sets the directory used to persist generated thumbnails and waveforms so
     // they survive across zooms and app restarts. Empty disables disk caching.
     void set_cache_dir(QString dir);
+    // Parks the worker threads so no decode/IO competes with an active export
+    // (the render's NVDEC bandwidth). Requests still queue up; they flush as
+    // soon as the render finishes and this is cleared. Thread-safe — intended
+    // to be driven from the render-queue worker thread.
+    void set_paused(bool paused);
 
 signals:
     void thumbnail_ready(uint64_t id, QImage image);
@@ -124,6 +129,7 @@ private:
     std::unordered_map<std::string, canvas::core::AudioWaveform> waveform_cache_;
 
     std::atomic<bool> stopping_{false};
+    std::atomic<bool> paused_{false};
     bool pending_ = false;
 };
 

@@ -45,11 +45,17 @@ private:
 
 enum class Placement { Overwrite, Insert, AppendAtEnd, PlaceOnTop };
 
+// `media_fps` is the source media's own frame rate. Placement derives the clip's
+// timeline duration from the source window *time-based* (`tl = src * seq.fps /
+// media.fps`), matching the renderer/playback source stride — so 60fps footage on
+// a 30fps timeline spans its real duration, not twice it. Defaults to seq.fps
+// (the historical frame-for-frame law) for callers without media context; fps==seq
+// placements are identical either way.
 std::unique_ptr<ICommand> place_clip(Sequence& seq, Track::Kind kind, std::size_t track_index,
-                                     Clip clip, Placement mode);
+                                     Clip clip, Placement mode, double media_fps = 0.0);
 std::unique_ptr<ICommand> place_linked_clip(Sequence& seq, std::size_t video_track,
                                             std::size_t audio_track, Clip video, Clip audio,
-                                            Placement mode);
+                                            Placement mode, double media_fps = 0.0);
 std::unique_ptr<ICommand> unlink_clip(Sequence& seq, Track::Kind kind, std::size_t track_index,
                                       ClipId id);
 // Links an unlinked clip to an unlinked clip of the opposite kind whose time

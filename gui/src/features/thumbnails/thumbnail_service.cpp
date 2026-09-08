@@ -257,6 +257,11 @@ void ThumbnailService::submit(ThumbRequest req) {
     cv_.notify_all();
 }
 
+void ThumbnailService::set_paused(bool paused) {
+    paused_ = paused;
+    cv_.notify_all();
+}
+
 void ThumbnailService::clear_cache() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -278,7 +283,9 @@ void ThumbnailService::worker_loop() {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [this] {
-                return stopping_ || (!queue_.empty() && pending_);
+                // Parked while paused_ (an export owns the GPU/disk): requests
+                // keep queueing and flush once the render clears the flag.
+                return stopping_ || (!paused_ && !queue_.empty() && pending_);
             });
             if (stopping_ && queue_.empty()) return;
             if (queue_.empty()) {

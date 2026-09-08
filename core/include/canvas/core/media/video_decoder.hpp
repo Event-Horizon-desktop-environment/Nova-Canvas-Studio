@@ -227,6 +227,19 @@ private:
     int64_t next_frame_ = 0;
     bool draining_ = false;
     int out_max_dim_ = 0;
+    // Frozen-tail hold frames. When a caller targets a frame past the stream's
+    // encoded end (a clip whose audio outlives its video, or a far-forward
+    // scrub over the media edge), re-seeking and re-decoding the same final
+    // frame on every call is ~90ms/frame wasted work that turns the render tail
+    // into a 10fps crawl. Instead the last real frame is decoded once and held;
+    // any later past-end request serves the cached copy. hold_rgba_ covers the
+    // CPU RGBA path, hold_hw_ the GPU NV12 path (a ref-counted copy of the
+    // device frame, independent of the reused av_frame_).
+    VideoFramePtr hold_rgba_;
+    int64_t hold_rgba_src_ = -1;
+    int hold_rgba_dim_ = -1;
+    AVFrame* hold_hw_ = nullptr;
+    int64_t hold_hw_src_ = -1;
     // Sequential-walk vs keyframe-seek path accounting (see PathStats).
     std::uint64_t path_seq_ = 0;
     std::uint64_t path_seeks_ = 0;

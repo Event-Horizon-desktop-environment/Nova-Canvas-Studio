@@ -44,6 +44,8 @@ HEADLESS=(
     "gui/src/features/playback/timeline_decoder.cpp"
     "gui/src/features/timeline/audio_targets.hpp"
     "gui/src/features/timeline/audio_targets.cpp"
+    "gui/src/features/deliver/deliver_settings_model.hpp"
+    "gui/src/features/deliver/deliver_settings_model.cpp"
     "gui/src/Widgets/timeline_snap.hpp"
     "gui/src/Widgets/timeline_snap.cpp"
     "gui/src/Widgets/timeline_selection.hpp"

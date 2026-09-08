@@ -530,9 +530,20 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         av_frame_get_buffer(a_src, 0);
     }
 
-    const int64_t total_video = s.duration_frames;
+    // Natural-speed frame budget: the export fps may differ from the timeline
+    // fps (Auto resolves to the highest source fps). Both the frame count and
+    // every output-frame -> timeline-frame mapping below scale by seq_fps/fps;
+    // when they coincide everything reduces to the legacy identity mapping
+    // (f -> tl frame f, total_video = s.duration_frames), so existing renders
+    // are byte-identical.
+    const double seq_fps = project.sequence.fps;
+    const double export_fps = s.fps > 0.0 ? s.fps : (seq_fps > 0.0 ? seq_fps : 30.0);
+    const double tl_per_frame = seq_fps > 0.0 ? seq_fps / export_fps : 1.0;
+    const int64_t total_video = seq_fps > 0.0
+        ? (int64_t)std::llround((double)s.duration_frames / seq_fps * export_fps)
+        : s.duration_frames;
     const int64_t total_audio = total_video > 0
-        ? (int64_t)std::llround((double)total_video / s.fps * s.audio_sample_rate)
+        ? (int64_t)std::llround((double)total_video / export_fps * s.audio_sample_rate)
         : 0;
 
     // ---- encode loop ----
@@ -642,26 +653,31 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     std::deque<ProducerSlot> ready_frames;
     bool producer_done = false;
     auto render_one_frame = [&](const int64_t f) -> std::tuple<AVFrame*, void*, AVFrame*> {
+        // Output frame f lands at timeline time f/export_fps; map to the timeline
+        // frame shown at that moment (identity when fps == seq fps).
+        const int64_t tl = (int64_t)std::llround((double)f * tl_per_frame);
         // GPU fast path: composite a single clip straight into the encoder's
         // CUDA hw frame, skipping the CPU RGBA blit + upload.
         if (v_use_hw && hw_frames && session_ok &&
             canvas::core::gpu::cuda_available()) {
             RenderSession::GpuFrameInfo gfi;
             auto _tf0 = std::chrono::steady_clock::now();
-            const bool _gk = session.frame_gpu(f, &gfi) && gfi.valid;
+            const bool _gk = session.frame_gpu(tl, &gfi) && gfi.valid;
             auto _tf1 = std::chrono::steady_clock::now();
             static double _st_fg = 0, _st_rz = 0; static long _cnt = 0;
             if (_gk) {
                 ++render_fast;
                 _st_fg += std::chrono::duration<double, std::milli>(_tf1 - _tf0).count();
                 // Sanity: output frames must map to strictly advancing source frames;
-                // a non-+1 delta means dropped/duplicated frames (judder).
+                // a non-+1 delta means dropped/duplicated frames (judder). Only
+                // meaningful at fps == seq fps; otherwise the tl mapping itself
+                // duplicates/rounds and the +1 check would false-trip.
                 static int64_t s_prev_src = INT64_MIN;
-                if (gfi.src_frame >= 0) {
+                if (gfi.src_frame >= 0 && tl_per_frame == 1.0) {
                     if (s_prev_src != INT64_MIN && gfi.src_frame != s_prev_src + 1) {
                         ++render_stalls;
                         fprintf(stderr, "[FRAME-DIAG] tl_frame=%lld src=+%lld (prev src=%lld) delta=%lld\n",
-                                (long long)f, (long long)gfi.src_frame,
+                                (long long)tl, (long long)gfi.src_frame,
                                 (long long)s_prev_src, (long long)(gfi.src_frame - s_prev_src));
                     }
                     s_prev_src = gfi.src_frame;
@@ -692,7 +708,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                             reinterpret_cast<uint8_t*>(uvc),
                             static_cast<std::size_t>(hw->linesize[1]),
                             gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
-                            gfi.dx, gfi.dy)) {
+                            gfi.dx, gfi.dy, gfi.fade)) {
                         void* ev = nullptr;
                         canvas::core::gpu::convert_nv12_record_event(&ev);
                         auto _tr1 = std::chrono::steady_clock::now();
@@ -714,8 +730,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         // CPU composite fallback (identical to the legacy loop): render RGBA on
         // the CPU, then convert to NV12 either with a CUDA kernel or swscale.
         const auto comp_t0 = std::chrono::steady_clock::now();
-        auto vf = session_ok ? session.frame(f)
-                             : render_video_frame(project, f, s.width, s.height, 0);
+        auto vf = session_ok ? session.frame(tl)
+                             : render_video_frame(project, tl, s.width, s.height, 0);
         if (!vf) return {nullptr, nullptr, nullptr};
         ++render_cpu;
         render_comp_ms += std::chrono::duration<double, std::milli>(
@@ -839,7 +855,6 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     if (session_ok && total_video > 0 &&
         v_use_hw && hw_frames && canvas::core::gpu::cuda_available()) {
         std::thread producer(producer_thread_fn);
-        producer.detach();
 
         while (!ended && !cancelled()) {
             AVFrame* to_send = nullptr;
@@ -980,6 +995,11 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             if (total_video > 0)
                 progress((double)std::min(frame, total_video) / total_video, "Encode");
         }
+        // Joined BEFORE the queue/condition-variable/stack teardown below so a
+        // producer mid-render_one_frame cannot touch freed state when the export
+        // returns (cancel or natural end). The producer exits on cancelled() or
+        // after pushing total_video slots, so this join is bounded.
+        if (producer.joinable()) producer.join();
         // Free any frames the producer pushed after the loop consumed the last
         // slot (cancel raced the flush); the encoder flush already ran.
         {
@@ -996,6 +1016,9 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     } else {
 
     while (!ended && !cancelled()) {
+        // Output frame `frame` lands at timeline time; map to the timeline frame
+        // (identity when fps == seq fps).
+        const int64_t tl = (int64_t)std::llround((double)frame * tl_per_frame);
         if (frame < total_video) {
             // render one frame
             bool gpu_composited = false;
@@ -1006,7 +1029,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             if (v_use_hw && hw_frames && session_ok &&
                 canvas::core::gpu::cuda_available()) {
                 RenderSession::GpuFrameInfo gfi;
-                if (session.frame_gpu(frame, &gfi) && gfi.valid) {
+                if (session.frame_gpu(tl, &gfi) && gfi.valid) {
                     ++render_fast;
                     AVFrame* hw = av_frame_alloc();
                     auto tb0 = std::chrono::steady_clock::now();
@@ -1022,7 +1045,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                                 reinterpret_cast<uint8_t*>(uvc),
                                 static_cast<std::size_t>(hw->linesize[1]),
                                 gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
-                                gfi.dx, gfi.dy)) {
+                                gfi.dx, gfi.dy, gfi.fade)) {
                             hw->pts = frame;
                             avcodec_send_frame(vctx, hw);
                             gpu_composited = true;
@@ -1034,8 +1057,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
 
             if (!gpu_composited) {
             const auto comp_t0 = std::chrono::steady_clock::now();
-            auto vf = session_ok ? session.frame(frame)
-                                 : render_video_frame(project, frame, s.width, s.height, 0);
+            auto vf = session_ok ? session.frame(tl)
+                                 : render_video_frame(project, tl, s.width, s.height, 0);
             if (vf) {
                 ++render_cpu;
                 render_comp_ms += std::chrono::duration<double, std::milli>(

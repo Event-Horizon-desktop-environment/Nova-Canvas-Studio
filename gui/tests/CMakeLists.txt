@@ -112,6 +112,15 @@ canvas_add_headless_test(timeline_volume_line_test
     ../src/Widgets/timeline_volume_line.cpp
 )
 
+# deliver_settings_model_test: Deliver-panel policy model (container<->codec
+# restriction lists, encoder/preset lists, bitrate-field visibility law).
+# Compiles deliver_settings_model.cpp directly (Qt-free seam enforced by the
+# build).
+canvas_add_headless_test(deliver_settings_model_test
+    deliver_settings_model_test.cpp
+    ../src/features/deliver/deliver_settings_model.cpp
+)
+
 # volume_line_drag_qt_test: full-widget (Qt) regression test that drives the
 # audio volume-line drag through the real press/move/release handlers and checks
 # the emitted preview/commit dB values stay inside the audio law band and point

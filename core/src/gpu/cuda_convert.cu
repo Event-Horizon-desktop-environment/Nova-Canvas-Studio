@@ -76,13 +76,16 @@ __device__ inline int clamp_index(float v, int n) {
 // black (Y=16, Cb=Cr=128) so every pixel of the output hw frame stays defined.
 // Output is `ow x oh`; the scaled content occupies (dx,dy)..(dx+dstW,dy+dstH).
 // The output is normally the full encoder hw frame (letterbox already applied).
+// `fade` in (0,1] dips the CONTENT toward black in-place (16 + (Y-16)*fade,
+// 128 + (C-128)*fade) — the whole-canvas edge-fade blend the CPU compositor
+// applies for a single clip's transition; 1.0 leaves pixels untouched.
 __global__ void nv12Resize(const uint8_t* __restrict__ srcY,
                            const uint8_t* __restrict__ srcUV,
                            int sw, int sh, size_t sYPitch, size_t sUVPitch,
                            int dstW, int dstH, int dx, int dy,
                            uint8_t* __restrict__ outY, size_t oYPitch,
                            uint8_t* __restrict__ outUV, size_t oUVPitch,
-                           int ow, int oh) {
+                           int ow, int oh, float fade) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= ow || y >= oh) return;
@@ -102,7 +105,7 @@ __global__ void nv12Resize(const uint8_t* __restrict__ srcY,
         const uint8_t* p01 = p00 + sYPitch;
         const uint8_t* p11 = p01 + 1;
         float Y = w00 * p00[0] + w10 * p10[0] + w01 * p01[0] + w11 * p11[0];
-        outY[(size_t)y * oYPitch + x] = (uint8_t)(Y + 0.5f);
+        outY[(size_t)y * oYPitch + x] = (uint8_t)(16.f + (Y - 16.f) * fade + 0.5f);
     } else {
         outY[(size_t)y * oYPitch + x] = 16;
     }
@@ -130,8 +133,8 @@ __global__ void nv12Resize(const uint8_t* __restrict__ srcY,
                 w00 * p00[0] + w10 * (p00[2]) + w01 * p01[0] + w11 * (p01[2]);
             const float cr =
                 w00 * p00[1] + w10 * (p00[3]) + w01 * p01[1] + w11 * (p01[3]);
-            dst[0] = (uint8_t)(cb + 0.5f);
-            dst[1] = (uint8_t)(cr + 0.5f);
+            dst[0] = (uint8_t)(128.f + (cb - 128.f) * fade + 0.5f);
+            dst[1] = (uint8_t)(128.f + (cr - 128.f) * fade + 0.5f);
         } else {
             dst[0] = 128;
             dst[1] = 128;
@@ -191,7 +194,7 @@ bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int sr
                                uint8_t* dY, std::size_t yPitch,
                                uint8_t* dUV, std::size_t uvPitch,
                                int out_w, int out_h, int dst_w, int dst_h,
-                               int dx, int dy) {
+                               int dx, int dy, float fade) {
     if (!srcY || !srcUV || !dY || !dUV || src_w <= 0 || src_h <= 0 || out_w <= 0 ||
         out_h <= 0 || dst_w <= 0 || dst_h <= 0)
         return false;
@@ -203,7 +206,7 @@ bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int sr
     const dim3 grp((out_w + 15) / 16, (out_h + 15) / 16);
     nv12Resize<<<grp, blk, 0, s>>>(srcY, srcUV, src_w, src_h, src_y_pitch, src_uv_pitch,
                                    dst_w, dst_h, dx, dy, dY, yPitch, dUV, uvPitch,
-                                   out_w, out_h);
+                                   out_w, out_h, fade);
     return gpu_cuda_check("nv12_resize_async", cudaGetLastError());
 }
 
@@ -329,7 +332,7 @@ bool convert_nv12_resize(const uint8_t* srcY, const uint8_t* srcUV, int src_w, i
                          uint8_t* dY, std::size_t yPitch,
                          uint8_t* dUV, std::size_t uvPitch,
                          int out_w, int out_h, int dst_w, int dst_h,
-                         int dx, int dy) {
+                         int dx, int dy, float fade) {
     if (!srcY || !srcUV || !dY || !dUV || src_w <= 0 || src_h <= 0 || out_w <= 0 ||
         out_h <= 0 || dst_w <= 0 || dst_h <= 0)
         return false;
@@ -341,7 +344,7 @@ bool convert_nv12_resize(const uint8_t* srcY, const uint8_t* srcUV, int src_w, i
     const dim3 grp((out_w + 15) / 16, (out_h + 15) / 16);
     nv12Resize<<<grp, blk>>>(srcY, srcUV, src_w, src_h, src_y_pitch, src_uv_pitch,
                              dst_w, dst_h, dx, dy, dY, yPitch, dUV, uvPitch,
-                             out_w, out_h);
+                             out_w, out_h, fade);
     cudaDeviceSynchronize();
     return cudaGetLastError() == cudaSuccess;
 }

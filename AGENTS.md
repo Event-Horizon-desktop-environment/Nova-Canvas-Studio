@@ -10,11 +10,11 @@ Mid-refactor: `splitplan.md` is a 40-phase plan to split the codebase into small
 
 - **Build:** `./build.sh` (also `-d` install deps, `-c` clean, `-t Debug`). Binary → `build/gui/canvas`. Auto-detects distro, prefers Ninja.
 - **Clean code only, zero warnings:** every build — Debug, Release, `build-release/` — must be warning-free. Treat any compiler warning as a build failure before handing off. NOTE: `-Werror` is **not enabled on any target yet** (splitplan Phase 38 is open; audited 2026-09-07), so zero-warning discipline is manual everywhere — treat every warning as a failure.
-- **Test:** `ctest --test-dir build`. **16 tests** (verified passing on this machine):
+- **Test:** `ctest --test-dir build`. **17 tests** (verified passing on this machine):
   - **Core (4, in `core/tests/`):** `roundtrip` (edit-op + project JSON round-trip; an edge in this test used to SEGFAULT on a stale timeline model until `EqBand::operator==` was added — it now passes), `export_sweep` (every valid codec×container combo; skip=2 if no libx264), `scrub_bench` (p95 scrub-preview latency budget; skip=2 if no libx264), `visual_render_test` (eye: identity video render is byte-identical to the legacy fast path, plus flip/scale/opacity actually change output pixels; synthesizes its own h264 source at runtime).
-  - **GUI-headless (11, in `gui/tests/`):** `sync_constants_test`, `timeline_decoder_test`, `audio_pipeline_test`, `sonicsync_test`, `av_reanchor_test` (seek-hold vs. audio-feed integration), `timeline_snap_test`, `timeline_selection_test`, `timeline_drag_test`, `transition_handle_editor_test`, `audio_targets_test` (multi-select audio-target resolution), `timeline_volume_line_test` (audio volume-line dB↔y law).
+  - **GUI-headless (12, in `gui/tests/`):** `sync_constants_test`, `timeline_decoder_test`, `audio_pipeline_test`, `sonicsync_test`, `av_reanchor_test` (seek-hold vs. audio-feed integration), `timeline_snap_test`, `timeline_selection_test`, `timeline_drag_test`, `transition_handle_editor_test`, `audio_targets_test` (multi-select audio-target resolution), `timeline_volume_line_test` (audio volume-line dB↔y law), `deliver_settings_model_test` (Deliver-panel container↔codec policy + bitrate-visibility law).
   - **GUI Qt-linked (1, in `gui/tests/qt/`):** `volume_line_drag_qt_test` — drives the real `TimelineWidget` press/move/release handlers in an offscreen session (the only Qt-linked test; `scripts/check_qtdep.sh` exempts `gui/tests/qt/` by design).
-  - If you quote a test count elsewhere, assume these 16 and re-verify with `ctest --test-dir build` before quoting.
+  - If you quote a test count elsewhere, assume these 17 and re-verify with `ctest --test-dir build` before quoting.
 - **`scripts/check_qtdep.sh`** — static guard for the headless invariant below (`-q` for exit-code-only, used by CI/`build.sh`). Also enforced at compile time: `canvas_add_headless_test()` targets link no Qt, so a stray `<Q...>` include fails the build outright.
 - **System deps:** Qt6 (Widgets/OpenGLWidgets/Svg), FFmpeg (libavformat/codec/util/swscale/swresample), nlohmann-json (system header, no explicit CMake dep), optional CUDA 12/13 (`nvcc` → `CANVAS_HAVE_CUDA`), PipeWire + ALSA (optional, pkg-config-detected).
 
@@ -22,7 +22,7 @@ Mid-refactor: `splitplan.md` is a 40-phase plan to split the codebase into small
 
 > A headless module may include ONLY `<system>`, `<canvas/core/...>`, and other headless modules. Never `<Q...>`. If a module needs Qt, it is NOT headless and needs a thin Qt adapter around it instead.
 
-The current headless surface (besides all of `core/`): `sync_constants.hpp`, `audio_sink.hpp`, `audio_pipeline.hpp/.cpp`, `sonicsync.hpp/.cpp`, `timeline_decoder.hpp/.cpp` (all in `gui/src/features/playback/`), `audio_targets.hpp/.cpp` (in `gui/src/features/timeline/`), and `timeline_snap.hpp/.cpp`, `timeline_selection.hpp/.cpp`, `timeline_drag.hpp/.cpp`, `transition_handle_editor.hpp/.cpp`, `timeline_volume_line.hpp/.cpp` (all in `gui/src/Widgets/`). Run `./scripts/check_qtdep.sh` after touching any of these — the script's allowlist is the authoritative list, keep it in sync.
+The current headless surface (besides all of `core/`): `sync_constants.hpp`, `audio_sink.hpp`, `audio_pipeline.hpp/.cpp`, `sonicsync.hpp/.cpp`, `timeline_decoder.hpp/.cpp` (all in `gui/src/features/playback/`), `audio_targets.hpp/.cpp` (in `gui/src/features/timeline/`), `deliver_settings_model.hpp/.cpp` (in `gui/src/features/deliver/`), and `timeline_snap.hpp/.cpp`, `timeline_selection.hpp/.cpp`, `timeline_drag.hpp/.cpp`, `transition_handle_editor.hpp/.cpp`, `timeline_volume_line.hpp/.cpp` (all in `gui/src/Widgets/`). Run `./scripts/check_qtdep.sh` after touching any of these — the script's allowlist is the authoritative list, keep it in sync.
 
 **FROZEN APIs (splitplan Phase 22):** `TimelineDecoder`, `AudioPipeline`, and `SonicSync`'s public surfaces are the stable playback seam. Don't change existing signatures without checking `splitplan.md`'s sign-off note; additive methods are fine.
 
@@ -115,7 +115,11 @@ a.plan.md / inspector.md / %08Video-Editor*/   pre-rename design docs + a stale 
   - `playback/sync_constants.hpp` — **headless.** `kLookahead`, `kScrubPrecache`, `kPreviewMaxDim`, `kCommitSeqMaxDelta`, `kAudioLeadMs`.
   - `playback/audio_output.hpp/.cpp` — ALSA w/ PipeWire fallback, float PCM, two writer threads, stat counters. `flush()` must join the ALSA thread before dropping (documented stale-audio bug/workaround).
   - `thumbnails/thumbnail_service.hpp/.cpp` — 4 worker threads, in-memory LRU + disk cache, waveform PNG + raw `.ehwf`. Decodes thumbnail frames at the `kPreviewMaxDim` (640) preview cap so zoom-out filmstrip rebuilds (hundreds of cells) stream in at ms cost instead of full-res decodes.
-  - `deliver/deliver_settings_panel.*` + `render_queue_panel.*` — Deliver page UI bound to core `RenderQueue`. Splitting the codec/container list builders out into a Qt-free `DeliverSettingsModel` is splitplan Phase 31 — **not done yet**.
+  - `deliver/deliver_settings_panel.*` — Deliver page UI wiring only: combo population, signal
+    plumbing, `settings()`/`set_settings()` round-trip against the model. Its codec/container
+    lists now live in the **headless** `deliver_settings_model.*` (splitplan Phase 31, done):
+    `preset_names()`, `encoder_backends()`, `video_codecs_for_format()`/`audio_codecs_for_format()`,
+    `bitrate_visibility()`. `render_queue_panel.*` — render-queue UI bound to core `RenderQueue`.
 - `src/Widgets/`:
   - `timeline_widget.hpp/.cpp` — `QGraphicsView` facade + geometry constants + signals. Still ~740 lines (Phase 32's "drop dead members, get under ~150 lines" cleanup hasn't run yet — don't assume it's a thin facade until that phase lands).
   - `timeline_view.cpp` — scene: minimap, ruler, tracks, filmstrip thumbnails, waveform pixmaps, playhead.
@@ -140,7 +144,7 @@ a.plan.md / inspector.md / %08Video-Editor*/   pre-rename design docs + a stale 
 
 ## Gotchas & conventions
 
-- `core/` has **zero Qt** dependency (deliberate); so do the extracted `gui/src/features/playback/*`, `gui/src/features/timeline/audio_targets.*`, and `gui/src/Widgets/timeline_{snap,selection,drag}.*`, `transition_handle_editor.*`, `timeline_volume_line.*` modules listed above — run `./scripts/check_qtdep.sh` after touching any of them.
+- `core/` has **zero Qt** dependency (deliberate); so do the extracted `gui/src/features/playback/*`, `gui/src/features/timeline/audio_targets.*`, `gui/src/features/deliver/deliver_settings_model.*`, and `gui/src/Widgets/timeline_{snap,selection,drag,volume_line}.*`, `transition_handle_editor.*` modules listed above — run `./scripts/check_qtdep.sh` after touching any of them.
 - Two decoders overlap: `VideoDecoder::decode_audio` vs standalone `AudioDecoder` — know which one a caller uses. Playback uses `AudioDecoder` (via `AudioPipeline`); de-duplicating this is splitplan Phase 33, **not done**.
 - GPU optional everywhere: guard with `CANVAS_HAVE_CUDA` / `cuda_available()`; never assume NVENC.
 - CMake: AUTOMOC/AUTORCC/AUTOUIC on for the GUI target; off for `canvas_core` and the headless test targets. `-Werror` is on for headless module targets only (Phase 38), not the GUI app — manual discipline there.

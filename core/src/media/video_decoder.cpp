@@ -273,6 +273,11 @@ void VideoDecoder::close() {
            path_.c_str(), (int)hw_avail_, (long long)next_frame_);
     if (packet_) av_packet_free(&packet_);
     if (av_frame_) av_frame_free(&av_frame_);
+    if (hold_hw_) av_frame_free(&hold_hw_);
+    hold_hw_src_ = -1;
+    hold_rgba_.reset();
+    hold_rgba_src_ = -1;
+    hold_rgba_dim_ = -1;
     if (sws_ctx_) {
         sws_freeContext(sws_ctx_);
         sws_ctx_ = nullptr;
@@ -571,6 +576,36 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
     // hw_frames_ctx, never the frame's own format, so comparing against it here
     // used to fail and this function returned null before decoding at all.
     if (!hw_avail_ || hw_pix_fmt_ != AV_PIX_FMT_CUDA) return nullptr;
+
+    // Frozen-tail hold: once the stream's final frame is known (last_frame_),
+    // a request past it must not re-walk to EOF and fail on every call — the
+    // exporter then silently drops to per-frame CPU re-seeks (~90ms/frame) for
+    // the whole audio-only tail. Serve a persistent ref of the last real frame
+    // instead, built once by re-anchoring on the owning keyframe.
+    if (last_frame_ > 0 && target > last_frame_) {
+        if (!hold_hw_ || hold_hw_src_ != last_frame_) {
+            const IframeEntry* entry = iframe_at_or_before(last_frame_);
+            if (entry) {
+                container_seek_seconds(entry->pts_seconds);
+            } else if (frame_rate_ > 0.0) {
+                container_seek_seconds(static_cast<double>(last_frame_) / frame_rate_);
+            }
+            const AVFrame* last = decode_to_hw(last_frame_, 0);
+            if (last && last->format == hw_pix_fmt_) {
+                if (!hold_hw_) hold_hw_ = av_frame_alloc();
+                if (hold_hw_ && av_frame_ref(hold_hw_, last) == 0) {
+                    hold_hw_src_ = last_frame_;
+                } else {
+                    av_frame_free(&hold_hw_);
+                    hold_hw_src_ = -1;
+                }
+            } else {
+                av_frame_free(&hold_hw_);
+                hold_hw_src_ = -1;
+            }
+        }
+        return hold_hw_;  // nullptr on failure -> caller falls back to CPU RGBA
+    }
     CANVAS_LOG("video_decoder: decode_to_hw target=%lld max_over=%d", (long long)target, max_over);
     // A CUDA decode session is primed by the bitstream's owning keyframe (the
     // AV1 sequence header). Entering mid-GOP makes FFmpeg transparently emit
@@ -653,8 +688,16 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
                 return av_frame_;
             }
             if (ret == AVERROR_EOF) {
-                if (next_frame_ > 0 && (last_frame_ < 0 || next_frame_ - 1 < last_frame_))
+                if (next_frame_ > 0 && (last_frame_ < 0 || next_frame_ - 1 < last_frame_)) {
+                    const int64_t old_last = last_frame_;
                     last_frame_ = next_frame_ - 1;
+                    log::log_warning(
+                        "[dec] HW-EOF srct=%-9lld hit=%-9lld last %-9lld -> %-9lld "
+                        "engaged=%d soft_only=%d hw=%d fmt=%d (latched, no re-anchor)",
+                        (long long)target, (long long)(next_frame_ - 1),
+                        (long long)old_last, (long long)last_frame_,
+                        hw_engaged_ ? 1 : 0, soft_only_ ? 1 : 0, hw_avail_ ? 1 : 0, hw_pix_fmt_);
+                }
                 CANVAS_LOG("video_decoder: decode_to_hw EOF at frame %lld", (long long)next_frame_);
                 return nullptr;
             }
@@ -684,6 +727,20 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
                 break;
             }
         }
+    }
+    // Draining latched from an earlier read-error/EOF: from here on every call
+    // returns null in microseconds and no seek resets it — log the very first
+    // occurrence so a permanent GPU-fastpath death is visible in one line.
+    if (draining_) {
+        static bool logged_drain_lock = false;
+        if (!logged_drain_lock) {
+            logged_drain_lock = true;
+            log::log_warning("[dec] decode_to_hw LATCHED DRAINING target=%lld last=%lld next=%lld "
+                             "soft_only=%d engaged=%d hw=%d fmt=%d (returning null every call)",
+                             (long long)target, (long long)last_frame_, (long long)next_frame_,
+                             soft_only_ ? 1 : 0, hw_engaged_ ? 1 : 0, hw_avail_ ? 1 : 0, hw_pix_fmt_);
+        }
+        return nullptr;
     }
     return nullptr;
 }
@@ -839,7 +896,18 @@ VideoFramePtr VideoDecoder::decode_to_frame(int64_t target, int max_output_dim) 
     if (!codec_ctx_ || frame_rate_ <= 0.0) return nullptr;
     set_output_dim(max_output_dim);
     refine_last_frame();
-    target = clamp_target(target);
+
+    // Frozen-tail hold: requesting past the stream's final frame used to
+    // container-seek and re-decode the identical last frame on every call
+    // (~90ms each) for the whole audio-only share of a project. Serve the
+    // cached final frame instead; build the cache once by decoding it exactly.
+    if (last_frame_ > 0 && target > last_frame_) {
+        if (hold_rgba_ && hold_rgba_src_ == last_frame_ && hold_rgba_dim_ == out_max_dim_)
+            return hold_rgba_;
+        target = last_frame_;
+    } else {
+        target = clamp_target(target);
+    }
 
     const auto dbg_start = std::chrono::steady_clock::now();
     const bool dbg_hw = hw_pix_fmt_ != AV_PIX_FMT_NONE;
@@ -877,6 +945,11 @@ VideoFramePtr VideoDecoder::decode_to_frame(int64_t target, int max_output_dim) 
             std::chrono::steady_clock::now() - dbg_start).count();
         CANVAS_LOG("decode: frame %lld took %.2f ms hw=%d", (long long)dbg_out->frame_number,
                dbg_ms, (int)dbg_hw);
+        if (last_frame_ > 0 && dbg_out->frame_number >= last_frame_) {
+            hold_rgba_ = dbg_out;
+            hold_rgba_src_ = dbg_out->frame_number;
+            hold_rgba_dim_ = out_max_dim_;
+        }
     }
     return dbg_out;
 }

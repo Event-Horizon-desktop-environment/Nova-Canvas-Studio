@@ -550,9 +550,9 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
         }
     }
 
-    // Single-clip edge fades must go through the CPU compositor, which applies
-    // the black-factor blend; the raw GPU NV12 path cannot express it, so bail
-    // whenever tl_frame is inside such a window.
+    // Single-clip edge fades: fold the whole-canvas black-factor blend into the
+    // GPU resize (fade in/out windows), using the same law as the CPU
+    // compositor so the GPU and CPU paths agree on every faded frame.
     {
         const Clip* f = the_clip;
         const bool in_in = f->has_transition_in() && !is_audio_transition(f->transition_in) &&
@@ -569,12 +569,14 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
                             !has_b_after && f->transition_out_duration > 0 &&
                             tl_frame >= f->tl_out - f->transition_out_duration &&
                             tl_frame < f->tl_out;
-        if (in_in || in_out) {
-            CANVAS_LOG("frame_gpu: clip id=%lld tl_frame=%lld in single-clip fade window, using CPU path",
-                   (long long)f->id, (long long)tl_frame);
-            gpu_mark(1);  // fade window
-            return false;
-        }
+        float fade = 1.0f;
+        if (in_in)
+            fade *= static_cast<float>(tl_frame - f->tl_in) /
+                    static_cast<float>(f->transition_in_duration);
+        if (in_out)
+            fade *= 1.0f - static_cast<float>(tl_frame - (f->tl_out - f->transition_out_duration)) /
+                            static_cast<float>(f->transition_out_duration);
+        out->fade = fade;
     }
 
     // Locate the persistent decoder for the track holding this clip.
@@ -623,10 +625,16 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
                               std::chrono::steady_clock::now() - dec0).count();
     gpu_decode_ms += dec_ms;
     if (!hw || !hw->hw_frames_ctx || hw->width <= 0 || hw->height <= 0) {
-        CANVAS_LOG("frame_gpu: decode_to_hw FAILED tl_frame=%lld src_frame=%lld hw=%p ctx=%p w=%d h=%d",
-               (long long)tl_frame, (long long)src_frame,
-               (const void*)hw, hw ? (const void*)hw->hw_frames_ctx : nullptr,
-               hw ? hw->width : 0, hw ? hw->height : 0);
+        static bool logged_first_decode_fail = false;
+        if (!logged_first_decode_fail) {
+            logged_first_decode_fail = true;
+            log::log_warning(
+                "[render] frame_gpu FIRST decode-fail tl=%lld src=%lld dec_ms=%.2f "
+                "hw=%p ctx=%p w=%d h=%d",
+                (long long)tl_frame, (long long)src_frame, dec_ms,
+                (const void*)hw, hw ? (const void*)hw->hw_frames_ctx : nullptr,
+                hw ? hw->width : 0, hw ? hw->height : 0);
+        }
         gpu_mark(3);  // decode failure
         return false;
     }
@@ -694,12 +702,14 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
     // sums, so order is irrelevant); locked tracks are still rendered
     // (locked = read-only, audio stays audible, mirroring playback).
     const bool any_solo = audio_mix::any_solo(seq.audio_tracks);
+    const double seq_fps = seq.fps;
+    const double tl_sec = static_cast<double>(tl_sample) / out_sample_rate;
     for (const auto& track : seq.audio_tracks) {
         if (track.muted || (any_solo && !track.solo)) continue;
         // Determine which timeline frame range this audio chunk covers.
-        const double frame_at_sample =
-            (static_cast<double>(tl_sample) / out_sample_rate) * fps;
-        const int64_t tl_frame = static_cast<int64_t>(std::floor(frame_at_sample));
+        const int64_t tl_frame = (seq_fps > 0.0)
+            ? static_cast<int64_t>(std::llround(tl_sec * seq_fps))
+            : static_cast<int64_t>(std::llround(tl_sec * fps));
         const Clip* clip = track.clip_at(tl_frame);
         if (!clip || !clip->enabled || clip->media < 0) continue;
 
@@ -717,20 +727,16 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
         const double media_fps = media_fps_for(project, *clip);
         if (media_fps <= 0.0) continue;
 
-        // Frame at the start of this chunk.
-        const int64_t start_tl_frame = static_cast<int64_t>(
-            std::floor((static_cast<double>(tl_sample) / out_sample_rate) * fps));
+        const int64_t start_tl_frame = tl_frame;
         const int64_t src_frame = clip_src_frame(project, *clip, start_tl_frame);
-        // Audio sample index on the realtime clock: src_in positions the trim in
-        // the source's own media fps, then advance by SEQUENCE time per timeline
-        // frame (mirrors playback, so export audio matches the editor at any
-        // frame-rate mix instead of halving/doubling the stream).
-        const double seq_fps = project.sequence.fps;
+        // Media position from CONTINUOUS timeline time (same law as the
+        // RenderSession path): advances exactly num_frames per call at any export
+        // fps instead of rate/seq_fps, keeping the decoder inside its window.
         const int64_t start_media_sample =
-            (start_tl_frame >= clip->tl_in && seq_fps > 0.0)
+            (seq_fps > 0.0 && tl_sec >= static_cast<double>(clip->tl_in) / seq_fps)
                 ? static_cast<int64_t>(std::llround(
                       (static_cast<double>(clip->src_in) / media_fps +
-                       static_cast<double>(start_tl_frame - clip->tl_in) / seq_fps) *
+                       (tl_sec - static_cast<double>(clip->tl_in) / seq_fps)) *
                       out_sample_rate))
                 : 0;
 
@@ -744,11 +750,13 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
         const int src_ch = chunk->channels;
         // Per-output-frame gain from the clip's audio IN/OUT transitions
         // (audio_fade_gain returns 1.0 when no audio fade touches the frame) and
-        // the track's post-fade gain (db_to_gain law).
+        // the track's post-fade gain (db_to_gain law). Fade frames advance on the
+        // TIMELINE clock (seq_fps), matching the media-sample law above; when
+        // export fps == seq fps this reduces to the historical `* fps` form.
         std::vector<float> gains(static_cast<std::size_t>(num_frames));
         for (int k = 0; k < num_frames; ++k) {
             const int64_t frm = start_tl_frame + static_cast<int64_t>(
-                static_cast<double>(k) / out_sample_rate * fps);
+                static_cast<double>(k) / out_sample_rate * seq_fps);
             gains[static_cast<std::size_t>(k)] = audio_fade_gain(*clip, frm);
         }
         // Mix: sum with the clip's volume, the track's gain, and the pan balance.
@@ -788,8 +796,18 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
     // can evaluate a hair below the integer (98400 samples @60fps -> 122.9999998),
     // and flooring that systematically requests the previous frame every chunk ->
     // a persistent 1-frame backward drift that force-re-seeks -> repeated audio.
-    const int64_t start_tl_frame = std::llround(
-        (static_cast<double>(tl_sample) / out_sample_rate) * fps);
+    //
+    // tl_sample is the OUTPUT sample position; map it to timeline time directly,
+    // not through the export fps. Only this keeps the media cursor advancing by
+    // exactly num_frames per call when export fps != sequence fps (the old
+    // frame-quantized law stepped rate/seq_fps samples per call while the
+    // exporter only served rate/fps -> a seek-back every chunk -> quadratic).
+    const double seq_fps = project_->sequence.fps;
+    const double tl_sec = static_cast<double>(tl_sample) / out_sample_rate;
+    const int64_t start_tl_frame =
+        (seq_fps > 0.0)
+            ? static_cast<int64_t>(std::llround(tl_sec * seq_fps))
+            : static_cast<int64_t>(std::llround(tl_sec * fps));
 
     // Mix each audible audio track in place, reusing the persistent per-track
     // AudioDecoder so sequential chunks advance one continuous decode stream
@@ -834,12 +852,16 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
         const double media_fps = media_fps_for(*project_, *clip);
         if (media_fps <= 0.0) continue;
         const int64_t src_frame = clip_src_frame(*project_, *clip, start_tl_frame);
-        const double seq_fps = project_->sequence.fps;
+        // Media position from CONTINUOUS timeline time: (tl_sec - tl_in/seq_fps)
+        // seconds into the clip at natural speed. When export fps == sequence fps
+        // (tl_sec*fps an exact integer) this is identical to the old frame-law;
+        // when they differ it advances exactly num_frames per call instead of
+        // rate/seq_fps, so the decoder stays inside its forward window.
         const int64_t start_media_sample =
-            (start_tl_frame >= clip->tl_in && seq_fps > 0.0)
+            (seq_fps > 0.0 && tl_sec >= static_cast<double>(clip->tl_in) / seq_fps)
                 ? static_cast<int64_t>(std::llround(
                       (static_cast<double>(clip->src_in) / media_fps +
-                       static_cast<double>(start_tl_frame - clip->tl_in) / seq_fps) *
+                       (tl_sec - static_cast<double>(clip->tl_in) / seq_fps)) *
                       out_sample_rate))
                 : 0;
 
@@ -878,10 +900,12 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
         const int src_ch = chunk->channels;
         // Per-output-frame gain from the clip's audio IN/OUT transitions
         // (audio_fade_gain returns 1.0 when no audio fade touches the frame).
+        // Fade frames advance on the TIMELINE clock (seq_fps), matching the
+        // media-sample law above and reducing to `* fps` when they coincide.
         std::vector<float> gains(static_cast<std::size_t>(num_frames));
         for (int k = 0; k < num_frames; ++k) {
             const int64_t frm = start_tl_frame + static_cast<int64_t>(
-                static_cast<double>(k) / out_sample_rate * fps);
+                static_cast<double>(k) / out_sample_rate * seq_fps);
             gains[static_cast<std::size_t>(k)] = audio_fade_gain(*clip, frm);
         }
         // Mix: sum with the clip's volume, the track's gain, and the pan balance.
