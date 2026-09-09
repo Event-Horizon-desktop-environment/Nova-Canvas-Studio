@@ -196,6 +196,13 @@ std::unique_ptr<ICommand> set_clip_transform(Sequence& seq, Track::Kind kind,
 std::unique_ptr<ICommand> set_clip_composite(Sequence& seq, Track::Kind kind,
                                              std::size_t track_index, ClipId id,
                                              float opacity, BlendMode blend_mode);
+// Replaces a clip's color grade (the node tree applied before the composite
+// blit). If the clip is linked, the mate inherits the same graph (an A/V pair
+// shares one grade; the audio half is a visual no-op). Passing an empty graph
+// clears the grade. Returns nullptr if the clip is not found.
+std::unique_ptr<ICommand> set_clip_grade(Sequence& seq, Track::Kind kind,
+                                         std::size_t track_index, ClipId id,
+                                         const grade_graph::GradeGraph& grade);
 // Sets transition shaping on a clip's IN or OUT edge: ease amount, curve value,
 // and the start/end ratio profile (all per-edge). If the clip is linked, the
 // mate's corresponding edge inherits the values. Returns nullptr if the clip is

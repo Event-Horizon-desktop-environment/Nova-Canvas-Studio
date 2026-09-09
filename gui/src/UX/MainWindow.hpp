@@ -38,6 +38,10 @@ class MainWindow;
 
 namespace canvas::gui {
 
+// Color-page chrome module (features/color/color_page.cpp) is a new-file
+// builder; the strip type is only pointer-held here, so a forward decl suffices.
+class MiniTimelineStrip;
+
 // Menu construction lives in ShellMenus.cpp (splitplan refactor) rather than the
 // wall-of-layout builder. Declared here and friended so it can touch the chrome
 // members it populates without widening MainWindow's public API.
@@ -91,6 +95,14 @@ void apply_inspector_file(MainWindow& main_window);
 // populates with private-API access.
 void build_center_workspace(MainWindow& main_window);
 
+// The Color page workspace + panels live in features/color/ (splitplan-style
+// builder, new module): build_color_page() creates the docks once the center
+// workspace exists; enter/leave_color_page() are the page-bar handoffs.
+// Declared here and friended so the module can own the Color chrome members.
+void build_color_page(MainWindow& main_window);
+void enter_color_page(MainWindow& main_window);
+void leave_color_page(MainWindow& main_window);
+
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 
@@ -114,7 +126,12 @@ protected:
     void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 
-private slots:
+private:
+    // NOTE: no `slots` on these. setupUi() calls QMetaObject::connectSlotsByName,
+    // which scans every moc-registered `on_*` slot against the .ui's designer
+    // widget names and warns per-launch for the ones that never match. All of
+    // them are wired via explicit function-pointer connects, so they're plain
+    // member functions.
     void on_import_media();
     void on_new_project();
     void on_open_project();
@@ -212,6 +229,15 @@ private:
     QDockWidget* deliver_queue_dock_ = nullptr;
     bool deliver_active_ = false;
 
+    // Color page (features/color/*, M0 UX scaffold).
+    bool color_active_ = false;
+    MiniTimelineStrip* color_mini_strip_ = nullptr;
+    QDockWidget* color_dock_ = nullptr;
+    QDockWidget* color_left_dock_ = nullptr;
+    QDockWidget* color_nodes_dock_ = nullptr;
+    QDockWidget* color_effects_dock_ = nullptr;
+    QDockWidget* color_lightbox_dock_ = nullptr;
+
     friend void build_app_menus(MainWindow& main_window);
     friend QWidget* build_top_bar(MainWindow& main_window);
     friend void build_page_bar(MainWindow& main_window);
@@ -238,6 +264,9 @@ private:
     friend void update_inspector_file(MainWindow& main_window);
     friend void apply_inspector_file(MainWindow& main_window);
     friend void build_center_workspace(MainWindow& main_window);
+    friend void build_color_page(MainWindow& main_window);
+    friend void enter_color_page(MainWindow& main_window);
+    friend void leave_color_page(MainWindow& main_window);
 
     std::unique_ptr<canvas::core::Project> project_;
     canvas::core::UndoStack undo_;

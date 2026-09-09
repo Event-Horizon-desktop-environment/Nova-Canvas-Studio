@@ -155,3 +155,39 @@ set_target_properties(volume_line_drag_qt_test PROPERTIES AUTOMOC ON AUTORCC ON 
 add_test(NAME volume_line_drag_qt_test COMMAND volume_line_drag_qt_test)
 set_tests_properties(volume_line_drag_qt_test PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# waveform_placement_qt_test: Qt regression test for the wrong-cut bug. Feeds a
+# synthetic waveform through the real on_waveform_ready placement path and pins
+# the drawn pixmap to the SAME geometry law frame_at_x() (and the razor) cut on:
+# left scene-x == kSceneMargin + kTrackHeaderWidth + tl_in/fpp and pixmap width
+# == clip body width. Guards the cx+2 inset AND the width-4 rescale regressions.
+qt_add_executable(waveform_placement_qt_test
+    qt/waveform_placement_qt_test.cpp
+    ../resources.qrc
+    ../src/Widgets/timeline_widget.cpp
+    ../src/Widgets/timeline_view.cpp
+    ../src/Widgets/timeline_interaction.cpp
+    ../src/Widgets/timeline_thumbnails.cpp
+    ../src/Widgets/timeline_snap.cpp
+    ../src/Widgets/timeline_selection.cpp
+    ../src/Widgets/timeline_drag.cpp
+    ../src/Widgets/transition_handle_editor.cpp
+    ../src/Widgets/timeline_volume_line.cpp
+    ../src/UX/theme.cpp
+    ../src/UX/horizon_style.cpp
+    ../src/features/thumbnails/thumbnail_service.cpp
+)
+target_include_directories(waveform_placement_qt_test PRIVATE
+    ${CANVAS_GUI_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../core/include
+)
+target_link_libraries(waveform_placement_qt_test PRIVATE
+    Qt6::Widgets
+    Qt6::Svg
+    Qt6::Test
+    canvas_core
+)
+set_target_properties(waveform_placement_qt_test PROPERTIES AUTOMOC ON AUTORCC ON AUTOUIC OFF)
+add_test(NAME waveform_placement_qt_test COMMAND waveform_placement_qt_test)
+set_tests_properties(waveform_placement_qt_test PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

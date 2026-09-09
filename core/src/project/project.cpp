@@ -1,5 +1,6 @@
 #include "canvas/core/project/project.hpp"
 
+#include "canvas/core/grade_graph/serialize.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <nlohmann/json.hpp>
@@ -13,10 +14,10 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr int kProjectVersion = 3;
+constexpr int kProjectVersion = 4;
 
 json clip_to_json(const Clip& c) {
-    return json{{"id", c.id},
+    json j{{"id", c.id},
                 {"media", c.media},
                 {"tl_in", c.tl_in},
                 {"tl_out", c.tl_out},
@@ -50,6 +51,8 @@ json clip_to_json(const Clip& c) {
                 {"opacity", c.opacity},
                 {"blend_mode", static_cast<int>(c.blend_mode)},
                 {"name", c.name}};
+    if (c.has_grade()) j["grade"] = grade_graph::grade_graph_to_json(c.grade);
+    return j;
 }
 
 Clip clip_from_json(const json& j) {
@@ -101,6 +104,16 @@ Clip clip_from_json(const json& j) {
     if (j.contains("blend_mode"))
         c.blend_mode = static_cast<BlendMode>(j.at("blend_mode").get<int>());
     if (j.contains("name")) j.at("name").get_to(c.name);
+    // A malformed grade must not kill the whole project load; drop the grade
+    // block and keep the clip (matches the deliver-settings tolerance below).
+    if (j.contains("grade")) {
+        try {
+            c.grade = grade_graph::grade_graph_from_json(j.at("grade"));
+        } catch (const std::exception& e) {
+            CANVAS_LOG("project: dropping malformed grade on clip %lld (%s)",
+                       (long long)c.id, e.what());
+        }
+    }
     return c;
 }
 

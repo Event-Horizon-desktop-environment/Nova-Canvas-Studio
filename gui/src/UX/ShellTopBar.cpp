@@ -1,5 +1,7 @@
 #include "UX/MainWindow.hpp"
 
+#include "features/color/color_page.hpp"
+
 #include <QAction>
 #include <QDockWidget>
 #include <QHBoxLayout>
@@ -111,15 +113,23 @@ void build_page_bar(MainWindow& mw) {
         apply_theme_style(b, &page_pill_style);
         page_bar->addWidget(b);
         QObject::connect(b, &QToolButton::clicked, &mw, [&mw, b, name, page_bar](bool) {
-            // Only Edit and Deliver have distinct layouts right now; the rest
-            // fall back to the Edit workspace.
+            // Edit, Deliver, and Color have their own layouts; the rest fall
+            // back to the Edit workspace. Leaving the Color page is handled
+            // here for whatever target page the bar lands on.
             const bool deliver = qstrcmp(name, "Deliver") == 0;
+            const bool color_page = qstrcmp(name, "Color") == 0;
             for (QToolButton* other : page_bar->findChildren<QToolButton*>()) {
                 if (other != b) other->setChecked(false);
             }
             b->setChecked(true);
+            leave_color_page(mw);
             if (deliver) mw.enter_deliver_page();
-            else mw.enter_edit_page();
+            else if (color_page) {
+                mw.enter_edit_page();
+                enter_color_page(mw);
+            } else {
+                mw.enter_edit_page();
+            }
         });
     }
 

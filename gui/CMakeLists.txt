@@ -59,6 +59,17 @@ qt_add_executable(canvas
     src/features/deliver/deliver_settings_model.cpp
     src/features/deliver/render_queue_panel.cpp
 
+    src/features/color/color_widgets.cpp
+    src/features/color/mini_timeline_strip.cpp
+    src/features/color/node_graph_canvas.cpp
+    src/features/color/scopes/common/scope_common.cpp
+    src/features/color/scopes/parade/parade_scope.cpp
+    src/features/color/scopes/waveform/waveform_scope.cpp
+    src/features/color/scopes/vectorscope/vectorscope_scope.cpp
+    src/features/color/scopes/histogram/histogram_scope.cpp
+    src/features/color/scopes/chromaticity/chromaticity_widget.cpp
+    src/features/color/color_page.cpp
+
     src/Widgets/viewer_gl.cpp
     src/Widgets/media_pool_widget.cpp
     src/Widgets/timeline_widget.cpp

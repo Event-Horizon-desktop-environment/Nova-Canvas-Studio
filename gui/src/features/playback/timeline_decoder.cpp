@@ -294,6 +294,11 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
     auto it = slots_.find(clip.media);
     if (it == slots_.end() || !it->second->loaded) return nullptr;
     auto* slot = it->second.get();
+    // Build the I-frame index lazily on the GPU path too: decode_to_hw_indexed
+    // needs it to anchor a scrub/commit on the owning keyframe. Without it the
+    // fallback is a plain container seek + forward decode on every position
+    // change (~520ms/scrub observed vs a tens-of-ms one-GOP walk indexed).
+    if (!slot->decoder.has_iframe_index()) slot->decoder.build_iframe_index();
     // decode_to_hw serves only the CUDA device and the composite kernel consumes
     // CUDA device pointers, so require hardware decode + a CUDA device.
     if (!slot->decoder.is_hardware() || hw_.device_name() != "cuda") return nullptr;

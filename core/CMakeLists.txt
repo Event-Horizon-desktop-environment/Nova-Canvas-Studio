@@ -82,8 +82,12 @@ add_library(canvas_core STATIC
     src/media/audio_waveform.cpp
     src/timeline/model.cpp
     src/timeline/edit_ops.cpp
+    src/grade_graph/graph.cpp
+    src/grade_graph/eval.cpp
+    src/grade_graph/serialize.cpp
     src/project/project.cpp
     src/export/renderer.cpp
+    src/export/grade_frame.cpp
     src/export/exporter.cpp
     src/export/deliver_preset.cpp
     src/export/render_queue.cpp
@@ -119,6 +123,16 @@ add_executable(canvas_scrub_bench_test tests/scrub_bench_test.cpp)
 target_link_libraries(canvas_scrub_bench_test PRIVATE canvas_core)
 set_target_properties(canvas_scrub_bench_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME scrub_bench COMMAND canvas_scrub_bench_test)
+
+add_executable(canvas_colorsci_test tests/colorsci_test.cpp)
+target_link_libraries(canvas_colorsci_test PRIVATE canvas_core)
+set_target_properties(canvas_colorsci_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME colorsci COMMAND canvas_colorsci_test)
+
+add_executable(canvas_graph_test tests/graph_test.cpp)
+target_link_libraries(canvas_graph_test PRIVATE canvas_core)
+set_target_properties(canvas_graph_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME graph COMMAND canvas_graph_test)
 
 add_executable(canvas_visual_render_test tests/visual_render_test.cpp)
 target_link_libraries(canvas_visual_render_test PRIVATE canvas_core)

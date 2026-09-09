@@ -109,6 +109,19 @@ int64_t TimelineWidget::snap_frame(int64_t frame) const {
     return timeline_snap::snap_to_grid(frame, frames_per_pixel_);
 }
 
+int64_t TimelineWidget::blade_cut_frame(const int x) const {
+    // The razor cuts at the mouse: nearest-frame conversion (std::llround) so a
+    // mid-block click cuts on the frame closest to the cursor instead of always
+    // the block's left edge (the "cut is offset to the left of where I clicked"
+    // symptom). The playhead — a playback-position marker that only advances
+    // while the video plays — is deliberately IGNORED: it has nothing to do with
+    // where the user points the razor.
+    const QPointF scene_p = mapToScene(QPoint(x, 0));
+    const double scene_x = scene_p.x();
+    return static_cast<int64_t>(
+        std::llround((scene_x - kSceneMargin - kTrackHeaderWidth) * frames_per_pixel_));
+}
+
 std::vector<int64_t> TimelineWidget::collect_snap_targets(
     const std::vector<canvas::core::ClipId>& exclude,
     const bool include_playhead) const {
@@ -1236,11 +1249,106 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
                  << "candidates=[" << QString::fromStdString(cands) << "]";
     }
 
-    if (hit && current_tool_ == Tool::Blade) {
-        if (debug_enabled())
-            qDebug() << "timeline: blade click clip id=" << hit->clip->id
-                     << "at frame" << frame_at_x(event->pos().x());
-        emit blade_requested(hit->clip, frame_at_x(event->pos().x()));
+    if (current_tool_ == Tool::Blade) {
+        if (hit) {
+            // The razor cuts exactly at the frame the pointer is on. The playhead is
+            // only a playback marker — it never steers the cut (it advances while
+            // the video plays, so it is unrelated to where the user points the
+            // razor); floor()'s systematic left bias is replaced by nearest-frame.
+            const int64_t cut = blade_cut_frame(event->pos().x());
+            // Always-on diagnostic: the mouse pixel/scene position vs the emitted cut
+            // frame, for both track kinds. The TimelineActions handler logs the same
+            // cut frame as [edit] BLADE at=..., so the two lines bracket the round-trip.
+            const char* kind =
+                hit->track_kind == canvas::core::Track::Kind::Video ? "video" : "audio";
+            qWarning().nospace()
+                << "[blade] " << kind << " clip=" << hit->clip->id
+                << " tl=[" << hit->clip->tl_in << "," << hit->clip->tl_out << ")"
+                << " src=[" << hit->clip->src_in << "," << hit->clip->src_out << ")"
+                << " mouse_x=" << event->pos().x()
+                << " scene_x=" << mapToScene(event->pos()).x()
+                << " click_frame=" << frame_at_x(event->pos().x())
+                << " cut=" << cut;
+            // Always-on waveform cross-reference for the SAME clip: media timing +
+            // the audio time the cut frame corresponds to. The source position
+            // follows the clip's src/tl rate (was: naive 1:1, wrong for
+            // fps-mismatched media whose src window is wider than its tl
+            // window) so the log agrees with what blade_linked_at actually does.
+            {
+                const auto mit = media_paths_.find(hit->clip->media);
+                if (mit != media_paths_.end() && mit->second.fps > 0.0) {
+                    const int64_t tl_span = hit->clip->tl_out - hit->clip->tl_in;
+                    const int64_t src_frame =
+                        tl_span > 0
+                            ? hit->clip->src_in +
+                                  static_cast<int64_t>(std::llround(
+                                      static_cast<double>(std::max<int64_t>(0,
+                                                                           cut - hit->clip->tl_in)) *
+                                      static_cast<double>(hit->clip->src_out -
+                                                          hit->clip->src_in) /
+                                      static_cast<double>(tl_span)))
+                            : hit->clip->src_in;
+                    const double audio_t = static_cast<double>(src_frame) / mit->second.fps;
+                    qWarning().nospace()
+                        << "[blade] A/V clip=" << hit->clip->id
+                        << " media_fps=" << QString::number(mit->second.fps, 'g', 4)
+                        << " media_total=" << mit->second.total_frames
+                        << " cut_src_frame=" << src_frame
+                        << " cut_audio_time_s=" << QString::number(audio_t, 'f', 3)
+                        << " cut_lo=" << QString::number(
+                               static_cast<double>(hit->clip->src_in) /
+                                   static_cast<double>(mit->second.total_frames),
+                               'g', 6);
+                } else {
+                    qWarning().nospace()
+                        << "[blade] A/V clip=" << hit->clip->id
+                        << " media_unresolved (media_id=" << hit->clip->media << ")";
+                }
+            }
+            emit blade_requested(hit->clip, cut);
+            event->accept();
+            return;
+        }
+        // Always-on diagnostic for a blade that hit nothing (e.g. an audio-row
+        // click that never found a clip body): report where it landed so a
+        // silent no-op is visible instead of looking like an offset cut.
+        const int v_count =
+            sequence_ ? static_cast<int>(sequence_->video_tracks.size()) : 0;
+        const int flat = track_at_y(scene_pos.y(), v_count);
+        const char* zone = "body";
+        if (in_ruler) zone = "ruler";
+        else if (on_minimap) zone = "minimap";
+        else if (flat < 0) zone = "pinned/band";
+        // Report whether the clicked row has ANY clip covering the click frame,
+        // so a silent blade is identifiable as a geometry miss vs no clip there.
+        std::string row_cover;
+        if (sequence_ && flat >= 0 &&
+            static_cast<std::size_t>(flat) <
+                sequence_->video_tracks.size() + sequence_->audio_tracks.size()) {
+            const int64_t f = frame_at_x(event->pos().x());
+            const bool is_v = static_cast<std::size_t>(flat) < sequence_->video_tracks.size();
+            const auto& tr = is_v
+                                 ? sequence_->video_tracks[static_cast<std::size_t>(flat)]
+                                 : sequence_->audio_tracks[static_cast<std::size_t>(flat - v_count)];
+            for (const auto& c : tr.clips) {
+                if (c.tl_out <= f + 1 && c.tl_in >= f - 1) continue;
+                if (!row_cover.empty()) row_cover += ";";
+                row_cover += "id=" + std::to_string(c.id) + "[" +
+                             std::to_string(c.tl_in) + "," + std::to_string(c.tl_out) + ")";
+                if (f >= c.tl_in && f < c.tl_out) row_cover += "*";
+            }
+            if (row_cover.empty()) row_cover = "none";
+        } else {
+            row_cover = "n/a";
+        }
+        qWarning().nospace()
+            << "[blade] NO-HIT zone=" << zone
+            << " row=" << flat
+            << " scene_x=" << scene_pos.x()
+            << " scene_y=" << scene_pos.y()
+            << " mouse_x=" << event->pos().x()
+            << " frame=" << frame_at_x(event->pos().x())
+            << " row_cover=" << QString::fromStdString(row_cover);
         event->accept();
         return;
     }
@@ -1619,7 +1727,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     }
 
     if (current_tool_ == Tool::Blade && !is_dragging_ && !is_selecting_range_) {
-        update_blade_preview(frame_at_x(event->pos().x()));
+        update_blade_preview(blade_cut_frame(event->pos().x()));
     }
 
     if (is_selecting_range_) {

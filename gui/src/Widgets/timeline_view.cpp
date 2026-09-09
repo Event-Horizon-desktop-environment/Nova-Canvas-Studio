@@ -988,7 +988,13 @@ void TimelineWidget::draw_tracks() {
                 text->setAcceptedMouseButtons(Qt::NoButton);
             }
             auto* wf = scene_.addPixmap(QPixmap());
-            wf->setPos(cx + 2, cy + 2);
+            // The wave pixmap must sit EXACTLY on the clip body's left edge (cx).
+            // frame_at_x() has no x-inset: scene_x = kSceneMargin + kTrackHeaderWidth
+            // + frame/fpp. Any horizontal inset here shifts the drawn spectrum
+            // relative to the razor grid -> blade aims land N frames off (the
+            // 2026-09-08 wrong-cut bug). The vertical +2 inset is fine (y has no
+            // frame meaning).
+            wf->setPos(cx, cy + 2);
             wf->setZValue(1);
             wf->setAcceptedMouseButtons(Qt::NoButton);
 

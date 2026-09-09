@@ -1,5 +1,7 @@
 #include "canvas/core/export/renderer.hpp"
 
+#include "canvas/core/export/grade_frame.hpp"
+
 #include "canvas/core/media/audio_decoder.hpp"
 #include "canvas/core/media/video_decoder.hpp"
 #include "canvas/core/timeline/audio_fade.hpp"
@@ -305,6 +307,10 @@ VideoFramePtr render_video_frame(const Project& project, int64_t tl_frame, int w
         // but correctness + quality matter most for export.
         auto frame = dec.decode_to_frame(src_frame, 0);
         if (frame) {
+            if (clip->has_grade()) {
+                VideoFramePtr graded = apply_grade_to_frame(*frame, clip->grade);
+                if (graded) frame = graded;  // passthrough keeps the decoder frame
+            }
             blit_rgba_transformed(*frame, canvas->rgba, width, height, dst_w, dst_h,
                                   dx, dy, *clip);
         } else {
@@ -411,6 +417,10 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
             CANVAS_LOG("RenderSession::frame: decode FAILED track=%zu src_frame=%lld media=%d",
                    i, (long long)src_frame, clip->media);
             continue;
+        }
+        if (clip->has_grade()) {
+            VideoFramePtr graded = apply_grade_to_frame(*decoded, clip->grade);
+            if (graded) decoded = graded;  // passthrough keeps the decoder frame
         }
 
         // Pillarbox/letterbox the source to fit the canvas preserving aspect.
@@ -548,6 +558,16 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
             gpu_mark(0);  // overlap / multi-clip => CPU compositor
             return false;
         }
+    }
+
+    // Grade the tree applies BEFORE the transform/composite blit, but the GPU
+    // path composites the raw decoded plane — a graded clip must drop to the
+    // CPU compositor (same guarantee as overlap and transform fallbacks).
+    if (the_clip->has_grade()) {
+        CANVAS_LOG("frame_gpu: graded clip id=%lld at tl_frame=%lld -> CPU path",
+               (long long)the_clip->id, (long long)tl_frame);
+        gpu_mark(4);
+        return false;
     }
 
     // Single-clip edge fades: fold the whole-canvas black-factor blend into the

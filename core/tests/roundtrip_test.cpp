@@ -16,8 +16,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 using namespace canvas::core;
 
@@ -253,6 +256,88 @@ int main() {
             check(!clips[1].has_transition_in(), "transition-blade: seam is a plain cut (right half)");
             check(clips[1].has_transition_out() && clips[1].transition_out_duration == 14,
                   "transition-blade: fade stays on the original tail");
+        }
+    }
+
+    {   // Blading an fps-mismatched clip must keep BOTH halves at the clip's
+        // src/tl rate. Leaf law (regression-verified): the source cut position
+        // is src_in + round((pos - tl_in) * src_span / tl_span), NOT a naive
+        // 1:1 offset — 60fps media on a 30fps timeline spans 2 src frames per
+        // tl frame, so a naive split puts the cut at the WRONG audio frame and
+        // collapses the left half toward rate 1.0 (plays at the wrong speed).
+        Project p = make_project();
+        Clip a;
+        a.media = 0;
+        a.name = "Rate2";
+        a.tl_in = 828;
+        a.src_in = 0;
+        a.src_out = 30661;   // 60fps media: tl span (15331) is half the src span
+        auto cmd = place_clip(p.sequence, Track::Kind::Video, 0, a, Placement::Overwrite, 60.0);
+        check(cmd != nullptr, "rate-blade: place 60fps clip at 30fps timeline");
+        undo.record(std::move(cmd));
+
+        const auto& placed = p.sequence.video_tracks[0].clips[0];
+        const double tl_span = static_cast<double>(placed.tl_out - placed.tl_in);
+        check(tl_span > 0.0 && std::abs((placed.src_out - placed.src_in) / tl_span - 2.0) < 1e-3,
+              "rate-blade: placed clip has src/tl rate ~2.0");
+
+        // Blade at the same timeline frame the razor logged (tl=1214); the leaf
+        // law must land the cut at src=772 (12.87s @60fps), NOT 386 (6.43s).
+        cmd = blade_at(p.sequence, Track::Kind::Video, 0, 1214);
+        check(cmd != nullptr, "rate-blade: cut mid-rate clip");
+        undo.record(std::move(cmd));
+
+        const auto& clips = p.sequence.video_tracks[0].clips;
+        if (clips.size() == 2) {
+            const int64_t left_src_out = clips[0].src_out;
+            check(left_src_out == 772,
+                  "rate-blade: left half src_out picks rate-aware frame (772), not naive 386");
+            const int64_t right_src_in = clips[1].src_in;
+            check(right_src_in == left_src_out,
+                  "rate-blade: right half src_in == left half src_out (contiguous)");
+            const double lrate = static_cast<double>(clips[0].src_out - clips[0].src_in) /
+                                 static_cast<double>(clips[0].tl_out - clips[0].tl_in);
+            const double rrate = static_cast<double>(clips[1].src_out - clips[1].src_in) /
+                                 static_cast<double>(clips[1].tl_out - clips[1].tl_in);
+            check(std::abs(lrate - 2.0) < 1e-3,
+                  "rate-blade: left half keeps rate 2.0 (not collapsed to 1.0)");
+            check(std::abs(rrate - 2.0) < 1e-3, "rate-blade: right half keeps rate 2.0");
+        } else {
+            check(false, "rate-blade: clip split in two");
+        }
+    }
+
+    {   // Same rate-preserving law on the LINKED blade (A/V pair cut together).
+        Project p = make_project();
+        Clip v;
+        v.media = 0;
+        v.name = "V60";
+        v.tl_in = 0;
+        v.src_in = 0;
+        v.src_out = 600;
+        Clip a = v;
+        a.name = "A60";
+        auto cmd = place_linked_clip(p.sequence, 0, 0, v, a, Placement::Overwrite, 60.0);
+        check(cmd != nullptr, "linked-rate-blade: place linked 60fps pair");
+        undo.record(std::move(cmd));
+
+        cmd = blade_linked_at(p.sequence, Track::Kind::Video, 0, 150);
+        check(cmd != nullptr, "linked-rate-blade: cut linked pair");
+        undo.record(std::move(cmd));
+
+        const auto& vc = p.sequence.video_tracks[0].clips;
+        const auto& ac = p.sequence.audio_tracks[0].clips;
+        if (vc.size() == 2 && ac.size() == 2) {
+            auto rate = [](const Clip& c) {
+                return static_cast<double>(c.src_out - c.src_in) /
+                       static_cast<double>(c.tl_out - c.tl_in);
+            };
+            check(std::abs(rate(vc[0]) - 2.0) < 1e-3 && std::abs(rate(vc[1]) - 2.0) < 1e-3,
+                  "linked-rate-blade: both video halves keep rate 2.0");
+            check(std::abs(rate(ac[0]) - 2.0) < 1e-3 && std::abs(rate(ac[1]) - 2.0) < 1e-3,
+                  "linked-rate-blade: both audio halves keep rate 2.0");
+        } else {
+            check(false, "linked-rate-blade: linked pair split in two on both tracks");
         }
     }
 
@@ -1422,6 +1507,243 @@ int main() {
               "batch-move: stationary clip is trimmed only at the overwrite boundary");
         check(ca2 && cb2 && ca2->tl_in == 120 && ca2->duration() == 30 && cb2->duration() == 30,
               "batch-move: dragged clips keep their exact size and relative spacing");
+    }
+
+    {
+        // blade_linked_at cuts the UNLINKED source-sibling: a clip of the same
+        // media on the opposite track kind, strictly interior to the cut, so a
+        // dropped A/V pair splits as one even after its link was lost. The pair
+        // gets re-linked, unattached audio (different media) is never touched,
+        // and a locked mate track is left alone.
+        Project p;
+        p.sequence.fps = 30.0;
+        p.sequence.video_tracks.emplace_back(Track::Kind::Video, "V1");
+        p.sequence.audio_tracks.emplace_back(Track::Kind::Audio, "A1");
+        p.sequence.video_tracks.emplace_back(Track::Kind::Video, "V2");
+
+        Clip vp;
+        vp.media = 3;
+        vp.name = "VES_PAIR";
+        vp.tl_in = 1000;
+        vp.tl_out = 5000;
+        vp.src_in = 0;
+        vp.src_out = 4000;
+        p.sequence.next_clip_id = 900;
+        vp.id = p.sequence.next_clip_id++;
+        p.sequence.video_tracks[0].clips.push_back(vp);
+
+        Clip ap;
+        ap.media = 3;  // same source file, no linked_id
+        ap.name = "AES_PAIR";
+        ap.tl_in = 1000;
+        ap.tl_out = 5000;
+        ap.src_in = 0;
+        ap.src_out = 4000;
+        ap.id = p.sequence.next_clip_id++;
+        p.sequence.audio_tracks[0].clips.push_back(ap);
+
+        Clip vo;
+        vo.media = 9;  // voiceover, different media
+        vo.name = "VES_VO";
+        vo.tl_in = 1000;
+        vo.tl_out = 5000;
+        vo.id = p.sequence.next_clip_id++;
+        p.sequence.audio_tracks[0].clips.push_back(vo);
+
+        Clip dead;
+        dead.media = 2;  // primary must cut V2's same-media clip too
+        dead.name = "VES_V2";
+        dead.tl_in = 1000;
+        dead.tl_out = 5000;
+        dead.id = p.sequence.next_clip_id++;
+        p.sequence.video_tracks[1].clips.push_back(dead);
+
+        auto cmd = blade_linked_at(p.sequence, Track::Kind::Video, 0, 2000);
+        check(cmd != nullptr, "sibling-blade: video blade returns a command");
+        check(p.sequence.video_tracks[0].clips.size() == 2, "sibling-blade: video splits in two");
+        check(p.sequence.audio_tracks[0].clips.size() == 3, "sibling-blade: audio clip count unchanged");
+        check(p.sequence.video_tracks[1].clips.size() == 1,
+              "sibling-blade: same-media clip on a different video track is NOT cut");
+
+        const Clip* vL = p.sequence.video_tracks[0].clip_with_id(vp.id);
+        const Clip* vR = [&] {
+            for (const auto& c : p.sequence.video_tracks[0].clips)
+                if (c.id != vp.id) return &c;
+            return (const Clip*)nullptr;
+        }();
+        const Clip* aL = p.sequence.audio_tracks[0].clip_with_id(ap.id);
+        const Clip* aR = [&] {
+            for (const auto& c : p.sequence.audio_tracks[0].clips)
+                if (c.id != ap.id && c.name == "AES_PAIR") return &c;
+            return (const Clip*)nullptr;
+        }();
+        check(vL && vR && vL->tl_out == 2000 && vR->tl_in == 2000,
+              "sibling-blade: video seam at cut frame");
+        check(aL && aR && aL->tl_out == 2000 && aR->tl_in == 2000,
+              "sibling-blade: audio sibling cut at the same frame");
+        check(vL->linked_id == aL->id && aL->linked_id == vL->id,
+              "sibling-blade: left halves re-linked");
+        check(vR->linked_id == aR->id && aR->linked_id == vR->id,
+              "sibling-blade: right halves re-linked");
+
+        cmd->undo(p.sequence);
+        check(p.sequence.video_tracks[0].clips.size() == 1 &&
+                  p.sequence.audio_tracks[0].clips.size() == 2,
+              "sibling-blade: undo restores the pre-cut state");
+
+        // Guard rails: unattached audio (media 9) is never cut, and a locked
+        // mate track keeps its clip whole.
+        Track& at = p.sequence.audio_tracks[0];
+        at.locked = true;
+        cmd = blade_linked_at(p.sequence, Track::Kind::Video, 0, 3000);
+        check(cmd != nullptr, "sibling-blade: primary cut still lands on a locked A1");
+        check(at.clip_with_id(ap.id) != nullptr && at.clips.size() == 2,
+              "sibling-blade: locked audio sibling is not cut");
+    }
+
+    {
+        // Color grade (Phase 3): set_clip_grade puts a node tree on a video
+        // clip, undo/redo round-trips it through the snapshot machinery, the
+        // linked audio mate inherits the same graph, and the whole tree
+        // survives a save/load at project version 4. An empty graph reads as
+        // "no grade" and keeps clips byte-identical on save.
+        Project p = make_project();
+        UndoStack undo;
+        Clip a;
+        a.media = 0;
+        a.tl_in = 0;
+        a.src_in = 0;
+        a.src_out = 30;
+        auto cmd = place_clip(p.sequence, Track::Kind::Video, 0, a, Placement::Overwrite);
+        check(cmd != nullptr, "grade: place video clip");
+        undo.record(std::move(cmd));
+        const ClipId id = p.sequence.video_tracks[0].clips[0].id;
+
+        grade_graph::GradeGraph g;
+        const int corr = g.add_node(grade_graph::NodeKind::kCorrector);
+        g.node(corr).correct_mode = grade_graph::CorrectMode::kLgg;
+        g.node(corr).lgg.emplace();
+        g.node(corr).lgg->gain_master = 0.6f;
+        const int out_n = g.add_node(grade_graph::NodeKind::kOutput);
+        check(g.add_rgb_edge(corr, out_n) >= 0, "grade: wire corrector -> output");
+
+        cmd = set_clip_grade(p.sequence, Track::Kind::Video, 0, id, g);
+        check(cmd != nullptr, "grade: set_clip_grade returns command");
+        undo.record(std::move(cmd));
+        const Clip& gc0 = p.sequence.video_tracks[0].clips[0];
+        check(gc0.has_grade(), "grade: clip reports a grade");
+        check(gc0.grade.num_nodes() == 2 && gc0.grade.edges().size() == 1,
+              "grade: clip carries the full node tree");
+
+        check(undo.undo(p.sequence), "grade: undo");
+        check(!p.sequence.video_tracks[0].clips[0].has_grade(),
+              "grade: undo restores the no-grade default");
+        check(undo.redo(p.sequence), "grade: redo");
+        check(p.sequence.video_tracks[0].clips[0].has_grade() &&
+                  p.sequence.video_tracks[0].clips[0].grade.num_nodes() == 2,
+              "grade: redo restores the tree");
+
+        std::string err;
+        check(save_project(p, "/tmp/opencode/media/grade.ehproj", &err),
+              "grade: save project (v4)");
+        Project loaded;
+        check(load_project(loaded, "/tmp/opencode/media/grade.ehproj", &err),
+              "grade: load project");
+        const Clip& lc = loaded.sequence.video_tracks[0].clips[0];
+        check(lc.has_grade() && lc.grade.num_nodes() == 2 && lc.grade.edges().size() == 1,
+              "grade: tree survives save/load");
+        bool gain_ok = false;
+        for (int i = 0; i < static_cast<int>(lc.grade.num_nodes()); ++i) {
+            const auto& n = lc.grade.node(i);
+            if (n.lgg && n.lgg->gain_master == 0.6f) gain_ok = true;
+        }
+        check(gain_ok, "grade: node params survive save/load");
+
+        // Existing therapy: a v3 file (no "grade" key anywhere) must load into
+        // clips with no grade and re-save without adding the key.
+        nlohmann::json v3;
+        v3["canvas_project"] = 3;
+        v3["name"] = "legacy";
+        v3["fps"] = 30.0;
+        v3["next_clip_id"] = 2;
+        nlohmann::json media = nlohmann::json::array();
+        nlohmann::json m0;
+        m0["id"] = 0;
+        m0["path"] = "/tmp/x.mp4";
+        m0["fps"] = 30.0;
+        m0["width"] = 100;
+        m0["height"] = 50;
+        m0["total_frames"] = 10;
+        m0["bin"] = "B";
+        m0["has_audio"] = false;
+        media.push_back(m0);
+        v3["media"] = media;
+        v3["bins"] = nlohmann::json::array({"B"});
+        nlohmann::json tracks = nlohmann::json::array();
+        nlohmann::json clip;
+        clip["id"] = 1;
+        clip["media"] = 0;
+        clip["tl_in"] = 0;
+        clip["tl_out"] = 10;
+        clip["src_in"] = 0;
+        clip["src_out"] = 10;
+        clip["name"] = "L";
+        nlohmann::json clips = nlohmann::json::array();
+        clips.push_back(clip);
+        nlohmann::json v1;
+        v1["name"] = "V1";
+        v1["locked"] = false;
+        v1["muted"] = false;
+        v1["solo"] = false;
+        v1["gain_db"] = 0.0;
+        v1["clips"] = clips;
+        tracks.push_back(v1);
+        v3["video_tracks"] = tracks;
+        v3["audio_tracks"] = nlohmann::json::array();
+        const std::string v3path = "/tmp/opencode/media/legacy_v3.ehproj";
+        {
+            std::ofstream out(v3path);
+            out << v3.dump(2);
+        }
+        Project legacy;
+        check(load_project(legacy, v3path, &err), "grade: legacy v3 project loads");
+        check(legacy.sequence.video_tracks.size() == 1 &&
+                  legacy.sequence.video_tracks[0].clips.size() == 1,
+              "grade: legacy clip present");
+        check(!legacy.sequence.video_tracks[0].clips[0].has_grade(),
+              "grade: legacy clip has no grade");
+        check(save_project(legacy, "/tmp/opencode/media/legacy_v3_resaved.ehproj", &err),
+              "grade: legacy project re-saves");
+        {
+            std::ifstream in("/tmp/opencode/media/legacy_v3_resaved.ehproj");
+            const std::string raw((std::istreambuf_iterator<char>(in)),
+                                  std::istreambuf_iterator<char>());
+            check(raw.find("\"grade\"") == std::string::npos,
+                  "grade: ungraded clip re-saves without a grade key");
+        }
+
+        // Linked mate inheritance: set on the video half; the audio mate holds
+        // the same graph (the payload is inert on audio, but the pair shares
+        // one grade so toggles/copies never drift).
+        Project lp = make_project();
+        Clip v;
+        v.media = 0;
+        v.tl_in = 0;
+        v.src_in = 0;
+        v.src_out = 30;
+        cmd = place_clip(lp.sequence, Track::Kind::Video, 0, v, Placement::Overwrite);
+        undo.record(std::move(cmd));
+        Clip au = v;
+        au.media = 0;
+        cmd = place_clip(lp.sequence, Track::Kind::Audio, 0, au, Placement::Overwrite);
+        undo.record(std::move(cmd));
+        const ClipId vid = lp.sequence.video_tracks[0].clips[0].id;
+        cmd = link_clip(lp.sequence, Track::Kind::Video, 0, vid);
+        undo.record(std::move(cmd));
+        cmd = set_clip_grade(lp.sequence, Track::Kind::Video, 0, vid, g);
+        check(cmd != nullptr, "grade: set on linked video returns command");
+        check(lp.sequence.audio_tracks[0].clips[0].grade.num_nodes() == 2,
+              "grade: linked audio mate inherits the grade");
     }
 
     if (failures == 0) {

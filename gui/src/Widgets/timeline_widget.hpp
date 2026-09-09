@@ -57,6 +57,7 @@ inline QPainterPath rounded_rect_path(const QRectF& r, qreal radius) {
 struct MediaMeta {
     std::string path;
     int64_t total_frames = 0;
+    double fps = 0.0;
 };
 
 // Transparent clip container used purely as a paint clip: children (filmstrip
@@ -416,6 +417,10 @@ private:
     // Converts a flat track index to a per-kind index (0..kind_count-1).
     int kind_track_index(int flat_track, int v_count) const;
     int64_t frame_at_x(int x) const;
+    // Blade cut frame for a pointer at viewport x: the NEAREST frame to the
+    // mouse (llround — no floor left-bias). The razor ignores the playhead and
+    // snapping entirely: it cuts exactly where the user points.
+    int64_t blade_cut_frame(int x) const;
     void scrub_to_frame(int64_t frame);
     // Cached snap targets for the live drag (see collect_snap_targets); empty
     // between drags.

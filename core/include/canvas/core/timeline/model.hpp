@@ -1,5 +1,7 @@
 #pragma once
 
+#include "canvas/core/grade_graph/graph.hpp"
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -118,6 +120,15 @@ struct Clip {
     float opacity = 1.0f;
     BlendMode blend_mode = BlendMode::Normal;
 
+    // Color grade: the node-grade tree applied to this clip's video BEFORE the
+    // transform/composite blit (Phase 3). An empty graph (no wired nodes) is
+    // the reporter's "no grade" — the evaluator passes the frame through and
+    // the project file omits the `grade` key, so ungraded clips save
+    // byte-identically to legacy files. Stored per-clip so the track-snapshot
+    // undo machinery restores it automatically. Only meaningful on video clips;
+    // an A/V pair's audio half never grades.
+    grade_graph::GradeGraph grade;
+
     // Audio processing — pitch shift, speed change, and parametric EQ. These
     // fields are stored per-clip so track-snapshot undo restores them
     // automatically. Pitch is split into semitones (coarse) and cents (fine);
@@ -191,6 +202,10 @@ struct Clip {
                rotation_deg != 0.0f || anchor_dx != 0.0 || anchor_dy != 0.0 ||
                flip_h || flip_v;
     }
+    // True when the clip carries a wired grade tree that the renderer must
+    // apply. Nodes alone (no wires) are a no-op tree and read as "no grade",
+    // so they keep the fast path.
+    [[nodiscard]] bool has_grade() const noexcept { return !grade.edges().empty(); }
     // True when the clip draws non-opaque (transparency / blend mode).
     [[nodiscard]] bool needs_compositing() const noexcept {
         return opacity != 1.0f || blend_mode != BlendMode::Normal;

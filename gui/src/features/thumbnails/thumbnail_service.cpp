@@ -89,7 +89,7 @@ QString ThumbnailService::disk_path_waveform(const std::string& path, int width,
 
 QString ThumbnailService::disk_path_raw_waveform(const std::string& path) const {
     if (cache_dir_.isEmpty()) return QString();
-    const std::string seed = "raw2|" + path;
+    const std::string seed = "raw3|" + path;
     return cache_dir_ + QLatin1Char('/') + cache_file_name(seed, "ehwf");
 }
 
@@ -175,7 +175,9 @@ void ThumbnailService::request(ThumbRequest req) {
 }
 
 void ThumbnailService::request_waveform(uint64_t id, std::string path, int width, int height,
-                                        float src_lo, float src_hi, float gain) {
+                                        float src_lo, float src_hi, float gain, int64_t src_in,
+                                        int64_t src_out, int64_t tl_in, int64_t tl_out,
+                                        double media_fps, int64_t media_total_frames) {
     if (path.empty() || width <= 0 || height <= 0) return;
     if (!(src_lo < src_hi) || src_lo >= 1.0f || src_hi <= 0.0f) { src_lo = 0.0f; src_hi = 1.0f; }
     ThumbRequest req;
@@ -188,6 +190,12 @@ void ThumbnailService::request_waveform(uint64_t id, std::string path, int width
     req.src_lo = src_lo;
     req.src_hi = src_hi;
     req.gain = std::clamp(gain, 0.0f, 1.0f);
+    req.src_in = src_in;
+    req.src_out = src_out;
+    req.tl_in = tl_in;
+    req.tl_out = tl_out;
+    req.media_fps = media_fps;
+    req.media_total_frames = media_total_frames;
     submit(std::move(req));
 }
 
@@ -419,6 +427,60 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
         }
         const canvas::core::AudioWaveform wf =
             reduce_waveform(*cached, req.target_width, req.src_lo, req.src_hi);
+
+        // Always-on cross-grid audit: the waveform buckets are placed on the
+        // AUDIO-time grid (t / duration_seconds), but the clip window fractions
+        // were derived from the VIDEO-frame grid (src_in / total_frames). The two
+        // agree only when media_fps * total_frames == duration_seconds. Print the
+        // drift in frames at both edges so a blade aimed at a drawn transient can
+        // be reconciled with the audio actually at that frame. Zero cost (muted
+        // unless a timeout fires), always-on by request (blade-cut debugging).
+        {
+            const double dur = cached->duration_seconds;
+            const double lo = static_cast<double>(req.src_lo);
+            const double hi = static_cast<double>(req.src_hi);
+            // Audio-time window at the clip's source edges.
+            const double audio_t_lo = lo * dur;
+            const double audio_t_hi = hi * dur;
+            // Video-frame window at the same source edges (exact only when the
+            // media is CFR and the container duration matches frames/fps).
+            const bool have_vid = req.media_fps > 0.0 && req.media_total_frames > 0 &&
+                                  req.src_out > req.src_in;
+            double video_t_lo = -1.0, video_t_hi = -1.0;
+            double drift_lo = 0.0, drift_hi = 0.0;  // in frames
+            if (have_vid) {
+                video_t_lo = static_cast<double>(req.src_in) / req.media_fps;
+                video_t_hi = static_cast<double>(req.src_out) / req.media_fps;
+                drift_lo = (audio_t_lo - video_t_lo) * req.media_fps;
+                drift_hi = (audio_t_hi - video_t_hi) * req.media_fps;
+            }
+            // Media-pool previews pass src_in/src_out = 0 (whole file), so the
+            // grid cross-check only fires for real timeline clips.
+            if (have_vid) {
+                qWarning().nospace()
+                    << "[wave] AUDIT id=" << req.id
+                    << " dur=" << QString::number(dur, 'f', 3) << "s"
+                    << " lo=" << QString::number(lo, 'g', 6)
+                    << " hi=" << QString::number(hi, 'g', 6)
+                    << " src=[" << req.src_in << "," << req.src_out << ")"
+                    << " tl=[" << req.tl_in << "," << req.tl_out << ")"
+                    << " fps=" << QString::number(req.media_fps, 'g', 4)
+                    << " vtotal=" << req.media_total_frames
+                    << " vdur=" << QString::number(req.media_total_frames / req.media_fps, 'f', 3) << "s"
+                    << " audioT=[" << QString::number(audio_t_lo, 'f', 3) << ","
+                    << QString::number(audio_t_hi, 'f', 3) << "]s"
+                    << " videoT=[" << QString::number(video_t_lo, 'f', 3) << ","
+                    << QString::number(video_t_hi, 'f', 3) << "]s"
+                    << " drift_lo_f=" << QString::number(drift_lo, 'f', 2)
+                    << " drift_hi_f=" << QString::number(drift_hi, 'f', 2);
+            } else {
+                qWarning().nospace()
+                    << "[wave] AUDIT id=" << req.id << " (whole-file/legacy)"
+                    << " dur=" << QString::number(dur, 'f', 3) << "s"
+                    << " lo=" << QString::number(lo, 'g', 6)
+                    << " hi=" << QString::number(hi, 'g', 6);
+            }
+        }
 
         QImage img(req.target_width, req.max_height, QImage::Format_ARGB32_Premultiplied);
         img.fill(Qt::transparent);

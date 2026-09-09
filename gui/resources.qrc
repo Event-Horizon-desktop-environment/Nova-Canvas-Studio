@@ -62,5 +62,16 @@
         <file alias="volume.svg">resources/icons/volume.svg</file>
         <file alias="zoom_in.svg">resources/icons/zoom_in.svg</file>
         <file alias="zoom_out.svg">resources/icons/zoom_out.svg</file>
+        <file alias="gallery.svg">resources/icons/gallery.svg</file>
+        <file alias="lut.svg">resources/icons/lut.svg</file>
+        <file alias="nodes.svg">resources/icons/nodes.svg</file>
+        <file alias="effects.svg">resources/icons/effects.svg</file>
+        <file alias="lightbox.svg">resources/icons/lightbox.svg</file>
+        <file alias="eyedropper.svg">resources/icons/eyedropper.svg</file>
+        <file alias="waveform.svg">resources/icons/waveform.svg</file>
+        <file alias="vectorscope.svg">resources/icons/vectorscope.svg</file>
+        <file alias="grid.svg">resources/icons/grid.svg</file>
+        <file alias="hdr.svg">resources/icons/hdr.svg</file>
+        <file alias="proxy.svg">resources/icons/proxy.svg</file>
     </qresource>
 </RCC>

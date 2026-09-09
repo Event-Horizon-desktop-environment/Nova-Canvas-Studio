@@ -536,6 +536,10 @@ void build_center_workspace(MainWindow& mw) {
     attach_inspector_audio(mw, mw.timeline_);
     attach_inspector_transition(mw, mw.timeline_);
     attach_inspector_file(mw, mw.timeline_);
+
+    // 7c. COLOR page docks + panels (features/color/color_page.cpp) — the last
+    // chrome built, so it can read the viewer/timeline/controller state.
+    build_color_page(mw);
 }
 
 }  // namespace canvas::gui

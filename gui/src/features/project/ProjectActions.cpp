@@ -210,7 +210,7 @@ void MainWindow::refresh_media_pool() {
 
     std::unordered_map<canvas::core::MediaId, canvas::gui::MediaMeta> paths;
     for (const auto& m : project_->media)
-        paths[m.id] = canvas::gui::MediaMeta{m.path, m.total_frames};
+        paths[m.id] = canvas::gui::MediaMeta{m.path, m.total_frames, m.fps};
     if (timeline_) timeline_->set_media_paths(std::move(paths));
 }
 
