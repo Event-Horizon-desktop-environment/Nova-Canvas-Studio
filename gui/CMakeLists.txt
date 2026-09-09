@@ -60,6 +60,7 @@ qt_add_executable(canvas
     src/features/deliver/render_queue_panel.cpp
 
     src/features/color/color_widgets.cpp
+    src/features/color/curves/curves_panel.cpp
     src/features/color/mini_timeline_strip.cpp
     src/features/color/node_graph_canvas.cpp
     src/features/color/scopes/common/scope_common.cpp

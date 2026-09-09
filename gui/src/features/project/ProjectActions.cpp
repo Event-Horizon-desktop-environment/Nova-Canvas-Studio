@@ -5,6 +5,7 @@
 #include "Logging.hpp"
 
 #include "Widgets/media_pool_widget.hpp"
+#include "features/color/mini_timeline_strip.hpp"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -46,6 +47,7 @@ void MainWindow::new_untitled_project() {
     undo_.clear();
     current_bin_.clear();
     project_->bins.clear();
+    if (color_mini_strip_) color_mini_strip_->set_sequence(&project_->sequence);
 }
 
 void MainWindow::ensure_tracks_at(canvas::core::Track::Kind kind, std::size_t index) {
@@ -212,6 +214,11 @@ void MainWindow::refresh_media_pool() {
     for (const auto& m : project_->media)
         paths[m.id] = canvas::gui::MediaMeta{m.path, m.total_frames, m.fps};
     if (timeline_) timeline_->set_media_paths(std::move(paths));
+
+    std::unordered_map<canvas::core::MediaId, canvas::gui::MiniMediaMeta> strip_paths;
+    for (const auto& m : project_->media)
+        strip_paths[m.id] = canvas::gui::MiniMediaMeta{m.path, m.total_frames, m.fps};
+    if (color_mini_strip_) color_mini_strip_->set_media_paths(std::move(strip_paths));
 }
 
 void MainWindow::delete_selected_media() {
@@ -518,6 +525,11 @@ void MainWindow::open_file(const QString& path) {
         project_path_ = path;
         remember_recent_project(path);
         current_bin_.clear();
+        // The Color page's mini-strip caches a raw pointer into the project's
+        // sequence; re-point it now that the old Project (and its Sequence) is
+        // gone, so a repaint on an already-open Color page can't dereference
+        // the freed object.
+        if (color_mini_strip_) color_mini_strip_->set_sequence(&project_->sequence);
         media_pool_->clear();
         for (const auto& m : project_->media) {
             controller_.add_media(m);

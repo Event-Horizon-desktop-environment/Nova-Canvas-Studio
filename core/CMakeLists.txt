@@ -82,6 +82,9 @@ add_library(canvas_core STATIC
     src/media/audio_waveform.cpp
     src/timeline/model.cpp
     src/timeline/edit_ops.cpp
+    src/colorsci/wheels_ui.cpp
+    src/colorsci/curves.cpp
+    src/colorsci/histogram.cpp
     src/grade_graph/graph.cpp
     src/grade_graph/eval.cpp
     src/grade_graph/serialize.cpp
@@ -133,6 +136,21 @@ add_executable(canvas_graph_test tests/graph_test.cpp)
 target_link_libraries(canvas_graph_test PRIVATE canvas_core)
 set_target_properties(canvas_graph_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME graph COMMAND canvas_graph_test)
+
+add_executable(canvas_wheels_ui_test tests/wheels_ui_test.cpp)
+target_link_libraries(canvas_wheels_ui_test PRIVATE canvas_core)
+set_target_properties(canvas_wheels_ui_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME wheels_ui COMMAND canvas_wheels_ui_test)
+
+add_executable(canvas_curves_test tests/curves_test.cpp)
+target_link_libraries(canvas_curves_test PRIVATE canvas_core)
+set_target_properties(canvas_curves_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME curves COMMAND canvas_curves_test)
+
+add_executable(canvas_histogram_test tests/histogram_test.cpp)
+target_link_libraries(canvas_histogram_test PRIVATE canvas_core)
+set_target_properties(canvas_histogram_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME histogram COMMAND canvas_histogram_test)
 
 add_executable(canvas_visual_render_test tests/visual_render_test.cpp)
 target_link_libraries(canvas_visual_render_test PRIVATE canvas_core)

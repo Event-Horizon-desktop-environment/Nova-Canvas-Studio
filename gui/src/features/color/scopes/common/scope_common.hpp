@@ -12,6 +12,7 @@
 #include <array>
 #include <cstdint>
 
+#include "canvas/core/colorsci/histogram.hpp"
 #include "canvas/core/media/frame.hpp"
 
 class QImage;
@@ -27,43 +28,22 @@ enum class ScopeMode { Waveform, Parade, Vectorscope, Histogram, CIE };
 // Sub-display variant for scopes that have one (panel sub-dropdown).
 enum class ScopeDisplay { Luma, Rgb, Yrgb };
 
-// Column buckets + 256 level buckets per channel (parade spec §2 step 2: 300–500
-// columns; 256 levels is visually indistinguishable from 1024 for 8-bit input).
-constexpr int kScopeCols = 384;
-constexpr int kScopeLevels = 256;
-constexpr int kScopeCellCount = kScopeCols * kScopeLevels;
+// The accumulation law (columns/levels/cell-count/sample budget + the
+// ColumnHistogram buffer) moved to core colorsci/histogram.hpp so the math is
+// Qt-free and unit-tested headless. These aliases keep the Qt scope widgets
+// compiling unchanged.
+using ColumnHistogram = canvas::core::colorsci::ColumnHistogram;
+inline constexpr int kScopeCols = canvas::core::colorsci::kHistogramCols;
+inline constexpr int kScopeLevels = canvas::core::colorsci::kHistogramLevels;
+inline constexpr int kScopeCellCount = canvas::core::colorsci::kHistogramCellCount;
+inline constexpr int kScopeTargetSamples = canvas::core::colorsci::kHistogramTargetSamples;
 // Cb×Cr scatter resolution for the vectorscope (wave spec §2 step 2).
 constexpr int kScopeVec = 256;
-// Bounded CPU sample budget per frame (parade spec §2 step 3: a full-res
-// every-pixel scatter would not keep up at playback; stride sampling keeps the
-// density shape intact and the cost well under the frame budget).
-constexpr int kScopeTargetSamples = 262144;
 
 // Channel colors shared by Parade and the Waveform RGB/YRGB overlays.
 const QColor kScopeWaveRgb[3] = {QColor(0xFF, 0x33, 0x33), QColor(0x4C, 0xFF, 0x4C),
                                  QColor(0x55, 0x8A, 0xFF)};
 const QColor kScopeLumaWhite = QColor(0xE8, 0xE8, 0xE6);
-
-// Stride-sampled per-frame column/level accumulation, shared by Parade,
-// Waveform, and Histogram (the histogram is a reduction of the same buffers at
-// render time — wave spec §3: never a second read of the frame).
-class ColumnHistogram {
-public:
-    void clear();
-    void accumulate(const canvas::core::VideoFrame& rgba);
-    void accumulate(const canvas::core::Nv12Frame& nv12);
-
-    [[nodiscard]] const std::array<std::uint32_t, 3 * kScopeCellCount>& channels() const {
-        return hist_;
-    }
-    [[nodiscard]] const std::array<std::uint32_t, kScopeCellCount>& luma() const {
-        return hist_luma_;
-    }
-
-private:
-    std::array<std::uint32_t, 3 * kScopeCellCount> hist_{};
-    std::array<std::uint32_t, kScopeCellCount> hist_luma_{};
-};
 
 // Painted shell for every live scope: caches the last presented RenderFrame,
 // re-runs the virtual accumulation on a NEW pointer only, and unifies the panel

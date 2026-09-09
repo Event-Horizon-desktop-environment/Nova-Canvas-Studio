@@ -4,10 +4,17 @@
 #include "ui_MainWindow.h"
 
 #include "features/color/color_widgets.hpp"
+#include "features/color/curves/curves_panel.hpp"
 #include "features/color/mini_timeline_strip.hpp"
 #include "features/color/node_graph_canvas.hpp"
 
 #include "UX/theme.hpp"
+
+#include "canvas/core/colorsci/histogram.hpp"
+#include "canvas/core/export/grade_frame.hpp"
+#include "canvas/core/grade_graph/graph.hpp"
+#include "canvas/core/timeline/edit_ops.hpp"
+#include "features/playback/sync_constants.hpp"
 
 #include <QDockWidget>
 #include <QGridLayout>
@@ -23,7 +30,10 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <cstdint>
+#include <memory>
 #include <utility>
+#include <vector>
 
 namespace canvas::gui {
 
@@ -105,6 +115,157 @@ QToolButton* make_tool(QWidget* parent, QLayout* target, const QIcon& ic,
 
 }  // namespace
 
+namespace {
+
+using canvas::core::colorsci::CurveParams;
+using canvas::core::colorsci::WheelPanelState;
+using canvas::core::grade_graph::GradeGraph;
+
+// Serializes the panels' combined state into a two-node grade chain: the
+// wheels' Primaries LGG corrector, then a Curves corrector when the curve law
+// is non-identity (identity is dropped so the JSON stays byte-compatible with
+// Phase 4's single-corrector files), wired to the output. The
+// panel→graph→edit-op handshake is unchanged from Phase 4.
+GradeGraph make_grade_graph(const WheelPanelState& state, const CurveParams& curves) {
+    using canvas::core::grade_graph::CorrectMode;
+    using canvas::core::grade_graph::NodeKind;
+
+    GradeGraph g;
+    const int lgg_node = g.add_node(NodeKind::kCorrector);
+    g.node(lgg_node).correct_mode = CorrectMode::kLgg;
+    g.node(lgg_node).lgg = state.lgg;
+
+    int tail = lgg_node;
+    if (!curves.is_identity()) {
+        // Re-fetch Node& by id after every add_node: the vector reallocates.
+        const int cv = g.add_node(NodeKind::kCorrector);
+        g.node(cv).correct_mode = CorrectMode::kCurves;
+        g.node(cv).curves = curves;
+        if (g.add_rgb_edge(tail, cv) < 0) {
+            g.clear();
+            return g;
+        }
+        tail = cv;
+    }
+
+    const int out = g.add_node(NodeKind::kOutput);
+    if (g.add_rgb_edge(tail, out) < 0) {
+        g.clear();
+        return g;
+    }
+    return g;
+}
+
+// Reverses make_grade_graph: pulls the LGG + Curves params a clip's tree owns
+// back into the panels (identity defaults when a mode is absent).
+struct GradeLoadState {
+    WheelPanelState wheels;
+    CurveParams curves;
+};
+
+GradeLoadState grade_load_state(const GradeGraph& graph) {
+    using canvas::core::grade_graph::CorrectMode;
+    GradeLoadState out;
+    for (std::size_t i = 0; i < graph.num_nodes(); ++i) {
+        const auto& n = graph.node(static_cast<int>(i));
+        switch (n.correct_mode) {
+            case CorrectMode::kLgg:
+                if (n.lgg) out.wheels.lgg = *n.lgg;
+                break;
+            case CorrectMode::kCurves:
+                if (n.curves) out.curves = *n.curves;
+                break;
+            default:
+                break;
+        }
+    }
+    return out;
+}
+
+const canvas::core::Clip* find_clip_by_id(const canvas::core::Sequence& seq,
+                                          canvas::core::ClipId id) {
+    for (const auto& track : seq.video_tracks) {
+        for (const auto& clip : track.clips) {
+            if (clip.id == id) return &clip;
+        }
+    }
+    for (const auto& track : seq.audio_tracks) {
+        for (const auto& clip : track.clips) {
+            if (clip.id == id) return &clip;
+        }
+    }
+    return nullptr;
+}
+
+// Integer-stride box-filter downscale into a NEW frame (the source may be a
+// shared cache frame, so never alias). Used to keep per-frame grade + scope
+// evaluation on a preview-resolution budget.
+canvas::core::VideoFramePtr downscale_rgba(const canvas::core::VideoFrame& src,
+                                           int max_dim) {
+    const int longest = std::max(src.width, src.height);
+    if (longest <= max_dim) {
+        return std::make_shared<canvas::core::VideoFrame>(src);
+    }
+    const int stride = (longest + max_dim - 1) / max_dim;
+    const int dw = std::max(1, src.width / stride);
+    const int dh = std::max(1, src.height / stride);
+
+    auto out = std::make_shared<canvas::core::VideoFrame>();
+    out->width = dw;
+    out->height = dh;
+    out->stride = static_cast<std::size_t>(dw) * 4u;
+    out->rgba.resize(static_cast<std::size_t>(dw * dh) * 4u);
+    for (int y = 0; y < dh; ++y) {
+        for (int x = 0; x < dw; ++x) {
+            std::uint32_t r = 0, g = 0, b = 0;
+            int count = 0;
+            const int y_hi = std::min((y + 1) * stride, src.height);
+            const int x_hi = std::min((x + 1) * stride, src.width);
+            for (int sy = y * stride; sy < y_hi; ++sy) {
+                const std::uint8_t* row = &src.rgba[static_cast<std::size_t>(sy) * src.stride];
+                for (int sx = x * stride; sx < x_hi; ++sx) {
+                    const std::uint8_t* px = row + static_cast<std::size_t>(sx) * 4u;
+                    r += px[0];
+                    g += px[1];
+                    b += px[2];
+                    ++count;
+                }
+            }
+            std::uint8_t* op = &out->rgba[static_cast<std::size_t>(y) * out->stride +
+                                          static_cast<std::size_t>(x) * 4u];
+            op[0] = static_cast<std::uint8_t>(r / count);
+            op[1] = static_cast<std::uint8_t>(g / count);
+            op[2] = static_cast<std::uint8_t>(b / count);
+            op[3] = 255;
+        }
+    }
+    return out;
+}
+
+// Normalized per-column luma occupancy (0..1) for the curve editor's veil.
+std::vector<float> luma_veil(const canvas::core::VideoFrame& frame) {
+    using canvas::core::colorsci::ColumnHistogram;
+    using canvas::core::colorsci::kHistogramCols;
+    using canvas::core::colorsci::kHistogramLevels;
+    ColumnHistogram h;
+    h.accumulate(frame);
+    std::vector<float> out(static_cast<std::size_t>(kHistogramCols), 0.0f);
+    float peak = 0.0f;
+    for (int c = 0; c < kHistogramCols; ++c) {
+        std::uint64_t sum = 0;
+        const std::size_t base = static_cast<std::size_t>(c) * kHistogramLevels;
+        for (int l = 0; l < kHistogramLevels; ++l) {
+            sum += h.luma()[base + static_cast<std::size_t>(l)];
+        }
+        out[static_cast<std::size_t>(c)] = static_cast<float>(sum);
+        peak = std::max(peak, out[static_cast<std::size_t>(c)]);
+    }
+    for (float& v : out) v = peak > 0.0f ? v / peak : 0.0f;
+    return out;
+}
+
+}  // namespace
+
 void build_color_page(MainWindow& mw) {
     // ── Bottom workspace dock: mini strip > page toolbar > tool ribbon > grading splitter ──
     auto* workspace = new QWidget(&mw);
@@ -116,11 +277,23 @@ void build_color_page(MainWindow& mw) {
     root->setContentsMargins(6, 6, 6, 4);
     root->setSpacing(4);
 
-    mw.color_mini_strip_ = new MiniTimelineStrip(workspace);
-    root->addWidget(mw.color_mini_strip_);
+    // ── Vertical divider: mini strip (media/clips) on top, page body below ──
+    auto* page_splitter = new QSplitter(Qt::Vertical, workspace);
+    page_splitter->setObjectName(QStringLiteral("colorPageSplitter"));
+    page_splitter->setChildrenCollapsible(true);
+    page_splitter->setHandleWidth(6);
+
+    mw.color_mini_strip_ = new MiniTimelineStrip(page_splitter);
+    mw.color_mini_strip_->set_thumbnail_service(&mw.thumbnails_);
+    page_splitter->addWidget(mw.color_mini_strip_);
+
+    auto* page_body = new QWidget(page_splitter);
+    auto* body_root = new QVBoxLayout(page_body);
+    body_root->setContentsMargins(0, 0, 0, 0);
+    body_root->setSpacing(4);
 
     // ── Page toolbar (panel-visibility toggles, spec §Layout-2) ──
-    auto* toolbar = new QWidget(workspace);
+    auto* toolbar = new QWidget(page_body);
     toolbar->setObjectName(QStringLiteral("colorPageToolbar"));
     apply_theme_style(toolbar, [] {
         const ThemeTokens& t = tokens();
@@ -160,10 +333,10 @@ void build_color_page(MainWindow& mw) {
                                   "Effects");
     auto* lightbox_btn = make_tool(toolbar, toolbar_layout, icon("lightbox"),
                                    "Lightbox");
-    root->addWidget(toolbar);
+    body_root->addWidget(toolbar);
 
     // ── Tool ribbon (viewer-overlay toggles, spec §Layout-6) ──
-    auto* ribbon = new QWidget(workspace);
+    auto* ribbon = new QWidget(page_body);
     ribbon->setObjectName(QStringLiteral("colorToolRibbon"));
     apply_theme_style(ribbon, [] {
         const ThemeTokens& t = tokens();
@@ -205,32 +378,68 @@ void build_color_page(MainWindow& mw) {
     stereo_btn->setAutoRaise(true);
     apply_theme_style(stereo_btn, &outline_pill_style);
     ribbon_layout->addWidget(stereo_btn);
-    root->addWidget(ribbon);
+    body_root->addWidget(ribbon);
 
-    // ── Grading workspace: Wheels | Curves | Scopes ──
-    auto* splitter = new QSplitter(Qt::Horizontal, workspace);
-    splitter->setChildrenCollapsible(false);
-    auto* wheels = new ColorWheelsPanel(splitter);
-    auto* curves = new CurvesPanel(splitter);
-    auto* scopes = new ScopesPanel(splitter);
-    wheels->setMinimumWidth(300);
-    curves->setMinimumWidth(220);
-    scopes->setMinimumWidth(240);
-    splitter->addWidget(wheels);
-    splitter->addWidget(curves);
-    splitter->addWidget(scopes);
-    splitter->setStretchFactor(0, 1);
-    splitter->setStretchFactor(1, 1);
-    splitter->setStretchFactor(2, 1);
-    splitter->setSizes({460, 280, 340});
-    root->addWidget(splitter, 1);
+// ── Grading workspace: Wheels | Curves | Scopes ──
+    // Wheels/curves/scopes live INSIDE the strip splitter's bottom cell (below
+    // the toolbar + ribbon), so they are the flexible space: dragging the strip
+    // divider grows/shrinks the whole section below it — toolbar and ribbon stay
+    // fixed and fully visible while the grading area absorbs the change — and
+    // dragging the dock's top edge resizes the entire section together.
+    auto* wheels = new ColorWheelsPanel(&mw);
+    auto* curves = new CurvesPanel(&mw);
+    auto* scopes = new ScopesPanel(&mw);
+
+    // ── Close the vertical splitter: strip above, everything else below ──
+    page_splitter->addWidget(page_body);
+    page_splitter->setStretchFactor(0, 0);
+    page_splitter->setStretchFactor(1, 1);
+    page_splitter->setSizes({102, 2000});
+
+    auto* grading_splitter = new QSplitter(Qt::Horizontal, page_body);
+    grading_splitter->setObjectName(QStringLiteral("colorGradingSplitter"));
+    grading_splitter->setHandleWidth(6);
+    grading_splitter->addWidget(wheels);
+    grading_splitter->addWidget(curves);
+    grading_splitter->addWidget(scopes);
+    grading_splitter->setSizes({460, 280, 340});
+    body_root->addWidget(grading_splitter, 1);
+
+    root->addWidget(page_splitter, 1);
 
     // Scopes panel is fed by the same "frame re-rendered" signal the preview
-    // viewer listens to, so it shows the presented (graded/mixed) frame, not
-    // the raw source (rgb-parade spec §5). Receiver context is the panel itself
-    // so the connection drops when the color page is torn down.
+    // viewer listens to, but with the SELECTED clip's grade applied first
+    // (rgb-parade spec §5: the scopes show the graded signal, not the raw
+    // source). The grade runs at the preview-resolution cap on a box-filtered
+    // copy so the per-frame evaluation stays cheap and never aliases the
+    // presenter's cached frame; the same downscaled result refreshes the curve
+    // editor's luma veil. With no selection/no grade/no CPU frame the scopes
+    // get the raw presented frame, as before. Receiver context is the panel
+    // itself so the connection drops when the color page is torn down.
     QObject::connect(&mw.controller_, &SequenceController::frame_ready, scopes,
-            [scopes](canvas::core::RenderFramePtr frame) {
+            [&mw, scopes, curves](canvas::core::RenderFramePtr frame) {
+                if (mw.project_ && frame && frame->a) {
+                    canvas::core::grade_graph::GradeGraph grade;
+                    canvas::core::Track::Kind kind;
+                    std::size_t index = 0;
+                    canvas::core::Clip clip;
+                    if (mw.find_selected_clip(kind, index, clip) && clip.has_grade()) {
+                        grade = clip.grade;
+                    }
+                    if (!grade.edges().empty()) {
+                        const auto scaled =
+                            downscale_rgba(*frame->a, canvas::gui::kPreviewMaxDim);
+                        const auto graded =
+                            canvas::core::apply_grade_to_frame(*scaled, grade);
+                        if (graded) {
+                            curves->set_veil(luma_veil(*graded));
+                            auto rf = std::make_shared<canvas::core::RenderFrame>();
+                            rf->a = graded;
+                            scopes->update_frame(std::move(rf));
+                            return;
+                        }
+                    }
+                }
                 scopes->update_frame(std::move(frame));
             });
 
@@ -450,7 +659,70 @@ void build_color_page(MainWindow& mw) {
                 if (mw.color_mini_strip_) mw.color_mini_strip_->set_playhead(frame);
             });
     QObject::connect(mw.color_mini_strip_, &MiniTimelineStrip::clip_activated, &mw,
-            [&mw](canvas::core::ClipId, int64_t frame) { mw.controller_.seek(frame); });
+            [&mw, wheels, curves, node_canvas](canvas::core::ClipId id, int64_t frame) {
+                mw.controller_.seek(frame);
+                mw.activate_color_clip(id);
+                // Load the activated clip's grade into the panels and the node
+                // canvas so the page edits what it shows.
+                if (!mw.project_) return;
+                const canvas::core::Clip* clip = find_clip_by_id(mw.project_->sequence, id);
+                if (!clip) return;
+                const GradeLoadState state = grade_load_state(clip->grade);
+                wheels->set_state(state.wheels);
+                curves->set_params(state.curves);
+                node_canvas->load_graph(clip->grade);
+            });
+    // Drag-to-scrub: begin_scrub on grab, fast low-res preview on move, clean
+    // full-res commit on release.
+    QObject::connect(mw.color_mini_strip_, &MiniTimelineStrip::scrub_begin, &mw,
+            [&mw]() { mw.controller_.begin_scrub(); });
+    QObject::connect(mw.color_mini_strip_, &MiniTimelineStrip::scrubbed, &mw,
+            [&mw](int64_t frame) { mw.controller_.seek_preview(frame); });
+    QObject::connect(mw.color_mini_strip_, &MiniTimelineStrip::scrub_committed, &mw,
+            [&mw](int64_t frame) {
+                mw.controller_.end_scrub();
+                mw.controller_.seek(frame);
+            });
+
+    // Wheel/curve commits → ONE undoable set_clip_grade on the selected clip.
+    // Relay through mw so the panels stay thin views: the Color page owns the
+    // graph law, the edit-op, and the undo recording. Both panels commit the
+    // COMBINED state (wheels → lgg, curves → curve law) so edits in one panel
+    // never discard the other.
+    const auto commit_grade = [&mw, wheels, curves] {
+        canvas::core::Track::Kind kind;
+        std::size_t index = 0;
+        canvas::core::Clip clip;
+        if (!mw.find_selected_clip(kind, index, clip)) return;
+        const canvas::core::grade_graph::GradeGraph g =
+            make_grade_graph(wheels->state(), curves->params());
+        auto cmd = canvas::core::set_clip_grade(mw.project_->sequence, kind,
+                index, clip.id, g);
+        if (!cmd) return;
+        mw.undo_.record(std::move(cmd));
+        mw.has_unsaved_changes_ = true;
+        mw.refresh_timeline();
+        mw.push_snapshot();
+    };
+    // Live movement previews through the same law without an undo entry.
+    const auto preview_grade = [&mw, wheels, curves] {
+        canvas::core::Track::Kind kind;
+        std::size_t index = 0;
+        canvas::core::Clip clip;
+        if (!mw.find_selected_clip(kind, index, clip)) return;
+        const canvas::core::grade_graph::GradeGraph g =
+            make_grade_graph(wheels->state(), curves->params());
+        auto cmd = canvas::core::set_clip_grade(mw.project_->sequence, kind,
+                index, clip.id, g);
+        if (!cmd) return;
+        cmd->redo(mw.project_->sequence);
+        mw.refresh_timeline();
+        mw.push_snapshot();
+    };
+    QObject::connect(wheels, &ColorWheelsPanel::params_committed, &mw, commit_grade);
+    QObject::connect(wheels, &ColorWheelsPanel::params_preview, &mw, preview_grade);
+    QObject::connect(curves, &CurvesPanel::curves_committed, &mw, commit_grade);
+    QObject::connect(curves, &CurvesPanel::curves_preview, &mw, preview_grade);
 
     // Page-toolbar toggles → panel visibility.
     // The media panel opens compact (~20% of the page) once, so the grading
@@ -513,9 +785,6 @@ void enter_color_page(MainWindow& mw) {
     if (mw.color_mini_strip_) {
         if (mw.project_) mw.color_mini_strip_->set_sequence(&mw.project_->sequence);
         mw.color_mini_strip_->set_playhead(mw.controller_.current_frame());
-    }
-    if (mw.status_) {
-        mw.status_->showMessage(MainWindow::tr("Color: build and refine the look."));
     }
 }
 

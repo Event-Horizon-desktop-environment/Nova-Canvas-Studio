@@ -1,6 +1,9 @@
 #include "features/color/color_widgets.hpp"
+#include <cmath>
+#include <utility>
 #include <QAbstractSpinBox>
 #include <QComboBox>
+#include <QDebug>
 #include <QDoubleSpinBox>
 #include <QFontMetrics>
 #include <QGridLayout>
@@ -12,13 +15,17 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QResizeEvent>
+#include <QShowEvent>
 #include <QSlider>
 #include <QStackedWidget>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <functional>
 #include <utility>
 
 #include "UX/theme.hpp"
@@ -30,11 +37,136 @@
 
 namespace canvas::gui {
 
+using namespace canvas::core::colorsci;
+
 // ── ToneField ────────────────────────────────────────────────────────────────
+// The parameter rows across the panel are drag-scrub fields, not slider
+// tracks: click on the box and drag vertically to change the value. A small
+// drag threshold keeps a plain click available for keyboard editing.
+
+namespace {
+// ScrubSpinBox: a QDoubleSpinBox that scrubs on horizontal drag. Drag distance
+// (px) maps to value via `units_per_px`; press stores the anchor, so repeated
+// drags accumulate from the value at press time rather than the mid-drag
+// value. A click without movement passes through to normal editing.
+class ScrubSpinBox : public QDoubleSpinBox {
+public:
+    explicit ScrubSpinBox(QWidget* parent = nullptr) : QDoubleSpinBox(parent) {
+        setButtonSymbols(QAbstractSpinBox::NoButtons);
+        setAlignment(Qt::AlignCenter);
+        setCursor(Qt::SizeHorCursor);
+        setMouseTracking(true);
+    }
+
+    void set_units_per_px(double units) { units_per_px_ = units; }
+    void set_field_range(double lo, double hi) { field_lo_ = lo; field_hi_ = hi; }
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton) {
+            press_x_ = event->position().x();
+            press_value_ = value();
+            dragging_ = true;
+            setFocus(Qt::MouseFocusReason);
+        }
+        QDoubleSpinBox::mousePressEvent(event);
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (dragging_ && (event->buttons() & Qt::LeftButton)) {
+            const double dx = event->position().x() - press_x_;
+            if (dx != 0.0) {
+                setValue(std::clamp(press_value_ + dx * units_per_px_,
+                                    field_lo_, field_hi_));
+                selectAll();
+            }
+            event->accept();
+            return;
+        }
+        QDoubleSpinBox::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        dragging_ = false;
+        QDoubleSpinBox::mouseReleaseEvent(event);
+    }
+
+private:
+    double units_per_px_ = 0.01;
+    double field_lo_ = 0.0;
+    double field_hi_ = 1.0;
+    double press_value_ = 0.0;
+    double press_x_ = 0.0;
+    bool dragging_ = false;
+};
+}  // namespace
+
+// SwatchStrip (at canvas::gui scope so it completes the header forward
+// declaration): the mockup's "swatch-slot" — a thin 4px gradient strip under a
+// parameter field's box with a small non-interactive marker at the current
+// value. kNone renders a transparent slot so every box on a shared row keeps
+// the same baseline.
+class SwatchStrip : public QWidget {
+public:
+    explicit SwatchStrip(SwatchKind kind, QWidget* parent = nullptr)
+        : QWidget(parent), kind_(kind) {
+        setFixedHeight(4);
+    }
+
+    void set_marker01(double t01) {
+        marker01_ = std::clamp(t01, 0.0, 1.0);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent* event) override {
+        Q_UNUSED(event);
+        if (kind_ == SwatchKind::kNone || width() < 8) return;
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const QRectF r = rect().adjusted(1, 0, -1, 0);
+
+        QLinearGradient g(r.left(), 0.0, r.right(), 0.0);
+        switch (kind_) {
+            case SwatchKind::kTemp:
+                g.setColorAt(0.0, QColor("#4a9ee8"));
+                g.setColorAt(0.5, QColor("#c9c9c9"));
+                g.setColorAt(1.0, QColor("#e8c34a"));
+                break;
+            case SwatchKind::kTint:
+                g.setColorAt(0.0, QColor("#4ae86e"));
+                g.setColorAt(0.5, QColor("#c9c9c9"));
+                g.setColorAt(1.0, QColor("#e84ad0"));
+                break;
+            case SwatchKind::kHue:
+                g.setColorAt(0.00, QColor("#4fa2e0"));
+                g.setColorAt(0.25, QColor("#4fe070"));
+                g.setColorAt(0.50, QColor("#e8d84f"));
+                g.setColorAt(0.75, QColor("#e0524f"));
+                g.setColorAt(1.00, QColor("#7a6ae8"));
+                break;
+            case SwatchKind::kNone:
+                return;
+        }
+        p.setPen(Qt::NoPen);
+        p.setBrush(g);
+        p.drawRoundedRect(r, 2, 2);
+
+        const qreal x = r.left() + marker01_ * r.width();
+        p.setPen(QPen(Qt::black, 1.0));
+        p.setBrush(QColor("#ffffff"));
+        p.drawEllipse(QPointF(x, r.center().y()), 3.5, 3.5);
+    }
+
+private:
+    SwatchKind kind_ = SwatchKind::kNone;
+    double marker01_ = 0.5;
+};
 
 ToneField::ToneField(const QString& label, double lo, double hi, double value,
-                     double reset_value, QWidget* parent)
-    : QWidget(parent), lo_(lo), hi_(hi), reset_value_(reset_value) {
+                     double reset_value, QWidget* parent, ToneFieldMode mode,
+                     SwatchKind swatch)
+    : QWidget(parent), lo_(lo), hi_(hi), reset_value_(reset_value), mode_(mode) {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(2);
@@ -44,19 +176,24 @@ ToneField::ToneField(const QString& label, double lo, double hi, double value,
         return QStringLiteral("color: %1; font-size: 11px;")
             .arg(css(tokens().ink_muted));
     });
-    root->addWidget(label_);
+    label_->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
+    const int box_width = mode == ToneFieldMode::kFieldOnly ? 88 : 58;
+    label_->setFixedWidth(box_width);
+    root->addWidget(label_, 0, Qt::AlignLeft);
 
     auto* row = new QHBoxLayout;
     row->setContentsMargins(0, 0, 0, 0);
     row->setSpacing(4);
 
-    spin_ = new QDoubleSpinBox(this);
-    spin_->setRange(lo, hi);
-    spin_->setValue(value);
-    spin_->setDecimals(2);
-    spin_->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    spin_->setFixedWidth(58);
-    apply_theme_style(spin_, [] {
+    auto* scrub = new ScrubSpinBox(this);
+    scrub->setRange(lo, hi);
+    scrub->setValue(value);
+    scrub->setDecimals(2);
+    scrub->setFixedWidth(box_width);
+    // Full range over a ~200px drag.
+    scrub->set_units_per_px((hi - lo) / 200.0);
+    scrub->set_field_range(lo, hi);
+    apply_theme_style(scrub, [] {
         const ThemeTokens& t = tokens();
         return QStringLiteral(
             "QDoubleSpinBox { background-color: %1; border: 1px solid %2;"
@@ -66,35 +203,81 @@ ToneField::ToneField(const QString& label, double lo, double hi, double value,
             .arg(css(t.surface_low), css(t.border), css(t.ink), css(t.accent),
                  css(t.accent));
     });
-
-    slider_ = new QSlider(Qt::Horizontal, this);
-    slider_->setRange(0, 1000);
-    slider_->setValue(static_cast<int>(std::lround(
-        (value - lo) / (hi - lo) * 1000.0)));
-    slider_->setFixedHeight(16);
-    apply_theme_style(slider_, &slider_style);
-
-    auto* reset = new QToolButton(this);
-    reset->setIcon(icon("reset"));
-    reset->setIconSize(QSize(13, 13));
-    reset->setAutoRaise(true);
-    reset->setFixedWidth(18);
-    reset->setToolTip(tr("Reset to default"));
-    apply_theme_style(reset, &flat_tool_style);
-    QObject::connect(reset, &QToolButton::clicked, this, [this] {
-        set_value(reset_value_);
-        emit reset_clicked();
-    });
-
+    spin_ = scrub;
     row->addWidget(spin_);
-    row->addWidget(slider_, 1);
-    row->addWidget(reset);
+
+    if (mode == ToneFieldMode::kFull || mode == ToneFieldMode::kFieldReset) {
+        reset_ = new QToolButton(this);
+        reset_->setIcon(icon("reset"));
+        reset_->setIconSize(QSize(13, 13));
+        reset_->setAutoRaise(true);
+        reset_->setFixedWidth(18);
+        reset_->setToolTip(tr("Reset to default"));
+        apply_theme_style(reset_, &flat_tool_style);
+        QObject::connect(reset_, &QToolButton::clicked, this, [this] {
+            set_value(reset_value_);
+            emit reset_clicked();
+        });
+        row->addWidget(reset_);
+    }
+
+    if (mode == ToneFieldMode::kFull) {
+        slider_ = new QSlider(Qt::Horizontal, this);
+        slider_->setRange(0, 1000);
+        slider_->setValue(static_cast<int>(std::lround(
+            (value - lo) / (hi - lo) * 1000.0)));
+        slider_->setFixedHeight(16);
+        apply_theme_style(slider_, &slider_style);
+        row->addWidget(slider_, 1);
+    } else {
+        row->addStretch(1);
+    }
     root->addLayout(row);
 
-    QObject::connect(slider_, &QSlider::valueChanged, this,
-                     &ToneField::slider_moved);
+    swatch_ = new SwatchStrip(swatch, this);
+    swatch_->setFixedWidth(box_width);
+    swatch_->set_marker01((value - lo) / (hi - lo));
+    root->addWidget(swatch_, 0, Qt::AlignLeft);
+
     QObject::connect(spin_, qOverload<double>(&QDoubleSpinBox::valueChanged),
                      this, &ToneField::spin_changed);
+    if (slider_) {
+        QObject::connect(slider_, &QSlider::valueChanged, this,
+                         &ToneField::slider_moved);
+    }
+}
+
+void ToneField::log_geometry(const char* tag) {
+    if (label_ == nullptr || spin_ == nullptr || swatch_ == nullptr) return;
+
+    const auto field = mapToParent(rect().topLeft());
+    const auto label_pos = label_->mapTo(this, QPoint(0, 0));
+    const auto spin_pos = spin_->mapTo(this, QPoint(0, 0));
+    const auto swatch_pos = swatch_->mapTo(this, QPoint(0, 0));
+    const auto reset_pos = reset_ ? reset_->mapTo(this, QPoint(0, 0))
+                                  : QPoint(-1, -1);
+
+    qWarning().nospace()
+        << "[tonefield:" << tag << "] label=" << label_->text()
+        << " field=" << field.x() << ","
+        << width() << "x" << height() << " label_geom=" << label_pos.x() << ","
+        << label_pos.y() << "," << label_->width() << "x" << label_->height()
+        << " spin_geom=" << spin_pos.x() << "," << spin_pos.y() << ","
+        << spin_->width() << "x" << spin_->height()
+        << " swatch_geom=" << swatch_pos.x() << "," << swatch_pos.y() << ","
+        << swatch_->width() << "x" << swatch_->height()
+        << " reset_geom=" << reset_pos.x() << "," << reset_pos.y() << ","
+        << (reset_ ? reset_->width() : 0) << "x" << (reset_ ? reset_->height() : 0);
+}
+
+void ToneField::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    log_geometry("resize");
+}
+
+void ToneField::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    log_geometry("show");
 }
 
 double ToneField::value() const {
@@ -105,23 +288,33 @@ void ToneField::set_value(double value) {
     if (!spin_) return;
     syncing_ = true;
     spin_->setValue(std::clamp(value, lo_, hi_));
-    slider_->setValue(static_cast<int>(std::lround(
-        (spin_->value() - lo_) / (hi_ - lo_) * 1000.0)));
+    if (slider_) {
+        slider_->setValue(static_cast<int>(std::lround(
+            (spin_->value() - lo_) / (hi_ - lo_) * 1000.0)));
+    }
     syncing_ = false;
+    update_swatch();
 }
 
 void ToneField::slider_moved(int pos) {
-    if (syncing_ || !spin_) return;
+    if (syncing_ || !spin_ || !slider_) return;
     syncing_ = true;
     const double v = lo_ + (hi_ - lo_) * pos / 1000.0;
     spin_->setValue(v);
     syncing_ = false;
     emit value_changed(v);
+    update_swatch();
 }
 
 void ToneField::spin_changed(double value) {
     sync_slider_from_spin();
+    update_swatch();
     if (!syncing_) emit value_changed(value);
+}
+
+void ToneField::update_swatch() {
+    if (!swatch_ || !spin_) return;
+    swatch_->set_marker01((spin_->value() - lo_) / (hi_ - lo_));
 }
 
 void ToneField::sync_slider_from_spin() {
@@ -132,11 +325,83 @@ void ToneField::sync_slider_from_spin() {
     syncing_ = false;
 }
 
+// ── MiniKnob ────────────────────────────────────────────────────────────
+// A small rotary dial in the style of an old cassette-player volume wheel.
+// Grab with the mouse and roll: vertical drag up = increase, down = decrease
+// (horizontal movement is ignored so a wheel drag never fights the panel).
+
+MiniKnob::MiniKnob(QWidget* parent) : QWidget(parent) {
+    setCursor(Qt::PointingHandCursor);
+    setMinimumSize(24, 24);
+}
+
+void MiniKnob::set_value01(float t01) {
+    t01_ = std::clamp(t01, 0.0f, 1.0f);
+    update();
+}
+
+void MiniKnob::paintEvent(QPaintEvent* event) {
+    Q_UNUSED(event);
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    const ThemeTokens& t = tokens();
+    const QPointF c = rect().center();
+    const qreal r = std::min(width(), height()) / 2.0 - 2.0;
+
+    // Body: machined wheel (radial gradient + ridge ring).
+    QRadialGradient body(c, r, c, 0.4 * r);
+    body.setColorAt(0.0, t.surface_highest);
+    body.setColorAt(1.0, t.surface_low);
+    p.setPen(QPen(t.border, 1.0));
+    p.setBrush(body);
+    p.drawEllipse(c, r, r);
+
+    // Ridge lip where a cassette wheel would have its knurling.
+    p.setPen(QPen(with_alpha(t.ink, 60), 1.0));
+    for (int i = 0; i < 12; ++i) {
+        const qreal a = i * 2 * M_PI / 12;
+        p.drawLine(c + QPointF(std::cos(a), std::sin(a)) * (r - 4.0),
+                   c + QPointF(std::cos(a), std::sin(a)) * r);
+    }
+
+    // Indicator: a pointer that sweeps -135°..+135° with value01, plus a
+    // center cap so it reads as a volume knob rather than a clock.
+    const qreal deg = -135.0 + 270.0 * t01_;
+    const qreal a = deg * M_PI / 180.0;
+    p.setPen(QPen(t.accent, 2.0, Qt::SolidLine, Qt::RoundCap));
+    p.drawLine(c, c + QPointF(std::cos(a), std::sin(a)) * (r - 5.0));
+    p.setPen(QPen(t.surface, 1.0));
+    p.setBrush(t.ink);
+    p.drawEllipse(c, 2.5, 2.5);
+}
+
+void MiniKnob::mousePressEvent(QMouseEvent* event) {
+    if (event->button() != Qt::LeftButton) return;
+    dragging_ = true;
+    press_t01_ = t01_;
+    press_pos_ = event->position();
+}
+
+void MiniKnob::mouseMoveEvent(QMouseEvent* event) {
+    if (!dragging_) return;
+    const qreal dy = press_pos_.y() - event->position().y();
+    // Full range over ~80px of roll.
+    set_value01(press_t01_ + static_cast<float>(dy / 80.0));
+    emit value_changed(t01_);
+    update();
+}
+
+void MiniKnob::mouseReleaseEvent(QMouseEvent* event) {
+    if (!dragging_ || event->button() != Qt::LeftButton) return;
+    dragging_ = false;
+    emit value_committed(t01_);
+}
+
 // ── ColorWheelWidget ─────────────────────────────────────────────────────────
 
 ColorWheelWidget::ColorWheelWidget(QWidget* parent) : QWidget(parent) {
     setCursor(Qt::PointingHandCursor);
-    setMinimumSize(104, 104);
+    setMinimumSize(72, 72);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 }
 
@@ -147,9 +412,11 @@ QRectF ColorWheelWidget::disc_rect() const {
 
 QPointF ColorWheelWidget::pos_to_xy(const QPointF& pos) const {
     const QPointF c = disc_rect().center();
+    const qreal r = disc_rect().width() / 2.0;
     QPointF d(pos.x() - c.x(), pos.y() - c.y());
     const qreal len = std::hypot(d.x(), d.y());
-    if (len > 0.0) d /= len;
+    if (r > 0.0) d /= r;             // xy normalized to [-1,1] on the disc
+    if (len > r) d *= r / len;       // clamp inside the disc: radius preserved
     return d;
 }
 
@@ -164,6 +431,40 @@ void ColorWheelWidget::set_xy(const QPointF& xy) {
     update();
 }
 
+void ColorWheelWidget::rebuild_face_cache() {
+    const QSize px = face_cache_size_;
+    const int cx = px.width() / 2;
+    const int cy = px.height() / 2;
+    const double rad = std::min(cx, cy) - 1.0;
+    const double inner = rad * 0.89;
+    QImage img(px, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+    for (int y = 0; y < px.height(); ++y) {
+        for (int x = 0; x < px.width(); ++x) {
+            const int dx = x - cx;
+            const int dy = y - cy;
+            const double d = std::hypot(static_cast<double>(dx), static_cast<double>(dy));
+            const double soft = 1.5;
+            if (d > rad + soft)
+                continue;
+            const double ang = std::atan2(static_cast<double>(dy), static_cast<double>(dx));
+            double h = ang / (2.0 * std::acos(-1.0));
+            if (h < 0.0)
+                h += 1.0;
+            double v = 0.72;
+            if (d > inner) {
+                const double t = (d - inner) / (rad - inner);
+                v = 0.72 + 0.20 * t;
+            }
+            QColor col = QColor::fromHsvF(h, 1.0, v);
+            if (d > rad)
+                col.setAlphaF(std::max(0.0, (rad + soft - d) / soft));
+            img.setPixelColor(x, y, col);
+        }
+    }
+    face_cache_ = std::move(img);
+}
+
 void ColorWheelWidget::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
     QPainter p(this);
@@ -174,28 +475,31 @@ void ColorWheelWidget::paintEvent(QPaintEvent* event) {
     const qreal r = disc.width() / 2.0;
     const QPointF c = disc.center();
 
-    // Hue ring: 56 hue segments around the band at full saturation.
-    static constexpr int kSegments = 56;
-    QPen ring_pen;
-    ring_pen.setWidthF(std::max(6.0, r * 0.08));
-    ring_pen.setCapStyle(Qt::FlatCap);
-    for (int i = 0; i < kSegments; ++i) {
-        const double a0 = 2.0 * M_PI * i / kSegments;
-        const double a1 = 2.0 * M_PI * (i + 1) / kSegments;
-        ring_pen.setColor(QColor::fromHsvF(i / 56.0, 1.0, 0.62));
-        p.setPen(ring_pen);
-        p.drawLine(c + QPointF(std::cos(a0), std::sin(a0)) * (r - 3.0),
-                   c + QPointF(std::cos(a1), std::sin(a1)) * (r - 3.0));
+    // Hue wheel: per-pixel HSV bake (angle -> hue) cached in face_cache_ —
+    // covers the ENTIRE disc (core + rim band) with every hue around the rim,
+    // no white core, no RGB-interpolation banding. The rim band is the same hue
+    // map at a higher value so it matches the core colors but stands out.
+    const QRectF face = disc.adjusted(r * 0.11, r * 0.11, -r * 0.11, -r * 0.11);
+    const QSize disc_px = disc.size().toSize();
+    if (disc_px != face_cache_size_) {
+        face_cache_size_ = disc_px;
+        rebuild_face_cache();
     }
+    p.save();
+    QPainterPath wheel_clip;
+    wheel_clip.addEllipse(disc);
+    p.setClipPath(wheel_clip);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    p.drawImage(disc, face_cache_);
+    p.restore();
 
-    // Inner well.
-    const qreal inset = std::clamp(r * 0.06, 4.0, 10.0);
-    QRadialGradient well(c, r, c, 0.35 * r);
-    well.setColorAt(0.0, t.surface_low);
-    well.setColorAt(1.0, t.surface);
-    p.setPen(QPen(t.border, 1.0));
-    p.setBrush(well);
-    p.drawEllipse(disc.adjusted(inset, inset, -inset, -inset));
+    // Crosshair lines + center ring (mockup wheel-face anatomy).
+    p.setPen(QPen(QColor(255, 255, 255, 40), 1.0));
+    p.drawLine(QPointF(face.left(), c.y()), QPointF(face.right(), c.y()));
+    p.drawLine(QPointF(c.x(), face.top()), QPointF(c.x(), face.bottom()));
+    p.setPen(QPen(QColor("#ececec"), 1.5));
+    p.setBrush(Qt::NoBrush);
+    p.drawEllipse(c, r * 0.055, r * 0.055);
 
     // Position marker.
     const QPointF dot = xy_to_pos(xy_);
@@ -224,6 +528,18 @@ void ColorWheelWidget::mouseMoveEvent(QMouseEvent* event) {
     update();
 }
 
+void ColorWheelWidget::mouseReleaseEvent(QMouseEvent* event) {
+    if (!dragging_ || event->button() != Qt::LeftButton) {
+        QWidget::mouseReleaseEvent(event);
+        return;
+    }
+    dragging_ = false;
+    set_xy(pos_to_xy(event->position()));
+    emit xy_changed(xy_);
+    emit xy_committed(xy_);
+    update();
+}
+
 // ── ColorWheelsPanel ─────────────────────────────────────────────────────────
 
 ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
@@ -231,333 +547,337 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
     root->setContentsMargins(10, 10, 10, 10);
     root->setSpacing(8);
 
-    // Header: title with arrow/dot pagination (spec recurring pattern).
+    // Header: title (left) + icon-button cluster (right), the shared
+    // panel-header contract every Grading-Workspace panel follows — title
+    // left · icon cluster right (reset-all, view options, overflow).
     auto* header = new QWidget(this);
-    auto* header_row = new QHBoxLayout(header);
-    header_row->setContentsMargins(0, 0, 0, 0);
-    header_row->setSpacing(4);
-
+    auto* header_l = new QHBoxLayout(header);
+    header_l->setContentsMargins(0, 0, 0, 0);
+    header_l->setSpacing(2);
     title_ = new QLabel(header);
+    title_->setText({});
     apply_theme_style(title_, [] {
         const ThemeTokens& t = tokens();
         return QStringLiteral("color: %1; font-size: 12px; font-weight: 600;")
             .arg(css(t.ink));
     });
-    header_row->addWidget(title_, 1);
+    header_l->addWidget(title_, 1);
 
-    prev_ = new QToolButton(header);
-    prev_->setIcon(icon("chevron_left"));
-    prev_->setIconSize(QSize(14, 14));
-    prev_->setAutoRaise(true);
-    apply_theme_style(prev_, &flat_tool_style);
-    header_row->addWidget(prev_);
+    auto make_header_icon = [this, header, header_l](const char* icon_name,
+                                                       const QString& tooltip,
+                                                       const std::function<void()>& on_click) {
+        auto* b = new QToolButton(header);
+        b->setIcon(icon(icon_name));
+        b->setIconSize(QSize(14, 14));
+        b->setAutoRaise(true);
+        b->setFixedSize(24, 24);
+        b->setToolTip(tooltip);
+        apply_theme_style(b, &flat_tool_style);
+        if (on_click) QObject::connect(b, &QToolButton::clicked, this, on_click);
+        header_l->addWidget(b);
+        return b;
+    };
 
-    dots_ = new QLabel(header);
-    dots_->setAlignment(Qt::AlignCenter);
-    dots_->setFixedWidth(26);
-    apply_theme_style(dots_, [] {
-        return QStringLiteral("color: %1; font-size: 9px;")
-            .arg(css(tokens().ink_muted));
+    // Reset-all: resets the whole panel state to identity and commits one undo.
+    make_header_icon("reset", tr("Reset all grades"), [this] {
+        reset_panel(state_);
+        set_state(state_);
+        commit();
     });
-    header_row->addWidget(dots_);
-
-    next_ = new QToolButton(header);
-    next_->setIcon(icon("chevron_right"));
-    next_->setIconSize(QSize(14, 14));
-    next_->setAutoRaise(true);
-    apply_theme_style(next_, &flat_tool_style);
-    header_row->addWidget(next_);
-
+    // View options / overflow: structural placeholders to match the panel
+    // header contract; no behavior yet.
+    make_header_icon("mode", tr("View options"), {});
+    make_header_icon("menu", tr("More options"), {});
     root->addWidget(header);
 
-    // Four big wheels in a 2×2 grid, each with a caption underneath. A single
-    // row of tiny wheels reads like miniature beads; two rows let every wheel
-    // grow to ~60% of the panel width (Resolve's wheels are the primary tool).
+    const auto add_tone = [this](const QString& label, double lo, double hi,
+                                 double value, double reset, int param,
+                                 QWidget* parent, QHBoxLayout* target,
+                                 ToneFieldMode mode = ToneFieldMode::kFieldReset,
+                                 SwatchKind swatch = SwatchKind::kNone) {
+        auto* t = new ToneField(label, lo, hi, value, reset, parent, mode, swatch);
+        tone_fields_.append(t);
+        target->addWidget(t, 1);
+        QObject::connect(t, &ToneField::value_changed, this,
+                         [this, param](double v) { tone_param_changed(param, v); });
+        return t;
+    };
+
+    // NOTE: no parameter row above the wheels — mockup layout keeps the tone
+    // fields in a single shared row BELOW the wheels only.
+
+    // Spec §9a item 2: exactly four circular wheels, evenly spaced, in fixed
+    // order Lift, Gamma, Gain, Offset. Each wheel column follows the mockup's
+    // `wtop` anatomy: a dial-block on the LEFT (small cassette master knob +
+    // its value), the wheel NAME centered, and the reset icon on the right —
+    // symmetric fixed-width ends so the name centers on the wheel's axis.
+    const char* const kWheelNames[4] = {"Lift", "Gamma", "Gain", "Offset"};
     auto* wheels_row = new QWidget(this);
-    auto* wheels_grid = new QGridLayout(wheels_row);
-    wheels_grid->setContentsMargins(0, 0, 0, 0);
-    wheels_grid->setSpacing(8);
+    auto* wheels_layout = new QHBoxLayout(wheels_row);
+    wheels_layout->setContentsMargins(0, 0, 0, 0);
+    wheels_layout->setSpacing(12);
     for (int i = 0; i < 4; ++i) {
         auto* cell = new QWidget(wheels_row);
         auto* cell_layout = new QVBoxLayout(cell);
         cell_layout->setContentsMargins(0, 0, 0, 0);
         cell_layout->setSpacing(2);
-        auto* wheel = new ColorWheelWidget(cell);
-        wheel_captions_.append(new QLabel(cell));
-        apply_theme_style(wheel_captions_.back(), [] {
+
+        // wtop: three-column header — dial-block | name | reset.
+        auto* wheel_header = new QWidget(cell);
+        auto* wheel_header_l = new QHBoxLayout(wheel_header);
+        wheel_header_l->setContentsMargins(0, 0, 0, 0);
+        wheel_header_l->setSpacing(0);
+
+        // Dial-block: hidden master state (identity mid by default) + the
+        // current master-term readout text. The cassette knob visual is gone;
+        // the master stays at its identity mid so the wheel response law keeps
+        // working, and the readout text + reset button remain.
+        auto* dial_block = new QWidget(wheel_header);
+        auto* dial_l = new QVBoxLayout(dial_block);
+        dial_l->setContentsMargins(0, 0, 0, 0);
+        dial_l->setSpacing(0);
+        auto* master = new MiniKnob(dial_block);
+        master->setToolTip(tr("Master"));
+        master->setFixedSize(20, 20);
+        // Start at the law's identity mid (0.5 -> Lift=0, Gamma/Gain=1, Offset=0).
+        master->set_value01(0.5f);
+        master->hide();
+        auto* dial_val = new QLabel("0.00", dial_block);
+        dial_val->setAlignment(Qt::AlignHCenter);
+        apply_theme_style(dial_val, [] {
+            return QStringLiteral("color: %1; font-size: 9px; font-family: monospace;")
+                .arg(css(tokens().ink_muted));
+        });
+        dial_l->addStretch(1);
+        dial_l->addWidget(dial_val);
+        dial_l->addStretch(1);
+        dial_block->setFixedWidth(30);
+        wheel_header_l->addWidget(dial_block);
+
+        auto* name = new QLabel(kWheelNames[i], wheel_header);
+        apply_theme_style(name, [] {
             return QStringLiteral("color: %1; font-size: 11px; font-weight: 550;")
                 .arg(css(tokens().ink_muted));
         });
-        wheel_captions_.back()->setAlignment(Qt::AlignHCenter);
+        name->setAlignment(Qt::AlignCenter);
+        wheel_header_l->addWidget(name, 1);
+        auto* reset = new QToolButton(wheel_header);
+        reset->setIcon(icon("reset"));
+        reset->setIconSize(QSize(12, 12));
+        reset->setAutoRaise(true);
+        reset->setFixedWidth(30);
+        reset->setFixedHeight(20);
+        reset->setToolTip(tr("Reset wheel"));
+        apply_theme_style(reset, &flat_tool_style);
+        wheel_header_l->addWidget(reset);
+        cell_layout->addWidget(wheel_header);
+
+        auto* wheel = new ColorWheelWidget(cell);
         cell_layout->addWidget(wheel, 1);
-        cell_layout->addWidget(wheel_captions_.back());
-        wheels_grid->addWidget(cell, i / 2, i % 2);
+
+        // Three small boxed per-channel numeric readouts (spec item 2).
+        auto* channel_row = new QWidget(cell);
+        auto* channel_layout = new QHBoxLayout(channel_row);
+        channel_layout->setContentsMargins(0, 0, 0, 0);
+        channel_layout->setSpacing(2);
+        QVector<QLabel*> boxes;
+        for (int ch = 0; ch < 3; ++ch) {
+            auto* v = new QLabel("0.000", channel_row);
+            v->setAlignment(Qt::AlignCenter);
+            apply_theme_style(v, [] {
+                const ThemeTokens& t = tokens();
+                return QStringLiteral(
+                    "QLabel { background-color: %1; border: 1px solid %2;"
+                    " border-radius: 4px; padding: 1px 2px; color: %3;"
+                    " font-size: 10px; font-family: monospace; }")
+                    .arg(css(t.surface_low), css(t.border_soft), css(t.ink));
+            });
+            channel_layout->addWidget(v, 1);
+            boxes.append(v);
+        }
+        channel_readouts_.append(boxes);
+        cell_layout->addWidget(channel_row);
+
+        wheels_layout->addWidget(cell, 1);
         wheels_.append(wheel);
+        masters_.append(master);
+        master_values_.append(dial_val);
+        const int idx = i;
+        QObject::connect(wheel, &ColorWheelWidget::xy_changed, this,
+                         [this, idx](const QPointF& xy) { wheel_moved(idx, xy); });
+        QObject::connect(wheel, &ColorWheelWidget::xy_committed, this,
+                         [this, idx](const QPointF& xy) { wheel_committed(idx, xy); });
+        QObject::connect(master, &MiniKnob::value_changed, this,
+                         [this, idx](float t01) { master_moved(idx, t01); });
+        QObject::connect(master, &MiniKnob::value_committed, this,
+                         [this, idx](float t01) {
+                             master_moved(idx, t01);
+                             commit();
+                         });
+        QObject::connect(reset, &QToolButton::clicked, this, [this, idx] {
+            wheels_[idx]->set_xy(QPointF(0.0, 0.0));
+            masters_[idx]->set_value01(0.5f);
+            // Reset through the controller law so the state matches the widgets.
+            reset_primaries_wheel(state_, static_cast<PrimariesWheel>(idx));
+            refresh_wheel_readout(idx);
+            commit();
+        });
     }
-    for (int col = 0; col < 2; ++col) wheels_grid->setColumnStretch(col, 1);
-    for (int row = 0; row < 2; ++row) wheels_grid->setRowStretch(row, 1);
     root->addWidget(wheels_row, 1);
 
-    // Shared tonal row: temperature / tint / contrast / pivot.
-    auto* tonal_row = new QWidget(this);
-    auto* tonal_layout = new QHBoxLayout(tonal_row);
-    tonal_layout->setContentsMargins(0, 0, 0, 0);
-    tonal_layout->setSpacing(10);
-    tonal_layout->addWidget(new ToneField(tr("Temp"), -100.0, 100.0, 0.0, 0.0, tonal_row), 1);
-    tonal_layout->addWidget(new ToneField(tr("Tint"), -100.0, 100.0, 0.0, 0.0, tonal_row), 1);
-    tonal_layout->addWidget(new ToneField(tr("Contrast"), -100.0, 100.0, 0.0, 0.0, tonal_row), 1);
-    tonal_layout->addWidget(new ToneField(tr("Pivot"), -100.0, 100.0, 0.0, 0.0, tonal_row), 1);
-    root->addWidget(tonal_row);
+    // The ONE shared tone row BELOW the wheels, matching the mockup's shared
+    // row exactly: Temp, Tint, Hue, Contrast, Pivot, Mid/Detail, Blk/Offset.
+    // Enum order == construction order below, so set_state's enum-int indexing
+    // stays valid. Color Boost, Shadows, Highlights, Saturation, Lum Mix are
+    // retained in WheelPanelState but no longer surfaced in the panel.
+    auto* param_row = new QWidget(this);
+    auto* param_layout = new QHBoxLayout(param_row);
+    param_layout->setContentsMargins(0, 0, 0, 0);
+    param_layout->setSpacing(8);
+    add_tone(tr("Temp"), kTempLo, kTempHi, 0.0, 0.0,
+             static_cast<int>(ToneParam::kTemp), param_row, param_layout,
+             ToneFieldMode::kFieldReset, SwatchKind::kTemp);
+    add_tone(tr("Tint"), kTintLo, kTintHi, 0.0, 0.0,
+             static_cast<int>(ToneParam::kTint), param_row, param_layout,
+             ToneFieldMode::kFieldReset, SwatchKind::kTint);
+    add_tone(tr("Hue"), kHueDegLo, kHueDegHi, 0.0, 0.0,
+             static_cast<int>(ToneParam::kHue), param_row, param_layout,
+             ToneFieldMode::kFieldReset, SwatchKind::kHue);
+    add_tone(tr("Contrast"), kContrastLo, kContrastHi, 1.0, 1.0,
+             static_cast<int>(ToneParam::kContrast), param_row, param_layout);
+    add_tone(tr("Pivot"), kPivotLo, kPivotHi, kDefaultPivot, kDefaultPivot,
+             static_cast<int>(ToneParam::kPivot), param_row, param_layout);
+    add_tone(tr("Mid/Detail"), kMidDetailLo, kMidDetailHi, 0.0, 0.0,
+             static_cast<int>(ToneParam::kMidDetail), param_row, param_layout);
+    add_tone(tr("Blk/Offset"), kOffsetLo, kOffsetHi, 0.0, 0.0,
+             static_cast<int>(ToneParam::kBlackOffset), param_row, param_layout);
+    root->addWidget(param_row);
 
-    // Shared chroma row: boost / saturation / hue / lum mix.
-    auto* chroma_row = new QWidget(this);
-    auto* chroma_layout = new QHBoxLayout(chroma_row);
-    chroma_layout->setContentsMargins(0, 0, 0, 0);
-    chroma_layout->setSpacing(10);
-    chroma_layout->addWidget(new ToneField(tr("Color Boost"), -100.0, 100.0, 0.0, 0.0, chroma_row), 1);
-    chroma_layout->addWidget(new ToneField(tr("Saturation"), -100.0, 100.0, 0.0, 0.0, chroma_row), 1);
-    chroma_layout->addWidget(new ToneField(tr("Hue"), -180.0, 180.0, 0.0, 0.0, chroma_row), 1);
-    chroma_layout->addWidget(new ToneField(tr("Lum Mix"), -100.0, 100.0, 0.0, 0.0, chroma_row), 1);
-    root->addWidget(chroma_row);
-
-    QObject::connect(prev_, &QToolButton::clicked, this,
-                     [this] { set_page((page_ + 1) % 2); });
-    QObject::connect(next_, &QToolButton::clicked, this,
-                     [this] { set_page((page_ + 1) % 2); });
-
-    set_page(0);
-}
-
-void ColorWheelsPanel::set_page(int page) {
-    page_ = page;
-    static const char* const kNames[2][4] = {
-        {"Lift", "Gamma", "Gain", "Offset"},
-        {"Dark", "Shadow", "Light", "Global"},
-    };
-    const QString title = tr(page_ == 0 ? "Primaries - Color Wheels"
-                                        : "HDR Color Wheels");
-    title_->setText(title);
-    for (int i = 0; i < 4; ++i) {
-        wheel_captions_[i]->setText(tr(kNames[page_][i]));
-        wheels_[i]->set_active(page_ != 0);  // HDR wheels read as "lit"
+    // The tone reset button also commits (its value already snapped to the
+    // reset value via set_value -> value_changed).
+    for (ToneField* t : tone_fields_) {
+        QObject::connect(t, &ToneField::reset_clicked, this, [this] { commit(); });
     }
-    dots_->setText(QStringLiteral("%1 %2").arg(page_ == 0 ? "\u25CF" : "\u25CB",
-                                               page_ == 1 ? "\u25CF" : "\u25CB"));
 }
 
-// ── CurveEditor ──────────────────────────────────────────────────────────────
-
-CurveEditor::CurveEditor(QWidget* parent) : QWidget(parent) {
-    tint_ = QColor(255, 255, 255);
-    setMinimumSize(180, 140);
-    setCursor(Qt::CrossCursor);
-}
-
-QRectF CurveEditor::plot_rect() const {
-    return QRectF(8.0, 8.0, width() - 16.0, height() - 16.0);
-}
-
-QPointF CurveEditor::to_plot(const QPointF& p) const {
-    const QRectF r = plot_rect();
-    return QPointF(r.left() + p.x() * r.width(), r.top() + (1.0 - p.y()) * r.height());
-}
-
-int CurveEditor::hit_point(const QPointF& pos) const {
-    const QRectF r = plot_rect();
-    for (int i = 0; i < points_.size(); ++i) {
-        const QPointF pp = to_plot(points_[i]);
-        if (QLineF(pp, pos).length() <= 9.0) return i;
+void ColorWheelsPanel::set_state(const canvas::core::colorsci::WheelPanelState& state) {
+    state_ = state;
+    // Push the loaded wheels/tone back into the widgets without committing.
+    for (int i = 0; i < wheels_.size(); ++i) {
+        wheels_[i]->set_xy(QPointF(0.0, 0.0));
+        const auto& meta = canvas::core::colorsci::detail::kWheelMeta[i];
+        const float master = [&] {
+            switch (static_cast<PrimariesWheel>(i)) {
+                case PrimariesWheel::kLift: return state_.lgg.lift_master;
+                case PrimariesWheel::kGamma: return state_.lgg.gamma_master;
+                case PrimariesWheel::kGain: return state_.lgg.gain_master;
+                case PrimariesWheel::kOffset: return state_.offset.master;
+            }
+            return 0.0f;
+        }();
+        const float t01 = value_to_master(master, meta.lo_master, meta.hi_master, meta.id_master);
+        masters_[i]->set_value01(t01);
+        refresh_wheel_readout(i);
     }
-    return -1;
+    tone_fields_[static_cast<int>(ToneParam::kTemp)]->set_value(state_.temp);
+    tone_fields_[static_cast<int>(ToneParam::kTint)]->set_value(state_.tint);
+    tone_fields_[static_cast<int>(ToneParam::kHue)]->set_value(state_.hue_deg);
+    tone_fields_[static_cast<int>(ToneParam::kContrast)]->set_value(state_.contrast);
+    tone_fields_[static_cast<int>(ToneParam::kPivot)]->set_value(state_.pivot);
+    tone_fields_[static_cast<int>(ToneParam::kMidDetail)]->set_value(state_.mid_detail);
+    tone_fields_[static_cast<int>(ToneParam::kBlackOffset)]->set_value(state_.black_offset);
 }
 
-void CurveEditor::set_points(const QVector<QPointF>& points) {
-    points_ = points;
-    update();
+canvas::core::colorsci::WheelPanelState ColorWheelsPanel::state() const {
+    return state_;
 }
 
-void CurveEditor::set_tint(const QColor& tint) {
-    tint_ = tint;
-    update();
+void ColorWheelsPanel::wheel_moved(int index, const QPointF& xy) {
+    const float master01 = masters_[index]->value01();
+    // Feed the wheel through the controller law. The lift/gamma/gain/offset
+    // per-channel terms land in the state and the boxes below the wheel track
+    // them exactly.
+    apply_primaries_wheel(state_, static_cast<PrimariesWheel>(index), xy.x(), xy.y(), master01);
+    wheels_[index]->set_active(true);
+    refresh_wheel_readout(index);
+    emit params_preview();
 }
 
-void CurveEditor::paintEvent(QPaintEvent* event) {
-    Q_UNUSED(event);
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
-    const ThemeTokens& t = tokens();
-    const QRectF r = plot_rect();
+void ColorWheelsPanel::wheel_committed(int index, const QPointF& xy) {
+    const float master01 = masters_[index]->value01();
+    apply_primaries_wheel(state_, static_cast<PrimariesWheel>(index), xy.x(), xy.y(), master01);
+    refresh_wheel_readout(index);
+    commit();
+}
 
-    // Panel well.
-    p.setBrush(t.surface_low);
-    p.setPen(QPen(t.border, 1.0));
-    p.drawRoundedRect(r, 8.0, 8.0);
+void ColorWheelsPanel::master_moved(int index, float t01) {
+    const QPointF xy = wheels_[index]->xy();
+    apply_primaries_wheel(state_, static_cast<PrimariesWheel>(index), xy.x(), xy.y(), t01);
+    refresh_wheel_readout(index);
+    emit params_preview();
+}
 
-    // Grid: quarters.
-    p.setPen(QPen(with_alpha(t.ink, 22), 1.0));
-    p.drawLine(QPointF(r.left(), r.center().y()), QPointF(r.right(), r.center().y()));
-    p.drawLine(QPointF(r.center().x(), r.top()), QPointF(r.center().x(), r.bottom()));
-
-    // Bounding frame ticks.
-    p.setPen(QPen(with_alpha(t.ink, 40), 1.0));
-    p.drawRect(r);
-
-    // Placeholder histogram veil (static, deterministic).
-    p.setClipRect(r);
-    QPen data_pen(QColor(255, 255, 255));
-    for (double x = 0.0; x <= 1.0; x += 0.02) {
-        const double luma = 0.52 + 0.30 * std::sin(x * 6.283 + 1.2) +
-                            0.16 * std::sin(x * 12.566 + 0.4);
-        const double v = std::clamp(luma, 0.05, 0.95);
-        data_pen.setColor(with_alpha(QColor(255, 255, 255), 28));
-        p.setPen(data_pen);
-        p.drawLine(to_plot(QPointF(x, v)), QPointF(to_plot(QPointF(x, v)).x(), r.bottom()));
+void ColorWheelsPanel::refresh_wheel_readout(int index) {
+    if (index < 0 || index >= channel_readouts_.size()) return;
+    const auto& meta = canvas::core::colorsci::detail::kWheelMeta[index];
+    std::array<float, 3> values{0.0f, 0.0f, 0.0f};
+    switch (static_cast<PrimariesWheel>(index)) {
+        case PrimariesWheel::kLift:
+            values = {state_.lgg.lift_r, state_.lgg.lift_g, state_.lgg.lift_b};
+            break;
+        case PrimariesWheel::kGamma:
+            values = {state_.lgg.gamma_r, state_.lgg.gamma_g, state_.lgg.gamma_b};
+            break;
+        case PrimariesWheel::kGain:
+            values = {state_.lgg.gain_r, state_.lgg.gain_g, state_.lgg.gain_b};
+            break;
+        case PrimariesWheel::kOffset:
+            values = {state_.offset.r, state_.offset.g, state_.offset.b};
+            break;
     }
-
-    // Curve itself: from identity to the editable points.
-    QVector<QPointF> poly;
-    poly.reserve(points_.size() + 2);
-    poly.append(QPointF(0.0, 0.0));
-    QVector<QPointF> sorted = points_;
-    std::sort(sorted.begin(), sorted.end(),
-              [](const QPointF& a, const QPointF& b) { return a.x() < b.x(); });
-    for (const QPointF& pt : sorted) poly.append(pt);
-    poly.append(QPointF(1.0, 1.0));
-
-    QPainterPath path;
-    path.moveTo(to_plot(poly.front()));
-    for (int i = 1; i < poly.size(); ++i) path.lineTo(to_plot(poly[i]));
-
-    p.setPen(QPen(tint_, 1.8));
-    p.drawPath(path);
-
-    // Control points.
-    for (const QPointF& pt : sorted) {
-        p.setPen(QPen(t.surface_highest, 1.0));
-        p.setBrush(t.accent);
-        p.drawEllipse(to_plot(pt), 3.5, 3.5);
+    for (int ch = 0; ch < 3; ++ch) {
+        channel_readouts_[index][ch]->setText(QString::number(values[ch], 'f', 3));
     }
-    p.setClipping(false);
+    if (index < master_values_.size() && masters_.size() > static_cast<qsizetype>(index)) {
+        const float master = master_to_value(
+            masters_[index]->value01(), meta.lo_master, meta.hi_master, meta.id_master);
+        master_values_[index]->setText(QString::number(master, 'f', 2));
+    }
+    if (static_cast<PrimariesWheel>(index) == PrimariesWheel::kOffset) {
+        // Keep the Blk/Offset field in lock-step with the Offset wheel's master.
+        state_.black_offset = state_.offset.master;
+        tone_fields_[static_cast<int>(ToneParam::kBlackOffset)]->set_value(state_.black_offset);
+    }
 }
 
-void CurveEditor::mousePressEvent(QMouseEvent* event) {
-    const QPointF pos = event->position();
-    const int hit = hit_point(pos);
-    if (event->button() == Qt::LeftButton) {
-        if (hit >= 0) {
-            drag_index_ = hit;
-        } else {
-            const QRectF r = plot_rect();
-            QPointF p((pos.x() - r.left()) / r.width(), 1.0 - (pos.y() - r.top()) / r.height());
-            p.setX(std::clamp(p.x(), 0.02, 0.98));
-            p.setY(std::clamp(p.y(), 0.02, 0.98));
-            points_.append(p);
-            std::sort(points_.begin(), points_.end(),
-                      [](const QPointF& a, const QPointF& b) { return a.x() < b.x(); });
-            drag_index_ = hit_point(pos);
-            update();
+void ColorWheelsPanel::tone_param_changed(int param, double value) {
+    switch (static_cast<ToneParam>(param)) {
+        case ToneParam::kTemp: state_.temp = static_cast<float>(value); break;
+        case ToneParam::kTint: state_.tint = static_cast<float>(value); break;
+        case ToneParam::kHue: state_.hue_deg = static_cast<float>(value); break;
+        case ToneParam::kContrast: state_.contrast = static_cast<float>(value); break;
+        case ToneParam::kPivot: state_.pivot = static_cast<float>(value); break;
+        case ToneParam::kMidDetail: state_.mid_detail = static_cast<float>(value); break;
+        case ToneParam::kBlackOffset: {
+            // Blk/Offset drives the Offset wheel's master through the same
+            // master01->value law as the cassette knob. Sync the knob so the
+            // wheel's master term and the field never diverge.
+            state_.black_offset = static_cast<float>(value);
+            state_.offset.master = static_cast<float>(value);
+            const auto& meta = canvas::core::colorsci::detail::kWheelMeta[static_cast<int>(PrimariesWheel::kOffset)];
+            masters_[static_cast<int>(PrimariesWheel::kOffset)]->set_value01(
+                value_to_master(state_.offset.master, meta.lo_master, meta.hi_master, meta.id_master));
+            refresh_wheel_readout(static_cast<int>(PrimariesWheel::kOffset));
+            break;
         }
-    } else if (event->button() == Qt::RightButton) {
-        points_.clear();
-        update();
     }
+    commit();
 }
 
-void CurveEditor::mouseMoveEvent(QMouseEvent* event) {
-    if (drag_index_ < 0 || drag_index_ >= points_.size()) return;
-    const QRectF r = plot_rect();
-    QPointF p((event->position().x() - r.left()) / r.width(),
-              1.0 - (event->position().y() - r.top()) / r.height());
-    p.setX(std::clamp(p.x(), 0.02, 0.98));
-    p.setY(std::clamp(p.y(), 0.02, 0.98));
-    points_[drag_index_] = p;
-    std::sort(points_.begin(), points_.end(),
-              [](const QPointF& a, const QPointF& b) { return a.x() < b.x(); });
-    drag_index_ = hit_point(event->position());
-    update();
+void ColorWheelsPanel::commit() {
+    emit params_committed(state_);
 }
 
-void CurveEditor::mouseDoubleClickEvent(QMouseEvent* event) {
-    const int hit = hit_point(event->position());
-    if (hit >= 0) {
-        points_.removeAt(hit);
-        update();
-    }
-}
-
-// ── CurvesPanel ──────────────────────────────────────────────────────────────
-
-CurvesPanel::CurvesPanel(QWidget* parent) : QWidget(parent) {
-    auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(10, 10, 10, 10);
-    root->setSpacing(8);
-
-    auto* header = new QWidget(this);
-    auto* header_row = new QHBoxLayout(header);
-    header_row->setContentsMargins(0, 0, 0, 0);
-    header_row->setSpacing(4);
-
-    auto* title = new QLabel(tr("Curves - Custom"), header);
-    apply_theme_style(title, [] {
-        const ThemeTokens& t = tokens();
-        return QStringLiteral("color: %1; font-size: 12px; font-weight: 600;")
-            .arg(css(t.ink));
-    });
-    header_row->addWidget(title, 1);
-
-    auto* curve_combo = new QComboBox(header);
-    curve_combo->addItems({tr("Custom"), tr("Luma vs Sat"), tr("Hue vs Hue"),
-                           tr("Hue vs Sat"), tr("Sat vs Sat")});
-    apply_theme_style(curve_combo, &flat_tool_style);
-    header_row->addWidget(curve_combo);
-
-    auto* channels = new QWidget(header);
-    auto* channels_row = new QHBoxLayout(channels);
-    channels_row->setContentsMargins(0, 0, 0, 0);
-    channels_row->setSpacing(2);
-    const char* const names[] = {"Y", "R", "G", "B"};
-    const QColor tints[] = {QColor(230, 230, 230), QColor(0xD9, 0x53, 0x4F),
-                            QColor(0x7B, 0xC9, 0x50), QColor(0x4F, 0x86, 0xD9)};
-    for (int i = 0; i < 4; ++i) {
-        auto* b = new QToolButton(channels);
-        b->setText(tr(names[i]));
-        b->setCheckable(true);
-        b->setChecked(i == 0);
-        b->setAutoRaise(true);
-        apply_theme_style(b, &outline_pill_style);
-        QObject::connect(b, &QToolButton::clicked, this,
-                         [this, i, tints, channels, b] {
-                             set_channel(i);
-                             for (QToolButton* other : channels->findChildren<QToolButton*>())
-                                 other->setChecked(other == b);
-                         });
-        channels_row->addWidget(b);
-    }
-    header_row->addWidget(channels);
-    root->addWidget(header);
-
-    editor_ = new CurveEditor(this);
-    root->addWidget(editor_, 1);
-    set_channel(0);
-
-    auto* soft = new QWidget(this);
-    auto* soft_row = new QHBoxLayout(soft);
-    soft_row->setContentsMargins(0, 0, 0, 0);
-    soft_row->setSpacing(10);
-    soft_row->addWidget(new ToneField(tr("Soft Clip Shadows"), -100.0, 100.0, 0.0, 0.0, soft), 1);
-    soft_row->addWidget(new ToneField(tr("Soft Clip Highlights"), -100.0, 100.0, 0.0, 0.0, soft), 1);
-    root->addWidget(soft);
-}
-
-void CurvesPanel::set_channel(int channel) {
-    switch (channel) {
-        case 0: editor_->set_tint(QColor(235, 235, 235)); break;
-        case 1: editor_->set_tint(QColor(0xD9, 0x53, 0x4F)); break;
-        case 2: editor_->set_tint(QColor(0x7B, 0xC9, 0x50)); break;
-        default: editor_->set_tint(QColor(0x4F, 0x86, 0xD9)); break;
-    }
-    editor_->set_points({});
-}
 
 // ── ScopesPanel ──────────────────────────────────────────────────────────────
 

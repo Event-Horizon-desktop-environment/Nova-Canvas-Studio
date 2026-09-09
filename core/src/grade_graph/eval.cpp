@@ -47,6 +47,8 @@ colorsci::RGBF apply_correction(const colorsci::RGBF& p, const Node& node) {
             return colorsci::apply_lgg(p, node.lgg.value_or(colorsci::LGG{}));
         case CorrectMode::kCdl:
             return colorsci::apply_cdl(p, node.cdl.value_or(colorsci::Cdl{}));
+        case CorrectMode::kCurves:
+            return colorsci::apply_curves(p, node.curves.value_or(colorsci::CurveParams{}));
         case CorrectMode::kIdentity:
             break;
     }

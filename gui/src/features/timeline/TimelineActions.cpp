@@ -16,6 +16,16 @@
 
 namespace canvas::gui {
 
+void MainWindow::activate_color_clip(const canvas::core::ClipId id) {
+    if (id == 0) {
+        selected_clip_ = 0;
+        selected_clip_ids_.clear();
+        return;
+    }
+    selected_clip_ = id;
+    selected_clip_ids_ = {id};
+}
+
 void MainWindow::connect_timeline() {
     timeline_->set_sequence(&project_->sequence);
 

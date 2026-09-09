@@ -23,6 +23,7 @@
 // splitplan "one class, one file, one job".
 
 #include "canvas/core/colorsci/cdl.hpp"
+#include "canvas/core/colorsci/curves.hpp"
 #include "canvas/core/colorsci/wheels.hpp"
 
 #include <optional>
@@ -52,7 +53,7 @@ enum class NodeKind {
 // What a Corrector/Parallel/Layer/Outside node's own formula computes. The
 // full wheel/tone parameter set lands in Phase 3; identity is the safe
 // default so an empty node is a no-op.
-enum class CorrectMode { kIdentity, kLgg, kCdl };
+enum class CorrectMode { kIdentity, kLgg, kCdl, kCurves };
 
 enum class KeyMixMode { kAdd, kSubtract, kIntersect, kInvert };
 
@@ -84,6 +85,7 @@ struct Node {
     CorrectMode correct_mode = CorrectMode::kIdentity;
     std::optional<colorsci::LGG> lgg;
     std::optional<colorsci::Cdl> cdl;
+    std::optional<colorsci::CurveParams> curves;
 
     KeyMixMode key_mode = KeyMixMode::kAdd;
     BlendMode blend = BlendMode::kNormal;

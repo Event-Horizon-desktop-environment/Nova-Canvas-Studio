@@ -191,6 +191,10 @@ private:
     // Locates the selected clip in the sequence; returns its kind/index.
     bool find_selected_clip(canvas::core::Track::Kind& out_kind, std::size_t& out_index,
                             canvas::core::Clip& out_clip) const;
+    // Selects a clip by id (the color-page mini-strip activation seam). Mirrors
+    // the timeline selection setters so the grading panels can target a clip
+    // that lives outside the main timeline's current selection.
+    void activate_color_clip(canvas::core::ClipId id);
     // Locates the audio clip an audio edit should target: the selected audio
     // clip itself, or the linked audio mate of a selected video clip. False when
     // the selection has no audio to edit.

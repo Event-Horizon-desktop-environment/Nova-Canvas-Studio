@@ -145,6 +145,55 @@ void NodeGraphCanvas::clear_nodes() {
     node_items_.clear();
 }
 
+namespace {
+
+QString correct_mode_label(canvas::core::grade_graph::CorrectMode mode) {
+    using canvas::core::grade_graph::CorrectMode;
+    switch (mode) {
+        case CorrectMode::kLgg: return QStringLiteral("LGG");
+        case CorrectMode::kCdl: return QStringLiteral("CDL");
+        case CorrectMode::kCurves: return QStringLiteral("Curves");
+        case CorrectMode::kIdentity: return QStringLiteral("Identity");
+    }
+    return QStringLiteral("Identity");
+}
+
+QString node_kind_label(canvas::core::grade_graph::NodeKind kind) {
+    using canvas::core::grade_graph::NodeKind;
+    switch (kind) {
+        case NodeKind::kCorrector: return QStringLiteral("Corrector");
+        case NodeKind::kParallel: return QStringLiteral("Parallel");
+        case NodeKind::kLayer: return QStringLiteral("Layer");
+        case NodeKind::kOutside: return QStringLiteral("Outside");
+        case NodeKind::kKeyMixer: return QStringLiteral("Key Mixer");
+        case NodeKind::kSplitter: return QStringLiteral("Splitter");
+        case NodeKind::kCombiner: return QStringLiteral("Combiner");
+        case NodeKind::kParallelMixer: return QStringLiteral("Parallel Mixer");
+        case NodeKind::kLayerMixer: return QStringLiteral("Layer Mixer");
+        case NodeKind::kOutput: return QStringLiteral("Output");
+    }
+    return QStringLiteral("Node");
+}
+
+}  // namespace
+
+void NodeGraphCanvas::load_graph(const canvas::core::grade_graph::GradeGraph& graph) {
+    clear_nodes();
+    // The canvas is a serial-view scaffold (Milestone 0): nodes are laid out in
+    // tree order, which matches the phase-5 chains (lgg -> curves -> output).
+    for (std::size_t i = 0; i < graph.num_nodes(); ++i) {
+        const canvas::core::grade_graph::Node& n = graph.node(static_cast<int>(i));
+        QString meta = QString::fromStdString(n.label);
+        if (meta.isEmpty()) {
+            meta = n.kind == canvas::core::grade_graph::NodeKind::kCorrector
+                       ? correct_mode_label(n.correct_mode)
+                       : QStringLiteral("out");
+        }
+        add_node(static_cast<int>(i), node_kind_label(n.kind), meta);
+    }
+    fit_to_content();
+}
+
 void NodeGraphCanvas::layout_nodes() {
     for (int i = 0; i < node_items_.size(); ++i) {
         node_items_[i]->setPos(40.0 + i * 188.0, 30.0 + (i % 2) * 66.0);

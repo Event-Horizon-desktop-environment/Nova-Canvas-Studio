@@ -191,3 +191,37 @@ set_target_properties(waveform_placement_qt_test PROPERTIES AUTOMOC ON AUTORCC O
 add_test(NAME waveform_placement_qt_test COMMAND waveform_placement_qt_test)
 set_tests_properties(waveform_placement_qt_test PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# wheel_panel_roundtrip_qt_test: Qt regression test for the color wheel panel
+# (color-grading-phases.md Phase 4). Drives the REAL ColorWheelsPanel handlers
+# offscreen (Lift-wheel press/move/release + tone-row spin boxes) and proves the
+# emitted WheelPanelState lands in the clip's grade through the same
+# one-corrector set_clip_grade seam the Color page uses, survives undo/redo and
+# JSON, and round-trips into a fresh panel. Qt-linked on purpose.
+qt_add_executable(wheel_panel_roundtrip_qt_test
+    qt/wheel_panel_roundtrip_qt_test.cpp
+    ../resources.qrc
+    ../src/features/color/color_widgets.cpp
+    ../src/features/color/scopes/common/scope_common.cpp
+    ../src/features/color/scopes/parade/parade_scope.cpp
+    ../src/features/color/scopes/waveform/waveform_scope.cpp
+    ../src/features/color/scopes/vectorscope/vectorscope_scope.cpp
+    ../src/features/color/scopes/histogram/histogram_scope.cpp
+    ../src/features/color/scopes/chromaticity/chromaticity_widget.cpp
+    ../src/UX/theme.cpp
+    ../src/UX/horizon_style.cpp
+)
+target_include_directories(wheel_panel_roundtrip_qt_test PRIVATE
+    ${CANVAS_GUI_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../core/include
+)
+target_link_libraries(wheel_panel_roundtrip_qt_test PRIVATE
+    Qt6::Widgets
+    Qt6::Svg
+    Qt6::Test
+    canvas_core
+)
+set_target_properties(wheel_panel_roundtrip_qt_test PROPERTIES AUTOMOC ON AUTORCC ON AUTOUIC OFF)
+add_test(NAME wheel_panel_roundtrip_qt_test COMMAND wheel_panel_roundtrip_qt_test)
+set_tests_properties(wheel_panel_roundtrip_qt_test PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

@@ -47,6 +47,7 @@ std::span<const EnumStrings<CorrectMode>> mode_table() {
         {"identity", CorrectMode::kIdentity},
         {"lgg", CorrectMode::kLgg},
         {"cdl", CorrectMode::kCdl},
+        {"curves", CorrectMode::kCurves},
     };
     return k;
 }
@@ -146,6 +147,34 @@ json node_to_json(const Node& n) {
                         {"power_b", c.power_b},
                         {"sat", c.sat}};
     }
+    if (n.curves) {
+        const colorsci::CurveParams& cv = *n.curves;
+        const auto channel_key = [](colorsci::CurveChannel ch) {
+            switch (ch) {
+                case colorsci::CurveChannel::kLuma: return "luma";
+                case colorsci::CurveChannel::kRed: return "red";
+                case colorsci::CurveChannel::kGreen: return "green";
+                case colorsci::CurveChannel::kBlue: return "blue";
+                case colorsci::CurveChannel::kCount: return "luma";
+            }
+            return "luma";
+        };
+        json cp = json::object();
+        for (int ci = 0; ci < colorsci::kCurveChannelCount; ++ci) {
+            const auto& pts = cv.channels[static_cast<std::size_t>(ci)];
+            if (pts.empty()) continue;
+            json arr = json::array();
+            for (const colorsci::CurvePoint& p : pts) arr.push_back(json{{"x", p.x}, {"y", p.y}});
+            cp[channel_key(static_cast<colorsci::CurveChannel>(ci))] = std::move(arr);
+        }
+        if (!cv.soft_clip.is_identity()) {
+            cp["soft_clip"] = json{{"low", cv.soft_clip.low},
+                                   {"low_soft", cv.soft_clip.low_soft},
+                                   {"high", cv.soft_clip.high},
+                                   {"high_soft", cv.soft_clip.high_soft}};
+        }
+        j["curves"] = std::move(cp);
+    }
     return j;
 }
 
@@ -229,6 +258,29 @@ GradeGraph grade_graph_from_json(const json& j) {
             n.cdl->power_g = c.value("power_g", 1.0f);
             n.cdl->power_b = c.value("power_b", 1.0f);
             n.cdl->sat = c.value("sat", 1.0f);
+        }
+        if (nj.contains("curves")) {
+            const json& cp = nj.at("curves");
+            n.curves.emplace();
+            const auto parse_channel = [&](const char* key, colorsci::CurveChannel ch) {
+                if (!cp.contains(key)) return;
+                auto& pts =
+                    n.curves->channels[static_cast<std::size_t>(ch)];
+                for (const auto& p : cp.at(key)) {
+                    pts.push_back(colorsci::CurvePoint{p.value("x", 0.0f), p.value("y", 0.0f)});
+                }
+            };
+            parse_channel("luma", colorsci::CurveChannel::kLuma);
+            parse_channel("red", colorsci::CurveChannel::kRed);
+            parse_channel("green", colorsci::CurveChannel::kGreen);
+            parse_channel("blue", colorsci::CurveChannel::kBlue);
+            if (cp.contains("soft_clip")) {
+                const json& sc = cp.at("soft_clip");
+                n.curves->soft_clip.low = sc.value("low", 0.0f);
+                n.curves->soft_clip.low_soft = sc.value("low_soft", 0.0f);
+                n.curves->soft_clip.high = sc.value("high", 1.0f);
+                n.curves->soft_clip.high_soft = sc.value("high_soft", 0.0f);
+            }
         }
     }
 

@@ -10,7 +10,6 @@
 #include <QDir>
 #include <QFrame>
 #include <QHBoxLayout>
-#include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
 #include <QSettings>
@@ -418,6 +417,7 @@ void build_center_workspace(MainWindow& mw) {
     const int initial_height = mw.timeline_->desired_timeline_height();
     mw.resizeDocks({timeline_dock}, {std::max(initial_height, 265)}, Qt::Vertical);
 
+    // ---- 7. CENTRAL WORKSPACE — the viewer column locks into view ----
     // Central workspace = the viewer column (regions lock into place around it).
     if (QWidget* vf = mw.ui->viewerFrame) {
         auto* vf_layout = new QVBoxLayout(vf);
@@ -525,7 +525,6 @@ void build_center_workspace(MainWindow& mw) {
     const ThemeTokens& t = tokens();
     mw.status_->setStyleSheet(QStringLiteral("background-color: %1; color: %2; border-top: 1px solid %3;")
                                   .arg(css(t.surface), css(t.ink_muted), css(t.border_soft)));
-    mw.status_->addPermanentWidget(new QLabel(MainWindow::tr("Nova Canvas Studio"), mw.status_));
 
     mw.connect_timeline();
 
