@@ -159,6 +159,7 @@ void build_left_dock(MainWindow& mw) {
     QObject::connect(mw.bin_tree_, &QTreeWidget::customContextMenuRequested, &mw,
             [&mw](const QPoint& pos) {
                 QMenu menu;
+                apply_rounded_menu(&menu);
                 QTreeWidgetItem* item = mw.bin_tree_->itemAt(pos);
                 menu.addAction(MainWindow::tr("New Bin"), &mw, [&mw]() {
                     mw.project_->bins.push_back("New Bin");
@@ -241,6 +242,7 @@ void build_left_dock(MainWindow& mw) {
     QObject::connect(mw.media_pool_, &QListWidget::customContextMenuRequested, &mw,
             [&mw](const QPoint& pos) {
                 QMenu menu;
+                apply_rounded_menu(&menu);
                 menu.addAction(MainWindow::tr("Import Media..."), &mw, &MainWindow::on_import_media);
                 menu.addSeparator();
                 menu.addAction(MainWindow::tr("Delete Selected Media"),

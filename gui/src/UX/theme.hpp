@@ -7,6 +7,7 @@
 #include <functional>
 
 class QApplication;
+class QMenu;
 class QWidget;
 
 namespace canvas::gui {
@@ -79,6 +80,19 @@ QColor with_alpha(const QColor& c, int alpha);
 // additionally styled via the per-widget stylesheet helpers below, applied to
 // individual widgets.
 void apply_theme(QApplication& app, bool light = false);
+
+// Dropdown / popup card rounding. A QMenu is a native popup window: a plain
+// QSS border-radius leaves the four corners square (measured). These helpers
+// make the popup a translucent, frameless window so the theme's rounded card
+// background actually clips — call apply_rounded_menu before the menu is shown.
+QMenu* make_rounded_menu(QWidget* parent);
+void apply_rounded_menu(QMenu* menu);
+
+// Installs a qApp-wide event filter that applies the same translucent-popup
+// rounding to popups not created through make_rounded_menu (e.g. QComboBox
+// dropdown containers, QMenuBar-owned submenus). Idempotent; called from
+// apply_theme.
+void install_popup_rounding(QApplication& app);
 
 // Loads a bundled SVG icon by short name, e.g. icon("blade") maps to the
 // ":/icons/blade.svg" resource. Rendered via QSvgRenderer at the requested

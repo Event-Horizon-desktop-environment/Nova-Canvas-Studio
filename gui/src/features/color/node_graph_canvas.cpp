@@ -230,6 +230,7 @@ void NodeGraphCanvas::rebuild_connections() {
 
 void NodeGraphCanvas::open_context_menu(const QPoint& pos) {
     QMenu menu(this);
+    apply_rounded_menu(&menu);
     const auto add_kind = [this, &menu](const QString& kind, const QString& label) {
         const auto* act = menu.addAction(kind);
         QObject::connect(act, &QAction::triggered, this,

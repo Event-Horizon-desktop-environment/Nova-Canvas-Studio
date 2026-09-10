@@ -444,6 +444,7 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     }
     const QPointF scene_pos = mapToScene(event->pos());
     QMenu menu(this);
+    apply_rounded_menu(&menu);
 
     // Right-clicking directly on an edit point (cut) between two clips shows the
     // cut context menu: delete-through-edit + preset cross-dissolve lengths.
@@ -565,11 +566,13 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
         // no right neighbour it fades that clip OUT to black at its tail.
         auto* transition_menu = menu.addMenu(tr("Out Transition") + QStringLiteral(" >"));
         transition_menu->setIcon(icon("transition_out"));
+        apply_rounded_menu(transition_menu);
         // "In Transition >" (the clip's leading edge) fades the clip IN from black
         // at its head, with no preceding clip/cut required. Independent of the OUT
         // transition.
         auto* transition_in_menu = menu.addMenu(tr("In Transition") + QStringLiteral(" >"));
         transition_in_menu->setIcon(icon("transition_in"));
+        apply_rounded_menu(transition_in_menu);
         struct Entry { const char* label; canvas::core::TransitionType type; int64_t dur; };
         static const Entry kVideo[] = {
             {"Cross Dissolve", canvas::core::TransitionType::CrossDissolve, 6},

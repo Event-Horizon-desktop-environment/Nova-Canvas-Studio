@@ -63,6 +63,7 @@ void ViewportSelector::mousePressEvent(QMouseEvent* event) {
     event->accept();
 
     QMenu menu(this);
+    apply_rounded_menu(&menu);
     menu.setToolTipsVisible(true);
     QAction* viewport = menu.addAction(tr("Viewport"));
     QAction* frame = menu.addAction(tr("Frame"));

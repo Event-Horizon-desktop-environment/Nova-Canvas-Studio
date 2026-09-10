@@ -67,6 +67,7 @@ void build_center_workspace(MainWindow& mw) {
     QObject::connect(mw.viewer_, &QWidget::customContextMenuRequested, &mw,
             [&mw](const QPoint& pos) {
                 QMenu menu(MainWindow::tr("Monitor Scale"), &mw);
+                apply_rounded_menu(&menu);
                 QAction* fit = menu.addAction(MainWindow::tr("Fit (letterbox)"));
                 fit->setCheckable(true);
                 fit->setChecked(mw.viewer_->scale_mode() == ViewerGL::ScaleMode::Fit);

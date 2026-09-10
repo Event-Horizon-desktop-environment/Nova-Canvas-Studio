@@ -11,6 +11,8 @@
 #include <QObject>
 #include <QSettings>
 
+#include <functional>
+
 namespace canvas::gui {
 
 void build_app_menus(MainWindow& mw) {
@@ -40,6 +42,7 @@ void build_app_menus(MainWindow& mw) {
                     // Audible-scrubbing preference. A small popup menu keeps the
                     // option discoverable without a dedicated settings dialog.
                     QMenu menu;
+            apply_rounded_menu(&menu);
                     const bool saved = QSettings().value(QStringLiteral("scrubAudioEnabled"), true).toBool();
                     mw.controller_.set_scrub_audio_enabled(saved);
                     auto* scrub_audio = menu.addAction(MainWindow::tr("Audible Scrubbing"));
@@ -130,6 +133,19 @@ void build_app_menus(MainWindow& mw) {
             m->setEnabled(false);
         }
     }
+
+    // Round every menubar dropdown (and any submenu, e.g. Open Recent). Must
+    // run after the menus are populated and before any is shown.
+    std::function<void(QMenu*)> round_menu_tree = [&](QMenu* menu) {
+        if (!menu) return;
+        apply_rounded_menu(menu);
+        const auto actions = menu->actions();
+        for (QAction* act : actions)
+            if (QMenu* sub = act->menu()) round_menu_tree(sub);
+    };
+    const auto bar_actions = mw.ui->menubar->actions();
+    for (QAction* act : bar_actions)
+        round_menu_tree(act->menu());
 }
 
 }  // namespace canvas::gui
