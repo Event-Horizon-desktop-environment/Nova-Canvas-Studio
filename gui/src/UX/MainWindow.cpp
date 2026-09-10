@@ -208,6 +208,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 MainWindow::~MainWindow() { delete ui; }
 
 void MainWindow::refresh_timeline() {
+    // Every edit (and project load) resyncs the time basis: total length AND
+    // the frame-rate used to render that length. fps_ is the readout rate for
+    // the transport/labels/Deliver — leaving it at the constructor default of
+    // 30 while the sequence adopts the media's own rate made the time read
+    // wrong after edits against the video and the ruler.
+    fps_ = project_->sequence.fps > 0.0 ? project_->sequence.fps : 30.0;
     timeline_->set_sequence(&project_->sequence);
     total_frames_ = project_->sequence.duration_frames();
     scrub_->setRange(0, static_cast<int>(std::max<int64_t>(total_frames_ - 1, 0)));

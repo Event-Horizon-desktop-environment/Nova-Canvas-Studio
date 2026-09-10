@@ -257,12 +257,13 @@ QString make_flat_controls_qss() {
       // Floating glass docks: the body is transparent so the workspace's mint
       // radial glow shows around the floating panels.
       "QDockWidget { background: transparent; color: %1; }"
-      // Floating menu card: one raised glass popup matching the app's panel
-      // language — lit top hairline catchlight, soft hairline border, generous
+      // Floating menu card: one raised popup matching the app's panel language —
+      // raised surface, lit top hairline catchlight and soft hairline border
+      // (all solid colors, no gradient so the banding fix stays intact), generous
       // r radius — with pill-shaped hover items and a mint accent check
       // indicator for checkable actions (right-click / bar menus alike).
-      "QMenu { background-color: %2; color: %1;"
-      "  border: 1px solid %3;"
+      "QMenu { background-color: %16; color: %1;"
+      "  border: 1px solid %3; border-top: 1px solid %15;"
       "  border-radius: 14px; padding: 6px; }"
       "QMenu::item { padding: 6px 28px 6px 12px; border-radius: 9px;"
       "  margin: 1px 3px 1px 4px; }"

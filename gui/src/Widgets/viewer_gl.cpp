@@ -197,7 +197,7 @@ vec4 grade_rgb(vec4 p, sampler3D lut, int size) {
 void main() {
     vec4 a = grade_rgb(sample_yuv(u_tex_y, u_tex_uv, v_uv, u_matrix_a, u_range_a), u_grade_a, u_grade_a_size);
     if (u_mode == MODE_NONE) { fragColor = a; return; }
-    vec4 b = grade_rgb(sample_yuv(u_tex_y, u_tex_uv, v_uv, u_matrix_b, u_range_b), u_grade_b, u_grade_b_size);
+    vec4 b = grade_rgb(sample_yuv(u_tex_b_y, u_tex_b_uv, v_uv, u_matrix_b, u_range_b), u_grade_b, u_grade_b_size);
     float t = clamp(u_progress, 0.0, 1.0);
 
     if (u_mode == MODE_FADEIN_A) { fragColor = a * t; return; }

@@ -76,6 +76,10 @@ bool TimelineWidget::eventFilter(QObject* watched, QEvent* event) {
 
 void TimelineWidget::set_sequence(const canvas::core::Sequence* sequence) {
     sequence_ = sequence;
+    // Reconcile the ruler/playhead timecode rate from the live sequence so a
+    // project (re)loaded at a different fps re-derives its tick labels instead
+    // of carrying the previous project's rate.
+    if (sequence && sequence->fps > 0.0) fps_ = sequence->fps;
     rebuild_timeline();
     update_playhead_position(playhead_frame_);
 }
