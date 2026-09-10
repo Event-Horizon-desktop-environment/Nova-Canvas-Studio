@@ -43,8 +43,11 @@ namespace {
 
 colorsci::RGBF apply_correction(const colorsci::RGBF& p, const Node& node) {
     switch (node.correct_mode) {
-        case CorrectMode::kLgg:
-            return colorsci::apply_lgg(p, node.lgg.value_or(colorsci::LGG{}));
+        case CorrectMode::kLgg: {
+            colorsci::RGBF out = p;
+            if (node.offset) out = colorsci::apply_offset(out, *node.offset);
+            return colorsci::apply_lgg(out, node.lgg.value_or(colorsci::LGG{}));
+        }
         case CorrectMode::kCdl:
             return colorsci::apply_cdl(p, node.cdl.value_or(colorsci::Cdl{}));
         case CorrectMode::kCurves:

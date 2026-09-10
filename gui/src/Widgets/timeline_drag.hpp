@@ -35,15 +35,26 @@
 namespace canvas::gui {
 namespace timeline_drag {
 
-// Batch-drag position math (Phase 3): the pressed (primary) clip's snap-aware
-// new tl_in defines a delta; every other selected clip follows the SAME delta
-// on its own lane so relative spacings are preserved. `primary_orig` is the
-// pressed clip's tl_in at press, `primary_snapped` its live snapped position,
-// `other_orig` the other clip's press-time tl_in. Positions clamp at 0.
+// Batch-drag position math (Phase 3): the whole selection shares ONE delta —
+// the pressed (primary) clip's snap-aware new tl_in defines it, and every other
+// clip follows the SAME delta on its own lane so relative spacings are
+// preserved. The delta is bounded below by the set's FRONT-MOST press-time
+// tl_in (`min_set_orig`): independent per-clip clamps let a trailing grabbed
+// clip slide over an earlier co-selected one once the lead hits the timeline
+// start, so the whole set instead stops as a unit there.
+[[nodiscard]] inline int64_t clamp_batch_delta(int64_t primary_orig,
+                                               int64_t primary_snapped,
+                                               int64_t min_set_orig) {
+    return std::max(primary_snapped - primary_orig, -min_set_orig);
+}
+
 [[nodiscard]] inline int64_t batch_target_tl_in(int64_t primary_orig,
                                                 int64_t primary_snapped,
-                                                int64_t other_orig) {
-    return std::max<int64_t>(0, other_orig + (primary_snapped - primary_orig));
+                                                int64_t other_orig,
+                                                int64_t min_set_orig) {
+    return std::max<int64_t>(0,
+                             other_orig + clamp_batch_delta(primary_orig, primary_snapped,
+                                                            min_set_orig));
 }
 
 class DragController {

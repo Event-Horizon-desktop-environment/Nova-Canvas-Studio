@@ -7,6 +7,8 @@
 #include <cstdint>
 
 #include "UX/theme.hpp"
+#include "canvas/core/gpu/colorspace.hpp"
+#include "canvas/core/util/color_log.hpp"
 
 namespace canvas::gui {
 
@@ -65,6 +67,19 @@ void HistogramScope::recompute_render() {
     if (frame->a && !frame->a->rgba.empty()) {
         hist_.accumulate(*frame->a);
     } else if (frame->nv12 && !frame->nv12->y.empty()) {
+        // Color archive: [scope] spec-change line exactly once per source
+        // switch — histogram readings share the frame->nv12 spec (matrix +
+        // probe-reconciled range) that grades must be judged against.
+        const auto& nv12 = *frame->nv12;
+        if (!spec_seen_ || nv12.matrix != last_spec_matrix_ || nv12.range != last_spec_range_) {
+            spec_seen_ = true;
+            last_spec_matrix_ = nv12.matrix;
+            last_spec_range_ = nv12.range;
+            CANVAS_COLOR_LOG(
+                "[scope] histogram spec matrix=%s range=%s",
+                canvas::core::gpu::color_matrix_name(nv12.matrix),
+                canvas::core::gpu::color_range_name(nv12.range));
+        }
         hist_.accumulate(*frame->nv12);
     }
     render_density();

@@ -512,6 +512,36 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     SwsContext* sws = sws_getContext(s.width, s.height, AV_PIX_FMT_RGBA,
                                      s.width, s.height, enc_sw_fmt,
                                      SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (!sws) {
+        avcodec_free_context(&actx); avcodec_free_context(&vctx);
+        if (oc->pb) avio_closep(&oc->pb);
+        avformat_free_context(oc);
+        return fail("Failed to create RGB->YUV conversion context.");
+    }
+    // Pin the conversion matrix so the encoded pixels match the stamped tags
+    // (issue #1): previously this passed NO SWS_CS_* flag, so libswscale applied
+    // its SWS_CS_DEFAULT (== ITU601 / BT.601) matrix to every RGB->YUV export no
+    // matter what the output stream was tagged. Output is conceived full-range
+    // RGB in, limited-range BT.709 YUV out (matches the tagged range:mpeg).
+    const bool tagged_bt709 = (vctx->colorspace == AVCOL_SPC_BT709);
+    const int conv_matrix = tagged_bt709 ? SWS_CS_ITU709 : SWS_CS_ITU601;
+    const int* conv_coefs = sws_getCoefficients(conv_matrix);
+    sws_setColorspaceDetails(sws, conv_coefs, 1, conv_coefs, 0,
+                             0, 1 << 16, 1 << 16);
+    // Tag-vs-conversion audit: output is stamped BT.709 limited (see configure
+    // above); this swscale now uses the SAME matrix (sws_setColorspaceDetails
+    // above), so a BT.709-tagged file is encoded with BT.709 coefficients.
+    ::canvas::core::log::log_warning(
+        "[export] color audit: out_tags=range:%s/matrix:%s/trc:%s ; rgba->%s "
+        "sws_setColorspaceDetails matrix=%s srcRange=JPEG dstRange=MPEG — %s",
+        vctx->color_range == AVCOL_RANGE_MPEG ? "mpeg" : "jpeg",
+        vctx->colorspace == AVCOL_SPC_BT709 ? "bt709"
+            : vctx->colorspace == AVCOL_SPC_BT470BG ? "bt601" : "other",
+        vctx->color_trc == AVCOL_TRC_BT709 ? "bt709" : "other",
+        av_get_pix_fmt_name(enc_sw_fmt),
+        conv_matrix == SWS_CS_ITU709 ? "BT.709" : "BT.601",
+        conv_matrix == SWS_CS_ITU709 ? "conversion matches stamped matrix"
+                                    : "conversion matrix follows tagged colorspace");
 
     AVFrame* rgb = av_frame_alloc();
     rgb->format = AV_PIX_FMT_RGBA;

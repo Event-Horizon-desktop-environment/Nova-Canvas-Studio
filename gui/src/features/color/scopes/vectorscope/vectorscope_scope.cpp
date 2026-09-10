@@ -11,6 +11,8 @@
 
 #include "UX/theme.hpp"
 #include "canvas/core/gpu/colorspace.hpp"
+#include "canvas/core/util/color_log.hpp"
+#include "canvas/core/util/log.hpp"
 
 namespace canvas::gui {
 
@@ -95,6 +97,30 @@ void VectorscopeScope::accumulate(const canvas::core::VideoFrame& rgba) {
 }
 
 void VectorscopeScope::accumulate(const canvas::core::Nv12Frame& nv12) {
+    // Color archive: log a [scope] spec-change line exactly once per source
+    // switch (matrix/range only change when the media under the playhead does),
+    // so wheel interactions can be correlated with the spec the vectorscope was
+    // analysing. Scopes consume the same frame->nv12 spec as the viewer shader.
+    if (!spec_seen_ || nv12.matrix != last_spec_matrix_ || nv12.range != last_spec_range_) {
+        spec_seen_ = true;
+        last_spec_matrix_ = nv12.matrix;
+        last_spec_range_ = nv12.range;
+        CANVAS_COLOR_LOG(
+            "[scope] vectorscope spec matrix=%s range=%s",
+            canvas::core::gpu::color_matrix_name(nv12.matrix),
+            canvas::core::gpu::color_range_name(nv12.range));
+    }
+    // Always-on (once): scope NV12->RGB uses the frame's resolved per-file spec
+    // (matrix + probe-reconciled range) — matching the viewer shader on this
+    // frame, NOT a compile-time BT.709 limited assumption.
+    static bool yuv2rgb_logged_ = false;
+    if (!yuv2rgb_logged_) {
+        yuv2rgb_logged_ = true;
+        ::canvas::core::log::log_warning(
+            "[vectorscope] yuv_to_rgb uses per-frame Nv12Frame spec matrix=%s range=%s",
+            canvas::core::gpu::color_matrix_name(nv12.matrix),
+            canvas::core::gpu::color_range_name(nv12.range));
+    }
     const int w = nv12.width;
     const int h = nv12.height;
     if (w <= 0 || h <= 0) return;
@@ -109,7 +135,8 @@ void VectorscopeScope::accumulate(const canvas::core::Nv12Frame& nv12) {
         const uint8_t* yrow = y + std::size_t(row) * nv12.y_pitch;
         for (int col = 0; col < w; col += sx) {
             const std::size_t uvo = std::size_t((row / 2) * nv12.uv_pitch) + std::size_t((col / 2) * 2);
-            const auto rgb = canvas::core::gpu::yuv_to_rgb(yrow[col], uv[uvo + 0], uv[uvo + 1]);
+            const auto rgb = canvas::core::gpu::yuv_to_rgb(yrow[col], uv[uvo + 0], uv[uvo + 1],
+                                                           nv12.range, nv12.matrix);
             const double nr = rgb.r / 255.0;
             const double ng = rgb.g / 255.0;
             const double nb = rgb.b / 255.0;

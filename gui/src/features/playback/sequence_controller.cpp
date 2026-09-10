@@ -113,7 +113,7 @@ void SequenceController::begin_scrub() {
         // Fresh drag: reset the pipeline's scrub-audio state so the first move
         // always feeds.
         audio_.begin_scrub();
-        qWarning() << "[scrub] BEGIN playing=" << playing_.load()
+        qDebug() << "[scrub] BEGIN playing=" << playing_.load()
                    << "enabled=" << scrub_audio_enabled_.load() << "frame=" << current_frame_.load();
     }
 }
@@ -129,7 +129,7 @@ void SequenceController::end_scrub() {
     scrub_preview_evictions_ += pv.evictions;
     const double avg_pv_ms =
         scrub_previews_ > 0 ? scrub_preview_ms_sum_ / static_cast<double>(scrub_previews_) : 0.0;
-    qWarning().nospace()
+    qDebug().nospace()
         << "[scrub] END released_at=" << current_frame_.load()
         << " was_playing=" << playing_.load()
         << " audio_open=" << scrub_audio_open_
@@ -207,7 +207,7 @@ void SequenceController::worker_loop() {
                 handle_play();
                 break;
             case Command::Pause:
-                qWarning() << "[transport] PAUSE at=" << current_frame_.load();
+                qDebug() << "[transport] PAUSE at=" << current_frame_.load();
                 playing_.store(false);
                 play_pause_intent_.store(false);
                 if (audio_.is_active()) {
@@ -228,7 +228,7 @@ void SequenceController::worker_loop() {
                 handle_seek_preview(req.arg);
                 break;
             case Command::Step:
-                qWarning() << "[transport] STEP delta=" << req.arg
+                qDebug() << "[transport] STEP delta=" << req.arg
                            << "-> target=" << (current_frame_.load() + req.arg);
                 handle_seek(current_frame_.load() + req.arg);
                 break;
@@ -281,7 +281,7 @@ void SequenceController::worker_loop() {
                 const auto lnow = Clock::now();
                 if (loop_agg_n == 1 || lnow - loop_agg_at >= std::chrono::seconds(1)) {
                     loop_agg_at = lnow;
-                    qWarning().nospace()
+                    qDebug().nospace()
                         << "[loop] n=" << loop_agg_n
                         << " fill_ms=" << QString::number(loop_fill / loop_agg_n, 'f', 2)
                         << " wait_ms=" << QString::number(loop_wait / loop_agg_n, 'f', 2)
@@ -329,7 +329,7 @@ void SequenceController::handle_set_project(std::shared_ptr<const canvas::core::
     // range, so a stale playhead past a shrunk sequence lands on the last frame.
     const int64_t cur = current_frame_.load();
     const int64_t anchor = initial_frame >= 0 ? initial_frame : (cur >= 0 ? cur : 0);
-    qWarning().nospace()
+    qDebug().nospace()
         << "[transport] SET-PROJECT anchor=" << anchor
         << " frames=" << total_frames_.load()
         << " fps=" << fps_.load()
@@ -396,7 +396,7 @@ void SequenceController::handle_play() {
     aud_baseline_frames_ = audio_out_.audible_position_frames();
     aud_armed_ = audio_.is_active();
     audio_out_.log_pipeline_stats("play-post");
-    qWarning() << "[transport] PLAY at=" << current_frame_.load()
+    qDebug() << "[transport] PLAY at=" << current_frame_.load()
                << "/" << total_frames_.load();
     emit playback_changed(true);
 }
@@ -429,7 +429,7 @@ void SequenceController::handle_seek(const int64_t frame_number) {
     // realtime instead of "catching up" by dropping frames owed from before the
     // seek (which would overshoot the scrub-release position).
     next_present_ = Clock::now();
-    qWarning() << "[scrub] COMMIT seek_to=" << target
+    qDebug() << "[scrub] COMMIT seek_to=" << target
                << "playing=" << was_playing
                << "scrubbing=" << scrubbing_.load();
     const auto commit_t0 = Clock::now();
@@ -456,7 +456,7 @@ void SequenceController::handle_seek(const int64_t frame_number) {
         seek_present_armed_ = false;
         const double d =
             std::chrono::duration<double, std::milli>(Clock::now() - seek_arm_t0_).count();
-        qWarning().nospace() << "[transport] seek->first_present at=" << target
+        qDebug().nospace() << "[transport] seek->first_present at=" << target
                              << " latency_ms=" << QString::number(d, 'f', 0)
                              << " decode_ms=" << QString::number(decode_ms, 'f', 1);
     }
@@ -469,7 +469,7 @@ void SequenceController::handle_seek(const int64_t frame_number) {
     if (was_playing) warm_lookahead(target + 1);
     const double warm_ms = std::chrono::duration<double, std::milli>(Clock::now() - warm_t0).count();
     // Always-on commit timing (flush + decode + lookahead warm) for scrub latency.
-    qWarning() << "[scrub] COMMIT-times rewind_ms=" << rewind_ms
+    qDebug() << "[scrub] COMMIT-times rewind_ms=" << rewind_ms
                << "preroll_ms=" << preroll_ms
                << "decode_ms=" << decode_ms
                << "warm_ms=" << warm_ms
@@ -554,7 +554,7 @@ void SequenceController::handle_seek_preview(const int64_t frame_number) {
     //   NONE  - a null frame (viewer holds the previous/last texture)
     // decode_ms is the full frame_for_playhead_preview cost; a high value with
     // BLACK/NONE points at a decode that ran but returned nothing usable.
-    qWarning().nospace()
+    qDebug().nospace()
         << "[scrub] target=" << target << " hit=" << (diag_has_pix ? "OK" : "BLACK")
         << " nv12=" << diag_nv12w
         << " a=" << diag_aw
@@ -609,7 +609,7 @@ void SequenceController::handle_seek_preview(const int64_t frame_number) {
 
     // Emit the per-preview timing breakdown whenever any of the heavy stages ran.
     if ((scrub_log_tick_ & 3u) == 0u || grain_ms > 0.0 || precache_ms > 0.0)
-        qWarning() << "[scrub] PREVIEW-times decode_ms=" << preview_ms
+        qDebug() << "[scrub] PREVIEW-times decode_ms=" << preview_ms
                    << "grain_ms=" << grain_ms
                    << "scrub_audio_ms=" << scrub_audio_ms
                    << "precache_ms=" << precache_ms
@@ -798,7 +798,7 @@ void SequenceController::present_next() {
         : 0.0;
     if (play_armed_) {
         play_armed_ = false;
-        qWarning().nospace()
+        qDebug().nospace()
             << "[transport] play->first_present frame=" << want
             << " latency_ms=" << QString::number(dt_present, 'f', 0);
     }
@@ -807,7 +807,7 @@ void SequenceController::present_next() {
         aud_armed_ = false;
         const double d =
             std::chrono::duration<double, std::milli>(Clock::now() - play_t0_).count();
-        qWarning().nospace()
+        qDebug().nospace()
             << "[transport] play->first_audible frame=" << want
             << " latency_ms=" << QString::number(d, 'f', 0);
     }
@@ -815,7 +815,7 @@ void SequenceController::present_next() {
         seek_present_armed_ = false;
         const double d =
             std::chrono::duration<double, std::milli>(Clock::now() - seek_arm_t0_).count();
-        qWarning().nospace() << "[transport] seek->first_present at=" << want
+        qDebug().nospace() << "[transport] seek->first_present at=" << want
                              << " latency_ms=" << QString::number(d, 'f', 0);
     }
 
@@ -855,6 +855,29 @@ void SequenceController::present_next() {
     if (!first_cadence || last_health_frame != 0)
         contiguous_this = want == last_health_frame + 1;
     last_health_frame = want;
+
+    // ALWAYS-ON per-frame stall monitor: a single contiguous present that takes
+    // >= 2.5x the target interval is flagged the moment it happens (throttled to
+    // ~1/3s). The 1s aggregate below would smooth this into the cadence average
+    // and hide the one-frame hiccup; a spike line with the frame number localizes
+    // it (a dropped frame here = audio keeps playing ahead of a stale picture).
+    static auto last_slow_log = Clock::now();
+    const double interval_ms_spike =
+        std::chrono::duration<double, std::milli>(interval).count();
+    if (contiguous_this && ms_since_present > interval_ms_spike * 2.5 &&
+        now - last_slow_log >= std::chrono::milliseconds(3000)) {
+        last_slow_log = now;
+        const auto gs_slow = decoder_.take_grade_stats();
+        const double gavg_slow =
+            gs_slow.samples > 0 ? gs_slow.ms_sum / static_cast<double>(gs_slow.samples) : 0.0;
+        qWarning().nospace()
+            << "[play] SLOW-PRESENT frame=" << want
+            << " delay_ms=" << QString::number(ms_since_present, 'f', 1)
+            << " target_ms=" << QString::number(interval_ms_spike, 'f', 1)
+            << " grade_avg_ms=" << QString::number(gavg_slow, 'f', 2)
+            << " ready=" << last_ready_depth_;
+    }
+
     contig_delta_ += contiguous_this ? 1 : 0;   // contiguous walks since last log
     if (++health_log_ == 1 || now - last_health_log >= std::chrono::seconds(1)) {
         // Only count contiguous same-rate presents toward fps_window; a seek or
@@ -872,7 +895,13 @@ void SequenceController::present_next() {
             if (frame->a) maxedge = std::max(frame->a->width, frame->a->height);
             if (frame->nv12) nv12w = frame->nv12->width;
         }
-        qWarning().nospace()
+        // Grade-apply cost folded into the snapshot: how much of the cadence
+        // budget the per-frame CPU grade consumed this second (0.00 when no
+        // graded clip presented). The decoder's `[grade]` lines own the detail;
+        // this ties grade cost to the cadence/fps story in ONE line.
+        const auto gs = decoder_.take_grade_stats();
+        const double gavg = gs.samples > 0 ? gs.ms_sum / static_cast<double>(gs.samples) : 0.0;
+        qDebug().nospace()
             << "[play] frame=" << want
             << " hit=" << (has_pix ? "OK" : "NONE")
             << " maxedge=" << maxedge << " nv12w=" << nv12w
@@ -889,6 +918,8 @@ void SequenceController::present_next() {
             << " cap=" << cap_events_
             << " hold_max_ms=" << QString::number(sonicsync_.hold_stats().hold_ms_max, 'f', 0)
             << " hold_cnt=" << sonicsync_.hold_stats().hold_count
+            << " grade_avg_ms=" << QString::number(gavg, 'f', 2)
+            << " grade_n=" << gs.samples
             << " audio=" << audio_.is_active();
         present_ready_hits_ = present_inline_ = 0;
         drop_events_ = drop_frames_ = cap_events_ = 0;

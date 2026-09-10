@@ -137,6 +137,7 @@ qt_add_executable(volume_line_drag_qt_test
     ../src/Widgets/timeline_drag.cpp
     ../src/Widgets/transition_handle_editor.cpp
     ../src/Widgets/timeline_volume_line.cpp
+    ../src/features/timeline/audio_targets.cpp
     ../src/UX/theme.cpp
     ../src/UX/horizon_style.cpp
     ../src/features/thumbnails/thumbnail_service.cpp
@@ -173,6 +174,7 @@ qt_add_executable(waveform_placement_qt_test
     ../src/Widgets/timeline_drag.cpp
     ../src/Widgets/transition_handle_editor.cpp
     ../src/Widgets/timeline_volume_line.cpp
+    ../src/features/timeline/audio_targets.cpp
     ../src/UX/theme.cpp
     ../src/UX/horizon_style.cpp
     ../src/features/thumbnails/thumbnail_service.cpp

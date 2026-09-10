@@ -361,7 +361,7 @@ void TimelineWidget::resizeEvent(QResizeEvent* event) {
     const auto rz_now = std::chrono::steady_clock::now();
     if (s_rz_n == 1 || rz_now - s_rz_at >= std::chrono::seconds(1)) {
         s_rz_at = rz_now;
-        qWarning() << "[ui:timeline] resize ms_avg=" << QString::number(s_rz_ms / s_rz_n, 'f', 2)
+        qDebug() << "[ui:timeline] resize ms_avg=" << QString::number(s_rz_ms / s_rz_n, 'f', 2)
                    << "ms_last=" << QString::number(rz_ms, 'f', 2)
                    << "ms_max=" << QString::number(s_max_ms, 'f', 2)
                    << "resizes/s=" << s_rz_n
@@ -420,7 +420,7 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
                   [&](const QString& a, const QString& b) { return classes[a] > classes[b]; });
         for (const QString& k : keys) cls << (k + "=" + QString::number(classes[k]));
         s_pt_at = pt_now;
-        qWarning() << "[ui:timeline] paint ms_avg=" << QString::number(s_pt_ms / s_pt_n, 'f', 2)
+        qDebug() << "[ui:timeline] paint ms_avg=" << QString::number(s_pt_ms / s_pt_n, 'f', 2)
                    << " ms_last=" << QString::number(pt_ms, 'f', 2)
                    << " ms_max=" << QString::number(s_max_ms, 'f', 2)
                    << " paints/s=" << s_pt_n

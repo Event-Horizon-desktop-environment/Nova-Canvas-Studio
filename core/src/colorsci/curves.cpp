@@ -5,6 +5,7 @@
 #include "canvas/core/colorsci/curves.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace canvas::core::colorsci {
@@ -13,9 +14,9 @@ namespace {
 
 constexpr float kEps = 1.0e-6f;
 
-// Hermite basis for a Catmull-Rom segment. Tangents are finite-difference
-// slopes clamped at the endpoints (standard Catmull-Rom with clamped tangents
-// — the "clamped spline" form; see header for why).
+// Hermite basis for a cubic spline segment. Tangents are the Fritsch–Carlson
+// monotone-cubic slopes derived in eval_curve below (see header for why a
+// plain Catmull-Rom overshoots and is not used).
 [[nodiscard]] inline float hermite(float t, float p1, float m1, float p2, float m2,
                                    float seg_len) noexcept {
     const float t2 = t * t;
@@ -65,29 +66,60 @@ float eval_curve(const std::vector<CurvePoint>& points, float x) {
     // as identity.
     if (knots.size() < 2) return x;
 
+    const std::size_t n = knots.size();
     const float xi = std::clamp(x, 0.0f, 1.0f);
+
+    // Fritsch–Carlson monotone-cubic tangents. Mono-cubic is the curve-editor
+    // norm (Resolve/Photoshop-style): the rendered spline never leaves the box
+    // its control points span, so "what you drew" is "what renders". A plain
+    // Catmull-Rom overshoots between close/stiff knots, producing outputs
+    // outside [0,1] that the final clamp then clips — flat bands and hue
+    // shifts that read as a "broken" curve.
+    std::vector<float> d(n - 1, 0.0f);
+    for (std::size_t i = 0; i + 1 < n; ++i) {
+        const float dx = knots[i + 1].x - knots[i].x;
+        if (dx > kEps) d[i] = (knots[i + 1].y - knots[i].y) / dx;
+    }
+
+    std::vector<float> m(n, 0.0f);
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for (std::size_t i = 1; i + 1 < n; ++i) {
+        if ((d[i - 1] > 0.0f && d[i] < 0.0f) || (d[i - 1] < 0.0f && d[i] > 0.0f) ||
+            d[i - 1] == 0.0f || d[i] == 0.0f) {
+            m[i] = 0.0f;  // local extremum or a flat neighbour flattens the tangent
+        } else {
+            m[i] = 0.5f * (d[i - 1] + d[i]);
+        }
+    }
+    // Fritsch–Carlson tangent limiting: pull each (m[i], m[i+1]) inside the
+    // help-circle of radius 3 (alpha^2 + beta^2 <= 9), which keeps every
+    // Hermite segment monotone and between its endpoints.
+    for (std::size_t i = 0; i + 1 < n; ++i) {
+        if (d[i] == 0.0f) {
+            m[i] = 0.0f;
+            m[i + 1] = 0.0f;
+            continue;
+        }
+        const float alpha = m[i] / d[i];
+        const float beta = m[i + 1] / d[i];
+        const float sq = alpha * alpha + beta * beta;
+        if (sq > 9.0f) {
+            const float tau = 3.0f / std::sqrt(sq);
+            m[i] *= tau;
+            m[i + 1] *= tau;
+        }
+    }
 
     // Rightmost segment takes x == 1; otherwise the segment where xi is in
     // [k[i].x, k[i+1].x).
-    for (std::size_t i = 0; i + 1 < knots.size(); ++i) {
+    for (std::size_t i = 0; i + 1 < n; ++i) {
         const float x0 = knots[i].x;
         const float x1 = knots[i + 1].x;
         if (xi < x1 || (xi == 1.0f && x1 == 1.0f)) {
             if (x1 - x0 <= kEps) continue;  // pathological adjacent duplicates: fall through
             const float t = std::clamp((xi - x0) / (x1 - x0), 0.0f, 1.0f);
-
-            const auto& preced = i == 0 ? knots[i] : knots[i - 1];
-            const auto& follow = i + 2 >= knots.size() ? knots[i + 1] : knots[i + 2];
-            const float m1 = (knots[i + 1].y - preced.y) /
-                             std::max(preced.x != knots[i + 1].x ? knots[i + 1].x - preced.x
-                                                                 : 1.0f,
-                                      kEps);
-            // Endpoint tangents clamp: no tangent can drive the curve outside
-            // the extreme ladder direction beyond its neighbour knot.
-            const float m2 = (follow.y - knots[i].y) /
-                             std::max(follow.x != knots[i].x ? follow.x - knots[i].x : 1.0f,
-                                      kEps);
-            return hermite(t, knots[i].y, m1, knots[i + 1].y, m2, x1 - x0);
+            return hermite(t, knots[i].y, m[i], knots[i + 1].y, m[i + 1], x1 - x0);
         }
     }
 
@@ -97,9 +129,9 @@ float eval_curve(const std::vector<CurvePoint>& points, float x) {
     float best_y = 0.0f;
     float best_d = std::numeric_limits<float>::max();
     for (const CurvePoint& k : knots) {
-        const float d = std::abs(k.x - xi);
-        if (d < best_d) {
-            best_d = d;
+        const float dd = std::abs(k.x - xi);
+        if (dd < best_d) {
+            best_d = dd;
             best_y = k.y;
         }
     }
@@ -129,9 +161,62 @@ float eval_soft_clip_low(float x, float low, float soft) noexcept {
 
 RGBF apply_curves(const RGBF& rgb, const CurveParams& c) noexcept {
     // Channel curves first: independent R/G/B reshaping.
-    const float r = eval_curve(c.channels[static_cast<int>(CurveChannel::kRed)], rgb.r);
-    const float g = eval_curve(c.channels[static_cast<int>(CurveChannel::kGreen)], rgb.g);
-    const float b = eval_curve(c.channels[static_cast<int>(CurveChannel::kBlue)], rgb.b);
+    const auto& red_pts = c.channels[static_cast<std::size_t>(CurveChannel::kRed)];
+    const auto& grn_pts = c.channels[static_cast<std::size_t>(CurveChannel::kGreen)];
+    const auto& blu_pts = c.channels[static_cast<std::size_t>(CurveChannel::kBlue)];
+    const bool r_edit = !red_pts.empty();
+    const bool g_edit = !grn_pts.empty();
+    const bool b_edit = !blu_pts.empty();
+    const int edited = static_cast<int>(r_edit) + static_cast<int>(g_edit) +
+                       static_cast<int>(b_edit);
+
+    float r = eval_curve(red_pts, rgb.r);
+    float g = eval_curve(grn_pts, rgb.g);
+    float b = eval_curve(blu_pts, rgb.b);
+
+    // Single-channel edit holds the pre-curve luma: the two untouched channels
+    // are counter-scaled (a common factor k) so an R/G/B curve changes color,
+    // not exposure — the Resolve unganged-custom-curve behavior (its Lum Mix
+    // luma-preserve default). Multi-channel edits move independently — that is
+    // the honest full-RGB S-curve case. If the untouched channels cannot fully
+    // absorb the luma drift within [0,1], the residual pulls the edited channel
+    // back toward its input; the result is always bounded and never flips a
+    // channel toward a neon complementary.
+    if (edited == 1) {
+        const float L_in = kLuma601R * rgb.r + kLuma601G * rgb.g + kLuma601B * rgb.b;
+        const float wp = r_edit ? kLuma601R : (g_edit ? kLuma601G : kLuma601B);
+        const float w_oa = r_edit ? kLuma601G : (g_edit ? kLuma601R : kLuma601R);
+        const float w_ob = r_edit ? kLuma601B : (g_edit ? kLuma601B : kLuma601G);
+        const float in_oa = r_edit ? rgb.g : (g_edit ? rgb.r : rgb.r);
+        const float in_ob = r_edit ? rgb.b : (g_edit ? rgb.b : rgb.g);
+
+        float primary = r_edit ? r : (g_edit ? g : b);
+        const float den = w_oa * in_oa + w_ob * in_ob;
+        const float excess = L_in - wp * primary;
+        float k = den > kEps ? excess / den : 0.0f;
+        const float cap = std::max(in_oa, in_ob);
+        if (cap > kEps) k = std::min(k, 1.0f / cap);
+        k = std::max(k, 0.0f);
+        float out_oa = k * in_oa;
+        float out_ob = k * in_ob;
+        const float err = L_in - (wp * primary + w_oa * out_oa + w_ob * out_ob);
+        if (std::fabs(err) > kEps && wp > kEps) {
+            primary = std::clamp(primary + err / wp, 0.0f, 1.0f);
+        }
+        if (r_edit) {
+            r = primary;
+            g = out_oa;
+            b = out_ob;
+        } else if (g_edit) {
+            r = out_oa;
+            g = primary;
+            b = out_ob;
+        } else {
+            r = out_oa;
+            g = out_ob;
+            b = primary;
+        }
+    }
 
     // Luma curve: reshape the luma, then hue-preservingly rescale each channel
     // by the luma ratio. Dark luma (no hue to preserve) skips the ratio.

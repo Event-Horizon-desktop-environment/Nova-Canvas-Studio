@@ -1,11 +1,12 @@
 // CUDA-accelerated RGBA -> NV12 conversion + resize.
 //
 // Compiled with nvcc (CUDA 12 & 13). The kernel is intentionally a single
-// __global__ that does bilinear resize + BT.601 limited-range RGB->YUV in one
+// __global__ that does bilinear resize + BT.709 limited-range RGB->YUV in one
 // launch and writes straight into the planes of an FFmpeg AV_PIX_FMT_CUDA hw
 // frame, so the normal encode loop never touches CPU for the color conversion.
 
 #include "canvas/core/gpu/cuda_convert.hpp"
+#include "canvas/core/util/log.hpp"
 
 #include <cuda_runtime.h>
 
@@ -18,8 +19,10 @@ using cuda_event_t = cudaEvent_t;
 namespace {
 
 // Bilinear-resize + RGBA -> NV12. yPlane holds Y (dst_h * dst_w), uvPlane holds
-// interleaved CbCr at (dst_h/2) * dst_w. BT.601 limited range (matching the
-// software NLE default).
+// interleaved CbCr at (dst_h/2) * dst_w. BT.709 limited range (matches the
+// source's actual tagged color space — see exporter.cpp's BT.709 stream tags;
+// this was previously BT.601, which mismatched the output and produced the
+// same magenta/purple skin-tone shift on playback of exported files).
 __global__ void rgbaToNV12(const uint8_t* __restrict__ src, int sw, int sh,
                            uint8_t* __restrict__ yPlane, size_t yPitch,
                            uint8_t* __restrict__ uvPlane, size_t uvPitch,
@@ -46,15 +49,15 @@ __global__ void rgbaToNV12(const uint8_t* __restrict__ src, int sw, int sh,
     const float g = w00 * p00[1] + w10 * p10[1] + w01 * p01[1] + w11 * p11[1];
     const float b = w00 * p00[2] + w10 * p10[2] + w01 * p01[2] + w11 * p11[2];
 
-    float Y = 16.f + (0.257f * r + 0.504f * g + 0.098f * b);
+    float Y = 16.f + (0.183f * r + 0.614f * g + 0.062f * b);
     if (Y < 16.f) Y = 16.f; else if (Y > 235.f) Y = 235.f;
     yPlane[(size_t)y * yPitch + x] = (uint8_t)(Y + 0.5f);
 
     // CbCr at 2x2 subsampling (x,y both even). Interleaved: Cb, Cr.
     if ((x & 1) == 0 && (y & 1) == 0) {
         const int cx = x >> 1, cy = y >> 1;
-        float Cb = 128.f + (-0.148f * r - 0.291f * g + 0.439f * b);
-        float Cr = 128.f + (0.439f * r - 0.368f * g - 0.071f * b);
+        float Cb = 128.f + (-0.101f * r - 0.339f * g + 0.439f * b);
+        float Cr = 128.f + (0.439f * r - 0.399f * g - 0.040f * b);
         if (Cb < 16.f) Cb = 16.f; else if (Cb > 240.f) Cb = 240.f;
         if (Cr < 16.f) Cr = 16.f; else if (Cr > 240.f) Cr = 240.f;
         uint8_t* uv = uvPlane + ((size_t)cy * uvPitch + (size_t)cx * 2);
@@ -72,8 +75,8 @@ __device__ inline int clamp_index(float v, int n) {
 }
 
 // Bilinear-resize a GPU NV12 source into a letterboxed rectangle on a GPU NV12
-// target, writing the whole target plane (content + bars). The bars are BT.601
-// black (Y=16, Cb=Cr=128) so every pixel of the output hw frame stays defined.
+// target, writing the whole target plane (content + bars). The bars are black
+// (Y=16, Cb=Cr=128) so every pixel of the output hw frame stays defined.
 // Output is `ow x oh`; the scaled content occupies (dx,dy)..(dx+dstW,dy+dstH).
 // The output is normally the full encoder hw frame (letterbox already applied).
 // `fade` in (0,1] dips the CONTENT toward black in-place (16 + (Y-16)*fade,
@@ -298,6 +301,19 @@ bool convert_rgba_to_nv12(const uint8_t* rgba, int src_w, int src_h,
                           int dst_w, int dst_h) {
     if (!rgba || !dY || !dUV || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0)
         return false;
+
+    // Always-on (once): the CUDA RGBA->NV12 kernel hardcodes BT.709 limited
+    // RGB->YUV coefficients + clamps (Y[16,235]/C[16,240]) — see rgbaToNV12.
+    // The export/hw path CONVERTS with BT.709 here, while the CPU swscale path
+    // converts with its BT.601 default: two different matrices for the same
+    // export depending on hw vs cpu. Traced against the [export] color audit.
+    static bool rgba_nv12_logged_ = false;
+    if (!rgba_nv12_logged_) {
+        rgba_nv12_logged_ = true;
+        ::canvas::core::log::log_warning(
+            "[gpu] rgbaToNV12 kernel: matrix=bt709 range=limited (hardcoded "
+            "coeffs, clamps Y[16,235] C[16,240]) — hw/export path only");
+    }
 
     // Persistent buffer avoids per-frame cudaMalloc/cudaFree (~14.7MB at 1440p).
     // The buffer is lazily allocated and only reallocated if the source grows.

@@ -11,11 +11,10 @@
 #include "UX/theme.hpp"
 
 #include "canvas/core/colorsci/histogram.hpp"
-#include "canvas/core/export/grade_frame.hpp"
 #include "canvas/core/grade_graph/graph.hpp"
 #include "canvas/core/timeline/edit_ops.hpp"
-#include "features/playback/sync_constants.hpp"
-
+#include "canvas/core/util/color_log.hpp"
+#include "canvas/core/util/log.hpp"
 #include <QDockWidget>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -30,6 +29,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -38,6 +38,13 @@
 namespace canvas::gui {
 
 namespace {
+
+// Grade-preview snapshot throttle: the worker rebuilds the whole decode stack
+// per SetProject (~217ms measured drain), so pushing on every wheel/curve
+// mouse-move out-runs it and floods the queue. 250ms ≈ the worker's drain rate;
+// dragging then coalesces to ~1-in-flight instead of a ~200-deep backlog, while
+// the final params_committed still lands the exact end state as one undo step.
+constexpr std::chrono::milliseconds kGradePreviewThrottle{250};
 
 // One placeholder stills/gallery cell: a rounded gradient well with an index
 // and a timecode readout. Stands in for real captured thumbnails until the
@@ -121,8 +128,48 @@ using canvas::core::colorsci::CurveParams;
 using canvas::core::colorsci::WheelPanelState;
 using canvas::core::grade_graph::GradeGraph;
 
+// Node census for the always-on [`grade]` trace: distinguishes "wheels only",
+// "wheels + curves", and multi-node trees in one line.
+QString graph_census(const GradeGraph& g) {
+    using canvas::core::grade_graph::CorrectMode;
+    int lgg = 0, curves = 0, other = 0;
+    for (std::size_t i = 0; i < g.num_nodes(); ++i) {
+        switch (g.node(static_cast<int>(i)).correct_mode) {
+            case CorrectMode::kLgg: ++lgg; break;
+            case CorrectMode::kCurves: ++curves; break;
+            default: ++other; break;
+        }
+    }
+    return QStringLiteral("nodes=%1 lgg=%2 curves=%3 other=%4")
+        .arg(g.num_nodes()).arg(lgg).arg(curves).arg(other);
+}
+
+// Compact wheel/curve state digest for the commit + preview traces: the
+// primaries LGG masters + per-channel lift, so a "return to center" commit
+// (which now restores the last committed wheel) is readable as restore-offset
+// versus the previous commit.
+QString grade_state_digest(const WheelPanelState& state, const CurveParams& curves) {
+    const auto& lgg = state.lgg;
+    std::size_t curve_pts = 0;
+    for (const auto& ch : curves.channels) curve_pts += ch.size();
+    return QStringLiteral(
+               "lift=(m=%1 r=%2 g=%3 b=%4) gamma=(m=%5) gain=(m=%6) off=(m=%7 r=%8 g=%9 b=%10)"
+               " tones=(temp=%11 tint=%12 hue=%13 contrast=%14 pivot=%15 mid=%16 black=%17)"
+               " curves=%18pts")
+        .arg(QString::number(lgg.lift_master, 'f', 3), QString::number(lgg.lift_r, 'f', 3),
+             QString::number(lgg.lift_g, 'f', 3), QString::number(lgg.lift_b, 'f', 3),
+             QString::number(lgg.gamma_master, 'f', 3), QString::number(lgg.gain_master, 'f', 3),
+             QString::number(state.offset.master, 'f', 3), QString::number(state.offset.r, 'f', 3),
+             QString::number(state.offset.g, 'f', 3), QString::number(state.offset.b, 'f', 3),
+             QString::number(state.temp, 'f', 1), QString::number(state.tint, 'f', 1),
+             QString::number(state.hue_deg, 'f', 1), QString::number(state.contrast, 'f', 2),
+             QString::number(state.pivot, 'f', 2), QString::number(state.mid_detail, 'f', 1),
+             QString::number(state.black_offset, 'f', 3), QString::number(curve_pts));
+}
+
 // Serializes the panels' combined state into a two-node grade chain: the
-// wheels' Primaries LGG corrector, then a Curves corrector when the curve law
+// wheels' Primaries LGG corrector (with the Offset wheel's additive term applied
+// before the LGG stage), then a Curves corrector when the curve law
 // is non-identity (identity is dropped so the JSON stays byte-compatible with
 // Phase 4's single-corrector files), wired to the output. The
 // panel→graph→edit-op handshake is unchanged from Phase 4.
@@ -134,6 +181,7 @@ GradeGraph make_grade_graph(const WheelPanelState& state, const CurveParams& cur
     const int lgg_node = g.add_node(NodeKind::kCorrector);
     g.node(lgg_node).correct_mode = CorrectMode::kLgg;
     g.node(lgg_node).lgg = state.lgg;
+    g.node(lgg_node).offset = state.offset;
 
     int tail = lgg_node;
     if (!curves.is_identity()) {
@@ -153,11 +201,19 @@ GradeGraph make_grade_graph(const WheelPanelState& state, const CurveParams& cur
         g.clear();
         return g;
     }
+
+    // Always-on graph-build trace: which correctors the panels' combined state
+    // produced (curves dropped when identity). Distinguishes a wheels-only
+    // build from a wheels+curves build at the graph boundary, matching the
+    // [`grade]` population in commit_grade/preview_grade below.
+    qWarning().nospace()
+        << "[grade] graph-built " << graph_census(g)
+        << " curves_in_panel=" << (curves.is_identity() ? 0 : 1);
     return g;
 }
 
-// Reverses make_grade_graph: pulls the LGG + Curves params a clip's tree owns
-// back into the panels (identity defaults when a mode is absent).
+// Reverses make_grade_graph: pulls the LGG + Offset + Curves params a clip's
+// tree owns back into the panels (identity defaults when a mode is absent).
 struct GradeLoadState {
     WheelPanelState wheels;
     CurveParams curves;
@@ -171,6 +227,7 @@ GradeLoadState grade_load_state(const GradeGraph& graph) {
         switch (n.correct_mode) {
             case CorrectMode::kLgg:
                 if (n.lgg) out.wheels.lgg = *n.lgg;
+                if (n.offset) out.wheels.offset = *n.offset;
                 break;
             case CorrectMode::kCurves:
                 if (n.curves) out.curves = *n.curves;
@@ -195,51 +252,6 @@ const canvas::core::Clip* find_clip_by_id(const canvas::core::Sequence& seq,
         }
     }
     return nullptr;
-}
-
-// Integer-stride box-filter downscale into a NEW frame (the source may be a
-// shared cache frame, so never alias). Used to keep per-frame grade + scope
-// evaluation on a preview-resolution budget.
-canvas::core::VideoFramePtr downscale_rgba(const canvas::core::VideoFrame& src,
-                                           int max_dim) {
-    const int longest = std::max(src.width, src.height);
-    if (longest <= max_dim) {
-        return std::make_shared<canvas::core::VideoFrame>(src);
-    }
-    const int stride = (longest + max_dim - 1) / max_dim;
-    const int dw = std::max(1, src.width / stride);
-    const int dh = std::max(1, src.height / stride);
-
-    auto out = std::make_shared<canvas::core::VideoFrame>();
-    out->width = dw;
-    out->height = dh;
-    out->stride = static_cast<std::size_t>(dw) * 4u;
-    out->rgba.resize(static_cast<std::size_t>(dw * dh) * 4u);
-    for (int y = 0; y < dh; ++y) {
-        for (int x = 0; x < dw; ++x) {
-            std::uint32_t r = 0, g = 0, b = 0;
-            int count = 0;
-            const int y_hi = std::min((y + 1) * stride, src.height);
-            const int x_hi = std::min((x + 1) * stride, src.width);
-            for (int sy = y * stride; sy < y_hi; ++sy) {
-                const std::uint8_t* row = &src.rgba[static_cast<std::size_t>(sy) * src.stride];
-                for (int sx = x * stride; sx < x_hi; ++sx) {
-                    const std::uint8_t* px = row + static_cast<std::size_t>(sx) * 4u;
-                    r += px[0];
-                    g += px[1];
-                    b += px[2];
-                    ++count;
-                }
-            }
-            std::uint8_t* op = &out->rgba[static_cast<std::size_t>(y) * out->stride +
-                                          static_cast<std::size_t>(x) * 4u];
-            op[0] = static_cast<std::uint8_t>(r / count);
-            op[1] = static_cast<std::uint8_t>(g / count);
-            op[2] = static_cast<std::uint8_t>(b / count);
-            op[3] = 255;
-        }
-    }
-    return out;
 }
 
 // Normalized per-column luma occupancy (0..1) for the curve editor's veil.
@@ -408,37 +420,17 @@ void build_color_page(MainWindow& mw) {
     root->addWidget(page_splitter, 1);
 
     // Scopes panel is fed by the same "frame re-rendered" signal the preview
-    // viewer listens to, but with the SELECTED clip's grade applied first
-    // (rgb-parade spec §5: the scopes show the graded signal, not the raw
-    // source). The grade runs at the preview-resolution cap on a box-filtered
-    // copy so the per-frame evaluation stays cheap and never aliases the
-    // presenter's cached frame; the same downscaled result refreshes the curve
-    // editor's luma veil. With no selection/no grade/no CPU frame the scopes
-    // get the raw presented frame, as before. Receiver context is the panel
-    // itself so the connection drops when the color page is torn down.
+    // viewer listens to. The presenter path (TimelineDecoder::frame/preview)
+    // now applies the clip-under-the-playhead's grade, so this handler just
+    // relays the already-graded presented frame — the scopes show the graded
+    // signal exactly as it leaves the preview path (rgb-parade spec §5), no
+    // second grade here. The CPU frame also refreshes the curve editor's luma
+    // veil. Receiver context is the panel itself so the connection drops when
+    // the color page is torn down.
     QObject::connect(&mw.controller_, &SequenceController::frame_ready, scopes,
-            [&mw, scopes, curves](canvas::core::RenderFramePtr frame) {
-                if (mw.project_ && frame && frame->a) {
-                    canvas::core::grade_graph::GradeGraph grade;
-                    canvas::core::Track::Kind kind;
-                    std::size_t index = 0;
-                    canvas::core::Clip clip;
-                    if (mw.find_selected_clip(kind, index, clip) && clip.has_grade()) {
-                        grade = clip.grade;
-                    }
-                    if (!grade.edges().empty()) {
-                        const auto scaled =
-                            downscale_rgba(*frame->a, canvas::gui::kPreviewMaxDim);
-                        const auto graded =
-                            canvas::core::apply_grade_to_frame(*scaled, grade);
-                        if (graded) {
-                            curves->set_veil(luma_veil(*graded));
-                            auto rf = std::make_shared<canvas::core::RenderFrame>();
-                            rf->a = graded;
-                            scopes->update_frame(std::move(rf));
-                            return;
-                        }
-                    }
+            [scopes, curves](canvas::core::RenderFramePtr frame) {
+                if (frame && frame->a) {
+                    curves->set_veil(luma_veil(*frame->a));
                 }
                 scopes->update_frame(std::move(frame));
             });
@@ -662,6 +654,11 @@ void build_color_page(MainWindow& mw) {
             [&mw, wheels, curves, node_canvas](canvas::core::ClipId id, int64_t frame) {
                 mw.controller_.seek(frame);
                 mw.activate_color_clip(id);
+                // Selection trace so a click on the mini strip is visible in the
+                // always-on log (distinguishes "clip selected" from "nothing
+                // selected, fallback in play").
+                qWarning().nospace()
+                    << "[grade] activate clip=" << id << " frame=" << frame;
                 // Load the activated clip's grade into the panels and the node
                 // canvas so the page edits what it shows.
                 if (!mw.project_) return;
@@ -671,6 +668,13 @@ void build_color_page(MainWindow& mw) {
                 wheels->set_state(state.wheels);
                 curves->set_params(state.curves);
                 node_canvas->load_graph(clip->grade);
+                // Load trace: boards and node canvas now reflect this clip's
+                // saved grade. Digest shows the restore-to-center semantics as
+                // "the wheels come up with whatever the clip last committed".
+                qWarning().nospace()
+                    << "[grade] header-load clip=" << id
+                    << " " << graph_census(clip->grade)
+                    << " " << grade_state_digest(state.wheels, state.curves);
             });
     // Drag-to-scrub: begin_scrub on grab, fast low-res preview on move, clean
     // full-res commit on release.
@@ -689,38 +693,235 @@ void build_color_page(MainWindow& mw) {
     // graph law, the edit-op, and the undo recording. Both panels commit the
     // COMBINED state (wheels → lgg, curves → curve law) so edits in one panel
     // never discard the other.
-    const auto commit_grade = [&mw, wheels, curves] {
+    // Grade target: the selected clip, or — when nothing is selected — the
+    // clip the viewer is actually showing (topmost video-track clip at the
+    // playhead). Without the fallback, wheel/curve commits died silently at
+    // find_selected_clip (selected_clip_ == 0), which read as "touching the
+    // controls does nothing". On fallback the clip is selected too, so the
+    // panels, undo and selection state stay in one consistent place.
+    const auto resolve_grade_target =
+        [&mw](canvas::core::Track::Kind& kind, std::size_t& index,
+              canvas::core::Clip& clip) -> bool {
+        if (mw.find_selected_clip(kind, index, clip)) return true;
+        if (!mw.project_) return false;
+        const auto& seq = mw.project_->sequence;
+        const int64_t frame = mw.controller_.current_frame();
+        for (std::size_t i = seq.video_tracks.size(); i-- > 0;) {
+            const canvas::core::Clip* c = seq.video_tracks[i].clip_at(frame);
+            if (!c || c->media < 0) continue;
+            kind = canvas::core::Track::Kind::Video;
+            index = i;
+            clip = *c;
+            mw.activate_color_clip(clip.id);
+            qWarning().nospace()
+                << "[grade] fallback no-selection -> playhead clip=" << clip.id
+                << " track=" << index << " frame=" << frame;
+            return true;
+        }
+        return false;
+    };
+    // Monotone change-token stamped onto every grade graph so the always-on
+    // log chain (commit → bake → upload → draw) can be correlated by one seq.
+    // Static: the lambdas below outlive this builder (they're connected with
+    // &mw context), so a function-local would dangle and seq would read
+    // recycled stack garbage in the log.
+    static auto grade_seq = std::uint64_t{0};
+    const auto commit_grade = [&mw, wheels, curves, resolve_grade_target] {
         canvas::core::Track::Kind kind;
         std::size_t index = 0;
         canvas::core::Clip clip;
-        if (!mw.find_selected_clip(kind, index, clip)) return;
-        const canvas::core::grade_graph::GradeGraph g =
+        if (!resolve_grade_target(kind, index, clip)) {
+            qWarning().nospace()
+                << "[grade] no target: no selection and no video clip at playhead "
+                << mw.controller_.current_frame();
+            return;
+        }
+        canvas::core::grade_graph::GradeGraph g =
             make_grade_graph(wheels->state(), curves->params());
+        g.change_seq = ++grade_seq;
+        // Color archive: the clip's state BEFORE this commit lands (the last
+        // committed grade is `clip.grade`; preview ticks have already mutated
+        // the sequence, so this is the true pre-change snapshot as of release).
+        CANVAS_COLOR_LOG(
+            "[grade] pre-change seq=%llu kind=%d track=%zu clip=%llu frame=%lld "
+            "prior=grade nodes=%zu edges=%zu has=%d state=%s",
+            static_cast<unsigned long long>(g.change_seq), static_cast<int>(kind),
+            static_cast<unsigned long long>(index),
+            static_cast<unsigned long long>(clip.id),
+            static_cast<long long>(mw.controller_.current_frame()),
+            clip.grade.num_nodes(), clip.grade.edges().size(), clip.has_grade() ? 1 : 0,
+            grade_state_digest(wheels->state(), curves->params()).toStdString().c_str());
         auto cmd = canvas::core::set_clip_grade(mw.project_->sequence, kind,
                 index, clip.id, g);
         if (!cmd) return;
         mw.undo_.record(std::move(cmd));
+        // Always-on commit trace: proves a wheel/curve/tone-field release
+        // actually landed an edit, on which clip (the fallback selection
+        // path from resolve_grade_target shows up here as the target clip),
+        // and exactly what state was written (the digest is the only place
+        // that shows a restore-to-center offset surviving as a real grade).
+        qWarning().nospace()
+            << "[grade] commit seq=" << g.change_seq
+            << " t=" << canvas::core::log::epoch_ms()
+            << " kind=" << static_cast<int>(kind)
+            << " track=" << index << " clip=" << clip.id
+            << " undo=" << mw.undo_.count()
+            << " " << graph_census(g)
+            << " " << grade_state_digest(wheels->state(), curves->params());
+        CANVAS_COLOR_LOG(
+            "[grade] commit seq=%llu kind=%d track=%zu clip=%llu frame=%lld "
+            "new=grade nodes=%zu edges=%zu state=%s",
+            static_cast<unsigned long long>(g.change_seq), static_cast<int>(kind),
+            static_cast<unsigned long long>(index),
+            static_cast<unsigned long long>(clip.id),
+            static_cast<long long>(mw.controller_.current_frame()),
+            g.num_nodes(), g.edges().size(),
+            grade_state_digest(wheels->state(), curves->params()).toStdString().c_str());
         mw.has_unsaved_changes_ = true;
         mw.refresh_timeline();
         mw.push_snapshot();
     };
     // Live movement previews through the same law without an undo entry.
-    const auto preview_grade = [&mw, wheels, curves] {
+    //
+    // THROTTLED: each preview push_snapshot() tears down the entire decode
+    // stack (decoder_.close() + reopen every media + full-res re-decode ~217ms
+    // measured), so pushing on EVERY mouse-move floods the worker queue with
+    // stale SetProject commands — a ~200-deep backlog that keeps draining for
+    // ~36s after the drag ends (the "slow as balls" scrub feel). Only the NEWEST
+    // grade matters while dragging, so drop intermediate ticks in lockstep with
+    // the worker's drain rate instead of out-running it.
+    static auto last_preview_push = std::chrono::steady_clock::time_point::min();
+    static auto preview_drops = std::size_t{0};
+    static auto last_preview_summary = std::chrono::steady_clock::time_point::min();
+    // "Drag just started" detector for the color archive: any preview activity
+    // (accepted OR throttled-dropped) refreshes this, so a quiet gap > 800ms
+    // before an accepted tick means a NEW wheel/curve interaction began — the
+    // point where the pre-change snapshot must be taken (by commit time the
+    // sequence already carries the drag's results).
+    static auto last_preview_any = std::chrono::steady_clock::time_point::min();
+    const auto preview_grade = [&mw, wheels, curves, resolve_grade_target] {
+        static constexpr auto kDragBeginGap = std::chrono::milliseconds(800);
+        const auto now = std::chrono::steady_clock::now();
+        const bool drag_begin = now - last_preview_any > kDragBeginGap;
+        last_preview_any = now;
+        if (now - last_preview_push < kGradePreviewThrottle) {
+            // Throttle-drop counter: collapsed into one line when the drag
+            // finally lands so the always-on log never floods at mouse-move
+            // rate, but the ~4Hz effective preview cadence — and how stale
+            // the live view is — stays visible.
+            ++preview_drops;
+            if (now - last_preview_summary >= std::chrono::seconds(1)) {
+                last_preview_summary = now;
+                const double stale_ms =
+                    std::chrono::duration<double, std::milli>(now - last_preview_push)
+                        .count();
+                qWarning().nospace()
+                    << "[grade] preview throttle active, dropped=" << preview_drops
+                    << " stale_ms=" << QString::number(stale_ms, 'f', 0);
+            }
+            return;
+        }
+        last_preview_push = now;
         canvas::core::Track::Kind kind;
         std::size_t index = 0;
         canvas::core::Clip clip;
-        if (!mw.find_selected_clip(kind, index, clip)) return;
-        const canvas::core::grade_graph::GradeGraph g =
+        if (!resolve_grade_target(kind, index, clip)) return;
+        if (drag_begin) {
+            // Color archive: the TRUE pre-change snapshot — frame, target clip,
+            // and its grade before any of THIS interaction's previews mutated it.
+            CANVAS_COLOR_LOG(
+                "[grade] drag-begin kind=%d track=%zu clip=%llu frame=%lld "
+                "prior=grade nodes=%zu edges=%zu has=%d state=%s",
+                static_cast<int>(kind), static_cast<unsigned long long>(index),
+                static_cast<unsigned long long>(clip.id),
+                static_cast<long long>(mw.controller_.current_frame()),
+                clip.grade.num_nodes(), clip.grade.edges().size(),
+                clip.has_grade() ? 1 : 0,
+                grade_state_digest(wheels->state(), curves->params()).toStdString().c_str());
+        }
+        canvas::core::grade_graph::GradeGraph g =
             make_grade_graph(wheels->state(), curves->params());
+        g.change_seq = ++grade_seq;
         auto cmd = canvas::core::set_clip_grade(mw.project_->sequence, kind,
                 index, clip.id, g);
         if (!cmd) return;
         cmd->redo(mw.project_->sequence);
         mw.refresh_timeline();
         mw.push_snapshot();
+        // Preview cadence trace: every ACCEPTED push (≈4/s while dragging),
+        // with the drop count since the last accepted one. This is the log the
+        // throttle fix is judged against — a healthy read is ~4 preview lines
+        // a second and a monotone drop count that stays small per pause.
+        qWarning().nospace()
+            << "[grade] preview seq=" << g.change_seq
+            << " t=" << canvas::core::log::epoch_ms()
+            << " kind=" << static_cast<int>(kind)
+            << " track=" << index << " clip=" << clip.id
+            << (preview_drops
+                    ? QStringLiteral(" dropped=%1").arg(preview_drops)
+                    : QString())
+            << " " << graph_census(g)
+            << " " << grade_state_digest(wheels->state(), curves->params());
+        CANVAS_COLOR_LOG(
+            "[grade] preview seq=%llu kind=%d clip=%llu frame=%lld "
+            "new=grade nodes=%zu edges=%zu state=%s",
+            static_cast<unsigned long long>(g.change_seq), static_cast<int>(kind),
+            static_cast<unsigned long long>(clip.id),
+            static_cast<long long>(mw.controller_.current_frame()),
+            g.num_nodes(), g.edges().size(),
+            grade_state_digest(wheels->state(), curves->params()).toStdString().c_str());
+        preview_drops = 0;
+        last_preview_summary = std::chrono::steady_clock::time_point::min();
     };
     QObject::connect(wheels, &ColorWheelsPanel::params_committed, &mw, commit_grade);
     QObject::connect(wheels, &ColorWheelsPanel::params_preview, &mw, preview_grade);
+    // Reset-all is a page-level action: the wheels panel reverted itself, so
+    // here we ALSO clear the Curves panel (the wheels panel can't see it) and
+    // write a truly EMPTY grade — the clip goes fully ungraded and the decoder
+    // stops baking even an identity LUT. One undo entry covers the whole reset.
+    const auto reset_all_grades = [&mw, wheels, curves, resolve_grade_target] {
+        wheels->set_state(canvas::core::colorsci::WheelPanelState{});
+        curves->set_params(canvas::core::colorsci::CurveParams{});
+        canvas::core::Track::Kind kind;
+        std::size_t index = 0;
+        canvas::core::Clip clip;
+        if (!resolve_grade_target(kind, index, clip)) {
+            qWarning().nospace()
+                << "[grade] reset-all no target, panels cleared: no selection and "
+                   "no video clip at playhead "
+                << mw.controller_.current_frame();
+            return;
+        }
+        canvas::core::grade_graph::GradeGraph g;
+        g.change_seq = ++grade_seq;
+        CANVAS_COLOR_LOG(
+            "[grade] pre-change seq=%llu kind=%d track=%zu clip=%llu frame=%lld "
+            "prior=grade nodes=%zu edges=%zu has=%d (reset-all)",
+            static_cast<unsigned long long>(g.change_seq), static_cast<int>(kind),
+            static_cast<unsigned long long>(index),
+            static_cast<unsigned long long>(clip.id),
+            static_cast<long long>(mw.controller_.current_frame()),
+            clip.grade.num_nodes(), clip.grade.edges().size(), clip.has_grade() ? 1 : 0);
+        auto cmd = canvas::core::set_clip_grade(mw.project_->sequence, kind, index,
+                                                clip.id, g);
+        if (!cmd) return;
+        mw.undo_.record(std::move(cmd));
+        qWarning().nospace()
+            << "[grade] reset-all commit seq=" << g.change_seq
+            << " t=" << canvas::core::log::epoch_ms()
+            << " kind=" << static_cast<int>(kind)
+            << " track=" << index << " clip=" << clip.id
+            << " undo=" << mw.undo_.count() << " grade=EMPTY (ungraded)";
+        CANVAS_COLOR_LOG(
+            "[grade] reset-all seq=%llu kind=%d clip=%llu frame=%lld grade=EMPTY",
+            static_cast<unsigned long long>(g.change_seq), static_cast<int>(kind),
+            static_cast<unsigned long long>(clip.id),
+            static_cast<long long>(mw.controller_.current_frame()));
+        mw.has_unsaved_changes_ = true;
+        mw.refresh_timeline();
+        mw.push_snapshot();
+    };
+    QObject::connect(wheels, &ColorWheelsPanel::reset_all_requested, &mw, reset_all_grades);
     QObject::connect(curves, &CurvesPanel::curves_committed, &mw, commit_grade);
     QObject::connect(curves, &CurvesPanel::curves_preview, &mw, preview_grade);
 
@@ -728,13 +929,13 @@ void build_color_page(MainWindow& mw) {
     // The media panel opens compact (~20% of the page) once, so the grading
     // tools at the bottom keep the width — afterwards it drags freely like the
     // edit-tab media pool and the size is preserved.
-    bool left_panels_sized = false;
+    auto left_panels_sized = std::make_shared<bool>(false);
     const auto show_left_panel = [&mw, color_tabs, gallery_btn, luts_btn,
-                                  &left_panels_sized](bool, int tab) {
+                                  left_panels_sized](bool, int tab) {
         color_tabs->setCurrentIndex(tab);
         mw.color_left_dock_->setVisible(gallery_btn->isChecked() || luts_btn->isChecked());
-        if (!left_panels_sized && mw.color_left_dock_->isVisible()) {
-            left_panels_sized = true;
+        if (!*left_panels_sized && mw.color_left_dock_->isVisible()) {
+            *left_panels_sized = true;
             const int target = std::clamp(mw.width() / 5, 220, 420);
             mw.resizeDocks({mw.color_left_dock_}, {target}, Qt::Horizontal);
         }
@@ -776,6 +977,11 @@ void build_color_page(MainWindow& mw) {
 
 void enter_color_page(MainWindow& mw) {
     mw.color_active_ = true;
+    // Always-on page trace: distinguishes "the user actually entered the Color
+    // page" from the tonefield/ministrip lines that fire during startup dock
+    // construction — the two look identical otherwise (see the 2026-09-09 log
+    // rounds where no grade interaction appeared despite the wheels existing).
+    qWarning() << "[page] enter color";
     if (mw.media_dock_) mw.media_dock_->hide();
     if (mw.inspector_dock_) mw.inspector_dock_->hide();
     if (mw.deliver_settings_dock_) mw.deliver_settings_dock_->hide();
@@ -791,6 +997,7 @@ void enter_color_page(MainWindow& mw) {
 void leave_color_page(MainWindow& mw) {
     if (!mw.color_active_) return;
     mw.color_active_ = false;
+    qWarning() << "[page] leave color";
     if (mw.color_dock_) mw.color_dock_->hide();
     if (mw.color_left_dock_) mw.color_left_dock_->hide();
     if (mw.color_nodes_dock_) mw.color_nodes_dock_->hide();

@@ -39,6 +39,12 @@ namespace canvas::gui {
 
 using namespace canvas::core::colorsci;
 
+// A puck released within this normalized radius of the disc center ([-1,1]^2)
+// is a "return-to-center" gesture: the wheel keeps its last committed grade
+// rather than committing the neutral puck values. ~5% of the disc radius, in
+// line with the small center ring drawn over the wheel face.
+constexpr double kCenterReleaseRadius = 0.05;
+
 // ── ToneField ────────────────────────────────────────────────────────────────
 // The parameter rows across the panel are drag-scrub fields, not slider
 // tracks: click on the box and drag vertically to change the value. A small
@@ -282,6 +288,10 @@ void ToneField::showEvent(QShowEvent* event) {
 
 double ToneField::value() const {
     return spin_ ? spin_->value() : lo_;
+}
+
+QString ToneField::label_text() const {
+    return label_ ? label_->text() : QString();
 }
 
 void ToneField::set_value(double value) {
@@ -578,11 +588,14 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
         return b;
     };
 
-    // Reset-all: resets the whole panel state to identity and commits one undo.
+    // Reset-all: resets the whole panel state to identity; the page owns the
+    // single undo so it can also clear the Curves panel (see
+    // reset_all_requested in the header) and write a truly empty grade.
     make_header_icon("reset", tr("Reset all grades"), [this] {
+        qWarning().nospace() << "[grade] reset-all";
         reset_panel(state_);
         set_state(state_);
-        commit();
+        emit reset_all_requested();
     });
     // View options / overflow: structural placeholders to match the panel
     // header contract; no behavior yet.
@@ -715,6 +728,7 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
                              commit();
                          });
         QObject::connect(reset, &QToolButton::clicked, this, [this, idx] {
+            qWarning().nospace() << "[grade] wheel-reset idx=" << idx;
             wheels_[idx]->set_xy(QPointF(0.0, 0.0));
             masters_[idx]->set_value01(0.5f);
             // Reset through the controller law so the state matches the widgets.
@@ -756,8 +770,18 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
     // The tone reset button also commits (its value already snapped to the
     // reset value via set_value -> value_changed).
     for (ToneField* t : tone_fields_) {
-        QObject::connect(t, &ToneField::reset_clicked, this, [this] { commit(); });
+        QObject::connect(t, &ToneField::reset_clicked, this, [this, t] {
+            qWarning().nospace() << "[grade] tone-reset field=" << t->label_text();
+            commit();
+        });
     }
+}
+
+bool ColorWheelsPanel::interaction_log_gate() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_interaction_log_ < std::chrono::milliseconds(100)) return false;
+    last_interaction_log_ = now;
+    return true;
 }
 
 void ColorWheelsPanel::set_state(const canvas::core::colorsci::WheelPanelState& state) {
@@ -786,6 +810,16 @@ void ColorWheelsPanel::set_state(const canvas::core::colorsci::WheelPanelState& 
     tone_fields_[static_cast<int>(ToneParam::kPivot)]->set_value(state_.pivot);
     tone_fields_[static_cast<int>(ToneParam::kMidDetail)]->set_value(state_.mid_detail);
     tone_fields_[static_cast<int>(ToneParam::kBlackOffset)]->set_value(state_.black_offset);
+    // Always-on load trace: proves a clip's saved grade actually reached the
+    // boards (the wheels come up CENTERED, so this line is the only proof the
+    // panel is not showing fresh identity defaults).
+    qWarning().nospace()
+        << "[grade] wheel-panel load lift_m=" << state_.lgg.lift_master
+        << " gamma_m=" << state_.lgg.gamma_master
+        << " gain_m=" << state_.lgg.gain_master
+        << " offset_m=" << state_.offset.master
+        << " lift_r=" << state_.lgg.lift_r
+        << " temp=" << state_.temp << " contrast=" << state_.contrast;
 }
 
 canvas::core::colorsci::WheelPanelState ColorWheelsPanel::state() const {
@@ -793,20 +827,101 @@ canvas::core::colorsci::WheelPanelState ColorWheelsPanel::state() const {
 }
 
 void ColorWheelsPanel::wheel_moved(int index, const QPointF& xy) {
+    const auto wheel = static_cast<PrimariesWheel>(index);
     const float master01 = masters_[index]->value01();
     // Feed the wheel through the controller law. The lift/gamma/gain/offset
     // per-channel terms land in the state and the boxes below the wheel track
     // them exactly.
-    apply_primaries_wheel(state_, static_cast<PrimariesWheel>(index), xy.x(), xy.y(), master01);
+    apply_primaries_wheel(state_, wheel, xy.x(), xy.y(), master01);
+    if (is_center_release(xy)) {
+        // Center = revert: a puck moved back onto the disc center reverts this
+        // wheel to identity (same law as the per-wheel reset button). Preview
+        // matches the commit rule so a center release commits what was shown.
+        reset_primaries_wheel(state_, wheel);
+        masters_[index]->set_value01(0.5f);
+    }
     wheels_[index]->set_active(true);
     refresh_wheel_readout(index);
+    if (interaction_log_gate()) {
+        const float radius = std::hypot(xy.x(), xy.y());
+        const float scale = canvas::core::colorsci::detail::kWheelMeta[index].scale;
+        const auto off = wheel_offset_for_roundtrip(index);
+        qWarning().nospace()
+            << "[grade] wheel-move idx=" << index
+            << " xy=(" << QString::number(xy.x(), 'f', 3) << ","
+            << QString::number(xy.y(), 'f', 3) << ")"
+            << " radius=" << QString::number(radius, 'f', 3)
+            << " scale=" << QString::number(scale, 'f', 3)
+            << " master=" << QString::number(master01, 'f', 3)
+            << " revert=" << (is_center_release(xy) ? 1 : 0)
+            << " -> off=(" << QString::number(off[0], 'f', 3) << ","
+            << QString::number(off[1], 'f', 3) << ","
+            << QString::number(off[2], 'f', 3) << ")";
+    }
     emit params_preview();
 }
 
+bool ColorWheelsPanel::is_center_release(const QPointF& xy) const {
+    return std::hypot(xy.x(), xy.y()) <= kCenterReleaseRadius;
+}
+
+// Post-law per-channel offset that a wheel's state currently holds — the exact
+// terms the LUT bake consumes (not the puck xy, which the scale law transforms
+// before it reaches the state). Printed alongside radius/scale in the
+// move/release traces so a "small-feeling drag" can be checked end-to-end:
+// radius -> scaled offset -> committed grade, all in one log.
+std::array<float, 3> ColorWheelsPanel::wheel_offset_for_roundtrip(int index) const {
+    switch (static_cast<PrimariesWheel>(index)) {
+        case PrimariesWheel::kLift:
+            return {state_.lgg.lift_r, state_.lgg.lift_g, state_.lgg.lift_b};
+        case PrimariesWheel::kGamma: {
+            const auto& w = state_.lgg;
+            return {w.gamma_r - 1.0f, w.gamma_g - 1.0f, w.gamma_b - 1.0f};
+        }
+        case PrimariesWheel::kGain: {
+            const auto& w = state_.lgg;
+            return {w.gain_r - 1.0f, w.gain_g - 1.0f, w.gain_b - 1.0f};
+        }
+        case PrimariesWheel::kOffset: {
+            const auto& o = state_.offset;
+            return {o.r, o.g, o.b};
+        }
+    }
+    return {0.0f, 0.0f, 0.0f};
+}
+
 void ColorWheelsPanel::wheel_committed(int index, const QPointF& xy) {
+    const auto wheel = static_cast<PrimariesWheel>(index);
     const float master01 = masters_[index]->value01();
-    apply_primaries_wheel(state_, static_cast<PrimariesWheel>(index), xy.x(), xy.y(), master01);
+    apply_primaries_wheel(state_, wheel, xy.x(), xy.y(), master01);
+    if (is_center_release(xy)) {
+        // Return-to-center reverts, not cancels: releasing a puck back on the
+        // disc center clears this wheel's grade to identity, same law as the
+        // per-wheel reset button. The committed params below carry identity for
+        // this wheel (other wheels/tone keep their committed values).
+        reset_primaries_wheel(state_, wheel);
+        masters_[index]->set_value01(0.5f);
+    }
     refresh_wheel_readout(index);
+    // Always-on release trace: the xy + revert flag make the return-to-center
+    // semantic legible — a center release logs revert=1 and the commit below
+    // writes identity for this wheel.
+    {
+        const float radius = std::hypot(xy.x(), xy.y());
+        const float scale = canvas::core::colorsci::detail::kWheelMeta[index].scale;
+        const auto off = wheel_offset_for_roundtrip(index);
+        qWarning().nospace()
+            << "[grade] wheel-release idx=" << index
+            << " xy=(" << QString::number(xy.x(), 'f', 3) << ","
+            << QString::number(xy.y(), 'f', 3) << ")"
+            << " radius=" << QString::number(radius, 'f', 3)
+            << " scale=" << QString::number(scale, 'f', 3)
+            << " master=" << QString::number(master01, 'f', 3)
+            << " revert=" << (is_center_release(xy) ? 1 : 0)
+            << " -> off=(" << QString::number(off[0], 'f', 3) << ","
+            << QString::number(off[1], 'f', 3) << ","
+            << QString::number(off[2], 'f', 3) << ")";
+    }
     commit();
 }
 
@@ -814,6 +929,11 @@ void ColorWheelsPanel::master_moved(int index, float t01) {
     const QPointF xy = wheels_[index]->xy();
     apply_primaries_wheel(state_, static_cast<PrimariesWheel>(index), xy.x(), xy.y(), t01);
     refresh_wheel_readout(index);
+    if (interaction_log_gate()) {
+        qWarning().nospace()
+            << "[grade] master-move idx=" << index
+            << " t01=" << QString::number(t01, 'f', 3);
+    }
     emit params_preview();
 }
 
@@ -871,10 +991,26 @@ void ColorWheelsPanel::tone_param_changed(int param, double value) {
             break;
         }
     }
+    if (interaction_log_gate()) {
+        qWarning().nospace()
+            << "[grade] tone-param param=" << param
+            << " value=" << QString::number(value, 'f', 2);
+    }
     commit();
 }
 
 void ColorWheelsPanel::commit() {
+    // Gates shared with the interaction taps: tone scrubs commit per value
+    // change, so an ungated line here would still flush at mouse-move rate.
+    // Each interaction surface (wheel release / tone-param / reset) logs its
+    // own explicit line on top of this digest.
+    if (interaction_log_gate()) {
+        qWarning().nospace()
+            << "[grade] wheel-commit lift_m=" << state_.lgg.lift_master
+            << " gamma_m=" << state_.lgg.gamma_master
+            << " gain_m=" << state_.lgg.gain_master
+            << " offset_m=" << state_.offset.master;
+    }
     emit params_committed(state_);
 }
 

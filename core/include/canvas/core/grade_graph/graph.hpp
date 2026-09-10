@@ -26,6 +26,7 @@
 #include "canvas/core/colorsci/curves.hpp"
 #include "canvas/core/colorsci/wheels.hpp"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
@@ -85,6 +86,7 @@ struct Node {
     CorrectMode correct_mode = CorrectMode::kIdentity;
     std::optional<colorsci::LGG> lgg;
     std::optional<colorsci::Cdl> cdl;
+    std::optional<colorsci::Offset> offset;  // Primaries Offset wheel, applied before LGG
     std::optional<colorsci::CurveParams> curves;
 
     KeyMixMode key_mode = KeyMixMode::kAdd;
@@ -130,6 +132,12 @@ public:
     [[nodiscard]] std::size_t num_nodes() const;
     [[nodiscard]] const std::vector<Edge>& edges() const;
     void clear();
+
+    // Transient change-tracking token (NOT serialized): bumped by the Color
+    // page on every grade write so the always-on log chain (commit → bake →
+    // upload → draw) reads as one sequence. Lives only in memory; the JSON
+    // round-trip ignores it.
+    std::uint64_t change_seq = 0;
 
 private:
     std::vector<Node> nodes_;

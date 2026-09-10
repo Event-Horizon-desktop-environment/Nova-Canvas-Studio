@@ -27,6 +27,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "canvas/core/grade_graph/lut.hpp"
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/media/frame_cache.hpp"
 #include "canvas/core/media/hw_device.hpp"
@@ -81,6 +82,17 @@ public:
         std::uint64_t evictions = 0;
     };
     [[nodiscard]] PreviewStats take_preview_stats();
+    // Window accrual of the per-frame grade-apply cost (Phase 6 live graded
+    // preview). The decoder's `[grade]` lines own the throttled per-frame
+    // reporting (engage census, per-30 summary, apply-spike warning); this is
+    // the cross-frame totals the controller folds into its per-second `[play]`
+    // health snapshot. Resets on every read.
+    struct GradeStats {
+        std::uint64_t samples = 0;
+        double ms_sum = 0.0;
+        double ms_max = 0.0;
+    };
+    [[nodiscard]] GradeStats take_grade_stats();
     // Media frame rate at `seq_frame` (what frame interval the playhead advances
     // at), or `fallback_fps` when nothing covers it.
     double media_rate_at(const canvas::core::Project& project, std::int64_t seq_frame,
@@ -130,6 +142,35 @@ private:
     // Topmost unlocked video clip covering `seq_frame` (bottom-to-top scan).
     const canvas::core::Clip* top_video_clip_at(const canvas::core::Project& project,
                                             std::int64_t seq_frame) const;
+
+    // Phase 6 live graded preview: applies `clip`'s grade to a decoded RGBA
+    // frame (returns the raw frame when the clip has no grade or the evaluator
+    // has no terminal to evaluate). Emits the always-on `[grade]` telemetry and
+    // accrues apply-time into the take_grade_stats() window. Private member so
+    // the stats land on the decoder (not file-local); the frozen public surface
+    // is untouched by this addition.
+    canvas::core::VideoFramePtr grade_clip_frame(const canvas::core::Clip& clip,
+                                                 canvas::core::VideoFramePtr frame);
+
+    // Resolve-style grade flattening: returns the baked 3D LUT for `clip`'s
+    // grade tree (nullptr when the clip has no wired grade => passthrough).
+    // The LUT is cached per clip and re-baked only on a grade change; the
+    // viewer attaches it to the NV12 fast path so the grade applies on the GPU,
+    // while the CPU RGBA path applies the SAME LUT — preview == export by
+    // construction. Also logs the always-on `[grade]` engage census on bake.
+    canvas::core::grade_graph::GradeLutPtr grade_lut_for(const canvas::core::Clip& clip);
+
+    std::uint64_t grade_samples_ = 0;
+    double grade_ms_sum_ = 0.0;
+    double grade_ms_max_ = 0.0;
+    // Baked LUT cache: clip -> LUT, so scrubbing through a graded timeline
+    // never re-runs the (already cheap) grid bake on every frame. Keyed by clip
+    // pointer: Project snapshots own fresh Clip objects (pointer changes on any
+    // edit), while a clip's pointer is stable within one snapshot — keying on
+    // pointer is therefore precise and invalidates on every real grade change.
+    std::unordered_map<const canvas::core::Clip*,
+                       canvas::core::grade_graph::GradeLutPtr>
+        grade_lut_cache_;
 };
 
 }  // namespace canvas::gui

@@ -192,6 +192,12 @@ void NodeGraphCanvas::load_graph(const canvas::core::grade_graph::GradeGraph& gr
         add_node(static_cast<int>(i), node_kind_label(n.kind), meta);
     }
     fit_to_content();
+    // Always-on node-canvas trace: which correctors the activated clip's tree
+    // actually carries. A bare "lgg -> out" (2 nodes) vs "lgg -> curves -> out"
+    // (3 nodes) read here is the fastest sanity check that a curves commit
+    // reached the graph at all.
+    qWarning().nospace()
+        << "[grade] node-canvas nodes=" << graph.num_nodes();
 }
 
 void NodeGraphCanvas::layout_nodes() {

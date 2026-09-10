@@ -17,6 +17,8 @@
 
 #include "features/color/scopes/common/scope_common.hpp"
 
+#include "canvas/core/gpu/colorspace.hpp"
+
 namespace canvas::gui {
 
 // How the chrominance cloud is shaded (panel "Trace" sub-dropdown; the item
@@ -65,12 +67,17 @@ private:
     void accumulate(const canvas::core::Nv12Frame& nv12);
     void render_density();
     void paint_graticule(QPainter& p, const QRectF& plot) const;
-
-    std::array<ScatterCell, kScopeVec * kScopeVec> scatter_{};
+std::array<ScatterCell, kScopeVec * kScopeVec> scatter_{};
     int gain_percent_ = 100;
     bool zoom2x_ = false;
     TraceMode trace_mode_ = TraceMode::Color;
     QImage content_;
+
+    // Last Nv12Frame spec this scope accumulated, so the color archive logs a
+    // [scope] spec-change line exactly once per source switch (not 60/s).
+    canvas::core::gpu::ColorMatrix last_spec_matrix_ = canvas::core::gpu::ColorMatrix::BT709;
+    canvas::core::gpu::ColorRange last_spec_range_ = canvas::core::gpu::ColorRange::Limited;
+    bool spec_seen_ = false;
 };
 
 }  // namespace canvas::gui

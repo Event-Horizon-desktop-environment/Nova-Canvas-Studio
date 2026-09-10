@@ -13,11 +13,20 @@
 // by construction (the editor clamps them) — the evaluator re-orders and
 // clamps defensively, but expects well-formed input.
 //
-// Interpolation: Catmull-Rom with clamped endpoint tangents (chosen over a
-// monotone-tension cubic so S-curves / overshoot are possible), evaluated via
-// the Hermite basis over the segment containing x. Knots hit exactly (the
-// curve passes through every control point), so "place a point and drag it"
-// is WYSIWYG.
+// Interpolation: Fritsch–Carlson monotone cubic (the curve-editor norm — the
+// same family Resolve/Photoshop-style tools use), evaluated via the Hermite
+// basis over the segment containing x. The spline is monotone wherever the
+// control points are monotone and never leaves the box the control points
+// span, so "what you drew" is "what renders" (WYSIWYG). Knots are hit exactly
+// (the curve passes through every control point). A plain Catmull-Rom was
+// originally used — it overshoots between close/stiff knots, pushing values
+// outside [0,1] that the final clamp then clips into flat bands and hue
+// shifts, which read as a "broken" curve.
+//
+// Single-channel edits hold luma: editing exactly one of R/G/B (others
+// identity) counter-scales the two untouched channels so the edit changes
+// color, not exposure — Resolve's unganged-custom-curve default. Editing more
+// than one channel, or the luma curve, behaves independently.
 //
 // Soft clip: toe (low) + shoulder (high) rails. low/high choose the input
 // level where the roll-off begins (low == 0 / high == 1 means "full range, no
@@ -115,10 +124,11 @@ struct CurveParams {
 
 // --- apply -----------------------------------------------------------------
 
-// Full custom-curve pass: per-channel curves, then the luma curve applied
-// hue-preservingly (Rec.601 luma with a ratio scale so parallel colors keep
-// their hue), then the soft-clip toe+shoulder on the graded luma (same ratio
-// scale). All steps clamp output to [0,1].
+// Full custom-curve pass: per-channel curves (a single edited R/G/B channel
+// holds the pre-curve luma by counter-scaling the untouched ones), then the
+// luma curve applied hue-preservingly (Rec.601 luma with a ratio scale so
+// parallel colors keep their hue), then the soft-clip toe+shoulder on the
+// graded luma (same ratio scale). All steps clamp output to [0,1].
 [[nodiscard]] RGBF apply_curves(const RGBF& rgb, const CurveParams& c) noexcept;
 
 }  // namespace canvas::core::colorsci

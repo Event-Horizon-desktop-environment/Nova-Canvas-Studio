@@ -147,6 +147,10 @@ json node_to_json(const Node& n) {
                         {"power_b", c.power_b},
                         {"sat", c.sat}};
     }
+    if (n.offset) {
+        const colorsci::Offset& o = *n.offset;
+        j["offset"] = json{{"master", o.master}, {"r", o.r}, {"g", o.g}, {"b", o.b}};
+    }
     if (n.curves) {
         const colorsci::CurveParams& cv = *n.curves;
         const auto channel_key = [](colorsci::CurveChannel ch) {
@@ -258,6 +262,14 @@ GradeGraph grade_graph_from_json(const json& j) {
             n.cdl->power_g = c.value("power_g", 1.0f);
             n.cdl->power_b = c.value("power_b", 1.0f);
             n.cdl->sat = c.value("sat", 1.0f);
+        }
+        if (nj.contains("offset")) {
+            const json& o = nj.at("offset");
+            n.offset.emplace();
+            n.offset->master = o.value("master", 0.0f);
+            n.offset->r = o.value("r", 0.0f);
+            n.offset->g = o.value("g", 0.0f);
+            n.offset->b = o.value("b", 0.0f);
         }
         if (nj.contains("curves")) {
             const json& cp = nj.at("curves");

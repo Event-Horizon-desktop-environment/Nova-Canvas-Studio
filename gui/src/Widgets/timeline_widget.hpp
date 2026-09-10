@@ -647,6 +647,11 @@ private:
     bool volume_dragging_ = false;
     canvas::core::ClipId volume_drag_clip_ = 0;
     float volume_drag_db_ = 0.0f;
+    // Audio clips the current volume drag previews/commits onto, resolved from
+    // the selection at press time (multi-selection: every selected audio target,
+    // incl. linked mates). Each move re-anchors ALL of them live; the commit
+    // handler resolves the same set so preview == commit.
+    std::vector<canvas::core::ClipId> volume_drag_targets_;
 
     // Per-track row heights (flat: video 0..v-1, then audio v..total-1).
     std::vector<double> video_track_heights_;

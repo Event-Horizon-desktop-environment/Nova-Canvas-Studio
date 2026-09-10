@@ -13,6 +13,8 @@
 #include "features/playback/sync_constants.hpp"
 #include "features/playback/timeline_decoder.hpp"
 
+#include "canvas/core/colorsci/wheels.hpp"
+#include "canvas/core/grade_graph/graph.hpp"
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/model.hpp"
@@ -185,6 +187,47 @@ int main() {
     report(rf && (rf->a || rf->nv12), "frame() assembles pixels at seq_frame");
     auto rp = decoder.preview(project, 5, 40);
     report(rp && (rp->a || rp->nv12), "preview() assembles pixels at seq_frame");
+
+    // Phase 6 live graded preview + Phase LUT: a clip owning a grade tree is
+    // baked to a 3D LUT attached to the RenderFrame (the viewer's NV12 shader
+    // samples it) and the CPU RGBA path applies the same LUT, so preview ==
+    // export by construction. Graded clips therefore ride the NV12 fast path on
+    // GPU machines; the small CPU `a` is still attached so the scopes show the
+    // graded signal. On software-only machines the graded RGBA path delivers the
+    // pixels with no LUT carried (the frame holds no NV12 planes then).
+    {
+        Project pgraded = project;
+        Clip graded = clip;
+        canvas::core::grade_graph::GradeGraph g;
+        const int lgg = g.add_node(canvas::core::grade_graph::NodeKind::kCorrector);
+        g.node(lgg).correct_mode = canvas::core::grade_graph::CorrectMode::kLgg;
+        canvas::core::colorsci::LGG bright;
+        bright.lift_master = 0.4f;  // additive lift across all channels
+        g.node(lgg).lgg = bright;
+        const int gout = g.add_node(canvas::core::grade_graph::NodeKind::kOutput);
+        g.add_rgb_edge(lgg, gout);
+        graded.grade = g;
+        pgraded.sequence.video_tracks[0].clips[0] = graded;
+
+        auto gf = decoder.frame(pgraded, 5);
+        report(gf && gf->a && gf->a->width == kWidth && gf->a->height == kHeight,
+               "graded clip frame() carries full-res graded pixels");
+        report(gf && (!gf->nv12 || (gf->grade && gf->grade->valid())),
+               "graded clip frame() NV12 path attaches a valid grade LUT");
+
+        auto raw = decoder.decode(project, clip, 5);
+        bool differs = false;
+        if (gf && gf->a && raw && gf->a->rgba.size() == raw->rgba.size()) {
+            for (std::size_t i = 0; i < raw->rgba.size(); ++i) {
+                if (raw->rgba[i] != gf->a->rgba[i]) { differs = true; break; }
+            }
+        }
+        report(differs, "graded clip frame() pixels differ from raw media");
+
+        auto gp = decoder.preview(pgraded, 5, 40);
+        report(gp && gp->a && (!gp->nv12 || (gp->grade && gp->grade->valid())),
+               "graded clip preview() carries graded pixels (LUT on NV12 path)");
+    }
 
     // Disabled clip → black fallback frame of the media dims, all-zero pixels.
     Clip disabled = clip;

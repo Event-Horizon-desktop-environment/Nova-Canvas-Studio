@@ -8,6 +8,7 @@
 
 #include <QWidget>
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -72,6 +73,9 @@ private:
     QSize previous_size_;
     bool scrubbing_ = false;
     int64_t scrub_owner_clip_ = -1;
+    // Drag-to-scrub move taps fire at pointer-move rate; peers (sequence seek
+    // previews) already throttle, so gate the per-move trace line here too.
+    std::chrono::steady_clock::time_point last_scrub_log_{};
     std::unordered_map<canvas::core::MediaId, MiniMediaMeta> media_paths_;
     ThumbnailService* thumbnail_service_ = nullptr;
     uint64_t next_request_id_ = 0;

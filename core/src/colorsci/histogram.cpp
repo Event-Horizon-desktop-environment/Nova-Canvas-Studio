@@ -3,6 +3,7 @@
 // Header `histogram.hpp` documents the geometry; this file is the math.
 
 #include "canvas/core/colorsci/histogram.hpp"
+#include "canvas/core/util/log.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -46,6 +47,17 @@ void ColumnHistogram::accumulate(const canvas::core::VideoFrame& rgba) {
 }
 
 void ColumnHistogram::accumulate(const canvas::core::Nv12Frame& nv12) {
+    // Always-on (once): scopes read NV12 and convert to RGB via colorspace.hpp's
+    // yuv_to_rgb with the frame's resolved per-file spec (matrix + probe-
+    // reconciled range) — the same spec the viewer shader uses on this frame.
+    static bool yuv2rgb_logged_ = false;
+    if (!yuv2rgb_logged_) {
+        yuv2rgb_logged_ = true;
+        ::canvas::core::log::log_warning(
+            "[hist] yuv_to_rgb uses per-frame Nv12Frame spec matrix=%s range=%s",
+            canvas::core::gpu::color_matrix_name(nv12.matrix),
+            canvas::core::gpu::color_range_name(nv12.range));
+    }
     const int w = nv12.width;
     const int h = nv12.height;
     if (w <= 0 || h <= 0) return;
@@ -62,7 +74,8 @@ void ColumnHistogram::accumulate(const canvas::core::Nv12Frame& nv12) {
         for (int col = 0; col < w; col += sx) {
             const std::size_t uvo = std::size_t((row / 2) * nv12.uv_pitch) +
                                     std::size_t((col / 2) * 2);
-            const auto rgb = canvas::core::gpu::yuv_to_rgb(yrow[col], uv[uvo + 0], uv[uvo + 1]);
+            const auto rgb = canvas::core::gpu::yuv_to_rgb(yrow[col], uv[uvo + 0], uv[uvo + 1],
+                                                           nv12.range, nv12.matrix);
             const std::size_t xoff =
                 std::size_t((col * kHistogramCols) / w) * kHistogramLevels;
             hist_[0 * kHistogramCellCount + xoff + rgb.r]++;

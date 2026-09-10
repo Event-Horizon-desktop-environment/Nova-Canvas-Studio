@@ -95,9 +95,11 @@ void test_primaries_wheel_apply() {
     cs::WheelPanelState s;
 
     // Lift wheel: full-right puck, master at neutral -> the LGG lift terms take
-    // exactly the puck offsets, master stays 0.
+    // exactly the puck offsets (scaled to the wheel's colorist reach), master
+    // stays 0.
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kLift, 1.0f, 0.0f, 0.5f);
-    check(near(s.lgg.lift_r, 1.0f) && near(s.lgg.lift_g, -0.5f), "lift wheel writes puck offsets");
+    check(near(s.lgg.lift_r, 0.20f) && near(s.lgg.lift_g, -0.10f),
+          "lift wheel writes puck offsets");
     check(near(s.lgg.lift_master, 0.0f), "lift wheel keeps master neutral at 0.5");
     check(lgg_near(cs::LGG{}, s.lgg) == false, "lift wheel actually changed the LGG");
 
@@ -116,9 +118,10 @@ void test_primaries_wheel_apply() {
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kGain, 1.0f, 0.0f, 0.5f);
     check(near(s.lgg.gain_r, 2.0f) && near(s.lgg.gain_b, 0.5f), "gain wheel writes 1+offsets");
 
-    // Offset wheel: flat additive channel terms + master.
+    // Offset wheel: flat additive channel terms (scaled reach) + master.
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kOffset, 1.0f, 0.0f, 0.5f);
-    check(near(s.offset.r, 1.0f) && near(s.offset.master, 0.0f), "offset wheel writes additive terms");
+    check(near(s.offset.r, 0.12f) && near(s.offset.master, 0.0f),
+          "offset wheel writes additive terms");
 
     // Out-of-range puck positions clamp into the shared ranges (never NaN/illegal).
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kLift, 9.0f, 9.0f, 2.0f);
@@ -251,6 +254,41 @@ void test_panel_to_graph_roundtrip() {
     }
 }
 
+void test_restore_primaries_wheel() {
+    // "Return to center is a cancel, not a commit": a wheel that was committed
+    // with a real offset must survive a release back at the disc center.
+    cs::WheelPanelState state;
+    cs::apply_primaries_wheel(state, cs::PrimariesWheel::kLift, 0.6f, -0.2f, 0.5f);
+    cs::apply_primaries_wheel(state, cs::PrimariesWheel::kGain, 0.4f, 0.3f, 0.5f);
+    const cs::LGG committed = state.lgg;
+
+    // The panel snapshots the committed state, then a center release writes the
+    // neutral puck values (as the old code did) BEFORE restoring them.
+    cs::WheelPanelState live = state;
+    cs::apply_primaries_wheel(live, cs::PrimariesWheel::kLift, 0.0f, 0.0f, 0.5f);
+    check(near(live.lgg.lift_r, 0.0f), "center release zeroes the lift terms (pre-restore)");
+    cs::restore_primaries_wheel(live, state, cs::PrimariesWheel::kLift);
+    check(lgg_near(live.lgg, committed), "restore brings the committed LGG back intact");
+
+    // Non-target wheels are untouched by restore.
+    live.lgg = cs::LGG{};
+    cs::restore_primaries_wheel(live, state, cs::PrimariesWheel::kLift);
+    check(near(live.lgg.lift_r, committed.lift_r), "lift restored into a reset state");
+    check(near(live.lgg.gamma_master, 1.0f), "gamma left alone by a lift-only restore");
+
+    // Offset wheel restores its master + channels, not just the channels.
+    cs::WheelPanelState off;
+    cs::apply_primaries_wheel(off, cs::PrimariesWheel::kOffset, 0.7f, 0.1f, 0.6f);
+    const cs::WheelPanelState off_committed = off;
+    off.offset = cs::Offset{};
+    cs::restore_primaries_wheel(off, off_committed, cs::PrimariesWheel::kOffset);
+    check(near(off.offset.master, off_committed.offset.master)
+          && near(off.offset.r, off_committed.offset.r)
+          && near(off.offset.g, off_committed.offset.g)
+          && near(off.offset.b, off_committed.offset.b),
+          "offset restore brings back master + channels");
+}
+
 }  // namespace
 
 int main() {
@@ -258,6 +296,7 @@ int main() {
     test_master_law();
     test_scaled_wheel_offset();
     test_primaries_wheel_apply();
+    test_restore_primaries_wheel();
     test_log_bands();
     test_hdr_zones();
     test_cdl_interchange();

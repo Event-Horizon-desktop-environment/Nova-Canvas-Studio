@@ -1,6 +1,7 @@
 #include "canvas/core/export/renderer.hpp"
 
 #include "canvas/core/export/grade_frame.hpp"
+#include "canvas/core/grade_graph/lut.hpp"
 
 #include "canvas/core/media/audio_decoder.hpp"
 #include "canvas/core/media/video_decoder.hpp"
@@ -22,6 +23,24 @@ extern "C" {
 }
 
 namespace canvas::core {
+
+grade_graph::GradeLutPtr RenderSession::TrackDecoder::lut_for(
+    const Clip* clip) {
+    // Clips are immutable per Project snapshot; the pointer is a cheap identity
+    // whose lifetime outlives the session. Re-bake only when the clip changes.
+    if (clip == lut_clip) return lut;
+    lut_clip = clip;
+    if (!clip || !clip->has_grade()) {
+        lut.reset();
+        return lut;
+    }
+    lut = grade_graph::bake_grade_lut(clip->grade);
+    if (lut) {
+        CANVAS_LOG("renderer: grade LUT baked for clip id=%lld (size=%d)",
+                   (long long)clip->id, lut->size);
+    }
+    return lut;
+}
 
 namespace {
 
@@ -308,8 +327,11 @@ VideoFramePtr render_video_frame(const Project& project, int64_t tl_frame, int w
         auto frame = dec.decode_to_frame(src_frame, 0);
         if (frame) {
             if (clip->has_grade()) {
-                VideoFramePtr graded = apply_grade_to_frame(*frame, clip->grade);
-                if (graded) frame = graded;  // passthrough keeps the decoder frame
+                // One-shot path: bake inline (sub-ms for the grid + trilinear).
+                const grade_graph::GradeLutPtr lut = grade_graph::bake_grade_lut(clip->grade);
+                if (lut) {
+                    if (VideoFramePtr graded = apply_grade_lut(*frame, *lut)) frame = graded;
+                }
             }
             blit_rgba_transformed(*frame, canvas->rgba, width, height, dst_w, dst_h,
                                   dx, dy, *clip);
@@ -419,8 +441,10 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
             continue;
         }
         if (clip->has_grade()) {
-            VideoFramePtr graded = apply_grade_to_frame(*decoded, clip->grade);
-            if (graded) decoded = graded;  // passthrough keeps the decoder frame
+            const grade_graph::GradeLutPtr lut = td.lut_for(clip);
+            if (lut) {
+                if (VideoFramePtr graded = apply_grade_lut(*decoded, *lut)) decoded = graded;
+            }
         }
 
         // Pillarbox/letterbox the source to fit the canvas preserving aspect.

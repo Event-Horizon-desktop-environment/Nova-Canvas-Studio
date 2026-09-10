@@ -339,7 +339,7 @@ void ThumbnailService::worker_loop() {
                     std::lock_guard<std::mutex> lock(waveform_mutex_);
                     wc = waveform_cache_.size();
                 }
-                qWarning().nospace()
+                qDebug().nospace()
                     << "[thumb] generated=" << agg_n
                     << " avg_ms=" << QString::number(avg_ms, 'f', 0)
                     << " last_ms=" << QString::number(ms, 'f', 0)
@@ -393,7 +393,7 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
                 // Rare (one per unique audio file per session), so always-on: a
                 // raw cached waveform makes first-paint instant; a miss means the
                 // next block incurs the full-file decode.
-                qWarning().nospace() << "thumb: waveform loaded RAW from disk path="
+                qDebug().nospace() << "thumb: waveform loaded RAW from disk path="
                                      << QString::fromStdString(req.path);
             } else {
                 const auto t0 = std::chrono::steady_clock::now();
@@ -403,7 +403,7 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
                 // Always-on: the first waveform for a file is a full-file decode
                 // (can be seconds on a long take); repeated slow ones point at a
                 // painful disk or a format that defeats the cached raw.
-                qWarning().nospace() << "thumb: waveform full-file DECODE took_ms="
+                qDebug().nospace() << "thumb: waveform full-file DECODE took_ms="
                                      << QString::number(ms, 'f', 0)
                                      << " buckets=" << kWaveformRawBuckets
                                      << " path=" << QString::fromStdString(req.path);
@@ -457,7 +457,7 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
             // Media-pool previews pass src_in/src_out = 0 (whole file), so the
             // grid cross-check only fires for real timeline clips.
             if (have_vid) {
-                qWarning().nospace()
+                qDebug().nospace()
                     << "[wave] AUDIT id=" << req.id
                     << " dur=" << QString::number(dur, 'f', 3) << "s"
                     << " lo=" << QString::number(lo, 'g', 6)
@@ -474,7 +474,7 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
                     << " drift_lo_f=" << QString::number(drift_lo, 'f', 2)
                     << " drift_hi_f=" << QString::number(drift_hi, 'f', 2);
             } else {
-                qWarning().nospace()
+                qDebug().nospace()
                     << "[wave] AUDIT id=" << req.id << " (whole-file/legacy)"
                     << " dur=" << QString::number(dur, 'f', 3) << "s"
                     << " lo=" << QString::number(lo, 'g', 6)

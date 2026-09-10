@@ -10,6 +10,9 @@
 #include <QVector>
 #include <QWidget>
 
+#include <array>
+#include <chrono>
+
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/colorsci/wheels_ui.hpp"
 #include "features/color/scopes/common/scope_common.hpp"
@@ -54,6 +57,7 @@ public:
               SwatchKind swatch = SwatchKind::kNone);
     void set_value(double value);
     [[nodiscard]] double value() const;
+    [[nodiscard]] QString label_text() const;
 
 signals:
     void value_changed(double value);
@@ -172,6 +176,11 @@ signals:
     // A drag/release/tone-commit finished: the panel state changed and the
     // Color page should commit ONE undoable set_clip_grade.
     void params_committed(const canvas::core::colorsci::WheelPanelState& state);
+    // Reset-all requested: the wheels panel reverted itself to identity and
+    // defers the SINGLE undo to the page, which must also clear the Curves
+    // panel so the whole grade truly reverts (the wheels alone can't see the
+    // curves state). The page writes an empty grade and commits once.
+    void reset_all_requested();
 
 private:
     void wheel_moved(int index, const QPointF& xy);
@@ -180,6 +189,19 @@ private:
     void tone_param_changed(int param, double value);
     void refresh_wheel_readout(int index);
     void commit();
+
+    // Is a puck release at `xy` a "return-to-center" (revert) gesture? Within
+    // a small dead zone around the disc center, releasing the puck commits
+    // identity for that wheel (same law as the per-wheel reset button).
+    [[nodiscard]] bool is_center_release(const QPointF& xy) const;
+    [[nodiscard]] std::array<float, 3> wheel_offset_for_roundtrip(int index) const;
+
+    // Rate limit for the per-move interaction taps (wheel drags / master knob
+    // spins / tone scrubs fire at mouse-move rate; the committed path — release,
+    // reset, tone commit — always logs). Keeps the array of "touched" columns
+    // readable while a multi-second drag still proves liveness.
+    [[nodiscard]] bool interaction_log_gate();
+    std::chrono::steady_clock::time_point last_interaction_log_{};
 
     QLabel* title_ = nullptr;
     QVector<ColorWheelWidget*> wheels_;

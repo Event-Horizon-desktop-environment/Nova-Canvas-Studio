@@ -369,6 +369,11 @@ void MiniTimelineStrip::mousePressEvent(QMouseEvent* event) {
     scrub_owner_clip_ = owner;
     playhead_ = frame;
     update();
+    // Always-on scrub lifecycle trace: begin + the grabbed clip tell the page
+    // log reader that the strip asserted itself (vs a passive wheel drag).
+    qWarning().nospace()
+        << "[grade] ministrip scrub-begin frame=" << frame
+        << " clip=" << owner;
     emit scrub_begin();
     emit scrubbed(frame);
     if (owner >= 0) emit clip_activated(owner, frame);
@@ -384,6 +389,12 @@ void MiniTimelineStrip::mouseMoveEvent(QMouseEvent* event) {
     scrub_owner_clip_ = owner;
     playhead_ = frame;
     update();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_scrub_log_ >= std::chrono::milliseconds(100)) {
+        last_scrub_log_ = now;
+        qWarning().nospace()
+            << "[grade] ministrip scrub frame=" << frame << " clip=" << owner;
+    }
     emit scrubbed(frame);
 }
 
@@ -397,6 +408,8 @@ void MiniTimelineStrip::mouseReleaseEvent(QMouseEvent* event) {
     if (scrub_frame_at(event->position(), owner, frame)) {
         playhead_ = frame;
         update();
+        qWarning().nospace()
+            << "[grade] ministrip scrub-commit frame=" << frame << " clip=" << owner;
         emit scrubbed(frame);
         emit scrub_committed(frame);
     }

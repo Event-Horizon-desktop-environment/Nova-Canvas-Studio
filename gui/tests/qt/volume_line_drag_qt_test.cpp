@@ -12,6 +12,8 @@
 #include "Widgets/timeline_widget.hpp"
 
 #include "canvas/core/timeline/model.hpp"
+#include "canvas/core/timeline/edit_ops.hpp"
+#include "features/timeline/audio_targets.hpp"
 
 #include <QApplication>
 #include <QGraphicsScene>
@@ -42,6 +44,24 @@ QPointF volume_line_viewport_center(TimelineWidget& w) {
         return w.mapFromScene(r.center());
     }
     return QPointF();
+}
+
+// Locate ALL audio volume lines in the scene (a QGraphicsLineItem sitting at
+// z ~1.5 whose span lies inside an audio track row), sorted left-to-right by
+// scene x. Returns viewport coords of each line's center.
+std::vector<QPointF> volume_line_viewport_centers(TimelineWidget& w) {
+    std::vector<QPointF> out;
+    for (QGraphicsItem* it : w.scene()->items()) {
+        auto* line = dynamic_cast<QGraphicsLineItem*>(it);
+        if (!line) continue;
+        if (std::abs(line->zValue() - 1.5) > 1e-6) continue;
+        const QRectF r = line->sceneBoundingRect();
+        if (r.width() < 20.0) continue;
+        out.push_back(w.mapFromScene(r.center()));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const QPointF& a, const QPointF& b) { return a.x() < b.x(); });
+    return out;
 }
 
 }  // namespace
@@ -169,6 +189,79 @@ int main(int argc, char** argv) {
             expect("overshoot-bottom committed once", false, all_ok);
         }
         if (all_ok) std::printf("PASS: bottom overshoot clamps at -100 (silence)\n");
+        else failures += 1;
+    }
+
+    // --- MULTI-SELECT: two audio clips selected, volume line dragged on the
+    //     FIRST. Every selected audio clip must preview live (its line re-anchors
+    //     during the drag — the reported "only the first clip reacts" gap) and
+    //     the release commit must land on BOTH clips' model volume. ---
+    {
+        canvas::core::Sequence seq2;
+        seq2.video_tracks.clear();
+        seq2.audio_tracks.resize(1);
+        canvas::core::Track& at2 = seq2.audio_tracks[0];
+        at2.name = "A1";
+        at2.kind = canvas::core::Track::Kind::Audio;
+        canvas::core::Clip c1;
+        c1.id = 1;
+        c1.tl_in = 0;
+        c1.tl_out = 100;
+        c1.src_in = 0;
+        c1.volume_db = 0.0f;
+        canvas::core::Clip c2;
+        c2.id = 2;
+        c2.tl_in = 100;
+        c2.tl_out = 200;
+        c2.src_in = 0;
+        c2.volume_db = 0.0f;
+        at2.clips.push_back(c1);
+        at2.clips.push_back(c2);
+
+        TimelineWidget w2;
+        w2.resize(1200, 600);
+        w2.set_sequence(&seq2);
+        w2.show();
+        w2.set_selection({1, 2});
+
+        std::vector<QPointF> centers = volume_line_viewport_centers(w2);
+        bool all_ok = true;
+        expect("multi-select sees two audio volume lines", centers.size() == 2, all_ok);
+        QSignalSpy spy(&w2, &TimelineWidget::volume_line_committed);
+        spy.clear();
+        if (centers.size() == 2) {
+            const QPointF p0 = centers[0];
+            const QPointF p1 = centers[1];
+            QTest::mousePress(w2.viewport(), Qt::LeftButton, Qt::NoModifier, p0.toPoint());
+            QTest::mouseMove(w2.viewport(), (p0 + QPointF(0, -14)).toPoint());
+            // While the drag is live the SECOND clip's line must already follow
+            // (both re-anchored off the same dB), not just the grabbed one.
+            const double before_y = p1.y();
+            std::vector<QPointF> live = volume_line_viewport_centers(w2);
+            const double after_y = live.size() == 2 ? live[1].y() : before_y;
+            expect("multi-select live preview re-anchors ALL selected clips",
+                   std::abs(after_y - before_y) > 0.5, all_ok);
+            QTest::mouseRelease(w2.viewport(), Qt::LeftButton, Qt::NoModifier, (p0 + QPointF(0, -14)).toPoint());
+            expect("multi-select commit fired", spy.size() == 1, all_ok);
+            if (spy.size() == 1) {
+                const float db = spy.at(0).at(0).toFloat();
+                // Mirror the real TimelineActions commit: resolve the selection's
+                // audio targets and set_clip_audio each.
+                const auto targets = resolve_audio_targets(seq2, w2.selected_clip_ids());
+                expect("selection resolved to BOTH clips", targets.size() == 2, all_ok);
+                for (const auto& t : targets) {
+                    auto cmd = canvas::core::set_clip_audio(seq2, t.kind, t.track, t.id, db, t.clip.pan);
+                    if (!cmd) { all_ok = false; break; }
+                }
+                expect("clip 1 volume committed", std::abs(seq2.audio_tracks[0].clips[0].volume_db - db) < 0.05f, all_ok);
+                expect("clip 2 volume committed too (multi-select)",
+                       seq2.audio_tracks[0].clips.size() == 2 &&
+                           std::abs(seq2.audio_tracks[0].clips[1].volume_db - db) < 0.05f,
+                       all_ok);
+                std::printf("multi-select committed %+.1f dB to both clips\n", static_cast<double>(db));
+            }
+        }
+        if (all_ok) std::printf("PASS: multi-select volume drag moves all selected clips\n");
         else failures += 1;
     }
 

@@ -1,11 +1,19 @@
 #pragma once
 
+#include "canvas/core/gpu/colorspace.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
 namespace canvas::core {
+
+namespace grade_graph {
+// Forward declaration only: RenderFrame carries the baked grade LUT so the
+// viewer can apply it on the GPU. The full type lives in grade_graph/lut.hpp.
+struct GradeLut3D;
+}  // namespace grade_graph
 
 struct VideoFrame {
     int64_t pts_ticks = 0;
@@ -33,6 +41,13 @@ struct Nv12Frame {
     std::size_t uv_pitch = 0;  // bytes per chroma row (interleaved CbCr)
     std::vector<uint8_t> y;
     std::vector<uint8_t> uv;
+
+    // Which decode the raw planes need (matrix + quantization), resolved by the
+    // decoder from the file's tags (reconciled with a luma probe when the tag
+    // lies about full range). RGB frames need none — they are already full-range
+    // RGB. Consumers that convert NV12 MUST honor these.
+    gpu::ColorMatrix matrix = gpu::ColorMatrix::BT709;
+    gpu::ColorRange range = gpu::ColorRange::Limited;
 
     [[nodiscard]] std::size_t bytes() const noexcept { return y.size() + uv.size(); }
 };
@@ -100,6 +115,16 @@ struct RenderFrame {
     // on the GPU fast path instead of two full-res CPU RGBA decodes. Present
     // alongside `mode`/`progress`; `b` (RGBA) stays null for this path.
     Nv12FramePtr b_nv12;
+
+    // Resolve-style grade LUTs: when a clip owns a wired grade tree, `grade` is
+    // the baked 3D RGB->RGB LUT for `a`/`nv12`, and `grade_b` for `b`/`b_nv12`.
+    // The decoder attaches them (baked once per grade change, cached), and the
+    // viewer samples them on the GPU after the YUV->RGB conversion; the CPU
+    // paths (scopes, export) apply the same LUT trilinearly so preview == export
+    // by construction. Null site below means the clip has no grade and the
+    // frame passes through.
+    std::shared_ptr<const grade_graph::GradeLut3D> grade;
+    std::shared_ptr<const grade_graph::GradeLut3D> grade_b;
 
     [[nodiscard]] bool has_transition() const noexcept {
         return mode != TransitionRenderMode::None && b != nullptr;

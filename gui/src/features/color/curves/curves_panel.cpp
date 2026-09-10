@@ -296,21 +296,41 @@ void CurvesPanel::set_channel(int channel) {
         default: editor_->set_tint(QColor(0x4F, 0x86, 0xD9)); break;
     }
     editor_->set_points(channel_points_[channel]);
+    qWarning().nospace()
+        << "[grade] curve-channel=" << channel
+        << " pts=" << channel_points_[channel].size();
 }
 
 void CurvesPanel::save_active_channel() {
     channel_points_[active_channel_] = editor_->points();
 }
 
+bool CurvesPanel::interaction_log_gate() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_interaction_log_ < std::chrono::milliseconds(100)) return false;
+    last_interaction_log_ = now;
+    return true;
+}
+
 void CurvesPanel::editor_points_changed() {
     if (syncing_) return;
     save_active_channel();
+    if (interaction_log_gate()) {
+        qWarning().nospace()
+            << "[grade] curve-drag channel=" << active_channel_
+            << " pts=" << channel_points_[active_channel_].size();
+    }
     emit curves_preview();
 }
 
 void CurvesPanel::editor_points_committed() {
     if (syncing_) return;
     save_active_channel();
+    // Always-on committed trace: point add/remove/drag-end/reset per channel,
+    // plus the resulting point count so a reset (→ 0 points) is legible.
+    qWarning().nospace()
+        << "[grade] curve-commit channel=" << active_channel_
+        << " pts=" << channel_points_[active_channel_].size();
     emit curves_committed(params());
     emit curves_preview();
 }
@@ -318,7 +338,11 @@ void CurvesPanel::editor_points_committed() {
 void CurvesPanel::tone_changed(int field, double value) {
     Q_UNUSED(value);
     if (syncing_) return;
-    Q_UNUSED(field);
+    if (interaction_log_gate()) {
+        qWarning().nospace()
+            << "[grade] curve-tone field=" << field
+            << " value=" << QString::number(value, 'f', 2);
+    }
     // Soft-clip rows commit on every change, matching the wheels' tone rows.
     emit curves_committed(params());
 }

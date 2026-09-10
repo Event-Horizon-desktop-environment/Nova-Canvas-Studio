@@ -118,10 +118,9 @@ void AudioPipeline::update_project(const canvas::core::Project* project) {
 void AudioPipeline::add_media(const canvas::core::MediaEntry& entry) {
     auto adec = std::make_unique<canvas::core::AudioDecoder>();
     if (adec->open(entry.path) && adec->has_audio()) {
-        if (::canvas::core::log::enabled())
-            ::canvas::core::log::log_warning("audio: opened decoder for media %d rate=%d ch=%d",
-                                         entry.id, adec->source_sample_rate(),
-                                         adec->source_channels());
+        CANVAS_LOG("audio: opened decoder for media %d rate=%d ch=%d",
+                   entry.id, adec->source_sample_rate(),
+                   adec->source_channels());
         std::lock_guard lock(mutex_);
         decoders_[entry.id] = std::move(adec);
     } else {
@@ -188,11 +187,10 @@ void AudioPipeline::open_output() {
     if (active_) return;
     active_ = sink_.open(rate_, channels_);
     if (!active_)
-        ::canvas::core::log::log_warning("audio: FAILED to open output device rate=%d channels=%d",
-                                     rate_, channels_);
-    if (::canvas::core::log::enabled())
-        ::canvas::core::log::log_warning("audio: pipeline open output active=%d rate=%d channels=%d",
-                                     (int)active_, rate_, channels_);
+        ::canvas::core::log::log_warning(
+            "audio: FAILED to open output device rate=%d channels=%d", rate_, channels_);
+    CANVAS_LOG("audio: pipeline open output active=%d rate=%d channels=%d", (int)active_, rate_,
+               channels_);
 }
 
 void AudioPipeline::close_output() {
@@ -205,9 +203,7 @@ void AudioPipeline::close_output() {
 
 void AudioPipeline::rewind(int64_t seq_frame, bool playing) {
     std::lock_guard lock(mutex_);
-    if (::canvas::core::log::enabled())
-        ::canvas::core::log::log_warning("audio: pipeline rewind active=%d playing=%d", (int)active_,
-                                     (int)playing);
+    CANVAS_LOG("audio: pipeline rewind active=%d playing=%d", (int)active_, (int)playing);
     reanchor_locked(seq_frame);
 }
 
@@ -222,7 +218,7 @@ void AudioPipeline::rewind(int64_t seq_frame, bool playing) {
 void AudioPipeline::reanchor_locked(int64_t seq_frame) {
     // New run: the sync log compares A/V offset before vs after the re-anchor.
     ++run_id_;
-    ::canvas::core::log::log_warning("[avsync] RE-ANCHOR run=%llu at_seq_frame=%lld device_written=%llu",
+    ::canvas::core::log::log_info("[avsync] RE-ANCHOR run=%llu at_seq_frame=%lld device_written=%llu",
                                  static_cast<unsigned long long>(run_id_),
                                  static_cast<long long>(seq_frame),
                                  static_cast<unsigned long long>(sink_.stat_written_frames()));
@@ -235,9 +231,8 @@ void AudioPipeline::reanchor_locked(int64_t seq_frame) {
     // next preroll/play_step starts at the anchor (no double-handoff).
     feed_watermarks_.clear();
     last_seq_fed_ = seq_frame;
-    if (::canvas::core::log::enabled())
-        ::canvas::core::log::log_warning("audio: rewind reset feed, anchor_media_sample=%lld rate=%d",
-                                     static_cast<long long>(anchor_media_sample_), rate_);
+    CANVAS_LOG("audio: rewind reset feed, anchor_media_sample=%lld rate=%d",
+               static_cast<long long>(anchor_media_sample_), rate_);
     for (auto& [id, adec] : decoders_) adec->reset();
     // Re-arm the device on every seek so playback restarts from the new
     // playhead; without this, resume would play stale audio from the old spot.
@@ -265,10 +260,9 @@ void AudioPipeline::preroll(int64_t seq_frame, int lead_ms, bool playing) {
     // write_mixed, so play_step() continues after each lead-in instead of
     // re-writing it (which pulls the audible cursor ahead of video).
     const int64_t written = write_mixed(seq_frame, total);
-    if (::canvas::core::log::enabled())
-        ::canvas::core::log::log_warning("audio: preroll lead_ms=%d written_frames=%lld sources=%zu",
-                                     lead_ms, static_cast<long long>(written), sources.size());
-    ::canvas::core::log::log_warning(
+    CANVAS_LOG("audio: preroll lead_ms=%d written_frames=%lld sources=%zu", lead_ms,
+               static_cast<long long>(written), sources.size());
+    ::canvas::core::log::log_info(
         "[audio:preroll] cur=%lld base_sample=%lld written_frames=%lld audible_before=%llu playing=%d",
         static_cast<long long>(seq_frame), static_cast<long long>(playhead_to_audio_sample(seq_frame)),
         static_cast<long long>(written),
@@ -331,9 +325,7 @@ void AudioPipeline::maybe_wave_capture_open_locked() {
     std::fwrite("data", 1, 4, wav_capture_f_);
     const uint32_t data_tmp = 0;
     std::fwrite(&data_tmp, 4, 1, wav_capture_f_);
-    if (::canvas::core::log::enabled())
-        ::canvas::core::log::log_warning("audio: wave capture ON -> %s rate=%d ch=%d", path,
-                                     rate_, channels_);
+    CANVAS_LOG("audio: wave capture ON -> %s rate=%d ch=%d", path, rate_, channels_);
 }
 
 void AudioPipeline::wave_capture_write_locked(const float* data, std::size_t frames) {
@@ -347,7 +339,7 @@ void AudioPipeline::wave_capture_close_locked() {
     patch_wav_header(wav_capture_f_, static_cast<std::size_t>(wav_capture_frames_), channels_);
     std::fclose(wav_capture_f_);
     wav_capture_f_ = nullptr;
-    ::canvas::core::log::log_warning(
+    ::canvas::core::log::log_info(
         "audio: wave capture OFF frames=%llu path=%s",
         static_cast<unsigned long long>(wav_capture_frames_), wav_capture_path_.c_str());
 }
@@ -372,7 +364,7 @@ void AudioPipeline::log_feed_ledger_locked(int64_t seq_frame, int64_t start_samp
     const int64_t dev_delta =
         static_cast<int64_t>(dev_written) - static_cast<int64_t>(last_dev_written);
     last_dev_written = dev_written;
-    ::canvas::core::log::log_warning(
+    ::canvas::core::log::log_info(
         "[audio:feed] frame=%lld start=%lld from=%lld want=%lld wrote=%lld fed_window=%llu "
         "dev_written_delta=%lld (%.0f/s) pending=%zu (%.0fms) audible=%llu dev_lat_ms=%.1f",
         static_cast<long long>(seq_frame), static_cast<long long>(start_sample),
@@ -400,7 +392,7 @@ void AudioPipeline::play_scrub_grain(int64_t seq_frame) {
     if (!clip || clip->media < 0) {
         if (project_) {
             if (const auto* present = clip_at_any_track(seq_frame))
-                ::canvas::core::log::log_warning(
+                CANVAS_LOG(
                     "[scrub] GHOST-GUARD frame=%lld clip covers frame enabled=%d media=%d tl=%lld->%lld",
                     static_cast<long long>(seq_frame), (int)present->enabled, present->media,
                     static_cast<long long>(present->tl_in),
@@ -430,9 +422,8 @@ void AudioPipeline::play_scrub_grain(int64_t seq_frame) {
         ::canvas::core::log::log_warning("[scrub] GRAIN dropped (overflow) at frame=%lld frames=%d",
                                      static_cast<long long>(seq_frame), f);
     if (dec_ms > 1.0)
-        ::canvas::core::log::log_warning("[scrub] GRAIN frame=%lld decode_ms=%.2f samples=%zu",
-                                     static_cast<long long>(seq_frame), dec_ms,
-                                     s->samples.size());
+        CANVAS_LOG("[scrub] GRAIN frame=%lld decode_ms=%.2f samples=%zu",
+                   static_cast<long long>(seq_frame), dec_ms, s->samples.size());
 }
 
 const canvas::core::Clip* AudioPipeline::audio_clip_at(int64_t seq_frame) const {
@@ -523,7 +514,7 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
         const int64_t from = have_wm ? std::max(start_sample, wm) : start_sample;
         const int64_t span = start_sample + want_frames - from;
         if (cut_diag_ > 0 && span <= 0)
-            ::canvas::core::log::log_warning(
+            CANVAS_LOG(
                 "[diag:cut]   STALE clip=%lld media=%d start=%lld wm=%lld span=%lld (write skip)",
                 static_cast<long long>(clip.id), clip.media, static_cast<long long>(start_sample),
                 static_cast<long long>(have_wm ? wit->second : start_sample),
@@ -549,10 +540,9 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
         if (playback_dbg() || cut_diag_ > 0) {
             const int dbg_ch = chunk->channels > 0 ? chunk->channels : 1;
             const int dbg_frames = static_cast<int>(chunk->samples.size()) / dbg_ch;
-            ::canvas::core::log::log_warning(
-                "[audio] DECODE media=%d from=%lld span=%lld dec_ms=%.2f frames=%d",
-                clip.media, static_cast<long long>(from),
-                static_cast<long long>(span), dec_ms, dbg_frames);
+            CANVAS_LOG("[audio] DECODE media=%d from=%lld span=%lld dec_ms=%.2f frames=%d",
+                       clip.media, static_cast<long long>(from),
+                       static_cast<long long>(span), dec_ms, dbg_frames);
         }
         // Never advance a source's watermark past its own clip end: a decode
         // that ran out (EOF / fixed-length chunk) must be re-requested from the
@@ -567,7 +557,7 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
             wit != feed_watermarks_.end() ? wit->second : start_sample,
             std::min<int64_t>(chunk_end, src_out_sample));
         if (cut_diag_ > 0)
-            ::canvas::core::log::log_warning(
+            CANVAS_LOG(
                 "[diag:cut]   SRC clip=%lld media=%d start=%lld from=%lld span=%lld frames=%d "
                 "wm=%lld src_out_sample=%lld",
                 static_cast<long long>(clip.id), clip.media, static_cast<long long>(start_sample),
@@ -719,7 +709,7 @@ void AudioPipeline::log_av_sync(int64_t seq_frame, double video_fps, double step
     speed_video_ms_ = video_ms;
     speed_audible_ms_ = audible_ms;
 
-    ::canvas::core::log::log_warning(
+    ::canvas::core::log::log_info(
         "[avsync] run=%llu frame=%lld video_ms=%.1f audible_ms=%.1f av_offset_ms=%.1f "
         "speed_x=%.3f write_to_audible_ms=%.1f step_s=%.4f",
         static_cast<unsigned long long>(run_id_), static_cast<long long>(seq_frame), video_ms,
@@ -772,13 +762,13 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
             if ((++gg_) == 1 || Clock::now() - last_gg >= std::chrono::seconds(1)) {
                 last_gg = Clock::now();
                 if (gg_suppressed_)
-                    ::canvas::core::log::log_warning(
+                    ::canvas::core::log::log_info(
                         "audio: GHOST-GUARD frame=%lld enabled=%d media=%d tl=%lld->%lld suppressed=%d",
                         static_cast<long long>(seq_frame), (int)present->enabled, present->media,
                         static_cast<long long>(present->tl_in),
                         static_cast<long long>(present->tl_out), gg_suppressed_);
                 else
-                    ::canvas::core::log::log_warning(
+                    ::canvas::core::log::log_info(
                         "audio: GHOST-GUARD frame=%lld enabled=%d media=%d tl=%lld->%lld",
                         static_cast<long long>(seq_frame), (int)present->enabled, present->media,
                         static_cast<long long>(present->tl_in),
@@ -931,7 +921,7 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
         const bool near_end = clip->tl_out > 0 && seq_frame > clip->tl_out - 4;
         if (clip_changed || near_start || near_end) cut_diag_ = 40;
         if (clip_changed)
-            ::canvas::core::log::log_warning(
+            ::canvas::core::log::log_info(
                 "audio: CUT-BOUNDARY clip=%lld media=%d tl=%lld->%lld src=%lld->%lld frame=%lld",
                 static_cast<long long>(clip->id), clip->media, static_cast<long long>(clip->tl_in),
                 static_cast<long long>(clip->tl_out), static_cast<long long>(clip->src_in),
@@ -951,7 +941,7 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
                 static_cast<double>(rate_) * 1000.0;
             const double pend_ms =
                 static_cast<double>(sink_.pending_frames()) / static_cast<double>(rate_) * 1000.0;
-            ::canvas::core::log::log_warning(
+            CANVAS_LOG(
                 "[diag:cut] frame=%lld clip=%lld media=%d wrote=%lld want=%lld from=%lld "
                 "audible_ms=%.1f video_ms=%.1f av_offset_ms=%.1f lat_ms=%.1f pend_ms=%.1f "
                 "backlog_ms=%.1f dec_ms=%.2f mix_ms=%.2f write_ms=%.2f",
@@ -1003,7 +993,7 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
             static_cast<double>(anchor_seq_frame_) / seq_fps * 1000.0 +
             static_cast<double>(run_audible) / static_cast<double>(rate_) * 1000.0;
         const double video_ms = static_cast<double>(seq_frame) / seq_fps * 1000.0;
-        ::canvas::core::log::log_warning(
+        ::canvas::core::log::log_info(
             "[audio] frame=%lld wrote=%lld req=%lld seek_hop=%d burst=%d audible_ms=%.1f "
             "video_ms=%.1f av_offset_ms=%.1f churn=%d dec_ms=%.2f mix_ms=%.2f write_ms=%.2f "
             "resyncs=%llu",
@@ -1079,7 +1069,7 @@ void AudioPipeline::feed_scrub_audio(int64_t target) {
     last_scrub_audio_target_ = target;
     const double target_ms = static_cast<double>(target) / seq_fps * 1000.0;
     const double chunk_ms = static_cast<double>(frames) / rate_ * 1000.0;
-    ::canvas::core::log::log_warning(
+    CANVAS_LOG(
         "[scrub] FEED target=%lld target_ms=%.0f base_sample=%lld chunk_ms=%.0f frames=%d "
         "pending_before=%zu pending_after=%zu%s",
         static_cast<long long>(target), target_ms, static_cast<long long>(base_sample), chunk_ms,

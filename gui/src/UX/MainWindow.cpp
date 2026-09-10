@@ -154,7 +154,7 @@ void MainWindow::push_snapshot(const int64_t initial_frame) {
     // Always-on: the copy cost lands on the UI thread on every edit. A big
     // timeline pushing multi-ms copies per keystroke shows up as edit lag even
     // when the worker keeps up, so this is the first place to look at.
-    qWarning().nospace()
+    qDebug().nospace()
         << "[proj] snapshot push anchor=" << initial_frame
         << " copy_ms=" << QString::number(copy_ms, 'f', 1)
         << " undo_depth=" << undo_.count()
@@ -232,7 +232,7 @@ void MainWindow::on_fps_tick() {
         const auto now = std::chrono::steady_clock::now();
         if (s_n == 1 || now - s_at >= std::chrono::seconds(2)) {
             s_at = now;
-            qWarning().nospace()
+            qDebug().nospace()
                 << "[eventloop] lag_avg_ms=" << QString::number(s_ms / s_n, 'f', 1)
                 << " lag_max_ms=" << QString::number(s_max, 'f', 1)
                 << " n=" << s_n;

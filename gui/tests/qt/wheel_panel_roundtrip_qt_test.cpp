@@ -21,6 +21,7 @@
 #include <QApplication>
 #include <QDoubleSpinBox>
 #include <QMouseEvent>
+#include <QToolButton>
 #include <QWidget>
 
 #include <algorithm>
@@ -126,14 +127,18 @@ int main(int argc, char** argv) {
 
     int commits = 0;
     int previews = 0;
+    int reset_alls = 0;
     QObject::connect(&panel, &ColorWheelsPanel::params_committed, &panel,
                      [&commits](const cs::WheelPanelState&) { ++commits; });
     QObject::connect(&panel, &ColorWheelsPanel::params_preview, &panel,
                      [&previews] { ++previews; });
+    QObject::connect(&panel, &ColorWheelsPanel::reset_all_requested, &panel,
+                     [&reset_alls] { ++reset_alls; });
 
     // ── Wheel drag: Lift wheel, exactly "right on the hue ring" = red. The
-    //    committed LGG must carry the puck law: dx=0.8 -> lift {0.8, -0.4, -0.4},
-    //    master stays at identity (0.5 slider -> 0).
+    //    committed LGG must carry the puck law: dx=0.8 -> radius 0.8 times the
+    //    lift colorist reach (0.20) -> lift {0.16, -0.08, -0.08}, master stays
+    //    at identity (0.5 slider -> 0).
     //    (A full-radius drag at 0.8·r stays inside the disc, so
     //    ColorWheelWidget::pos_to_xy returns the exact normalized 0.8.)
     const auto wheels = panel.findChildren<ColorWheelWidget*>();
@@ -164,10 +169,12 @@ int main(int argc, char** argv) {
     // positions, so assert the puck law structurally: a rightward drag pulls
     // red, dips green AND blue nearly symmetrically (hue ring), and the master
     // stays at its identity mid. The exact panel->model mirror is asserted
-    // below against THIS committed state.
-    expect(st.lgg.lift_r > 0.5f && st.lgg.lift_r <= cs::kLiftHi,
+    // below against THIS committed state. The additive wheels run at their
+    // colorist reach (~0.20 max lift since the 2026-09-10 retune from 0.35), so
+    // a pull tracking the wheel delivers roughly 0.16 red and stays well under 1.
+    expect(st.lgg.lift_r > 0.10f && st.lgg.lift_r <= cs::kLiftHi,
            "Lift wheel right-drag pulls red");
-    expect(st.lgg.lift_g < -0.2f && st.lgg.lift_b < -0.2f,
+    expect(st.lgg.lift_g < -0.05f && st.lgg.lift_b < -0.05f,
            "Lift wheel right-drag dips green and blue");
     expect(std::fabs(st.lgg.lift_g - st.lgg.lift_b) < 0.05f,
            "green/blue dip stays hue-symmetric");
@@ -231,6 +238,73 @@ int main(int argc, char** argv) {
     expect(lgg_near(st2.lgg, st.lgg) && near(st2.temp, st.temp) &&
                near(st2.black_offset, st.black_offset),
            "fresh panel reload keeps the committed params");
+
+    // ── Return-to-center REVERTS (destructive): drag the Lift puck back onto
+    //    the disc center and release. A center release must revert the wheel
+    //    to identity — the committed lift_r≈0.8 drag above does NOT survive —
+    //    while untouched tone params keep their committed values.
+    {
+        ColorWheelWidget* lift = panel.findChildren<ColorWheelWidget*>()[0];
+        const QPointF disc_c = lift->rect().center();
+        const qreal r = (std::min(lift->width(), lift->height()) - 6.0) / 2.0;
+        const int before = commits;
+        drag_to(lift, disc_c + QPointF(0.8 * r, 0.0), disc_c);
+        st = panel.state();
+        expect(commits == before + 1, "center release commits once");
+        expect(near(st.lgg.lift_r, 0.0f) && near(st.lgg.lift_g, 0.0f) &&
+                   near(st.lgg.lift_b, 0.0f),
+               "center release reverts the wheel to identity");
+        expect(near(st.temp, 40.0f), "center release keeps other panel params");
+    }
+
+    // ── Per-wheel reset button reverts that wheel to identity too.
+    {
+        ColorWheelWidget* lift = panel.findChildren<ColorWheelWidget*>()[0];
+        const QPointF disc_c = lift->rect().center();
+        const qreal r = (std::min(lift->width(), lift->height()) - 6.0) / 2.0;
+        drag_to(lift, disc_c, disc_c + QPointF(0.8 * r, 0.0));  // re-grade Lift
+        expect(panel.state().lgg.lift_r > 0.15f, "Lift re-graded before reset");
+        QToolButton* reset_btn = nullptr;
+        for (QToolButton* b : panel.findChildren<QToolButton*>()) {
+            if (b->toolTip() == QLatin1String("Reset wheel")) {
+                reset_btn = b;
+                break;
+            }
+        }
+        expect(reset_btn != nullptr, "per-wheel reset button exists");
+        if (reset_btn) {
+            const int before = commits;
+            reset_btn->click();
+            st = panel.state();
+            expect(commits == before + 1, "wheel reset commits once");
+            expect(near(st.lgg.lift_r, 0.0f) && near(st.lgg.lift_g, 0.0f) &&
+                       near(st.lgg.lift_b, 0.0f) && near(st.lgg.lift_master, 0.0f),
+                   "wheel reset reverts the wheel to identity");
+        }
+    }
+
+    // ── Reset-all defers to the page: it reverts the panel to identity but
+    //    does NOT commit through params_committed — the page owns the single
+    //    undo so it can clear the Curves panel too before writing the grade.
+    {
+        QToolButton* reset_all_btn = nullptr;
+        for (QToolButton* b : panel.findChildren<QToolButton*>()) {
+            if (b->toolTip() == QLatin1String("Reset all grades")) {
+                reset_all_btn = b;
+                break;
+            }
+        }
+        expect(reset_all_btn != nullptr, "reset-all button exists");
+        if (reset_all_btn) {
+            const int before = commits;
+            const int before_resets = reset_alls;
+            reset_all_btn->click();
+            st = panel.state();
+            expect(reset_alls == before_resets + 1, "reset-all request reaches the page");
+            expect(commits == before, "reset-all does not double-commit through the panel");
+            expect(lgg_near(st.lgg, cs::LGG{}), "reset-all reverts every wheel to identity");
+        }
+    }
 
     std::printf(failures == 0 ? "ALL QT TESTS PASSED\n" : "%d QT TEST(S) FAILED\n", failures);
     return failures == 0 ? 0 : 1;

@@ -47,10 +47,30 @@ constexpr int kWheelPageCount = 4;
 }
 
 // Per-wheel maximum offset strength (how far a full-radius puck may reach).
-inline constexpr float kWheelLiftScale = 1.0f;
+// Colorist-realistic reaches: the additive wheels (lift/offset) are tuned so a
+// full pull shifts a channel by a modest amount, NOT a full +-1.0 — a
+// full-range additive shift on one channel with the cosine wings (other two
+// channels dip at half strength) blows faces into saturated magenta on any
+// moderate drag, which reads as "the textures are corrupted". Gamma stays
+// strong because it is multiplicative (1-centered) and perceptually even.
+//
+// Tuning note (2026-09-10): 0.25 on Offset was still too strong — a puck
+// drag that only *felt* like ~0.1 of travel (small motion on a compact wheel
+// widget; pos_to_xy is absolute-position, so the felt "amount moved" and the
+// resulting radius aren't the same thing) landed at radius ~0.98 and produced
+// off=(r=-0.136 g=-0.109 b=0.246), which is ~98% of the old 0.25 cap on Blue
+// alone — enough to wash a whole face magenta. Lowered further here. If this
+// still reads as touchy, the next step is easing the radius->offset curve
+// (e.g. radius^1.5) in scaled_wheel_offset rather than lowering the cap
+// again, since the cap change alone can't fix a widget where a small-feeling
+// drag already reaches most of the radius — but note scaled_wheel_offset's
+// linear radius scaling is covered by an explicit unit test
+// ("radius scales the offset"), so an easing curve needs that test updated
+// deliberately, not as a side effect of a constant tweak.
+inline constexpr float kWheelLiftScale = 0.20f;
 inline constexpr float kWheelGammaScale = 2.0f;
 inline constexpr float kWheelGainScale = 1.0f;
-inline constexpr float kWheelOffsetScale = 1.0f;
+inline constexpr float kWheelOffsetScale = 0.12f;
 
 // Master slider (normalized 0..1) <-> term value within [lo,hi], piecewise-
 // linear through the identity mid: t01=0.5 -> mid exactly, symmetric towards
@@ -212,5 +232,12 @@ void apply_primaries_wheel(WheelPanelState& s, PrimariesWheel w, float dx, float
 // Reset a single term (primaries page) or the whole panel to identity.
 void reset_primaries_wheel(WheelPanelState& s, PrimariesWheel w) noexcept;
 void reset_panel(WheelPanelState& s) noexcept;
+
+// Copy one Primaries wheel's master + per-channel terms from `from` into `to`.
+// Kept as a general state-copy law (used by tests / future callers). The panel
+// no longer routes "return to center" through this: a puck released at the disc
+// center reverts the wheel to identity, same law as the per-wheel reset button.
+void restore_primaries_wheel(WheelPanelState& to, const WheelPanelState& from,
+                             PrimariesWheel w) noexcept;
 
 }  // namespace canvas::core::colorsci

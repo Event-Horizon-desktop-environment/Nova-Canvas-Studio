@@ -17,6 +17,8 @@
 
 #include "canvas/core/media/frame.hpp"
 
+#include "canvas/core/gpu/colorspace.hpp"
+
 class QPainter;
 
 namespace canvas::gui {
@@ -52,6 +54,12 @@ private:
     bool dirty_ = false;
     std::array<std::uint32_t, kScatterGrid * kScatterGrid> grid_{};
     QImage scatter_;
+
+    // Last Nv12Frame spec this scope analysed, so the color archive logs a
+    // [scope] spec-change line exactly once per source switch.
+    canvas::core::gpu::ColorMatrix last_spec_matrix_ = canvas::core::gpu::ColorMatrix::BT709;
+    canvas::core::gpu::ColorRange last_spec_range_ = canvas::core::gpu::ColorRange::Limited;
+    bool spec_seen_ = false;
 };
 
 }  // namespace canvas::gui

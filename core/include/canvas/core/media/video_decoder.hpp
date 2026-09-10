@@ -70,6 +70,11 @@ public:
     [[nodiscard]] double duration_seconds() const { return duration_seconds_; }
     [[nodiscard]] int64_t total_frames() const { return total_frames_; }
     [[nodiscard]] int64_t current_frame() const { return next_frame_; }
+    // Resolved per-file color spec: matrix/range read from codecpar and
+    // reconciled against a decoded-luma probe when a `tv`-style tag lies about
+    // full-range data. Every frame this decoder produces (RGBA via make_rgba,
+    // NV12 via decode_to_hw) is consistent with this spec.
+    [[nodiscard]] gpu::ColorSpec color_spec() const { return {matrix_, range_}; }
     // Highest valid target frame index for this stream (inclusive), once known.
     // Returns -1 when the encoded extent is not yet known (no frame decoded and
     // neither the container nor stream duration is available).
@@ -223,6 +228,10 @@ private:
     double frame_rate_ = 0.0;
     double duration_seconds_ = 0.0;
     int64_t total_frames_ = -1;
+    // Resolved per-file color spec (see color_spec()). matrix_/range_ start on
+    // the codecpar tags and range_ may be upgraded to Full by the luma probe.
+    gpu::ColorMatrix matrix_ = gpu::ColorMatrix::BT709;
+    gpu::ColorRange range_ = gpu::ColorRange::Limited;
     int64_t last_frame_ = -1;
     int64_t next_frame_ = 0;
     bool draining_ = false;

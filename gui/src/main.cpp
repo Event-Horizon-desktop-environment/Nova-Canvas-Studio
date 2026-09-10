@@ -9,6 +9,8 @@
 #include "Logging.hpp"
 #include "UX/MainWindow.hpp"
 #include "UX/theme.hpp"
+#include "canvas/core/colorsci/wheels_ui.hpp"
+#include "canvas/core/gpu/colorspace.hpp"
 #include "canvas/core/media/hw_device.hpp"
 
 extern "C" {
@@ -72,6 +74,18 @@ int main(int argc, char* argv[]) {
     // can be matched to the binary that produced it and stale runs are obvious.
     qWarning() << "eh: boot" << QApplication::applicationVersion()
                << "built" << __DATE__ << __TIME__;
+    // Always-on compiled-in constants report: proves which law the running
+    // binary was built with. If this line ever disagrees with the source, the
+    // binary is stale (wrong build dir / ccache / un-rebuilt) and NOTHING else
+    // in the log can be trusted. Also anchors the YUV matrix so a BT.601 vs
+    // BT.709 mismatch — the purple-skin suspect — is decided by the log alone.
+    qWarning().nospace()
+        << "[build] wheel_scales lift="
+        << canvas::core::colorsci::kWheelLiftScale
+        << " gamma=" << canvas::core::colorsci::kWheelGammaScale
+        << " gain=" << canvas::core::colorsci::kWheelGainScale
+        << " offset=" << canvas::core::colorsci::kWheelOffsetScale
+        << " yuv=bt709 limited yuv2rgb(Y=1.164 R=1.793 G=-0.213/-0.533 B=2.112)";
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("canvas"));
     QApplication::setApplicationDisplayName(QStringLiteral("Nova Canvas Studio"));

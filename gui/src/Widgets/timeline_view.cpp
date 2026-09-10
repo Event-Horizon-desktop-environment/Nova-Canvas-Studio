@@ -174,7 +174,7 @@ void TimelineWidget::rebuild_timeline() {
     const auto rb_now = std::chrono::steady_clock::now();
     if (s_rb_n == 1 || rb_now - s_rb_at >= std::chrono::seconds(1)) {
         s_rb_at = rb_now;
-        qWarning() << "[ui:timeline] rebuild ms_avg=" << QString::number(s_rb_ms / s_rb_n, 'f', 2)
+        qDebug() << "[ui:timeline] rebuild ms_avg=" << QString::number(s_rb_ms / s_rb_n, 'f', 2)
                    << "ms_last=" << QString::number(rb_ms, 'f', 2)
                    << "ms_max=" << QString::number(s_rb_max, 'f', 2)
                    << "n=" << s_rb_n
@@ -290,7 +290,7 @@ void TimelineWidget::relayout_scene() {
     const auto rl_now = std::chrono::steady_clock::now();
     if (s_rl_n == 1 || rl_now - s_rl_at >= std::chrono::seconds(1)) {
         s_rl_at = rl_now;
-        qWarning() << "[ui:timeline] relayout ms_avg=" << QString::number(s_rl_ms / s_rl_n, 'f', 2)
+        qDebug() << "[ui:timeline] relayout ms_avg=" << QString::number(s_rl_ms / s_rl_n, 'f', 2)
                    << "ms_last=" << QString::number(rl_ms, 'f', 2)
                    << "ms_max=" << QString::number(s_max_ms, 'f', 2)
                    << "relayouts/s=" << s_rl_n
@@ -1284,14 +1284,20 @@ void TimelineWidget::shift_transition_bubbles(
         const ClipItem* item = find_clip_item(anchor);
         if (!item || !item->rect) continue;
         const double x = item->rect->scenePos().x();
+        // Right edge in frames from the LIVE rect (a drag/trim preview moves the
+        // rect before the model commits, so the model's duration would be stale).
+        const double w = item->rect->rect().width();
         const int64_t cur_in =
             static_cast<int64_t>(std::llround((x - left_edge) * frames_per_pixel_));
+        const int64_t span = w > 0.0
+            ? static_cast<int64_t>(std::llround(w * frames_per_pixel_))
+            : (item->clip ? item->clip->duration() : 0);
         if (from_left && !b.in_edge && !b.cut) {
             // Single out-edge: pill hugs the clip's CURRENT right edge.
-            b.frame = cur_in + (item->clip ? item->clip->duration() : 0);
+            b.frame = cur_in + span;
         } else if (from_left && b.cut) {
             // Cut carried by its left clip: edit point = its current tl_out.
-            b.frame = cur_in + (item->clip ? item->clip->duration() : 0);
+            b.frame = cur_in + span;
         } else {
             // In-edge single, or cut carried by its right clip: the anchor's
             // current tl_in IS the edit point.

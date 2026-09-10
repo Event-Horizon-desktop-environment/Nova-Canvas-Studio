@@ -1,5 +1,6 @@
 #pragma once
 
+#include "canvas/core/grade_graph/lut.hpp"
 #include "canvas/core/media/audio_decoder.hpp"
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/media/video_decoder.hpp"
@@ -100,6 +101,12 @@ private:
         int64_t active_tl_in = INT64_MIN;  // tl_in of the clip the decoder maps
         int active_media = -1;             // media id the decoder was opened for
         std::unique_ptr<VideoDecoder> dec;
+        // Baked LUT cache: one entry per active clip, invalidated when the clip
+        // pointer changes (each Project snapshot owns fresh Clips), so a graded
+        // clip bakes once per session instead of once per frame.
+        const Clip* lut_clip = nullptr;
+        grade_graph::GradeLutPtr lut;
+        grade_graph::GradeLutPtr lut_for(const Clip* clip);
     };
 
     // Persistent per-audio-track state, kept so sequential audio_chunk() calls

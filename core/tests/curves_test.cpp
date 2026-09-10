@@ -64,7 +64,7 @@ void test_identity() {
     check(true, "eval_curve(empty) == x across the domain");
 }
 
-void test_catmull_rom_knots() {
+void test_spline_knots() {
     // A single interior point off the diagonal: the spline must hit it exactly.
     const std::vector<cs::CurvePoint> pts{{0.5f, 0.8f}};
     check(near(cs::eval_curve(pts, 0.5f), 0.8f), "single point interpolated exactly");
@@ -107,6 +107,32 @@ void test_monotone_range() {
     }
     check(monotone, "eval_curve is monotone over monotone knots");
     check(in_range, "eval_curve stays within [0,1]");
+}
+
+void test_no_overshoot_stiff() {
+    // A near-vertical monotone ladder is exactly where plain Catmull-Rom
+    // overshoots out of the box (tangents blow up) and the final clamp then
+    // clips. The Fritsch-Carlson law must stay monotone and in [0,1] here.
+    const std::vector<cs::CurvePoint> stiff{{0.45f, 0.2f}, {0.5f, 0.85f}, {0.55f, 0.88f}};
+    float prev = -1.0f;
+    bool monotone = true;
+    bool in_range = true;
+    for (float x = 0.0f; x <= 1.00001f; x += 0.002f) {
+        const float y = cs::eval_curve(stiff, x);
+        if (y < prev - 1e-3f) monotone = false;
+        if (y < -1e-3f || y > 1.0001f) in_range = false;
+        prev = y;
+    }
+    check(monotone, "stiff ladder stays monotone (no Catmull-Rom overshoot)");
+    check(in_range, "stiff ladder stays inside [0,1]");
+
+    // Non-monotone (dip) data must still stay inside the box everywhere.
+    bool dip_in_range = true;
+    for (float x = 0.0f; x <= 1.00001f; x += 0.002f) {
+        const float y = cs::eval_curve({{0.3f, 0.7f}, {0.5f, 0.2f}, {0.7f, 0.55f}}, x);
+        if (y < -1e-3f || y > 1.0001f) dip_in_range = false;
+    }
+    check(dip_in_range, "dip-shaped data stays inside [0,1]");
 }
 
 void test_soft_clip_high() {
@@ -180,15 +206,44 @@ void test_luma_curve_hue_preserving() {
           "luma curve scales RGB by the luma ratio (hue preserved)");
 }
 
-void test_channel_curves_isolated() {
-    // A red-channel curve only moves red.
-    cs::CurveParams c;
-    c.channels[static_cast<std::size_t>(cs::CurveChannel::kRed)] = {{0.5f, 0.9f}};
-    const cs::RGBF in{0.5f, 0.4f, 0.3f};
-    const cs::RGBF out = cs::apply_curves(in, c);
-    check(near(out.r, cs::eval_curve({{0.5f, 0.9f}}, 0.5f)), "red curve moves red");
-    check(near(out.g, in.g), "green untouched by red curve");
-    check(near(out.b, in.b), "blue untouched by red curve");
+void test_single_channel_luma_hold() {
+    // Editing exactly one RGB channel holds the pre-curve luma by counter-
+    // scaling the two untouched channels (Resolve-style unganged curve), so a
+    // color edit does not change exposure.
+    {
+        cs::CurveParams c;
+        c.channels[static_cast<std::size_t>(cs::CurveChannel::kRed)] = {{0.5f, 0.9f}};
+        const cs::RGBF in{0.5f, 0.4f, 0.3f};
+        const float L_in = cs::kLuma601R * in.r + cs::kLuma601G * in.g + cs::kLuma601B * in.b;
+        const cs::RGBF out = cs::apply_curves(in, c);
+        check(near(out.r, 0.9f), "edited red channel reaches its curve value");
+        const float L_out = cs::kLuma601R * out.r + cs::kLuma601G * out.g + cs::kLuma601B * out.b;
+        check(near(L_out, L_in), "single-channel edit holds the pre-curve luma");
+        check(out.g < in.g - 1e-3f && out.b < in.b - 1e-3f,
+              "untouched channels counter-scale down for a red lift");
+    }
+    {
+        cs::CurveParams c;
+        c.channels[static_cast<std::size_t>(cs::CurveChannel::kBlue)] = {{0.5f, 0.2f}};
+        const cs::RGBF in{0.5f, 0.4f, 0.5f};  // blue input hits the knot x == 0.5
+        const float L_in = cs::kLuma601R * in.r + cs::kLuma601G * in.g + cs::kLuma601B * in.b;
+        const cs::RGBF out = cs::apply_curves(in, c);
+        check(near(out.b, 0.2f), "edited blue channel reaches its curve value");
+        const float L_out = cs::kLuma601R * out.r + cs::kLuma601G * out.g + cs::kLuma601B * out.b;
+        check(near(L_out, L_in), "blue cut still holds the pre-curve luma");
+        check(out.g > in.g + 1e-3f && out.r > in.r + 1e-3f,
+              "untouched channels counter-scale up for a blue cut");
+    }
+    {
+        // Two channels edited at once is an independent RGB reshape (no hold).
+        cs::CurveParams c;
+        c.channels[static_cast<std::size_t>(cs::CurveChannel::kRed)] = {{0.5f, 0.2f}};
+        c.channels[static_cast<std::size_t>(cs::CurveChannel::kGreen)] = {{0.5f, 0.9f}};
+        const cs::RGBF in{0.5f, 0.5f, 0.5f};
+        const cs::RGBF out = cs::apply_curves(in, c);
+        check(near(out.r, 0.2f) && near(out.g, 0.9f) && near(out.b, 0.5f),
+              "multi-channel edit reshapes each channel independently");
+    }
 }
 
 void test_soft_clip_through_apply() {
@@ -256,14 +311,15 @@ void test_graph_evaluation_and_roundtrip() {
 
 int main() {
     test_identity();
-    test_catmull_rom_knots();
+    test_spline_knots();
     test_sort_and_duplicates();
     test_monotone_range();
+    test_no_overshoot_stiff();
     test_soft_clip_high();
     test_soft_clip_low();
     test_luma_curve_gray();
     test_luma_curve_hue_preserving();
-    test_channel_curves_isolated();
+    test_single_channel_luma_hold();
     test_soft_clip_through_apply();
     test_graph_evaluation_and_roundtrip();
 

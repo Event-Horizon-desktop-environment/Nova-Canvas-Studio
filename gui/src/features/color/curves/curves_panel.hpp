@@ -14,6 +14,7 @@
 #include <QWidget>
 
 #include <array>
+#include <chrono>
 #include <vector>
 
 class QColor;
@@ -111,6 +112,10 @@ private:
     std::array<QVector<QPointF>, 4> channel_points_;
     int active_channel_ = kLuma;
     bool syncing_ = false;
+
+    // Interaction-tap rate limiter, same cadence + purpose as the wheel panel's.
+    [[nodiscard]] bool interaction_log_gate();
+    std::chrono::steady_clock::time_point last_interaction_log_{};
 };
 
 }  // namespace canvas::gui

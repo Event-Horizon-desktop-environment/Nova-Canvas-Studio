@@ -1,5 +1,6 @@
 #include "Widgets/timeline_widget.hpp"
 #include "Widgets/timeline_snap.hpp"
+#include "features/timeline/audio_targets.hpp"
 #include "Logging.hpp"
 #include "UX/theme.hpp"
 
@@ -320,7 +321,7 @@ void TimelineWidget::scrub_to_frame(const int64_t frame) {
         auto now = QDateTime::currentDateTime();
         double dt_ms = 0.0;
         if (!first) dt_ms = last_t.msecsTo(now);
-        qWarning() << "[scrub] TIMELINE scrub_to_frame=" << frame
+        qDebug() << "[scrub] TIMELINE scrub_to_frame=" << frame
                    << "dt_ms=" << dt_ms
                    << "delta=" << (last_log >= 0 ? (frame - last_log) : 0)
                    << "px_per_move=" << (last_log >= 0 ? std::abs(frame - last_log) : 0);
@@ -346,7 +347,7 @@ void TimelineWidget::scrub_to_frame(const int64_t frame) {
     const auto s_now = std::chrono::steady_clock::now();
     if (s_agg_n == 1 || s_now - s_agg_at >= std::chrono::seconds(1)) {
         s_agg_at = s_now;
-        qWarning() << "[scrub] UI cost_ms=" << cost_ms
+        qDebug() << "[scrub] UI cost_ms=" << cost_ms
                    << "avg_ms=" << QString::number(s_agg_ms / s_agg_n, 'f', 2)
                    << "max_ms=" << QString::number(s_max_ms, 'f', 2)
                    << "n=" << s_agg_n;
@@ -1179,6 +1180,16 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
             volume_dragging_ = false;
             volume_drag_clip_ = vol_clip->clip->id;
             volume_drag_db_ = static_cast<float>(vol_clip->clip->volume_db);
+            // Resolve the whole loudness-drag target set once, at press. Every
+            // selected audio clip (and video clip's audio mate) previews and
+            // commits together, so a multi-select volume drag moves them all
+            // live and the committed handler lands on exactly this set.
+            volume_drag_targets_.clear();
+            if (sequence_) {
+                const auto targets = resolve_audio_targets(*sequence_, selection_.ids());
+                for (const auto& t : targets) volume_drag_targets_.push_back(t.id);
+            }
+            if (volume_drag_targets_.empty()) volume_drag_targets_.push_back(volume_drag_clip_);
             drag_press_pos_ = event->pos();
             setCursor(Qt::SizeVerCursor);
             event->accept();
@@ -1261,7 +1272,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
             // cut frame as [edit] BLADE at=..., so the two lines bracket the round-trip.
             const char* kind =
                 hit->track_kind == canvas::core::Track::Kind::Video ? "video" : "audio";
-            qWarning().nospace()
+            qDebug().nospace()
                 << "[blade] " << kind << " clip=" << hit->clip->id
                 << " tl=[" << hit->clip->tl_in << "," << hit->clip->tl_out << ")"
                 << " src=[" << hit->clip->src_in << "," << hit->clip->src_out << ")"
@@ -1289,7 +1300,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
                                       static_cast<double>(tl_span)))
                             : hit->clip->src_in;
                     const double audio_t = static_cast<double>(src_frame) / mit->second.fps;
-                    qWarning().nospace()
+                    qDebug().nospace()
                         << "[blade] A/V clip=" << hit->clip->id
                         << " media_fps=" << QString::number(mit->second.fps, 'g', 4)
                         << " media_total=" << mit->second.total_frames
@@ -1300,7 +1311,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
                                    static_cast<double>(mit->second.total_frames),
                                'g', 6);
                 } else {
-                    qWarning().nospace()
+                    qDebug().nospace()
                         << "[blade] A/V clip=" << hit->clip->id
                         << " media_unresolved (media_id=" << hit->clip->media << ")";
                 }
@@ -1341,7 +1352,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
         } else {
             row_cover = "n/a";
         }
-        qWarning().nospace()
+        qDebug().nospace()
             << "[blade] NO-HIT zone=" << zone
             << " row=" << flat
             << " scene_x=" << scene_pos.x()
@@ -1564,7 +1575,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         const auto tr_now = std::chrono::steady_clock::now();
         if (s_tr_n == 1 || tr_now - s_tr_at >= std::chrono::seconds(1)) {
             s_tr_at = tr_now;
-            qWarning() << "[ui:timeline] track_resize ms_avg=" << QString::number(s_tr_ms / s_tr_n, 'f', 2)
+            qDebug() << "[ui:timeline] track_resize ms_avg=" << QString::number(s_tr_ms / s_tr_n, 'f', 2)
                        << "ms_last=" << QString::number(tr_ms, 'f', 2)
                        << "ms_max=" << QString::number(s_max_ms, 'f', 2)
                        << "moves/s=" << s_tr_n
@@ -1622,7 +1633,12 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
                 const double db = timeline_volume_line::drag_db_from_relative_y(
                     rel_y, item->volume_h, timeline_volume_line::kVolumeLineDragExponent);
                 volume_drag_db_ = static_cast<float>(db);
-                set_live_clip_gain(volume_drag_clip_, volume_drag_db_);
+                // Re-anchor EVERY target off the same dB, so a multi-selection
+                // volume drag moves all selected clips' lines and spectra live
+                // (not just the grabbed one).
+                if (volume_drag_targets_.empty()) volume_drag_targets_.push_back(volume_drag_clip_);
+                for (const auto id : volume_drag_targets_)
+                    set_live_clip_gain(id, volume_drag_db_);
                 emit volume_line_preview(volume_drag_db_);
                 // Transient dB readout while dragging (Bug 3): a temp tooltip at
                 // the cursor so the user can see the level going up/down.
@@ -1702,6 +1718,11 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         preview_trim_clip(*trimmed_clip_, trim_edge_, clamped);
         if (ClipItem* mate = find_linked_mate(trimmed_clip_))
             preview_trim_clip(*mate, trim_edge_, clamped);
+        // Transition bubbles stay glued to their edit points while the trimmed
+        // edge previews too (the clip-drag path already shifts them).
+        std::unordered_set<canvas::core::ClipId> trim_ids{trimmed_clip_->clip->id};
+        if (ClipItem* mate = find_linked_mate(trimmed_clip_)) trim_ids.insert(mate->clip->id);
+        shift_transition_bubbles(trim_ids);
         event->accept();
         return;
     }
@@ -1803,8 +1824,6 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
             dragged_clip_->track_index = target;
         }
 
-        position_clip_at(*dragged_clip_, res.new_tl_in);
-
         // Primary's press-time tl_in (the delta the whole set follows).
         int64_t primary_orig = 0;
         for (std::size_t si = 0; si < drag_clip_snapshot_.size(); ++si) {
@@ -1814,6 +1833,17 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
             }
         }
 
+        // The batch previews as ONE unit: a single shared delta bounded so the
+        // front-most selected clip can never be pulled below the start. Dragging
+        // a trailing grabbed clip earlier than a co-selected lead therefore stops
+        // the whole set at the lead's 0-clamp instead of sliding over it.
+        int64_t min_seq_orig = primary_orig;
+        if (!drag_clip_orig_.empty())
+            min_seq_orig = *std::min_element(drag_clip_orig_.begin(), drag_clip_orig_.end());
+        const int64_t batch_delta =
+            timeline_drag::clamp_batch_delta(primary_orig, res.new_tl_in, min_seq_orig);
+        const int64_t primary_new = std::max<int64_t>(0, primary_orig + batch_delta);
+
         std::unordered_set<canvas::core::ClipId> dragged_ids{drag_primary_id_};
         if (drag_mate_ && drag_mate_->clip) dragged_ids.insert(drag_mate_->clip->id);
         for (const auto& s : drag_clip_snapshot_) dragged_ids.insert(s.id);
@@ -1821,14 +1851,14 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
             for (std::size_t si = 0; si < drag_clip_snapshot_.size(); ++si) {
                 auto& s = drag_clip_snapshot_[si];
                 if (s.id == drag_primary_id_) continue;
-                s.new_tl_in =
-                    timeline_drag::batch_target_tl_in(primary_orig, res.new_tl_in,
-                                                      drag_clip_orig_[si]);
+                s.new_tl_in = timeline_drag::batch_target_tl_in(
+                    primary_orig, res.new_tl_in, drag_clip_orig_[si], min_seq_orig);
                 if (ClipItem* item = find_clip_item(s.id))
                     position_clip_at(*item, s.new_tl_in);
             }
         }
-        if (drag_mate_) position_clip_at(*drag_mate_, res.new_tl_in);
+        if (drag_mate_) position_clip_at(*drag_mate_, primary_new);
+        position_clip_at(*dragged_clip_, primary_new);
         // Transition bubbles stay glued to their edit points while the owning
         // clips preview (the committed rebuild recreates them exactly).
         shift_transition_bubbles(dragged_ids);
@@ -1848,7 +1878,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         const auto drag_now = std::chrono::steady_clock::now();
         if (s_drag_n == 1 || drag_now - s_drag_at >= std::chrono::seconds(1)) {
             s_drag_at = drag_now;
-            qWarning() << "[ui:drag] move ms_avg=" << QString::number(s_drag_ms / s_drag_n, 'f', 2)
+            qDebug() << "[ui:drag] move ms_avg=" << QString::number(s_drag_ms / s_drag_n, 'f', 2)
                        << "ms_last=" << QString::number(drag_ms, 'f', 2)
                        << "ms_max=" << QString::number(s_drag_max, 'f', 2)
                        << "moves/s=" << s_drag_n
@@ -1908,6 +1938,7 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
         volume_dragging_ = false;
         volume_drag_clip_ = 0;
         volume_drag_db_ = 0.0f;
+        volume_drag_targets_.clear();
         unsetCursor();
         event->accept();
         return;
@@ -2017,21 +2048,31 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
                     break;
                 }
             }
+            // Same uniform shared delta as the live preview: bounded so the
+            // front-most selected clip pins at 0 and a trailing grabbed clip
+            // never overlaps it. Keeps preview == commit.
+            const int64_t min_seq_orig =
+                *std::min_element(drag_clip_orig_.begin(), drag_clip_orig_.end());
+            const int64_t batch_delta =
+                timeline_drag::clamp_batch_delta(primary_orig, res.new_tl_in, min_seq_orig);
+            const int64_t primary_new = std::max<int64_t>(0, primary_orig + batch_delta);
             auto& prim = drag_clip_snapshot_[primary_i];
             const bool track_changed =
                 dragged_clip_->track_kind != prim.kind ||
                 kind_track_index(dragged_clip_->track_index, v_count) != prim.track_index;
-            const bool primary_moved = res.new_tl_in != primary_orig || track_changed;
-            prim.new_tl_in = res.new_tl_in;
+            const bool primary_moved = primary_new != primary_orig || track_changed;
+            prim.new_tl_in = primary_new;
             prim.kind = dragged_clip_->track_kind;
             prim.track_index = kind_track_index(dragged_clip_->track_index, v_count);
             std::vector<MovedClip> moved;
             for (std::size_t si = 0; si < drag_clip_snapshot_.size(); ++si) {
-                const auto& s = drag_clip_snapshot_[si];
+                auto& s = drag_clip_snapshot_[si];
                 if (si == primary_i) {
                     if (primary_moved) moved.push_back(s);
-                } else if (s.new_tl_in != drag_clip_orig_[si]) {
-                    moved.push_back(s);
+                } else {
+                    s.new_tl_in = timeline_drag::batch_target_tl_in(
+                        primary_orig, res.new_tl_in, drag_clip_orig_[si], min_seq_orig);
+                    if (s.new_tl_in != drag_clip_orig_[si]) moved.push_back(s);
                 }
             }
             if (!moved.empty()) emit clips_moved(std::move(moved));

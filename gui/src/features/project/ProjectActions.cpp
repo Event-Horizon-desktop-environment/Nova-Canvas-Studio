@@ -77,6 +77,12 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
                                 canvas::core::Placement mode,
                                 std::optional<double> drop_scene_y) {
     if (!project_) return false;
+    // A drop over the track header (or anywhere left of the timeline's first
+    // frame) yields a negative frame from the widget's pixel→frame map; clamp
+    // it so the placed clip flushes against the timeline start instead of
+    // painting on top of the header strip. frame_at_x callers elsewhere floor
+    // ≥0 themselves; this funnel guards every placement path.
+    frame = std::max<int64_t>(0, frame);
     const canvas::core::MediaEntry* found = nullptr;
     for (const auto& m : project_->media) {
         if (m.id == media_id) { found = &m; break; }
@@ -193,10 +199,11 @@ void MainWindow::refresh_media_pool() {
         }
         media_pool_->addItem(item);
 
-        if (m.has_audio || (m.width <= 0 && m.height <= 0)) {
-            // Audio-bearing media (audio-only files or video with an audio
-            // stream): paint its spectrum (waveform) as the pool preview so the
-            // pool shows the sound rather than a video frame.
+        if (m.width <= 0 && m.height <= 0) {
+            // Audio-only media: paint its spectrum (waveform) as the pool
+            // preview so the pool shows the sound rather than a video frame.
+            // Video-bearing files request an actual frame below so the pool
+            // shows the picture, not a spectrum.
             thumbnails_.request_waveform(static_cast<uint64_t>(i), m.path, 240, 136, 0.0f, 1.0f);
             continue;
         }
@@ -391,6 +398,29 @@ int MainWindow::import_media_paths(const QStringList& paths) {
             entry.total_frames = probe.total_frames();
             entry.bin = current_bin_.toStdString();
             entry.has_audio = probe.has_audio();
+
+            // A fresh (untitled) project starts at the default 30fps; adopt the
+            // first video's own rate so a 60fps clip plays at 60fps cadence
+            // instead of a halved 30fps scrub/present. Guarded to the untouched
+            // sequence (default fps, no media, no placed clips) — a project whose
+            // user picked a rate or already has content keeps it.
+            if (project_->sequence.fps == 30.0 && project_->media.empty() &&
+                project_->sequence.video_tracks.empty() &&
+                project_->sequence.audio_tracks.empty()) {
+                const double first_fps = probe.frame_rate();
+                if (first_fps > 0.0) {
+                    project_->sequence.fps = first_fps;
+                    qWarning().nospace() << "[seq] adopted fps="
+                                         << QString::number(first_fps, 'f', 3)
+                                         << " from first media: " << path;
+                    if (timeline_) timeline_->set_fps(first_fps);
+                    update_fps_label();
+                    // Re-anchor the playback worker on the adopted fps (it caches
+                    // the last snapshot's rate for pacing).
+                    push_snapshot(current_frame_);
+                }
+            }
+
             project_->media.push_back(entry);
             controller_.add_media(entry);
 

@@ -74,7 +74,7 @@ void TimelineWidget::request_clip_thumbnails() {
             // in the generator (audio-time grid). This is the exact pair of inputs
             // the grid cross-check needs.
             const double fpp = frames_per_pixel();
-            qWarning().nospace()
+            qDebug().nospace()
                 << "[wave] REQ id=" << id
                 << " clip=" << item.clip->id
                 << " src=[" << item.clip->src_in << "," << item.clip->src_out << ")"
@@ -170,7 +170,7 @@ void TimelineWidget::on_waveform_ready(uint64_t id, const QImage& image) {
         const double dxl = kSceneMargin + kTrackHeaderWidth;
         const double drawn_left_frame = (cell_x - dxl) * fpp;
         const double drawn_right_frame = (cell_x + cw - dxl) * fpp;
-        qWarning().nospace()
+        qDebug().nospace()
             << "[wave] PLACE id=" << id
             << " clip=" << item.clip->id
             << " cell_scene_x=" << QString::number(cell_x, 'g', 4)

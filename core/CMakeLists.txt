@@ -88,6 +88,7 @@ add_library(canvas_core STATIC
     src/grade_graph/graph.cpp
     src/grade_graph/eval.cpp
     src/grade_graph/serialize.cpp
+    src/grade_graph/lut.cpp
     src/project/project.cpp
     src/export/renderer.cpp
     src/export/grade_frame.cpp
@@ -136,6 +137,11 @@ add_executable(canvas_graph_test tests/graph_test.cpp)
 target_link_libraries(canvas_graph_test PRIVATE canvas_core)
 set_target_properties(canvas_graph_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME graph COMMAND canvas_graph_test)
+
+add_executable(canvas_lut_test tests/lut_test.cpp)
+target_link_libraries(canvas_lut_test PRIVATE canvas_core)
+set_target_properties(canvas_lut_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME lut COMMAND canvas_lut_test)
 
 add_executable(canvas_wheels_ui_test tests/wheels_ui_test.cpp)
 target_link_libraries(canvas_wheels_ui_test PRIVATE canvas_core)

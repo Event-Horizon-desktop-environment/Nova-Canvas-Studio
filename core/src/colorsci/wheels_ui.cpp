@@ -154,4 +154,31 @@ void reset_panel(WheelPanelState& s) noexcept {
     s = WheelPanelState{};
 }
 
+void restore_primaries_wheel(WheelPanelState& to, const WheelPanelState& from,
+                             PrimariesWheel w) noexcept {
+    switch (w) {
+        case PrimariesWheel::kLift:
+            to.lgg.lift_master = from.lgg.lift_master;
+            to.lgg.lift_r = from.lgg.lift_r;
+            to.lgg.lift_g = from.lgg.lift_g;
+            to.lgg.lift_b = from.lgg.lift_b;
+            break;
+        case PrimariesWheel::kGamma:
+            to.lgg.gamma_master = from.lgg.gamma_master;
+            to.lgg.gamma_r = from.lgg.gamma_r;
+            to.lgg.gamma_g = from.lgg.gamma_g;
+            to.lgg.gamma_b = from.lgg.gamma_b;
+            break;
+        case PrimariesWheel::kGain:
+            to.lgg.gain_master = from.lgg.gain_master;
+            to.lgg.gain_r = from.lgg.gain_r;
+            to.lgg.gain_g = from.lgg.gain_g;
+            to.lgg.gain_b = from.lgg.gain_b;
+            break;
+        case PrimariesWheel::kOffset:
+            to.offset = from.offset;
+            break;
+    }
+}
+
 }  // namespace canvas::core::colorsci

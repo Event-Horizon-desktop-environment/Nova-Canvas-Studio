@@ -3,6 +3,7 @@
 #include "sync_constants.hpp"
 
 #include "canvas/core/gpu/cuda_convert.hpp"
+#include "canvas/core/util/color_log.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <algorithm>
@@ -50,11 +51,13 @@ void TimelineDecoder::close() {
     size_t hw_slots = 0;
     for (const auto& [id, slot] : slots_)
         if (slot->loaded && slot->decoder.is_hardware()) ++hw_slots;
-    ::canvas::core::log::log_warning("[dec] close slots=%zu hw=%zu previews=%zu",
-                                 slots_.size(), hw_slots, preview_cache_.size());
+    ::canvas::core::log::log_warning("[dec] close slots=%zu hw=%zu previews=%zu grade_luts=%zu",
+                                 slots_.size(), hw_slots, preview_cache_.size(),
+                                 grade_lut_cache_.size());
     slots_.clear();
     preview_cache_.clear();
     preview_lru_.clear();
+    grade_lut_cache_.clear();
 }
 
 void TimelineDecoder::invalidate(const canvas::core::MediaId media) {
@@ -79,6 +82,188 @@ TimelineDecoder::PreviewStats TimelineDecoder::take_preview_stats() {
     preview_misses_ = 0;
     preview_evictions_ = 0;
     return out;
+}
+
+TimelineDecoder::GradeStats TimelineDecoder::take_grade_stats() {
+    const GradeStats out{grade_samples_, grade_ms_sum_, grade_ms_max_};
+    grade_samples_ = 0;
+    grade_ms_sum_ = 0.0;
+    grade_ms_max_ = 0.0;
+    return out;
+}
+
+// Phase 6 live graded preview: applies `clip`'s grade to the decoded RGBA
+// frame. Returns the frame untouched when the clip owns no grade tree, or when
+// the evaluator has no terminal to evaluate, so callers always keep real
+// pixels (never a dropped presentation).
+//
+// Realtime telemetry — ALWAYS-ON, no CANVAS_DEBUG / no cmd needed (stderr +
+// ~/studio/canvas_debug.log, flushed per line):
+//   * `[grade] engaged`      per clip change: id, source frame, dims, and a
+//                            node census (lgg/curves/other counts). The node
+//                            census says what a slowdown should be blamed on:
+//                            wheels vs curves vs a multi-node tree.
+//   * `[grade] SPIKE`        a single apply above ~12ms, warned immediately
+//                            (throttled to 1/3s) — a one-frame pathology that a
+//                            pure averages window would smooth away.
+//   * `[grade] avg/peak`     per-30-frame window summary at INFO level (~1
+//                            line/sec at 30fps playback). The dims field tells
+//                            preview (≤640 cap) from full-res playback apart.
+// Cross-frame totals accrue into take_grade_stats() for the controller's
+// per-second `[play]` health line.
+canvas::core::VideoFramePtr TimelineDecoder::grade_clip_frame(
+    const canvas::core::Clip& clip, canvas::core::VideoFramePtr frame) {
+    const canvas::core::grade_graph::GradeLutPtr lut = grade_lut_for(clip);
+    if (!frame || !lut) return frame;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto graded = canvas::core::grade_graph::apply_grade_lut(*frame, *lut);
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+
+    grade_samples_ += 1u;
+    grade_ms_sum_ += ms;
+    if (ms > grade_ms_max_) grade_ms_max_ = ms;
+
+    static constexpr double kSpikeMs = 12.0;
+    static constexpr double kCooldownSec = 3.0;
+    static auto last_spike_ = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (ms > kSpikeMs && (last_spike_ == std::chrono::steady_clock::time_point{} ||
+                          now - last_spike_ >= std::chrono::duration<double>(kCooldownSec))) {
+        last_spike_ = now;
+        ::canvas::core::log::log_warning(
+            "[grade] SPIKE clip=%llu src=%lld dims=%dx%d apply_ms=%.2f (CPU LUT)",
+            static_cast<unsigned long long>(clip.id),
+            static_cast<long long>(frame->frame_number), frame->width, frame->height, ms);
+    }
+
+    static constexpr std::uint64_t kReportEvery = 30;
+    static std::uint64_t window_frames_ = 0;
+    static double window_ms_ = 0.0;
+    static double window_peak_ms_ = 0.0;
+    window_frames_ += 1u;
+    window_ms_ += ms;
+    if (ms > window_peak_ms_) window_peak_ms_ = ms;
+    if (window_frames_ >= kReportEvery) {
+        ::canvas::core::log::log_info(
+            "[grade] clip=%llu src=%lld dims=%dx%d apply_ms=%.2f avg_ms=%.2f peak_ms=%.2f "
+            "last=%llu frames (CPU LUT)",
+            static_cast<unsigned long long>(clip.id),
+            static_cast<long long>(frame->frame_number), frame->width, frame->height, ms,
+            window_ms_ / static_cast<double>(window_frames_), window_peak_ms_,
+            static_cast<unsigned long long>(window_frames_));
+        window_frames_ = 0u;
+        window_ms_ = 0.0;
+        window_peak_ms_ = 0.0;
+    }
+    return graded ? graded : frame;
+}
+
+canvas::core::grade_graph::GradeLutPtr TimelineDecoder::grade_lut_for(
+    const canvas::core::Clip& clip) {
+    if (!clip.has_grade()) return nullptr;
+
+    const auto it = grade_lut_cache_.find(&clip);
+    if (it != grade_lut_cache_.end()) return it->second;
+
+    static canvas::core::ClipId engaged_clip_ = 0;
+    if (engaged_clip_ != clip.id) {
+        engaged_clip_ = clip.id;
+        int lgg = 0, curves = 0, other = 0;
+        const auto& g = clip.grade;
+        for (int i = 0; i < g.num_nodes(); ++i) {
+            switch (g.node(i).correct_mode) {
+                case canvas::core::grade_graph::CorrectMode::kLgg:
+                    ++lgg;
+                    break;
+                case canvas::core::grade_graph::CorrectMode::kCurves:
+                    ++curves;
+                    break;
+                default:
+                    ++other;  // identity/cdl correctors + the output node
+                    break;
+            }
+        }
+        ::canvas::core::log::log_info(
+            "[grade] engaged clip=%llu nodes=%d lgg=%d curves=%d other=%d (3D LUT path)",
+            static_cast<unsigned long long>(clip.id), g.num_nodes(), lgg, curves, other);
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    // Log the LGG/Offset structs the graph actually feeds the baker — a second
+    // source of truth vs. the wheel widget's own commit trace. If these two
+    // ever disagree, the scale law or the graph build dropped/reordered a term.
+    {
+        using namespace canvas::core::grade_graph;
+        using namespace canvas::core::colorsci;
+        const auto& g = clip.grade;
+        bool any = false;
+        for (int i = 0; i < g.num_nodes(); ++i) {
+            const Node& n = g.node(i);
+            if (n.lgg) {
+                const LGG& p = *n.lgg;
+                ::canvas::core::log::log_info(
+                    "[grade] graph-lgg clip=%llu node=%d "
+                    "lift=(m=%.4f r=%.4f g=%.4f b=%.4f) "
+                    "gamma=(m=%.4f r=%.4f g=%.4f b=%.4f) "
+                    "gain=(r=%.4f g=%.4f b=%.4f)",
+                    static_cast<unsigned long long>(clip.id), n.id, p.lift_master,
+                    p.lift_r, p.lift_g, p.lift_b, p.gamma_master, p.gamma_r, p.gamma_g,
+                    p.gamma_b, p.gain_r, p.gain_g, p.gain_b);
+                any = true;
+            }
+            if (n.offset) {
+                const Offset& o = *n.offset;
+                ::canvas::core::log::log_info(
+                    "[grade] graph-offset clip=%llu node=%d off=(m=%.4f r=%.4f g=%.4f b=%.4f)",
+                    static_cast<unsigned long long>(clip.id), n.id, o.master, o.r, o.g,
+                    o.b);
+                any = true;
+            }
+        }
+        if (!any)
+            ::canvas::core::log::log_info(
+                "[grade] graph-lgg clip=%llu nodes=%d (no LGG/offset node)",
+                static_cast<unsigned long long>(clip.id), g.num_nodes());
+    }
+    canvas::core::grade_graph::GradeLutPtr lut =
+        canvas::core::grade_graph::bake_grade_lut(clip.grade);
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    if (lut) {
+        const auto digest = canvas::core::grade_graph::grade_lut_digest(*lut);
+        static std::uint64_t last_hash = 0;
+        const bool changed = digest.hash != last_hash;
+        if (changed) last_hash = digest.hash;
+        ::canvas::core::log::log_info(
+            "[grade] LUT-baked clip=%llu seq=%llu t=%llu size=%d bake_ms=%.2f hash=%016llx "
+            "mid=(%.3f,%.3f,%.3f) black=(%.3f,%.3f,%.3f) white=(%.3f,%.3f,%.3f) "
+            "skin=(%.3f,%.3f,%.3f) maxdev=%.3f changed=%d",
+            static_cast<unsigned long long>(clip.id),
+            static_cast<unsigned long long>(clip.grade.change_seq),
+            static_cast<unsigned long long>(::canvas::core::log::epoch_ms()), lut->size, ms,
+            static_cast<unsigned long long>(digest.hash), digest.mid[0], digest.mid[1],
+            digest.mid[2], digest.black[0], digest.black[1], digest.black[2],
+            digest.white[0], digest.white[1], digest.white[2], digest.skin[0], digest.skin[1],
+            digest.skin[2], digest.max_dev, changed ? 1 : 0);
+        // Color archive: same bake, correlated with the GUI [grade] commit by
+        // seq and the viewer upload by seq — the always-on page log.
+        CANVAS_COLOR_LOG(
+            "[grade] bake clip=%llu seq=%llu size=%d hash=%016llx "
+            "black=(%.3f,%.3f,%.3f) white=(%.3f,%.3f,%.3f) "
+            "skin=(%.3f,%.3f,%.3f) maxdev=%.3f changed=%d",
+            static_cast<unsigned long long>(clip.id),
+            static_cast<unsigned long long>(clip.grade.change_seq), lut->size,
+            static_cast<unsigned long long>(digest.hash), digest.black[0], digest.black[1],
+            digest.black[2], digest.white[0], digest.white[1], digest.white[2],
+            digest.skin[0], digest.skin[1], digest.skin[2], digest.max_dev,
+            changed ? 1 : 0);
+    }
+    grade_lut_cache_.emplace(&clip, lut);
+    return lut;
 }
 
 bool TimelineDecoder::is_loaded(const canvas::core::MediaId id) const {
@@ -369,6 +554,11 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
     frame->height = out_h;
     frame->y_pitch = static_cast<std::size_t>(out_w);
     frame->uv_pitch = static_cast<std::size_t>(out_w);
+    // The shaders decode these raw planes with the slot file's resolved color
+    // spec — matrix and (probe-reconciled) range — not with assumed 709-limited.
+    const canvas::core::gpu::ColorSpec spec = slot->decoder.color_spec();
+    frame->matrix = spec.matrix;
+    frame->range = spec.range;
     const auto gpu_t0 = std::chrono::steady_clock::now();
     if (!canvas::core::gpu::convert_nv12_resize_to_host(
             reinterpret_cast<const uint8_t*>(hw->data[0]),
@@ -392,7 +582,11 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
     nv12_gpu_ms_ += gpu_ms;
     nv12_hw_max_ = std::max(nv12_hw_max_, hw_ms);
     nv12_gpu_max_ = std::max(nv12_gpu_max_, gpu_ms);
-    if (::canvas::core::log::enabled())
+    // Per-frame tracing, throttled to every 8th request: the ~1s aggregate line
+    // below carries the trend (req/fps_hw/hw_avg/gpu_avg), so this one only
+    // needs to sample stray spikes — at 30fps a per-frame line is ~30 lines/s
+    // of log that drowns the ~1s [play]/[viewer] health lines.
+    if (::canvas::core::log::enabled() && (nv12_req_ & 7u) == 0)
         ::canvas::core::log::log_warning(
             "[dec] nv12 media=%d seq=%lld src=%lld max_dim=%d dec_hw_ms=%.2f gpu_ms=%.2f",
             clip.media, static_cast<long long>(seq_frame),
@@ -495,6 +689,14 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
     if (a) apply_clip_visual(*out, *a);
     if (!a) return out;
 
+    // Graded clips ride the SAME GPU/NV12 fast path as grade-free ones: the
+    // grade is baked into a 3D LUT once per grade change and attached to the
+    // RenderFrame (out->grade), which the viewer samples in its NV12 shader —
+    // no full-res CPU grade eval on the playback path (Phase LUT live graded
+    // preview). The CPU RGBA path applies that same LUT, so preview == export
+    // by construction.
+    const bool grade_a = a->has_grade();
+
     // Is `seq_frame` inside the transition window owned by A's OUT boundary?
     const int64_t dur_out = a->transition_out_duration;
     const int64_t tr_out_start = a->tl_out - dur_out;
@@ -516,11 +718,16 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
         // instead of the two full-res CPU RGBA decodes that collapsed the
         // transition window to ~1.5 fps at 2K60. Falls through to the RGBA path
         // below when a required plane can't be hardware-decoded.
-        if (auto nvA = decode_nv12(project, *a, seq_frame, 0)) {
+        const auto nvA = decode_nv12(project, *a, seq_frame, 0);
+        if (nvA) {
             // Single-clip IN fade needs only A: the viewer ramps A itself against
             // black in the shader.
             if (in_in_trans && !in_out_trans) {
                 out->nv12 = std::move(nvA);
+                out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
+                if (grade_a)
+                    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
+                                                         kPreviewMaxDim));
                 out->mode = to_render_mode(a->transition_in);
                 if (dur_in > 0)
                     out->progress = static_cast<float>(seq_frame - a->tl_in) /
@@ -570,6 +777,15 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                 if (nvB) {
                     out->nv12 = std::move(nvA);
                     out->b_nv12 = std::move(nvB);
+                    out->grade = grade_a
+                                     ? grade_lut_for(*a)
+                                     : canvas::core::grade_graph::GradeLutPtr{};
+                    out->grade_b = b->has_grade()
+                                       ? grade_lut_for(*b)
+                                       : canvas::core::grade_graph::GradeLutPtr{};
+                    if (grade_a)
+                        out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
+                                                             kPreviewMaxDim));
                     out->mode = to_render_mode(a->transition_out);
                     if (dur_out > 0)
                         out->progress = static_cast<float>(seq_frame - tr_out_start) /
@@ -582,6 +798,10 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                 // No incoming clip at the cut (e.g. the last clip on the track):
                 // fade A itself out to black over the transition window.
                 out->nv12 = std::move(nvA);
+                out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
+                if (grade_a)
+                    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
+                                                         kPreviewMaxDim));
                 out->mode = to_render_mode(a->transition_out);
                 if (dur_out > 0) {
                     out->progress = static_cast<float>(seq_frame - tr_out_start) /
@@ -596,14 +816,21 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
         // GPU fast path: HW decode + CUDA composite straight into a small NV12
         // the viewer uploads as Y/UV textures (no full-res CPU RGBA). Falls back
         // to the RGBA path below when unavailable (software decode, non-CUDA
-        // device, backward scrub where decode_to_hw can't rewind).
-        if (auto nv12 = decode_nv12(project, *a, seq_frame, 0)) {
+        // device, backward scrub where decode_to_hw can't rewind). Graded clips
+        // ride this path too: the LUT rides on the RenderFrame and the viewer's
+        // NV12 shader applies it.
+        const auto nv12 = decode_nv12(project, *a, seq_frame, 0);
+        if (nv12) {
             out->nv12 = std::move(nv12);
+            out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
+            if (grade_a)
+                out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
+                                                     kPreviewMaxDim));
             return out;
         }
     }
 
-    out->a = decode(project, *a, seq_frame);
+    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame));
 
     if (in_in_trans) {
         out->mode = to_render_mode(a->transition_in);
@@ -644,7 +871,7 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
             int64_t b_seq = b->tl_in + static_cast<int64_t>(std::llround(
                 (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
             if (b_seq < 0) b_seq = 0;
-            out->b = decode(project, *b, b_seq);
+            out->b = grade_clip_frame(*b, decode(project, *b, b_seq));
             if (dur_out > 0)
                 out->progress = static_cast<float>(seq_frame - tr_out_start) /
                                 static_cast<float>(dur_out);
@@ -697,19 +924,30 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                              !canvas::core::is_audio_transition(a->transition_in) &&
                              seq_frame >= a->tl_in && seq_frame < a->tl_in + dur_in;
 
+    // Graded clips ride the GPU NV12 fast path like every other clip: the LUT
+    // is attached to the RenderFrame and the viewer's NV12 shader applies it
+    // (Phase LUT live graded preview). CPU-only fallback below also goes
+    // through the same LUT, so scrub and playback previews match export.
     const bool need_rgba = in_out_trans || in_in_trans;
 
     bool nv12_had = false, rgba_had = false;
     if (!need_rgba) {
-        // GPU fast path with the reduced-cap composite (see frame).
+        // GPU fast path with the reduced-cap composite (see frame). Scopes still
+        // need CPU pixels, so a graded clip wins a small graded `a` as well; the
+        // NV12 planes drive the viewer, the graded rgba copy drives the scopes.
+        // Both carry the same LUT output, so scopes and the preview match export.
         if (auto nv12 = decode_nv12(project, *a, seq_frame, max_dim)) {
             nv12_had = true;
             out->nv12 = std::move(nv12);
+            if (a->has_grade()) {
+                out->grade = grade_lut_for(*a);
+                out->a = grade_clip_frame(*a, decode(project, *a, seq_frame, max_dim));
+            }
             return out;
         }
     }
 
-    out->a = decode(project, *a, seq_frame, max_dim);
+    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame, max_dim));
     if (out->a) rgba_had = true;
 
     if (in_in_trans) {
@@ -741,7 +979,7 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
             int64_t b_seq = b->tl_in + static_cast<int64_t>(std::llround(
                 (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
             if (b_seq < 0) b_seq = 0;
-            out->b = decode(project, *b, b_seq, max_dim);
+            out->b = grade_clip_frame(*b, decode(project, *b, b_seq, max_dim));
             if (dur_out > 0) out->progress = static_cast<float>(seq_frame - tr_out_start) /
                                              static_cast<float>(dur_out);
             out->mode = to_render_mode(a->transition_out);

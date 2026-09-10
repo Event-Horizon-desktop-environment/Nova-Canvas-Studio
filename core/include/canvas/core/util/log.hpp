@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -22,6 +23,16 @@
 #endif
 
 namespace canvas::core::log {
+
+// Monotonic milliseconds since first call — a stable "epoch" for correlating
+// the always-on [grade]/[viewer] chains (commit → bake → upload → draw) across
+// the GUI and core threads in one log. Process-local; NOT wall-clock.
+inline std::uint64_t epoch_ms() {
+    static const auto t0 = std::chrono::steady_clock::now();
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - t0)
+                                          .count());
+}
 
 inline bool enabled() {
     static const bool on = [] {
@@ -154,6 +165,38 @@ inline void log_error(const char* fmt, ...) {
     std::fflush(stderr);
     if (FILE* f_ = ::canvas::core::log::file(); f_) {
         std::fprintf(f_, "[eh-core ERROR %s] %s\n", ts_, buf);
+        std::fflush(f_);
+    }
+}
+
+// Unconditional (always-on) informational line. Same sink/flush discipline as
+// log_warning, but for periodic PERFORMANCE TELEMETRY and state transitions
+// rather than anomalies: e.g. the `[grade]` apply-time snapshots and `[dec]`
+// aggregates. Distinct level so a session log reads as INFO = measurements,
+// WARN = conditions to notice, ERROR = failures — and the whole thing stays
+// available in real time with no CANVAS_DEBUG/cmd.
+inline void log_info(const char* fmt, ...) {
+    std::lock_guard<std::mutex> lk_(::canvas::core::log::mutex());
+    const auto now_ = std::chrono::system_clock::now();
+    const auto t_ = std::chrono::system_clock::to_time_t(now_);
+    std::tm tmv_;
+    localtime_r(&t_, &tmv_);
+    char ts_[32];
+    std::snprintf(ts_, sizeof(ts_), "%02d:%02d:%02d.%03d", tmv_.tm_hour, tmv_.tm_min,
+                  tmv_.tm_sec,
+                  static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       now_.time_since_epoch())
+                                       .count() %
+                                   1000));
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    std::fprintf(stderr, "[eh-core INFO %s] %s\n", ts_, buf);
+    std::fflush(stderr);
+    if (FILE* f_ = ::canvas::core::log::file(); f_) {
+        std::fprintf(f_, "[eh-core INFO %s] %s\n", ts_, buf);
         std::fflush(f_);
     }
 }

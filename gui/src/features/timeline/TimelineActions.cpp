@@ -108,7 +108,7 @@ void MainWindow::connect_timeline() {
                                                              vi, frame);
                         if (cmd) {
                             undo_.record(std::move(cmd));
-                            qWarning() << "[edit] BLADE v_track=" << vi << "clip=" << clip->id
+                            qDebug() << "[edit] BLADE v_track=" << vi << "clip=" << clip->id
                                        << "at=" << frame;
                             has_unsaved_changes_ = true;
                             refresh_timeline();
@@ -123,7 +123,7 @@ void MainWindow::connect_timeline() {
                                                              ai, frame);
                         if (cmd) {
                             undo_.record(std::move(cmd));
-                            qWarning() << "[edit] BLADE a_track=" << ai << "clip=" << clip->id
+                            qDebug() << "[edit] BLADE a_track=" << ai << "clip=" << clip->id
                                        << "at=" << frame;
                             has_unsaved_changes_ = true;
                             refresh_timeline();
@@ -146,7 +146,7 @@ void MainWindow::connect_timeline() {
                             dst_kind, dst, new_tl_in);
                         if (cmd) {
                             undo_.record(std::move(cmd));
-                            qWarning() << "[edit] MOVE v_track=" << vi << "clip=" << clip->id
+                            qDebug() << "[edit] MOVE v_track=" << vi << "clip=" << clip->id
                                        << "-> tl_in=" << new_tl_in << "dst_kind="
                                        << (dst_kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                        << "dst_track=" << dst;
@@ -164,7 +164,7 @@ void MainWindow::connect_timeline() {
                             dst_kind, dst, new_tl_in);
                         if (cmd) {
                             undo_.record(std::move(cmd));
-                            qWarning() << "[edit] MOVE a_track=" << ai << "clip=" << clip->id
+                            qDebug() << "[edit] MOVE a_track=" << ai << "clip=" << clip->id
                                        << "-> tl_in=" << new_tl_in << "dst_kind="
                                        << (dst_kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                        << "dst_track=" << dst;
@@ -268,7 +268,7 @@ void MainWindow::connect_timeline() {
                         return;
                     }
                     undo_.record(std::move(cmd));
-                    qWarning() << "[edit] TRIM"
+                    qDebug() << "[edit] TRIM"
                                << (edge == TimelineWidget::TrimEdge::Head ? "head" : "tail")
                                << "kind=" << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                << "track=" << track << "clip=" << clip->id
@@ -296,7 +296,7 @@ void MainWindow::connect_timeline() {
                 auto cmd = canvas::core::create_top_track_move(project_->sequence, clip_id, tl_in);
                 if (cmd) {
                     undo_.record(std::move(cmd));
-                    qWarning() << "[edit] AUTO-TRACK clip=" << clip_id << "tl_in=" << tl_in;
+                    qDebug() << "[edit] AUTO-TRACK clip=" << clip_id << "tl_in=" << tl_in;
                     has_unsaved_changes_ = true;
                     // Synchronous rebuild; the widget re-acquires its clip items
                     // by id right after this signal returns.
@@ -312,7 +312,7 @@ void MainWindow::connect_timeline() {
                     project_->sequence, kind, static_cast<std::size_t>(track_index), id);
                 if (cmd) {
                     undo_.record(std::move(cmd));
-                    qWarning() << "[edit] UNLINK kind="
+                    qDebug() << "[edit] UNLINK kind="
                                << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                << "track=" << track_index << "clip=" << id;
                     has_unsaved_changes_ = true;
@@ -328,7 +328,7 @@ void MainWindow::connect_timeline() {
                     project_->sequence, kind, static_cast<std::size_t>(track_index), id);
                 if (cmd) {
                     undo_.record(std::move(cmd));
-                    qWarning() << "[edit] LINK kind="
+                    qDebug() << "[edit] LINK kind="
                                << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                << "track=" << track_index << "clip=" << id;
                     has_unsaved_changes_ = true;
@@ -348,7 +348,7 @@ void MainWindow::connect_timeline() {
                         project_->sequence, kind, tidx, clip->id, type, duration);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qWarning() << "[edit] SET-TRANSITION kind="
+                        qDebug() << "[edit] SET-TRANSITION kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id
                                    << "type=" << static_cast<int>(type) << "dur=" << duration;
@@ -382,7 +382,7 @@ void MainWindow::connect_timeline() {
                         canvas::core::clear_clip_transition(project_->sequence, kind, tidx, clip->id);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qWarning() << "[edit] CLEAR-TRANSITION kind="
+                        qDebug() << "[edit] CLEAR-TRANSITION kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id;
                         has_unsaved_changes_ = true;
@@ -416,7 +416,7 @@ void MainWindow::connect_timeline() {
                         project_->sequence, kind, tidx, clip->id, type, duration);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qWarning() << "[edit] SET-TRANSITION-IN kind="
+                        qDebug() << "[edit] SET-TRANSITION-IN kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id
                                    << "type=" << static_cast<int>(type) << "dur=" << duration;
@@ -450,7 +450,7 @@ void MainWindow::connect_timeline() {
                         project_->sequence, kind, tidx, clip->id);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qWarning() << "[edit] CLEAR-TRANSITION-IN kind="
+                        qDebug() << "[edit] CLEAR-TRANSITION-IN kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id;
                         has_unsaved_changes_ = true;
@@ -520,7 +520,7 @@ void MainWindow::connect_timeline() {
                     }
                 }
                 if (changed) {
-                    qWarning() << "[edit] DELETE-TRANSITION (bubble)";
+                    qDebug() << "[edit] DELETE-TRANSITION (bubble)";
                     has_unsaved_changes_ = true;
                     refresh_timeline();
                     push_snapshot();
@@ -544,7 +544,7 @@ void MainWindow::connect_timeline() {
                         project_->sequence, kind, tidx, clip->id, type, duration);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qWarning() << "[edit] TRANSITION-RESIZE kind="
+                        qDebug() << "[edit] TRANSITION-RESIZE kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id
                                    << "dur=" << duration;
@@ -585,7 +585,7 @@ void MainWindow::connect_timeline() {
                         project_->sequence, kind, tidx, clip->id, type, duration);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qWarning() << "[edit] TRANSITION-IN-RESIZE kind="
+                        qDebug() << "[edit] TRANSITION-IN-RESIZE kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id
                                    << "dur=" << duration;
@@ -621,7 +621,7 @@ void MainWindow::connect_timeline() {
                             project_->sequence, canvas::core::Track::Kind::Video, vi, clip->id);
                         if (cmd) {
                             undo_.record(std::move(cmd));
-                            qWarning() << "[edit] THROUGH-EDIT v_track=" << vi
+                            qDebug() << "[edit] THROUGH-EDIT v_track=" << vi
                                        << "out_clip=" << clip->id;
                             has_unsaved_changes_ = true;
                             refresh_timeline();
@@ -638,7 +638,7 @@ void MainWindow::connect_timeline() {
                             project_->sequence, canvas::core::Track::Kind::Audio, ai, clip->id);
                         if (cmd) {
                             undo_.record(std::move(cmd));
-                            qWarning() << "[edit] THROUGH-EDIT a_track=" << ai
+                            qDebug() << "[edit] THROUGH-EDIT a_track=" << ai
                                        << "out_clip=" << clip->id;
                             has_unsaved_changes_ = true;
                             refresh_timeline();
@@ -664,7 +664,7 @@ void MainWindow::connect_timeline() {
                 tracks.push_back(std::move(t));
                 has_unsaved_changes_ = true;
                 refresh_timeline();
-                qWarning() << "[edit] ADD-TRACK kind="
+                qDebug() << "[edit] ADD-TRACK kind="
                            << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                            << "index=" << (tracks.size() - 1);
                 push_snapshot();
@@ -681,7 +681,7 @@ void MainWindow::connect_timeline() {
                 tracks.erase(tracks.begin() + static_cast<std::ptrdiff_t>(idx));
                 has_unsaved_changes_ = true;
                 refresh_timeline();
-                qWarning() << "[edit] DEL-TRACK kind="
+                qDebug() << "[edit] DEL-TRACK kind="
                            << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                            << "index=" << track_index << "now=" << tracks.size();
                 push_snapshot();
@@ -838,7 +838,7 @@ void MainWindow::remove_all_transitions() {
     has_unsaved_changes_ = true;
     refresh_timeline();
     push_snapshot();
-    qWarning() << "[edit] REMOVE-ALL-TRANSITIONS cleared=" << cleared;
+    qDebug() << "[edit] REMOVE-ALL-TRANSITIONS cleared=" << cleared;
 }
 
 void MainWindow::update_inspector_audio() {
@@ -881,12 +881,12 @@ void MainWindow::apply_inspector_audio() {
     refresh_timeline();
     push_audio_mix_snapshot();
     if (targets.size() == 1)
-        qWarning() << "[edit] CLIP-AUDIO kind="
+        qDebug() << "[edit] CLIP-AUDIO kind="
                    << (targets.front().kind == canvas::core::Track::Kind::Video ? "V" : "A")
                    << "track=" << targets.front().track << "clip=" << targets.front().id
                    << "vol_db=" << vol << "pan=" << pan;
     else
-        qWarning() << "[edit] CLIP-AUDIO-BATCH clips=" << targets.size()
+        qDebug() << "[edit] CLIP-AUDIO-BATCH clips=" << targets.size()
                    << "vol_db=" << vol << "pan=" << pan;
 }
 

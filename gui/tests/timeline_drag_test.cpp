@@ -188,16 +188,26 @@ void test_end_resets() {
 }
 
 void test_batch_delta_preserved() {
-    // Batch drag math (Phase 3): primary 60 -> 320 (snapped), so every other
-    // selected clip shifts by +260 on its own lane; relative spacings hold.
-    CHECK(timeline_drag::batch_target_tl_in(60, 320, 200) == 460);
-    CHECK(timeline_drag::batch_target_tl_in(60, 320, 90) == 350);
-    // Negative delta vs. an early clip clamps at 0.
-    CHECK(timeline_drag::batch_target_tl_in(300, 100, 40) == 0);
+    // Batch drag math (Phase 3): the whole selection shares ONE delta — primary
+    // 60 -> 320 (snapped), so every other selected clip shifts by +260 on its
+    // own lane; relative spacings hold. min_set_orig is a third clip at 40.
+    CHECK(timeline_drag::batch_target_tl_in(60, 320, 200, 40) == 460);
+    CHECK(timeline_drag::batch_target_tl_in(60, 320, 90, 40) == 350);
+    // Negative delta: the shared delta is floored by the FRONT-MOST selected
+    // clip (40), so the lead pins at 0 instead of the primary running over it.
+    CHECK(timeline_drag::clamp_batch_delta(300, 100, 40) == -40);
+    CHECK(timeline_drag::batch_target_tl_in(300, 100, 40, 40) == 0);
     // Zero delta (no actual move) maps every clip back to its origin.
-    CHECK(timeline_drag::batch_target_tl_in(120, 120, 40) == 40);
-    // Primary moved EARLIER: later clips follow the same negative delta.
-    CHECK(timeline_drag::batch_target_tl_in(600, 300, 720) == 420);
+    CHECK(timeline_drag::batch_target_tl_in(120, 120, 40, 40) == 40);
+    // Primary (the set's front-most clip) moved EARLIER: later clips follow
+    // the full negative delta — the floor bound (-min_set_orig) never engages.
+    CHECK(timeline_drag::batch_target_tl_in(600, 300, 720, 600) == 420);
+    // REGRESSION case (bladed two clips, grab the TRAILING half and drag the
+    // selection left): the front-most co-selected clip at 40 clamps at 0, so
+    // the trailing primary stops at 260 and a clip at 720 lands at 680 — the
+    // old per-clip clamp let the trailing clip keep going and slide OVER the
+    // lead (720-200=520).
+    CHECK(timeline_drag::batch_target_tl_in(300, 100, 720, 40) == 680);
 }
 
 // --- Resolve-style magnetic edge snapping (Phase 8) ---------------------------
