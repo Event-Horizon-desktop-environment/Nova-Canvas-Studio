@@ -163,6 +163,16 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
 
 void MainWindow::refresh_media_pool() {
     if (!media_pool_) return;
+    // The Dual-Viewer source preview can point at a pooled entry that just got
+    // removed (or the whole pool rebuilt): drop the stale preview so it can't
+    // read an orphaned snapshot anymore.
+    if (src_preview_.has_media() &&
+        std::find_if(project_->media.begin(), project_->media.end(),
+                     [&](const canvas::core::MediaEntry& m) {
+                         return m.path == src_preview_.media_path();
+                     }) == project_->media.end()) {
+        clear_source_preview();
+    }
     media_pool_->clear();
     const QString bin = current_bin_;
     for (std::size_t i = 0; i < project_->media.size(); ++i) {
@@ -180,6 +190,7 @@ void MainWindow::refresh_media_pool() {
 
         const bool is_video = m.width > 0 && m.height > 0;
         item->setData(kPoolIsVideoRole, is_video);
+        item->setData(kPoolHasAudioRole, m.has_audio);
         item->setData(kPoolResolutionRole,
                       is_video
                           ? QStringLiteral("%1×%2 · %3")
@@ -215,6 +226,11 @@ void MainWindow::refresh_media_pool() {
         req.target_width = 240;
         req.max_height = 136;
         thumbnails_.request(req);
+        if (m.has_audio) {
+            // Video+audio media get a hybrid tile: the frame top + this
+            // audio-spectrum strip bottom, composed by the tile delegate.
+            thumbnails_.request_waveform(static_cast<uint64_t>(i), m.path, 116, 24, 0.0f, 1.0f);
+        }
     }
 
     std::unordered_map<canvas::core::MediaId, canvas::gui::MediaMeta> paths;

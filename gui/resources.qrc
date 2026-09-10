@@ -15,6 +15,8 @@
         <file alias="chevron_left.svg">resources/icons/chevron_left.svg</file>
         <file alias="chevron_right.svg">resources/icons/chevron_right.svg</file>
         <file alias="color_tag.svg">resources/icons/color_tag.svg</file>
+        <file alias="Collapse.svg">resources/icons/Collapse.svg</file>
+        <file alias="Expand.svg">resources/icons/Expand.svg</file>
         <file alias="edge_jump.svg">resources/icons/edge_jump.svg</file>
         <file alias="edit.svg">resources/icons/edit.svg</file>
         <file alias="fit.svg">resources/icons/fit.svg</file>
@@ -59,6 +61,7 @@
         <file alias="unlock.svg">resources/icons/unlock.svg</file>
         <file alias="vhs.svg">resources/icons/vhs.svg</file>
         <file alias="viewport.svg">resources/icons/viewport.svg</file>
+        <file alias="Dual-View.svg">resources/icons/Dual-View.svg</file>
         <file alias="volume.svg">resources/icons/volume.svg</file>
         <file alias="zoom_in.svg">resources/icons/zoom_in.svg</file>
         <file alias="zoom_out.svg">resources/icons/zoom_out.svg</file>

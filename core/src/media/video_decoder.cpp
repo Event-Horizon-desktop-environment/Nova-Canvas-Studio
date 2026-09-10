@@ -876,6 +876,33 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
         return hold_hw_;  // nullptr on failure -> caller falls back to CPU RGBA
     }
     CANVAS_LOG("video_decoder: decode_to_hw target=%lld max_over=%d", (long long)target, max_over);
+    // Far-jump re-anchor, mirroring decode_to_frame's sequential-vs-seek rule.
+    // A fresh decoder starts at the container head, so a deep target reached by
+    // fast-overing every frame is a multi-second stall (seen in GPU exports that
+    // re-open after a clip change). Seek to the owning keyframe instead so the
+    // forward walk spans a single GOP. The common +1 sequential step never
+    // crosses the 64-frame cutoff and stays on the walk path.
+    //
+    // Bounds the check on BOTH sides of the stream position: re-anchoring only
+    // on `target < next_frame_` would re-fire on a plain 1-frame timestamp
+    // overshoot (the fast-over walk returns the frame just past target, so
+    // next_frame_ legitimately reads target+2 and the very next +1 request
+    // looks "behind"), turning a sequential GPU export into a per-GOP re-seek.
+    // A seek is only worthwhile when the requested position is far from where
+    // the walk currently sits; small overshoots are absorbed by walking.
+    const int64_t delta = target - next_frame_;
+    if (delta >= 64 || -delta >= 64) {
+        const int64_t prev_next = next_frame_;
+        const IframeEntry* entry = iframe_at_or_before(target);
+        if (entry) {
+            container_seek_seconds(entry->pts_seconds);
+        } else if (frame_rate_ > 0.0 && target > 0) {
+            container_seek_seconds(static_cast<double>(target) / frame_rate_);
+        }
+        log::log_warning("[dec] hw far-jump target=%lld next=%lld delta=%lld iframe=%lld",
+                         (long long)target, (long long)prev_next, (long long)delta,
+                         entry ? (long long)entry->frame : -1LL);
+    }
     // A CUDA decode session is primed by the bitstream's owning keyframe (the
     // AV1 sequence header). Entering mid-GOP makes FFmpeg transparently emit
     // SOFTWARE frames from a hardware-configured decoder; the NV12 composite

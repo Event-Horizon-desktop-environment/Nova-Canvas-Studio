@@ -306,8 +306,8 @@ void build_left_dock(MainWindow& mw) {
 
     mw.media_dock_ = mw.ui->mediaDock;
     mw.media_dock_->setObjectName(QStringLiteral("mediaDock"));
-    // The dock's own background carries the mint workspace glow; the glass card
-    // below floats on it (mirror of the viewer column's viewerFrame).
+    // The dock backdrop paints the flat workspace surface; the glass card below
+    // floats on it (mirror of the viewer column's viewerFrame).
     apply_theme_style(mw.media_dock_, &dock_glow_style);
     auto* media_title = new QWidget(mw.media_dock_);
     media_title->setObjectName(QStringLiteral("mediaDockTitle"));
@@ -316,8 +316,9 @@ void build_left_dock(MainWindow& mw) {
                               " border: none; }");
     });
     mw.media_dock_->setTitleBarWidget(media_title);
+
     // Floating glass card wrapping the tab strip, so the tab strip + its panes
-    // read as one rounded panel hovering over the workspace glow.
+    // read as one rounded panel hovering over the workspace surface.
     auto* media_glass = new QFrame(&mw);
     media_glass->setObjectName(QStringLiteral("dockGlassCard"));
     apply_theme_style(media_glass, &dock_panel_style);
@@ -325,7 +326,67 @@ void build_left_dock(MainWindow& mw) {
     media_glass_layout->setContentsMargins(0, 0, 0, 0);
     media_glass_layout->setSpacing(0);
     media_glass_layout->addWidget(left_tabs);
-    mw.media_dock_->setWidget(media_glass);
+
+    // Resolve-style collapse: a button column pinned at the dock's OUTER edge.
+    // The pool panel itself stays visible in BOTH states — the toggle only
+    // hands the bottom-left corner to the bottom dock, so the pool's HEIGHT
+    // shrinks to sit above the timeline (same width, same position) while the
+    // timeline spans the full width to the app's far-left edge. Restoring
+    // reclaims the corner and the pool regains its full height.
+    auto* dock_body = new QWidget(mw.media_dock_);
+    auto* dock_body_layout = new QHBoxLayout(dock_body);
+    dock_body_layout->setContentsMargins(0, 0, 0, 0);
+    dock_body_layout->setSpacing(0);
+
+    auto* collapse_col = new QWidget(dock_body);
+    constexpr int kMediaStripWidth = 34;  // thin expand strip (Resolve-style sliver)
+    collapse_col->setFixedWidth(kMediaStripWidth);
+    auto* collapse_layout = new QVBoxLayout(collapse_col);
+    collapse_layout->setContentsMargins(2, 6, 2, 0);
+    collapse_layout->setSpacing(0);
+    collapse_layout->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
+    auto* collapse_btn = new QToolButton(collapse_col);
+    collapse_btn->setObjectName(QStringLiteral("mediaCollapseBtn"));
+    collapse_btn->setIcon(icon("Collapse"));
+    collapse_btn->setIconSize(QSize(16, 16));
+    collapse_btn->setAutoRaise(true);
+    collapse_btn->setFixedSize(30, 30);
+    collapse_btn->setCursor(Qt::PointingHandCursor);
+    collapse_btn->setToolTip(MainWindow::tr("Collapse Media Pool"));
+    apply_theme_style(collapse_btn, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral(
+            "QToolButton#mediaCollapseBtn { background: transparent; border: none;"
+            " border-radius: 6px; padding: 4px; }"
+            "QToolButton#mediaCollapseBtn:hover { background-color: %1; }"
+            "QToolButton#mediaCollapseBtn:pressed { background-color: %2; }")
+            .arg(css(t.state_hover), css(t.border));
+    });
+    QObject::connect(collapse_btn, &QToolButton::clicked, &mw,
+            [collapse_btn, &mw] {
+        const bool collapsing =
+            mw.corner(Qt::BottomLeftCorner) == Qt::LeftDockWidgetArea;
+        if (collapsing)
+            // Pool keeps its width/position; only its height collapses to sit
+            // ABOVE the timeline, which then spans to the app's far-left edge.
+            mw.setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
+        else
+            mw.setCorner(Qt::BottomLeftCorner, Qt::LeftDockWidgetArea);
+        // Re-apply the pool's width so the corner flip never eats it.
+        mw.resizeDocks({mw.media_dock_}, {mw.media_dock_->width()}, Qt::Horizontal);
+        // Kick the main-window layout so the corner change re-flows instantly.
+        const QSize cur = mw.size();
+        mw.resize(cur.width() + 1, cur.height());
+        mw.resize(cur);
+        collapse_btn->setIcon(icon(collapsing ? "Expand" : "Collapse"));
+        collapse_btn->setToolTip(MainWindow::tr(collapsing ? "Expand Media Pool"
+                                                           : "Collapse Media Pool"));
+    });
+    collapse_layout->addWidget(collapse_btn);
+
+    dock_body_layout->addWidget(collapse_col);
+    dock_body_layout->addWidget(media_glass, 1);
+    mw.media_dock_->setWidget(dock_body);
     mw.media_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
 }
 

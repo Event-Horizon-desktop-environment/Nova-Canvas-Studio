@@ -101,6 +101,16 @@ public:
     // Shared hardware-decode device (probed once; falls back to software).
     [[nodiscard]] const canvas::core::HwDeviceManager& hw() const noexcept { return hw_; }
 
+    // CPU-graded CPU preview feed for the Color-page scopes. On the GPU fast
+    // path a graded clip needs no CPU pixels to DISPLAY (the grade rides as a
+    // GPU-sampled 3D LUT on the NV12 planes), so the extra 640x360 RGBA decode
+    // + CPU LUT apply per frame is a pure cost — it exists only so the Color
+    // page's scopes/curve-veil can read graded pixels. Off by default: Edit-tab
+    // and media playback stay on the GPU fast path. The Color page enables it
+    // on enter (and re-presents the current frame) so its scopes show signal.
+    void set_cpu_graded_preview_enabled(bool on) { cpu_graded_preview_enabled_ = on; }
+    [[nodiscard]] bool cpu_graded_preview_enabled() const noexcept { return cpu_graded_preview_enabled_; }
+
     // Slot diagnostics for the [scrub:BAD] trace (media slot loaded / hw-decoding).
     [[nodiscard]] bool is_loaded(canvas::core::MediaId id) const;
     [[nodiscard]] bool is_hardware(canvas::core::MediaId id) const;
@@ -138,6 +148,11 @@ private:
     std::uint64_t preview_evictions_ = 0;
 
     canvas::core::HwDeviceManager hw_;
+
+    // Off by default → Edit-tab/media playback stay pure GPU (NV12 fast path +
+    // GPU LUT); set only while the Color page is active so its scopes/veil can
+    // read the CPU-graded preview feed.
+    bool cpu_graded_preview_enabled_ = false;
 
     // Topmost unlocked video clip covering `seq_frame` (bottom-to-top scan).
     const canvas::core::Clip* top_video_clip_at(const canvas::core::Project& project,

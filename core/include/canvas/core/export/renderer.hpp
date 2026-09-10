@@ -78,6 +78,15 @@ public:
         // Whole-canvas edge-fade gain toward black (same law as the CPU
         // compositor's single-clip transition factor; 1.0 = no fade).
         float fade = 1.0f;
+        // Baked grade LUT for the single graded clip at this frame (null when
+        // the clip is ungraded). The GPU grade kernel consumes it via
+        // grade_lut_upload; ungraded frames take the plain nv12Resize path.
+        grade_graph::GradeLutPtr grade;
+        // Resolved source color spec (ColorMatrix: 0=601,1=709,2=2020; ColorRange:
+        // 0=limited,1=full) from the decoder's ColorSpec so the grade kernel
+        // decodes with the file's actual matrix/range, mirroring swscale.
+        int matrix = 1;
+        int range = 0;
         bool valid = false;
     };
 

@@ -1,6 +1,7 @@
 #include "canvas/core/export/exporter.hpp"
 
 #include "canvas/core/export/renderer.hpp"
+#include "canvas/core/gpu/colorspace.hpp"
 #include "canvas/core/gpu/cuda_convert.hpp"
 #include "canvas/core/util/log.hpp"
 
@@ -104,6 +105,49 @@ bool is_hw_pix_fmt(AVPixelFormat f) {
     return f == AV_PIX_FMT_CUDA || f == AV_PIX_FMT_VAAPI || f == AV_PIX_FMT_QSV ||
            f == AV_PIX_FMT_DRM_PRIME || f == AV_PIX_FMT_D3D11;
 }
+
+// Per-export device-side grade-LUT cache. The bake pointer (RenderSession caches
+// one baked LUT per active clip via TrackDecoder::lut_for) identifies the grid,
+// so a graded clip uploads once per export, not once per frame.
+struct GpuGradeLut {
+    const grade_graph::GradeLut3D* baked = nullptr;
+    void* dev = nullptr;
+
+    bool ensure(const RenderSession::GpuFrameInfo& gfi) {
+        if (!gfi.grade || !gfi.grade->valid()) return false;
+        if (baked == gfi.grade.get()) return dev != nullptr;
+        release();
+        dev = canvas::core::gpu::grade_lut_upload(gfi.grade->data.data(), gfi.grade->size);
+        baked = dev ? gfi.grade.get() : nullptr;
+        if (dev) {
+            CANVAS_LOG("render: grade LUT uploaded to device size=%d seq=%llu",
+                   gfi.grade->size, (unsigned long long)gfi.grade->change_seq);
+        }
+        return dev != nullptr;
+    }
+
+    gpu::GradeKernelParams params(const RenderSession::GpuFrameInfo& gfi) const {
+        gpu::GradeKernelParams p;
+        p.lut = static_cast<const float*>(dev);
+        p.lut_size = gfi.grade ? gfi.grade->size : 0;
+        const gpu::MatrixCoeffs k = gpu::matrix_coeffs(static_cast<gpu::ColorMatrix>(gfi.matrix),
+                                                       static_cast<gpu::ColorRange>(gfi.range));
+        p.r_cr = k.r_cr;
+        p.g_cb = k.g_cb;
+        p.g_cr = k.g_cr;
+        p.b_cb = k.b_cb;
+        p.range = gfi.range;
+        return p;
+    }
+
+    void release() {
+        if (dev) {
+            canvas::core::gpu::grade_lut_free(dev);
+            dev = nullptr;
+        }
+        baked = nullptr;
+    }
+};
 
 }  // namespace
 
@@ -667,6 +711,10 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     RenderSession session;
     bool session_ok = session.begin(project, s.width, s.height, dec_dev);
 
+    // Device-side grade-LUT cache for the fused GPU grade kernel (one upload per
+    // graded clip per export). Released before avformat teardown below.
+    GpuGradeLut s_gpu_grade;
+
     // Pipelined render: a producer thread decodes + composites ahead of the
     // main thread, which sends + drains. GPU work overlaps NVENC; a 3-thread
     // split measured no faster — the device serializes decode->kernel->encode.
@@ -728,17 +776,37 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                         }
                     }
                     // Async resize on a non-blocking stream; the consumer waits on the event
-                    // before sending the frame.
-                    if (src_ref && canvas::core::gpu::convert_nv12_resize_async(
-                            reinterpret_cast<const uint8_t*>(gfi.srcY),
-                            reinterpret_cast<const uint8_t*>(gfi.srcUV),
-                            gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
-                            reinterpret_cast<uint8_t*>(yc),
-                            static_cast<std::size_t>(hw->linesize[0]),
-                            reinterpret_cast<uint8_t*>(uvc),
-                            static_cast<std::size_t>(hw->linesize[1]),
-                            gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
-                            gfi.dx, gfi.dy, gfi.fade)) {
+                    // before sending the frame. Graded clips run the fused grade+resize
+                    // kernel (device LUT cached per clip) so they stay on this path.
+                    // `src_ref` guards the whole launch: the async kernel must read the
+                    // borrowed device planes, which only the av_frame_ref keeps alive.
+                    bool resized = src_ref != nullptr;
+                    if (resized) {
+                        if (gfi.grade && gfi.grade->valid() && s_gpu_grade.ensure(gfi)) {
+                            resized = canvas::core::gpu::convert_nv12_grade_resize_async(
+                                reinterpret_cast<const uint8_t*>(gfi.srcY),
+                                reinterpret_cast<const uint8_t*>(gfi.srcUV),
+                                gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
+                                reinterpret_cast<uint8_t*>(yc),
+                                static_cast<std::size_t>(hw->linesize[0]),
+                                reinterpret_cast<uint8_t*>(uvc),
+                                static_cast<std::size_t>(hw->linesize[1]),
+                                gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
+                                gfi.dx, gfi.dy, gfi.fade, s_gpu_grade.params(gfi));
+                        } else {
+                            resized = canvas::core::gpu::convert_nv12_resize_async(
+                                reinterpret_cast<const uint8_t*>(gfi.srcY),
+                                reinterpret_cast<const uint8_t*>(gfi.srcUV),
+                                gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
+                                reinterpret_cast<uint8_t*>(yc),
+                                static_cast<std::size_t>(hw->linesize[0]),
+                                reinterpret_cast<uint8_t*>(uvc),
+                                static_cast<std::size_t>(hw->linesize[1]),
+                                gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
+                                gfi.dx, gfi.dy, gfi.fade);
+                        }
+                    }
+                    if (resized) {
                         void* ev = nullptr;
                         canvas::core::gpu::convert_nv12_record_event(&ev);
                         auto _tr1 = std::chrono::steady_clock::now();
@@ -1066,7 +1134,23 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                     if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
                         const uintptr_t yc = reinterpret_cast<uintptr_t>(hw->data[0]);
                         const uintptr_t uvc = reinterpret_cast<uintptr_t>(hw->data[1]);
-                        if (canvas::core::gpu::convert_nv12_resize(
+                        // Graded clips use the fused grade+resize kernel (device LUT
+                        // cached per clip), then sync; ungraded use the sync resize.
+                        bool got = false;
+                        if (gfi.grade && gfi.grade->valid() && s_gpu_grade.ensure(gfi)) {
+                            got = canvas::core::gpu::convert_nv12_grade_resize_async(
+                                      reinterpret_cast<const uint8_t*>(gfi.srcY),
+                                      reinterpret_cast<const uint8_t*>(gfi.srcUV),
+                                      gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
+                                      reinterpret_cast<uint8_t*>(yc),
+                                      static_cast<std::size_t>(hw->linesize[0]),
+                                      reinterpret_cast<uint8_t*>(uvc),
+                                      static_cast<std::size_t>(hw->linesize[1]),
+                                      gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
+                                      gfi.dx, gfi.dy, gfi.fade, s_gpu_grade.params(gfi)) &&
+                                  canvas::core::gpu::convert_nv12_sync();
+                        } else {
+                            got = canvas::core::gpu::convert_nv12_resize(
                                 reinterpret_cast<const uint8_t*>(gfi.srcY),
                                 reinterpret_cast<const uint8_t*>(gfi.srcUV),
                                 gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
@@ -1075,7 +1159,9 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                                 reinterpret_cast<uint8_t*>(uvc),
                                 static_cast<std::size_t>(hw->linesize[1]),
                                 gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
-                                gfi.dx, gfi.dy, gfi.fade)) {
+                                gfi.dx, gfi.dy, gfi.fade);
+                        }
+                        if (got) {
                             hw->pts = frame;
                             avcodec_send_frame(vctx, hw);
                             gpu_composited = true;
@@ -1290,6 +1376,12 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
 
     CANVAS_LOG("render: complete out='%s' frames=%lld audio_samples=%lld",
            s.output_path.c_str(), (long long)frame, (long long)audio_sample);
+
+    // Free the device-side grade LUT cache. Both encode paths have finished and
+    // synced by now (producer joined + event-waited; else path convert_nv12_sync
+    // called per frame), so no queued kernel can still read the LUT. Safe to
+    // call with a null cache.
+    s_gpu_grade.release();
 
     if (a_src) av_frame_free(&a_src);
     av_frame_free(&rgb);

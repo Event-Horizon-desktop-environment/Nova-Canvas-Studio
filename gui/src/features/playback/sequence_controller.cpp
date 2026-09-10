@@ -88,6 +88,9 @@ void SequenceController::toggle_play_pause() {
                  << "(intent=" << play_pause_intent_.load()
                  << " worker_playing=" << playing_.load() << ")";
 }
+void SequenceController::release_audio() {
+    push({Command::ReleaseAudio, 0, {}, {}});
+}
 void SequenceController::seek(const int64_t frame_number) {
     push({Command::Seek, frame_number, {}, {}});
 }
@@ -231,6 +234,19 @@ void SequenceController::worker_loop() {
                 qDebug() << "[transport] STEP delta=" << req.arg
                            << "-> target=" << (current_frame_.load() + req.arg);
                 handle_seek(current_frame_.load() + req.arg);
+                break;
+            case Command::ReleaseAudio:
+                // Cross-player audio handoff (dual-viewer source preview):
+                // pause and CLOSE the device so the competing controller can
+                // open it. A plain Pause only idles the sink; the open handle
+                // would block the other player's open_output().
+                playing_.store(false);
+                play_pause_intent_.store(false);
+                if (audio_.is_active()) {
+                    audio_out_.set_hold_active(false);
+                    audio_.close_output();
+                }
+                emit playback_changed(false);
                 break;
             }
             continue;

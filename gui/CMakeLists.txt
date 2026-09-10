@@ -59,6 +59,10 @@ qt_add_executable(canvas
     src/features/deliver/deliver_settings_model.cpp
     src/features/deliver/render_queue_panel.cpp
 
+    src/features/source_preview/source_preview_model.cpp
+    src/features/source_preview/source_preview_controller.cpp
+    src/features/source_preview/source_viewer_panel.cpp
+
     src/features/color/color_widgets.cpp
     src/features/color/curves/curves_panel.cpp
     src/features/color/mini_timeline_strip.cpp

@@ -17,10 +17,13 @@ void MainWindow::build_ui() {
     // bottom). Everything below populates those widgets with app chrome.
     ui = new Ui::MainWindow;
     // Claim the four corners BEFORE setupUi so the .ui's addDockWidget calls
-    // lay the docks out the proven way: the media pool owns the full
-    // left edge (extending all the way down to the page foundation bar) and the
-    // timeline docks into the bottom-center — starting at the media pool's right
-    // edge — instead of spanning underneath it.
+    // lay the docks out the proven way: the media pool owns the bottom-left
+    // corner (a full-height left column) and the timeline docks into the
+    // bottom-center — starting at the media pool's right edge, NOT spanning
+    // underneath it. Resolve-style collapse depends on this: hiding the media
+    // pool panel shrinks the left dock to a thin strip, which frees its
+    // horizontal span and slides the timeline + viewer LEFT — the pool's
+    // collapse hands the room it occupied to the timeline.
     setCorner(Qt::TopLeftCorner, Qt::LeftDockWidgetArea);
     setCorner(Qt::BottomLeftCorner, Qt::LeftDockWidgetArea);
     setCorner(Qt::TopRightCorner, Qt::RightDockWidgetArea);

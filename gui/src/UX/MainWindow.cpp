@@ -5,10 +5,12 @@
 #include "ui_MainWindow.h"
 
 #include "Widgets/media_pool_widget.hpp"
+#include "Widgets/viewer_gl.hpp"
 
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QIcon>
 #include <QImage>
 #include <QKeyEvent>
@@ -96,6 +98,69 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&controller_, &SequenceController::position_changed, this, &MainWindow::on_position_changed);
     connect(&controller_, &SequenceController::playback_changed, this, &MainWindow::on_playback_changed);
 
+    // Dual-Viewer source preview: the source controller presents straight into
+    // its own ViewerGL (created in build_center_workspace). Cross-pause keeps
+    // audio exclusive — only one controller holds the output device, so one
+    // starting playback releases the other's device (see release_audio).
+    connect(&src_preview_, &source_preview::SourcePreviewController::frame_ready, this,
+            [this](canvas::core::RenderFramePtr frame) {
+                if (source_panel_) source_panel_->viewer()->set_frame(std::move(frame));
+            });
+    connect(&src_preview_, &source_preview::SourcePreviewController::position_changed, this,
+            [this](int64_t frame) {
+                if (source_panel_) source_panel_->set_media_position(frame, src_preview_.fps());
+            });
+    connect(&src_preview_, &source_preview::SourcePreviewController::playback_changed, this,
+            [this](bool playing) {
+                if (source_panel_) source_panel_->set_playing(playing);
+                if (playing) controller_.release_audio();
+            });
+    connect(&src_preview_, &source_preview::SourcePreviewController::media_changed, this,
+            [this](bool has_media) {
+                if (!source_panel_) return;
+                if (!has_media) {
+                    source_panel_->clear_media();
+                } else {
+                    source_panel_->set_media_info(
+                        QFileInfo(QString::fromStdString(src_preview_.media_path())).completeBaseName(),
+                        src_preview_.is_video(), src_preview_.is_audio(),
+                        src_preview_.total_frames());
+                }
+            });
+    connect(&controller_, &SequenceController::playback_changed, this, [this](bool playing) {
+        if (playing) src_preview_.release_audio();
+    });
+    connect(media_pool_, &MediaPoolWidget::clipScrubbed, this,
+            [this](int media_index, double fraction) {
+                // Hover-skim a pool tile: Live Media Preview only while the
+                // Dual-Viewer source pane is actually visible (single mode
+                // still paints the hover playhead, but decodes nothing).
+                if (!source_panel_ || !source_panel_->isVisible()) return;
+                if (!project_ || media_index < 0 ||
+                    static_cast<std::size_t>(media_index) >= project_->media.size())
+                    return;
+                if (!source_hovering_) {
+                    // Audible hover session start. A paused timeline still
+                    // HOLDS the output device open, which would block the
+                    // source's scrub grains — free it, but never cut a playing
+                    // timeline (its playback keeps the device and the pool
+                    // hover only previews video alongside it, Resolve-style).
+                    if (!controller_.is_playing()) controller_.release_audio();
+                    src_preview_.begin_hover_scrub();
+                    source_hovering_ = true;
+                }
+                open_source_preview(project_->media[static_cast<std::size_t>(media_index)]);
+                src_preview_.scrub_fraction(fraction);
+            });
+    connect(media_pool_, &MediaPoolWidget::clipScrubEnded, this,
+            [this](int /*media_index*/) {
+                if (!source_hovering_) return;
+                source_hovering_ = false;
+                // Audible-scrub session over: end_scrub CLOSES the source's
+                // output device so the timeline can reopen it on its next Play.
+                src_preview_.end_hover_scrub();
+            });
+
     connect(&thumbnails_, &ThumbnailService::thumbnail_ready, this,
             [this](uint64_t id, QImage image) {
                 const int idx = static_cast<int>(id);
@@ -107,7 +172,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             [this](uint64_t id, QImage image) {
                 const int idx = static_cast<int>(id);
                 if (media_pool_ && idx >= 0 && idx < media_pool_->count()) {
-                    media_pool_->item(idx)->setIcon(QIcon(QPixmap::fromImage(image)));
+                    QListWidgetItem* item = media_pool_->item(idx);
+                    // Hybrid video+audio tiles keep the frame as the icon (top)
+                    // and stash this spectrum for the bottom strip; audio-only
+                    // media still use it as the whole-tile preview.
+                    if (item->data(kPoolIsVideoRole).toBool() &&
+                        item->data(kPoolHasAudioRole).toBool()) {
+                        item->setData(kPoolWaveformImageRole, image);
+                    } else {
+                        item->setIcon(QIcon(QPixmap::fromImage(image)));
+                    }
                 }
             });
 
@@ -170,6 +244,14 @@ void MainWindow::push_audio_mix_snapshot() {
     if (!project_) return;
     auto snapshot = std::make_shared<canvas::core::Project>(*project_);
     controller_.update_audio_mix(std::move(snapshot));
+}
+
+void MainWindow::open_source_preview(const canvas::core::MediaEntry& media) {
+    src_preview_.open_media(media, project_ ? project_->sequence.fps : 30.0);
+}
+
+void MainWindow::clear_source_preview() {
+    src_preview_.close_media();
 }
 
 void MainWindow::on_position_changed(const int64_t frame_number) {

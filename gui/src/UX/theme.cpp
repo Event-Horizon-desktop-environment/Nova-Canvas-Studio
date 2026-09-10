@@ -159,14 +159,21 @@ public:
             tint = normal_;
         }
         if (tint_ && tint.isValid() && tint != QColor(Qt::transparent)) {
-            QPixmap colored(px);
-            colored.fill(tint);
-            colored.setDevicePixelRatio(dpr);
-            QPainter tp(&colored);
+            // Tint the glyph with the theme ink by drawing a solid paint layer
+            // INTO the rendered shape (SourceIn keeps the source only where the
+            // DESTINATION is opaque — i.e. over the glyph, transparent corners
+            // stay transparent). The previous order — drawing the glyph into a
+            // fully-opaque fill with SourceIn — yielded the glyph's AUTHORED
+            // color instead (SourceIn result = source, clipped by destination
+            // alpha), so SVG icons authored in black (e.g. Dual-View, blade,
+            // snap) rendered as black on the dark theme.
+            QPixmap layer(px);
+            layer.fill(tint);
+            layer.setDevicePixelRatio(dpr);
+            QPainter tp(&pm);
             tp.setCompositionMode(QPainter::CompositionMode_SourceIn);
-            tp.drawPixmap(0, 0, pm);
+            tp.drawPixmap(0, 0, layer);
             tp.end();
-            pm = colored;
             // Two-tone support: restore any reserved-accent glyph region (pole
             // tips etc.) from the supersampled render so the accent survives
             // the theme tint AND the smooth downscale.
@@ -219,7 +226,9 @@ private:
         switch (mode) {
             case QIcon::Normal:
             case QIcon::Selected:
-                return t.ink_muted;
+                // Full-strength ink, not ink_muted: toolbar glyphs should read
+                // bold and bright against the dark surfaces, not washed out.
+                return t.ink;
             case QIcon::Active:
                 return t.ink;
             case QIcon::Disabled:
@@ -252,9 +261,8 @@ QString make_flat_controls_qss() {
       // language — lit top hairline catchlight, soft hairline border, generous
       // r radius — with pill-shaped hover items and a mint accent check
       // indicator for checkable actions (right-click / bar menus alike).
-      "QMenu { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-      "  stop:0 %2, stop:1 %16); color: %1;"
-      "  border: 1px solid %3; border-top: 1px solid %15;"
+      "QMenu { background-color: %2; color: %1;"
+      "  border: 1px solid %3;"
       "  border-radius: 14px; padding: 6px; }"
       "QMenu::item { padding: 6px 28px 6px 12px; border-radius: 9px;"
       "  margin: 1px 3px 1px 4px; }"
@@ -425,10 +433,8 @@ void apply_theme(QApplication& app, bool light) {
 QString transport_bar_style() {
     const ThemeTokens& t = tokens();
     return QStringLiteral(
-        "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 %1, stop:0.5 %2, stop:1 %2);"
-        " border-top: 1px solid %3;")
-        .arg(css(t.surface_raised), css(t.surface), css(t.border_hi));
+        "background-color: %1; border-top: 1px solid %2;")
+        .arg(css(t.surface), css(t.border_soft));
 }
 
 QString timeline_tools_style() {
@@ -438,10 +444,8 @@ QString timeline_tools_style() {
 QString page_switcher_style() {
     const ThemeTokens& t = tokens();
     return QStringLiteral(
-        "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 %1, stop:1 %2);"
-        " border-top: 1px solid %3;")
-        .arg(css(t.surface_raised), css(t.surface), css(t.border_hi));
+        "background-color: %1; border-top: 1px solid %2;")
+        .arg(css(t.surface_raised), css(t.border_soft));
 }
 
 QString time_label_style() {
@@ -461,54 +465,42 @@ QString media_pool_style() {
         .arg(css(t.surface_low), css(t.ink));
 }
 
-// Floating glass panels: a vertical glass gradient (lit at the top, easing to
-// the surface), a hairline border with the brighter border_hi catch-light on
-// the top edge, and a generous r-xl radius so the panels read as rounded.
+// Floating panels: a flat raised card with a hairline border and a generous
+// r-xl radius so the panels read as rounded.
 QString viewer_frame_style() {
     const ThemeTokens& t = tokens();
     return QStringLiteral(
-        "QFrame#viewerFrame { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 %1, stop:0.18 %2, stop:1 %3);"
-        " border: 1px solid %4; border-top: 1px solid %5;"
+        "QFrame#viewerFrame { background-color: %1;"
+        " border: 1px solid %2;"
         " border-radius: 16px; }")
-        .arg(css(t.surface_highest), css(t.surface_raised), css(t.surface_low),
-             css(t.border_soft), css(t.border_hi));
+        .arg(css(t.surface_low), css(t.border_soft));
 }
 
 QString timeline_frame_style() {
     const ThemeTokens& t = tokens();
     return QStringLiteral(
-        "QFrame#timelineFrame { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 %1, stop:0.15 %2, stop:1 %3);"
-        " border: 1px solid %4; border-top: 1px solid %5;"
+        "QFrame#timelineFrame { background-color: %1;"
+        " border: 1px solid %2;"
         " border-radius: 16px; }")
-        .arg(css(t.surface_higher), css(t.surface_raised), css(t.surface),
-             css(t.border_soft), css(t.border_hi));
+        .arg(css(t.surface), css(t.border_soft));
 }
 
-// Mint radial workspace glow for a dock's backdrop. Painted by the QDockWidget
-// itself so it shows around the floating glass card and through the transparent
-// title strip (the dock-side mirror of QWidget#viewerColumn in ShellCenter.cpp).
+// Flat dock backdrop: no gradient glow, just the workspace surface.
 QString dock_glow_style() {
     const ThemeTokens& t = tokens();
-    return QStringLiteral("QDockWidget { background:"
-                          " qradialgradient(cx:0.5, cy:0.0, radius:1.8, fx:0.5, fy:0.0,"
-                          " stop:0 %1, stop:0.5 %2, stop:1 %3); }")
-        .arg(css(with_alpha(t.accent, 20)), css(with_alpha(t.accent, 6)),
-             css(t.surface));
+    return QStringLiteral("QDockWidget { background-color: %1; }")
+        .arg(css(t.surface));
 }
 
-// Floating glass card that carries a dock's content: the viewer/timeline frame
-// recipe, plus a small margin so the workspace glow shows around the panel.
+// Flat card that carries a dock's content: a rounded raised panel with a small
+// margin so the workspace surface shows around the card.
 QString dock_panel_style() {
     const ThemeTokens& t = tokens();
     return QStringLiteral(
-        "QWidget#dockGlassCard { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 %1, stop:0.18 %2, stop:1 %3);"
-        " border: 1px solid %4; border-top: 1px solid %5;"
+        "QWidget#dockGlassCard { background-color: %1;"
+        " border: 1px solid %2;"
         " border-radius: 16px; margin: 8px 6px; }")
-        .arg(css(t.surface_highest), css(t.surface_raised), css(t.surface_low),
-             css(t.border_soft), css(t.border_hi));
+        .arg(css(t.surface_raised), css(t.border_soft));
 }
 
 QString global_toolbar_style() {
@@ -519,9 +511,8 @@ QString global_toolbar_style() {
 QString top_status_bar_style() {
     const ThemeTokens& t = tokens();
     return QStringLiteral(
-        "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 %1, stop:1 %2); border-bottom: 1px solid %3;")
-        .arg(css(t.surface_raised), css(t.surface), css(t.border));
+        "background-color: %1; border-bottom: 1px solid %2;")
+        .arg(css(t.surface), css(t.border));
 }
 
 QString big_timecode_style() {
@@ -563,24 +554,20 @@ QString inspector_card_header_open_style() {
     const ThemeTokens& t = tokens();
     return QStringLiteral(
         "QWidget#inspectorCardHeader {"
-        " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        "  stop:0 %1, stop:1 %2);"
-        " border: 1px solid %3; border-top: 1px solid %4;"
+        " background-color: %1;"
+        " border: 1px solid %2;"
         " border-top-left-radius: 16px; border-top-right-radius: 16px; }")
-        .arg(css(t.surface_highest), css(t.surface_raised),
-             css(t.border_soft), css(t.border_hi));
+        .arg(css(t.surface_highest), css(t.border_soft));
 }
 
 QString inspector_card_header_closed_style() {
     const ThemeTokens& t = tokens();
     return QStringLiteral(
         "QWidget#inspectorCardHeader {"
-        " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        "  stop:0 %1, stop:1 %2);"
-        " border: 1px solid %3; border-top: 1px solid %4;"
+        " background-color: %1;"
+        " border: 1px solid %2;"
         " border-radius: 16px; }")
-        .arg(css(t.surface_highest), css(t.surface_raised),
-             css(t.border_soft), css(t.border_hi));
+        .arg(css(t.surface_highest), css(t.border_soft));
 }
 
 QString inspector_card_body_style() {
@@ -603,12 +590,11 @@ QString page_pill_style() {
         " background: transparent; border: 1px solid transparent; }"
         "QToolButton:hover:!checked { color: %2; background-color: %3; }"
         "QToolButton:pressed { background-color: %4; }"
-        "QToolButton:checked { color: %2; background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 %5, stop:1 %6); border: 1px solid %7; border-top: 1px solid %8;"
+        "QToolButton:checked { color: %2; background-color: %5;"
+        " border: 1px solid %6;"
         " font-weight: 600; }")
         .arg(css(t.ink_muted), css(t.ink), css(t.state_hover),
-             css(t.state_press), css(t.surface_highest), css(t.surface_raised),
-             css(t.border), css(t.border_hi));
+             css(t.state_press), css(t.surface_highest), css(t.border));
 }
 
 // Inspector mode tabs: a recessed semi-rounded segmented track (the pill row's
@@ -628,11 +614,10 @@ QString inspector_tab_style() {
         "QToolButton { color: %1; background: transparent; border: none;"
         " border-radius: 11px; padding: 5px 4px; font-weight: 500; }"
         "QToolButton:hover:!checked { color: %2; background-color: %3; }"
-        "QToolButton:checked { color: %4; background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 %5, stop:1 %6); border: 1px solid %7; font-weight: 600; }")
+        "QToolButton:checked { color: %4; background-color: %5;"
+        " border: 1px solid %6; font-weight: 600; }")
         .arg(css(t.ink_muted), css(t.ink), css(t.state_hover),
-             css(t.accent_text), css(t.surface_highest), css(t.surface_raised),
-             css(t.accent_line));
+             css(t.accent_text), css(t.surface_highest), css(t.accent_line));
 }
 
 // Left "Media Pool / Sync Bin / ..." tab strip: the pane is transparent so the
@@ -645,9 +630,8 @@ QString left_tab_strip_style() {
         "QTabBar::tab{background:transparent;color:%1;padding:6px 12px;"
         "  border:none;border-radius:10px;font-weight:500;margin:2px 1px;}"
         "QTabBar::tab:hover{color:%2;background-color:%3;}"
-        "QTabBar::tab:selected{color:%4;background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        "  stop:0 %5, stop:1 %6);border:1px solid %7;border-top:1px solid %8;"
-        "  font-weight:600;}"
+        "QTabBar::tab:selected{color:%4;background-color:%5;"
+        "  border:1px solid %7;font-weight:600;}"
         "QTabBar::tab:selected:hover{color:%4;}"
         "QTabBar QToolButton{background:transparent;border:none;border-radius:8px;}"
         "QTabBar QToolButton:hover{background:%3;}")
@@ -710,21 +694,17 @@ QString slider_style() {
         .arg(css(t.border), css(t.accent), css(t.ink), css(t.surface_highest));
 }
 
-// Circular mint play button: a round accent disc with a lit top edge and a
-// soft mint halo (approximated with a bright rim + gradient) so it reads as the
-// glowing transport control from the Alt-html design.
+// Circular mint play button: a round accent disc — flat, clean, no bevel.
 QString transport_play_style() {
     const ThemeTokens& t = tokens();
     return QStringLiteral(
-        "QToolButton { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 %1, stop:1 %2); border: 1px solid %3;"
-        " border-top: 1px solid %4; border-radius: 50%; min-width: 30px;"
+        "QToolButton { background-color: %1; border: 1px solid %2;"
+        " border-radius: 50%; min-width: 30px;"
         " max-width: 30px; min-height: 30px; max-height: 30px; }"
-        "QToolButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-        " stop:0 %5, stop:1 %2); }"
-        "QToolButton:pressed { background: %6; }")
-        .arg(css(t.accent_hover), css(t.accent_press), css(t.accent_line),
-             css(t.accent_hover), css(t.accent), css(t.accent_press));
+        "QToolButton:hover { background-color: %3; }"
+        "QToolButton:pressed { background-color: %4; }")
+        .arg(css(t.accent), css(t.accent_line), css(t.accent_hover),
+             css(t.accent_press));
 }
 
 QIcon icon(const char* name) { return QIcon(new SvgIconEngine(QString::fromLatin1(name))); }

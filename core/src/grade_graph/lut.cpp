@@ -47,18 +47,30 @@ std::uint8_t clamp_unit(float v) {
     const float fg = vg - static_cast<float>(g0);
     const float fb = wb - static_cast<float>(b0);
 
+    // Corner indices derive from the (r?,g?,b?) tuples directly. When an input
+    // sits exactly on the grid edge r1/r0==last the naive i100=i000+n*n would
+    // read one row past N-1 (a latent OOB the zero edge-weight masked); clamping
+    // the HIGH neighbor to the floor keeps every read in-bounds while keeping
+    // the interpolation bit-identical. This index law is mirrored 1:1 by the
+    // CUDA nv12GradeResize kernel — never change one without the other.
     const std::vector<float>& d = lut.data;
-    const std::size_t i000 = (static_cast<std::size_t>(r0) * static_cast<std::size_t>(n) +
-                              static_cast<std::size_t>(g0)) *
-                                 static_cast<std::size_t>(n) +
+    const std::size_t nsz = static_cast<std::size_t>(n);
+    const std::size_t i000 = (static_cast<std::size_t>(r0) * nsz + static_cast<std::size_t>(g0)) * nsz +
                              static_cast<std::size_t>(b0);
-    const std::size_t i100 = i000 + static_cast<std::size_t>(n) * static_cast<std::size_t>(n);
-    const std::size_t i001 = i000 + 1u;
-    const std::size_t i101 = i100 + 1u;
-    const std::size_t i010 = i000 + static_cast<std::size_t>(n);
-    const std::size_t i110 = i100 + static_cast<std::size_t>(n);
-    const std::size_t i011 = i010 + 1u;
-    const std::size_t i111 = i110 + 1u;
+    const std::size_t i100 = (static_cast<std::size_t>(r1) * nsz + static_cast<std::size_t>(g0)) * nsz +
+                             static_cast<std::size_t>(b0);
+    const std::size_t i001 = (static_cast<std::size_t>(r0) * nsz + static_cast<std::size_t>(g0)) * nsz +
+                             static_cast<std::size_t>(b1);
+    const std::size_t i101 = (static_cast<std::size_t>(r1) * nsz + static_cast<std::size_t>(g0)) * nsz +
+                             static_cast<std::size_t>(b1);
+    const std::size_t i010 = (static_cast<std::size_t>(r0) * nsz + static_cast<std::size_t>(g1)) * nsz +
+                             static_cast<std::size_t>(b0);
+    const std::size_t i110 = (static_cast<std::size_t>(r1) * nsz + static_cast<std::size_t>(g1)) * nsz +
+                             static_cast<std::size_t>(b0);
+    const std::size_t i011 = (static_cast<std::size_t>(r0) * nsz + static_cast<std::size_t>(g1)) * nsz +
+                             static_cast<std::size_t>(b1);
+    const std::size_t i111 = (static_cast<std::size_t>(r1) * nsz + static_cast<std::size_t>(g1)) * nsz +
+                             static_cast<std::size_t>(b1);
 
     for (int c = 0; c < 3; ++c) {
         const std::size_t s000 = i000 * 3u + static_cast<std::size_t>(c);
@@ -234,19 +246,29 @@ VideoFramePtr apply_grade_lut(const VideoFrame& src, const GradeLut3D& lut) {
         const float fg = vg - static_cast<float>(g0);
         const float fb = wb - static_cast<float>(b0);
 
-        // Trilinear over the 8 enclosing grid cells.
+        // Trilinear over the 8 enclosing grid cells. Indices derive from the
+        // (r?,g?,b?) tuples directly (see sample_lut_pixel for why): when
+        // r0==last the high neighbor r1 is clamped to last so every read stays
+        // in-bounds, and the mirror CUDA kernel (nv12GradeResize) uses the same
+        // law bit-for-bit.
         const std::vector<float>& d = lut.data;
-        const std::size_t i000 = (static_cast<std::size_t>(r0) * static_cast<std::size_t>(n) +
-                                  static_cast<std::size_t>(g0)) *
-                                     static_cast<std::size_t>(n) +
+        const std::size_t nsz = static_cast<std::size_t>(n);
+        const std::size_t i000 = (static_cast<std::size_t>(r0) * nsz + static_cast<std::size_t>(g0)) * nsz +
                                  static_cast<std::size_t>(b0);
-        const std::size_t i100 = i000 + static_cast<std::size_t>(n) * static_cast<std::size_t>(n);
-        const std::size_t i001 = i000 + 1u;
-        const std::size_t i101 = i100 + 1u;
-        const std::size_t i010 = i000 + static_cast<std::size_t>(n);
-        const std::size_t i110 = i100 + static_cast<std::size_t>(n);
-        const std::size_t i011 = i010 + 1u;
-        const std::size_t i111 = i110 + 1u;
+        const std::size_t i100 = (static_cast<std::size_t>(r1) * nsz + static_cast<std::size_t>(g0)) * nsz +
+                                 static_cast<std::size_t>(b0);
+        const std::size_t i001 = (static_cast<std::size_t>(r0) * nsz + static_cast<std::size_t>(g0)) * nsz +
+                                 static_cast<std::size_t>(b1);
+        const std::size_t i101 = (static_cast<std::size_t>(r1) * nsz + static_cast<std::size_t>(g0)) * nsz +
+                                 static_cast<std::size_t>(b1);
+        const std::size_t i010 = (static_cast<std::size_t>(r0) * nsz + static_cast<std::size_t>(g1)) * nsz +
+                                 static_cast<std::size_t>(b0);
+        const std::size_t i110 = (static_cast<std::size_t>(r1) * nsz + static_cast<std::size_t>(g1)) * nsz +
+                                 static_cast<std::size_t>(b0);
+        const std::size_t i011 = (static_cast<std::size_t>(r0) * nsz + static_cast<std::size_t>(g1)) * nsz +
+                                 static_cast<std::size_t>(b1);
+        const std::size_t i111 = (static_cast<std::size_t>(r1) * nsz + static_cast<std::size_t>(g1)) * nsz +
+                                 static_cast<std::size_t>(b1);
 
         for (int c = 0; c < 3; ++c) {
             const std::size_t s000 = i000 * 3u + static_cast<std::size_t>(c);

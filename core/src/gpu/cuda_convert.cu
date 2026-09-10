@@ -145,6 +145,165 @@ __global__ void nv12Resize(const uint8_t* __restrict__ srcY,
     }
 }
 
+// Fused NV12 -> RGB -> 3D grade LUT (trilinear) -> RGB*fade -> NV12 for graded
+// clips on the export fast path. One launch replaces nv12Resize when a clip is
+// graded, so graded clips stay on the NVENC path (900+ fps) instead of dropping
+// to the CPU RGBA blit. The envelope mirrors the CPU compositor, in order:
+//
+//   1. resize sampling: byte-identical to nv12Resize (bilinear Y + 4-tap block
+//      chroma, letterbox bars Y=16/C=128).
+//   2. YUV->RGB: colorspace.hpp full-swing chroma gains (g.r_* are the caller's
+//      matrix_coeffs(matrix, range) values) + 1.164 limited-luma unwinding when
+//      g.range != full; RGB clamped to [0,255]. Same constants the viewer
+//      shaders use — never re-derived here.
+//   3. grade: bit-for-bit apply_grade_lut/sample_lut_pixel (r-major layout
+//      data[((r*N)+g)*N + b]; grid units = clamp(input)* (N-1); high neighbors
+//      clamped to the floor index on the top edge so every read is in-bounds).
+//      The index is EXPLICIT, so unlike the viewer's GL 3D-texture upload there
+//      is NO R/B axis swap here.
+//   4. fade: RGB output *= fade, the CPU compositor's whole-canvas transverse
+//      dip applied AFTER grade.
+//   5. RGB->YUV: EXACTLY rgbaToNV12's BT.709-limited law (coefficients, clamps
+//      Y[16,235]/C[16,240], +0.5 rounding) so a graded GPU export matches the
+//      CPU-composited convert_rgba_to_nv12 path to the byte.
+__global__ void nv12GradeResize(const uint8_t* __restrict__ srcY,
+                                const uint8_t* __restrict__ srcUV,
+                                int sw, int sh, size_t sYPitch, size_t sUVPitch,
+                                int dstW, int dstH, int dx, int dy,
+                                uint8_t* __restrict__ outY, size_t oYPitch,
+                                uint8_t* __restrict__ outUV, size_t oUVPitch,
+                                int ow, int oh, float fade,
+                                GradeKernelParams g) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= ow || y >= oh) return;
+
+    const int rdx = x - dx, rdy = y - dy;
+    const bool in_rect = rdx >= 0 && rdx < dstW && rdy >= 0 && rdy < dstH;
+
+    // 4:2:0 chroma is uniform per 2x2 output block (same block addressing as
+    // nv12Resize); bars keep neutral chroma / video black.
+    const int bx = x >> 1, by = y >> 1;
+    float Y = 16.f, Cb = 128.f, Cr = 128.f;
+    if (in_rect) {
+        const float sx = ((float)rdx + 0.5f) * sw / dstW - 0.5f;
+        const float sy = ((float)rdy + 0.5f) * sh / dstH - 0.5f;
+        int ix = clamp_index(sx, sw), iy = clamp_index(sy, sh);
+        float fx = sx - ix, fy = sy - iy;
+        if (fx < 0) fx = 0; else if (fx > 1) fx = 1;
+        if (fy < 0) fy = 0; else if (fy > 1) fy = 1;
+        const float w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy);
+        const float w01 = (1 - fx) * fy,     w11 = fx * fy;
+        const uint8_t* p00 = srcY + (size_t)iy * sYPitch + ix;
+        const uint8_t* p10 = p00 + 1;
+        const uint8_t* p01 = p00 + sYPitch;
+        const uint8_t* p11 = p01 + 1;
+        Y = w00 * p00[0] + w10 * p10[0] + w01 * p01[0] + w11 * p11[0];
+
+        const int srccw = sw >> 1, srcch = sh >> 1;
+        const int cdw = dstW >> 1, cdh = dstH >> 1;
+        const int cdx = dx >> 1, cdy = dy >> 1;
+        const int crdx = bx - cdx, crdy = by - cdy;
+        if (crdx >= 0 && crdx < cdw && crdy >= 0 && crdy < cdh) {
+            const float scx = ((float)crdx + 0.5f) * srccw / cdw - 0.5f;
+            const float scy = ((float)crdy + 0.5f) * srcch / cdh - 0.5f;
+            int icx = clamp_index(scx, srccw), icy = clamp_index(scy, srcch);
+            float fcx = scx - icx, fcy = scy - icy;
+            if (fcx < 0) fcx = 0; else if (fcx > 1) fcx = 1;
+            if (fcy < 0) fcy = 0; else if (fcy > 1) fcy = 1;
+            const float w00 = (1 - fcx) * (1 - fcy), w10 = fcx * (1 - fcy);
+            const float w01 = (1 - fcx) * fcy,     w11 = fcx * fcy;
+            const uint8_t* q00 = srcUV + (size_t)icy * sUVPitch + (size_t)icx * 2;
+            const uint8_t* q01 = q00 + sUVPitch;
+            Cb = w00 * q00[0] + w10 * (q00[2]) + w01 * q01[0] + w11 * (q01[2]);
+            Cr = w00 * q00[1] + w10 * (q00[3]) + w01 * q01[1] + w11 * (q01[3]);
+        }
+    }
+
+    // YUV -> full-range RGB (colorspace.hpp law; g.r_* are the (matrix, range)
+    // chroma gains, g.range picks the 1.164 limited-luma unwinding).
+    const float yr = (g.range == 1) ? Y : 1.164f * (Y - 16.f);
+    const float Cbq = Cb - 128.f, Crq = Cr - 128.f;
+    float r = yr + g.r_cr * Crq;
+    float g_ = yr + g.g_cb * Cbq + g.g_cr * Crq;
+    float b = yr + g.b_cb * Cbq;
+    if (r < 0.f) r = 0.f; else if (r > 255.f) r = 255.f;
+    if (g_ < 0.f) g_ = 0.f; else if (g_ > 255.f) g_ = 255.f;
+    if (b < 0.f) b = 0.f; else if (b > 255.f) b = 255.f;
+    float rn = r * (1.f / 255.f), gn = g_ * (1.f / 255.f), bn = b * (1.f / 255.f);
+
+    // Trilinear grade over the r-major grid — apply_grade_lut/sample_lut_pixel
+    // law, index explicit (no GL-style R/B axis swap needed here).
+    if (g.lut && g.lut_size >= 2) {
+        const int last = g.lut_size - 1;
+        if (rn < 0.f) rn = 0.f; else if (rn > 1.f) rn = 1.f;
+        if (gn < 0.f) gn = 0.f; else if (gn > 1.f) gn = 1.f;
+        if (bn < 0.f) bn = 0.f; else if (bn > 1.f) bn = 1.f;
+        const float ur = rn * (float)last;
+        const float vg = gn * (float)last;
+        const float wb = bn * (float)last;
+        int r0 = (int)ur, g0 = (int)vg, b0 = (int)wb;
+        if (r0 < 0) r0 = 0; else if (r0 > last) r0 = last;
+        if (g0 < 0) g0 = 0; else if (g0 > last) g0 = last;
+        if (b0 < 0) b0 = 0; else if (b0 > last) b0 = last;
+        const int r1 = r0 < last ? r0 + 1 : r0;
+        const int g1 = g0 < last ? g0 + 1 : g0;
+        const int b1 = b0 < last ? b0 + 1 : b0;
+        const float fr = ur - (float)r0, fg = vg - (float)g0, fb = wb - (float)b0;
+        const size_t nsz = (size_t)g.lut_size;
+        const size_t i000 = ((size_t)r0 * nsz + (size_t)g0) * nsz + (size_t)b0;
+        const size_t i100 = ((size_t)r1 * nsz + (size_t)g0) * nsz + (size_t)b0;
+        const size_t i001 = ((size_t)r0 * nsz + (size_t)g0) * nsz + (size_t)b1;
+        const size_t i101 = ((size_t)r1 * nsz + (size_t)g0) * nsz + (size_t)b1;
+        const size_t i010 = ((size_t)r0 * nsz + (size_t)g1) * nsz + (size_t)b0;
+        const size_t i110 = ((size_t)r1 * nsz + (size_t)g1) * nsz + (size_t)b0;
+        const size_t i011 = ((size_t)r0 * nsz + (size_t)g1) * nsz + (size_t)b1;
+        const size_t i111 = ((size_t)r1 * nsz + (size_t)g1) * nsz + (size_t)b1;
+        const float* d = g.lut;
+        for (int c = 0; c < 3; ++c) {
+            const float c00 = d[i000 * 3u + (size_t)c] +
+                              (d[i001 * 3u + (size_t)c] - d[i000 * 3u + (size_t)c]) * fb;
+            const float c10 = d[i100 * 3u + (size_t)c] +
+                              (d[i101 * 3u + (size_t)c] - d[i100 * 3u + (size_t)c]) * fb;
+            const float c01 = d[i010 * 3u + (size_t)c] +
+                              (d[i011 * 3u + (size_t)c] - d[i010 * 3u + (size_t)c]) * fb;
+            const float c11 = d[i110 * 3u + (size_t)c] +
+                              (d[i111 * 3u + (size_t)c] - d[i110 * 3u + (size_t)c]) * fb;
+            const float c0 = c00 + (c01 - c00) * fg;
+            const float c1 = c10 + (c11 - c10) * fg;
+            const float v = c0 + (c1 - c0) * fr;
+            if (c == 0) r = v * 255.f;
+            else if (c == 1) g_ = v * 255.f;
+            else b = v * 255.f;
+        }
+    }
+
+    // Whole-canvas edge fade toward black, applied AFTER grade as the CPU
+    // compositor does (canvas->rgba *= fade).
+    if (fade < 1.f) {
+        r *= fade;
+        g_ *= fade;
+        b *= fade;
+    }
+
+    // BT.709-limited encode: EXACTLY the rgbaToNV12 law (coefficients, clamps,
+    // +0.5 rounding). A bar pixel decodes to (0,0,0) so it re-encodes to
+    // 16/128/128 regardless of fade — defined output for the whole plane.
+    float Yo = 16.f + (0.183f * r + 0.614f * g_ + 0.062f * b);
+    if (Yo < 16.f) Yo = 16.f; else if (Yo > 235.f) Yo = 235.f;
+    outY[(size_t)y * oYPitch + x] = (uint8_t)(Yo + 0.5f);
+
+    if ((x & 1) == 0 && (y & 1) == 0) {
+        float Cbo = 128.f + (-0.101f * r - 0.339f * g_ + 0.439f * b);
+        float Cro = 128.f + (0.439f * r - 0.399f * g_ - 0.040f * b);
+        if (Cbo < 16.f) Cbo = 16.f; else if (Cbo > 240.f) Cbo = 240.f;
+        if (Cro < 16.f) Cro = 16.f; else if (Cro > 240.f) Cro = 240.f;
+        uint8_t* uv = outUV + (size_t)by * oUVPitch + (size_t)bx * 2;
+        uv[0] = (uint8_t)(Cbo + 0.5f);
+        uv[1] = (uint8_t)(Cro + 0.5f);
+    }
+}
+
 }  // namespace
 
 bool cuda_available() {
@@ -399,6 +558,51 @@ bool convert_nv12_resize_to_host(const uint8_t* srcY, const uint8_t* srcUV,
     cudaFree(dUV);
     cudaFree(dY);
     return ok;
+}
+
+void* grade_lut_upload(const float* data, int size) {
+    if (!data || size < 2) return nullptr;
+    const uint64_t bytes = (uint64_t)size * size * size * 3u * sizeof(float);
+    if (bytes == 0 || bytes > (uint64_t)1u << 32) return nullptr;
+    void* d = nullptr;
+    if (cudaMalloc(&d, bytes) != cudaSuccess) return nullptr;
+    if (cudaMemcpy(d, data, bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+        cudaFree(d);
+        return nullptr;
+    }
+    return d;
+}
+
+void grade_lut_free(void* dev) {
+    if (dev) cudaFree(dev);
+}
+
+bool convert_nv12_grade_resize_async(const uint8_t* srcY, const uint8_t* srcUV,
+                                     int src_w, int src_h,
+                                     std::size_t src_y_pitch, std::size_t src_uv_pitch,
+                                     uint8_t* dY, std::size_t yPitch,
+                                     uint8_t* dUV, std::size_t uvPitch,
+                                     int out_w, int out_h, int dst_w, int dst_h,
+                                     int dx, int dy, float fade,
+                                     const GradeKernelParams& g) {
+    if (!srcY || !srcUV || !dY || !dUV || src_w <= 0 || src_h <= 0 || out_w <= 0 ||
+        out_h <= 0 || dst_w <= 0 || dst_h <= 0)
+        return false;
+    // A graded call needs a valid device LUT. With g.lut_size < 2 the kernel
+    // skips the grade (passthrough decode->encode), but callers should never
+    // send that here — the exporter chooses this kernel only when a bake exists.
+    if (!g.lut || g.lut_size < 2) return false;
+    cudaStream_t s = convert_stream();
+    if (!s) return false;
+
+    cudaGetLastError();
+    const dim3 blk(16, 16);
+    const dim3 grp((out_w + 15) / 16, (out_h + 15) / 16);
+    nv12GradeResize<<<grp, blk, 0, s>>>(srcY, srcUV, src_w, src_h, src_y_pitch,
+                                        src_uv_pitch, dst_w, dst_h, dx, dy,
+                                        dY, yPitch, dUV, uvPitch,
+                                        out_w, out_h, fade, g);
+    return gpu_cuda_check("nv12_grade_resize_async", cudaGetLastError());
 }
 
 }  // namespace canvas::core::gpu

@@ -976,12 +976,17 @@ void build_color_page(MainWindow& mw) {
 }
 
 void enter_color_page(MainWindow& mw) {
+    const bool already_active = mw.color_active_;
     mw.color_active_ = true;
     // Always-on page trace: distinguishes "the user actually entered the Color
     // page" from the tonefield/ministrip lines that fire during startup dock
     // construction — the two look identical otherwise (see the 2026-09-09 log
     // rounds where no grade interaction appeared despite the wheels existing).
     qWarning() << "[page] enter color";
+    // The scopes/curve-veil read CPU graded pixels; enable the decoder's
+    // graded-preview feed for the Color page session (Edit-tab playback stays
+    // on the pure GPU NV12 fast path).
+    mw.controller_.set_cpu_graded_preview_enabled(true);
     if (mw.media_dock_) mw.media_dock_->hide();
     if (mw.inspector_dock_) mw.inspector_dock_->hide();
     if (mw.deliver_settings_dock_) mw.deliver_settings_dock_->hide();
@@ -992,12 +997,18 @@ void enter_color_page(MainWindow& mw) {
         if (mw.project_) mw.color_mini_strip_->set_sequence(&mw.project_->sequence);
         mw.color_mini_strip_->set_playhead(mw.controller_.current_frame());
     }
+    // Last presented frame was produced with the feed OFF — step to the same
+    // frame so the scopes immediately get a graded `a` to chew on. Skip on a
+    // re-enter (already decoding with the feed on).
+    if (!already_active && !mw.controller_.is_playing())
+        mw.controller_.step(0);
 }
 
 void leave_color_page(MainWindow& mw) {
     if (!mw.color_active_) return;
     mw.color_active_ = false;
     qWarning() << "[page] leave color";
+    mw.controller_.set_cpu_graded_preview_enabled(false);
     if (mw.color_dock_) mw.color_dock_->hide();
     if (mw.color_left_dock_) mw.color_left_dock_->hide();
     if (mw.color_nodes_dock_) mw.color_nodes_dock_->hide();

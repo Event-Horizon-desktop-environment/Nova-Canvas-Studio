@@ -191,10 +191,11 @@ int main() {
     // Phase 6 live graded preview + Phase LUT: a clip owning a grade tree is
     // baked to a 3D LUT attached to the RenderFrame (the viewer's NV12 shader
     // samples it) and the CPU RGBA path applies the same LUT, so preview ==
-    // export by construction. Graded clips therefore ride the NV12 fast path on
-    // GPU machines; the small CPU `a` is still attached so the scopes show the
-    // graded signal. On software-only machines the graded RGBA path delivers the
-    // pixels with no LUT carried (the frame holds no NV12 planes then).
+    // export by construction. Graded clips ride the NV12 fast path on GPU
+    // machines; the small CPU `a` (the Color-page scopes feed) is gated behind
+    // set_cpu_graded_preview_enabled() and OFF by default — see below. On
+    // software-only machines the graded RGBA path delivers the pixels with no
+    // LUT carried (the frame holds no NV12 planes then).
     {
         Project pgraded = project;
         Clip graded = clip;
@@ -208,6 +209,12 @@ int main() {
         g.add_rgb_edge(lgg, gout);
         graded.grade = g;
         pgraded.sequence.video_tracks[0].clips[0] = graded;
+
+        // The CPU graded-preview feed is OFF by default (Edit-tab playback stays
+        // on the pure GPU fast path). This block exercises the Color-page feed:
+        // opt in explicitly so the graded-rgba assertions below are valid on
+        // both GPU (NV12 + LUT) and software-only machines.
+        decoder.set_cpu_graded_preview_enabled(true);
 
         auto gf = decoder.frame(pgraded, 5);
         report(gf && gf->a && gf->a->width == kWidth && gf->a->height == kHeight,

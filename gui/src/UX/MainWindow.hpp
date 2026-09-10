@@ -18,6 +18,8 @@
 #include "features/deliver/deliver_settings_panel.hpp"
 #include "features/deliver/render_queue_panel.hpp"
 #include "features/playback/sequence_controller.hpp"
+#include "features/source_preview/source_preview_controller.hpp"
+#include "features/source_preview/source_viewer_panel.hpp"
 #include "features/thumbnails/thumbnail_service.hpp"
 #include "Widgets/timeline_widget.hpp"
 #include "Widgets/viewer_gl.hpp"
@@ -121,6 +123,11 @@ public:
     void render_all_from_queue();
     void reflect_render_queue();
 
+    // Dual-Viewer source preview: opens a pooled media entry in the source
+    // controller (set_project + first frame) and closes it again.
+    void open_source_preview(const canvas::core::MediaEntry& media);
+    void clear_source_preview();
+
 protected:
     void keyPressEvent(QKeyEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
@@ -206,8 +213,10 @@ private:
     QAction* inspector_toggle_action_ = nullptr;
     QToolButton* inspector_top_btn_ = nullptr;
     SequenceController controller_;
+    source_preview::SourcePreviewController src_preview_;
     ThumbnailService thumbnails_;
     ViewerGL* viewer_ = nullptr;
+    source_preview::SourceViewerPanel* source_panel_ = nullptr;
     TimelineWidget* timeline_ = nullptr;
     QSlider* scrub_ = nullptr;
     QToolButton* play_button_ = nullptr;
@@ -280,6 +289,9 @@ private:
     int64_t total_frames_ = -1;
     int64_t current_frame_ = 0;
     bool has_unsaved_changes_ = false;
+    // Audible media-pool hover session is active (between clipScrubbed and
+    // clipScrubEnded). Drives the source player's begin/end_hover_scrub pair.
+    bool source_hovering_ = false;
     canvas::core::ClipId selected_clip_ = 0;
     // The full visible selection (ids, incl. linked mates) from the timeline —
     // PRIMARY clip drives the Visual inspector, the whole set drives mixer

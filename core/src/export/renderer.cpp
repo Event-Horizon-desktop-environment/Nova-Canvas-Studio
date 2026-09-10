@@ -584,15 +584,11 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
         }
     }
 
-    // Grade the tree applies BEFORE the transform/composite blit, but the GPU
-    // path composites the raw decoded plane — a graded clip must drop to the
-    // CPU compositor (same guarantee as overlap and transform fallbacks).
-    if (the_clip->has_grade()) {
-        CANVAS_LOG("frame_gpu: graded clip id=%lld at tl_frame=%lld -> CPU path",
-               (long long)the_clip->id, (long long)tl_frame);
-        gpu_mark(4);
-        return false;
-    }
+    // Grade the tree applies BEFORE the transform/composite blit. The GPU path
+    // now grades inline: the baked LUT rides on GpuFrameInfo and the exporter's
+    // fused nv12GradeResize kernel applies it during the resize (previously a
+    // graded clip had to drop to the CPU compositor — which cost the fast path
+    // on every graded export).
 
     // Single-clip edge fades: fold the whole-canvas black-factor blend into the
     // GPU resize (fade in/out windows), using the same law as the CPU
@@ -715,6 +711,12 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
     out->dx = (width_ - dst_w) / 2;
     out->dy = (height_ - dst_h) / 2;
     out->source = hw;
+    // Grade + source color spec ride along for the fused GPU grade kernel;
+    // ungraded clips carry null grade and the exporter uses plain nv12Resize.
+    out->grade = td->lut_for(clip);
+    const gpu::ColorSpec spec = td->dec->color_spec();
+    out->matrix = static_cast<int>(spec.matrix);
+    out->range = static_cast<int>(spec.range);
     out->valid = true;
     gpu_mark(-1);  // landed: counts total ms, never increments bailed/reasons
     return true;

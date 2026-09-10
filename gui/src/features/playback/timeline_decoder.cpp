@@ -725,7 +725,7 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
             if (in_in_trans && !in_out_trans) {
                 out->nv12 = std::move(nvA);
                 out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
-                if (grade_a)
+                if (grade_a && cpu_graded_preview_enabled_)
                     out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
                                                          kPreviewMaxDim));
                 out->mode = to_render_mode(a->transition_in);
@@ -783,7 +783,7 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                     out->grade_b = b->has_grade()
                                        ? grade_lut_for(*b)
                                        : canvas::core::grade_graph::GradeLutPtr{};
-                    if (grade_a)
+                    if (grade_a && cpu_graded_preview_enabled_)
                         out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
                                                              kPreviewMaxDim));
                     out->mode = to_render_mode(a->transition_out);
@@ -799,7 +799,7 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                 // fade A itself out to black over the transition window.
                 out->nv12 = std::move(nvA);
                 out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
-                if (grade_a)
+                if (grade_a && cpu_graded_preview_enabled_)
                     out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
                                                          kPreviewMaxDim));
                 out->mode = to_render_mode(a->transition_out);
@@ -823,7 +823,10 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
         if (nv12) {
             out->nv12 = std::move(nv12);
             out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
-            if (grade_a)
+            // The GPU fast path is the whole story when the Color page is NOT
+            // active: display rides the NV12 planes + shader LUT, and there is
+            // nothing consuming the small CPU `a`.
+            if (grade_a && cpu_graded_preview_enabled_)
                 out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
                                                      kPreviewMaxDim));
             return out;
@@ -926,24 +929,111 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
 
     // Graded clips ride the GPU NV12 fast path like every other clip: the LUT
     // is attached to the RenderFrame and the viewer's NV12 shader applies it
-    // (Phase LUT live graded preview). CPU-only fallback below also goes
-    // through the same LUT, so scrub and playback previews match export.
-    const bool need_rgba = in_out_trans || in_in_trans;
-
+    // (Phase LUT live graded preview). Transition windows too: single-clip
+    // fades and cut-dissolves crossfade two hardware NV12 planes in the shader
+    // (b_nv12 + mode/progress), so a scrub across a transition stays GPU-speed
+    // instead of two full CPU RGBA decodes per frame. The CPU compositor below
+    // is the fallback when a required plane can't be hardware-decoded.
+    const bool grade_a = a->has_grade();
     bool nv12_had = false, rgba_had = false;
-    if (!need_rgba) {
-        // GPU fast path with the reduced-cap composite (see frame). Scopes still
-        // need CPU pixels, so a graded clip wins a small graded `a` as well; the
-        // NV12 planes drive the viewer, the graded rgba copy drives the scopes.
-        // Both carry the same LUT output, so scopes and the preview match export.
-        if (auto nv12 = decode_nv12(project, *a, seq_frame, max_dim)) {
+    {
+        // GPU fast path with the reduced-cap composite (see frame).
+        const auto nvA = decode_nv12(project, *a, seq_frame, max_dim);
+        if (nvA) {
             nv12_had = true;
-            out->nv12 = std::move(nv12);
-            if (a->has_grade()) {
-                out->grade = grade_lut_for(*a);
-                out->a = grade_clip_frame(*a, decode(project, *a, seq_frame, max_dim));
+            // Single-clip IN fade needs only A: the viewer ramps A itself against
+            // black in the shader.
+            if (in_in_trans && !in_out_trans) {
+                out->nv12 = std::move(nvA);
+                out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
+                if (grade_a && cpu_graded_preview_enabled_)
+                    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame, max_dim));
+                out->mode = to_render_mode(a->transition_in);
+                if (dur_in > 0)
+                    out->progress = static_cast<float>(seq_frame - a->tl_in) /
+                                    static_cast<float>(dur_in);
+                out->fade_from_black = true;
+                return out;
             }
-            return out;
+            if (in_out_trans) {
+                // The incoming clip B (sitting exactly at the cut on the same
+                // track) plays BEHIND A. Advance B through its pre-roll handle so
+                // the dissolve reveals live footage instead of a frozen first
+                // frame; clamp to source 0 when the head was trimmed tight.
+                const canvas::core::Sequence& seq = project.sequence;
+                const canvas::core::Clip* b = nullptr;
+                for (const auto& track : seq.video_tracks) {
+                    if (track.locked) continue;
+                    for (const auto& cc : track.clips) {
+                        if (cc.tl_in == a->tl_out) { b = &cc; break; }
+                    }
+                    if (b) break;
+                }
+                if (b && b != a) {
+                    const double bsf = project.sequence.fps;
+                    const double bmf = media_fps_of(project, *b);
+                    const double bratio = (bmf > 0.0 && bsf > 0.0) ? bsf / bmf : 1.0;
+                    int64_t b_seq = b->tl_in + static_cast<int64_t>(std::llround(
+                        (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
+                    if (b_seq < 0) b_seq = 0;
+                    auto nvB = [&]() -> canvas::core::Nv12FramePtr {
+                        // Same clip media => the adjacent clips share ONE hardware
+                        // decoder slot, and B would decode the exact frame A already
+                        // has (b->tl_in == a->tl_out maps b_seq == seq_frame).
+                        // Re-decoding re-seeks the shared CUDA session backward,
+                        // re-walking up to a full keyframe GOP per transition frame.
+                        // Reuse A's planes: crossfading identical frames is the
+                        // seamless-cut the dissolve intends.
+                        if (b->media == a->media) return nvA;
+                        return decode_nv12(project, *b, b_seq, max_dim);
+                    }();
+                    if (nvB) {
+                        out->nv12 = std::move(nvA);
+                        out->b_nv12 = std::move(nvB);
+                        out->grade = grade_a
+                                         ? grade_lut_for(*a)
+                                         : canvas::core::grade_graph::GradeLutPtr{};
+                        out->grade_b = b->has_grade()
+                                           ? grade_lut_for(*b)
+                                           : canvas::core::grade_graph::GradeLutPtr{};
+                        if (grade_a && cpu_graded_preview_enabled_)
+                            out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
+                                                                 max_dim));
+                        out->mode = to_render_mode(a->transition_out);
+                        if (dur_out > 0)
+                            out->progress = static_cast<float>(seq_frame - tr_out_start) /
+                                            static_cast<float>(dur_out);
+                        return out;
+                    }
+                    // B couldn't be hardware-decoded: fall through and render the
+                    // whole transition on the CPU RGBA path below.
+                } else {
+                    // No incoming clip at the cut (e.g. the last clip on the
+                    // track): fade A itself out to black over the window.
+                    out->nv12 = std::move(nvA);
+                    out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
+                    if (grade_a && cpu_graded_preview_enabled_)
+                        out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
+                                                             max_dim));
+                    out->mode = to_render_mode(a->transition_out);
+                    if (dur_out > 0)
+                        out->progress = static_cast<float>(seq_frame - tr_out_start) /
+                                        static_cast<float>(dur_out);
+                    out->fade_to_black = true;
+                    return out;
+                }
+            } else {
+                // Plain frame: NV12 plane + grade LUT.
+                out->nv12 = std::move(nvA);
+                if (a->has_grade()) {
+                    out->grade = grade_lut_for(*a);
+                    // The GPU path needs no CPU rgba to display; the small graded
+                    // feed only exists for the Color-page scopes.
+                    if (cpu_graded_preview_enabled_)
+                        out->a = grade_clip_frame(*a, decode(project, *a, seq_frame, max_dim));
+                }
+                return out;
+            }
         }
     }
 
@@ -1001,7 +1091,7 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
             "[scrub:BAD] seq=%lld media=%d src=%lld gpu_path=%d nv12_ok=%d rgba_ok=%d "
             "slot_loaded=%d hw=%d maxdim=%d",
             static_cast<long long>(seq_frame), a->media,
-            static_cast<long long>(a->src_in + (seq_frame - a->tl_in)), (!need_rgba),
+            static_cast<long long>(a->src_in + (seq_frame - a->tl_in)), nv12_had,
             nv12_had, rgba_had, is_loaded(a->media), is_hardware(a->media), max_dim);
         out->a = make_black_frame(*a, max_dim);
         rgba_had = true;  // packed black pixels; count as paint-able

@@ -50,6 +50,12 @@ public:
     void play();
     void pause();
     void toggle_play_pause();
+    // Claims the audio output device back from a competing controller: pauses
+    // this player and CLOSES its device so another SequenceController (e.g. the
+    // dual-viewer source preview) can open it. Two AudioOutputs can't share one
+    // device, so a paused controller that keeps its handle open blocks the
+    // other's play(). Additive API — the timeline path never calls it.
+    void release_audio();
     void seek(int64_t frame_number);
     // Fast low-resolution scrub preview: decodes the frame at a reduced size for
     // responsive scrubbing and does NOT write it into the full-res frame cache.
@@ -67,6 +73,13 @@ public:
     // Enable/disable audible scrubbing (sound grains while dragging the playhead).
     void set_scrub_audio_enabled(bool on) { scrub_audio_enabled_.store(on); }
     [[nodiscard]] bool scrub_audio_enabled() const { return scrub_audio_enabled_.load(); }
+
+    // Gate the CPU graded-preview feed (decoder-level flag, default OFF so
+    // play/edit stay on the pure GPU NV12 fast path). The Color page enables it
+    // on enter so its scopes/curve-veil read graded pixels; it then re-presents
+    // the current frame to seed them.
+    void set_cpu_graded_preview_enabled(bool on) { decoder_.set_cpu_graded_preview_enabled(on); }
+    [[nodiscard]] bool cpu_graded_preview_enabled() const { return decoder_.cpu_graded_preview_enabled(); }
 
     // Monitoring volume / mute, forwarded to the audio output. Volume is [0,1];
     // setting volume un-mutes. Mute silences without losing the volume.
@@ -89,7 +102,7 @@ signals:
     void playback_changed(bool playing);
 
 private:
-    enum class Command { SetProject, AddMedia, Play, Pause, Seek, SeekPreview, Step, UpdateAudioMix, Stop };
+    enum class Command { SetProject, AddMedia, Play, Pause, Seek, SeekPreview, Step, UpdateAudioMix, ReleaseAudio, Stop };
     struct Request {
         Command command = Command::Stop;
         int64_t arg = 0;

@@ -121,6 +121,14 @@ canvas_add_headless_test(deliver_settings_model_test
     ../src/features/deliver/deliver_settings_model.cpp
 )
 
+# source_preview_model_test: Dual-Viewer / media-pool-scrub model (synthetic
+# single-clip preview project + scrub fraction<->source frame law). Compiles
+# source_preview_model.cpp directly (Qt-free seam enforced by the build).
+canvas_add_headless_test(source_preview_model_test
+    source_preview_model_test.cpp
+    ../src/features/source_preview/source_preview_model.cpp
+)
+
 # volume_line_drag_qt_test: full-widget (Qt) regression test that drives the
 # audio volume-line drag through the real press/move/release handlers and checks
 # the emitted preview/commit dB values stay inside the audio law band and point

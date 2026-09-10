@@ -143,6 +143,11 @@ target_link_libraries(canvas_lut_test PRIVATE canvas_core)
 set_target_properties(canvas_lut_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME lut COMMAND canvas_lut_test)
 
+add_executable(canvas_gpu_grade_test tests/gpu_grade_test.cpp)
+target_link_libraries(canvas_gpu_grade_test PRIVATE canvas_core)
+set_target_properties(canvas_gpu_grade_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME gpu_grade COMMAND canvas_gpu_grade_test)
+
 add_executable(canvas_wheels_ui_test tests/wheels_ui_test.cpp)
 target_link_libraries(canvas_wheels_ui_test PRIVATE canvas_core)
 set_target_properties(canvas_wheels_ui_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)

@@ -152,9 +152,8 @@ void RenderQueuePanel::build() {
     setAutoFillBackground(false);
     apply_theme_style(this, [] {
         const ThemeTokens& t = tokens();
-        return QStringLiteral("QWidget{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-                              " stop:0 %1, stop:0.5 %2, stop:1 %2);}")
-            .arg(css(t.surface_raised), css(t.surface));
+        return QStringLiteral("QWidget{background-color:%1;}")
+            .arg(css(t.surface));
     });
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(10, 10, 10, 10);
