@@ -76,7 +76,7 @@ protected:
             dragging_ = true;
             setFocus(Qt::MouseFocusReason);
             CANVAS_COLOR_LOG(
-                "[color:scrub] press x=%.0f value=%.4f units_per_px=%.5f range=(%.2f,%.2f)",
+                "[scrub] press x=%.0f value=%.4f units_per_px=%.5f range=(%.2f,%.2f)",
                 press_x_, press_value_, units_per_px_, field_lo_, field_hi_);
         }
         QDoubleSpinBox::mousePressEvent(event);
@@ -93,7 +93,7 @@ protected:
                 selectAll();
                 if (prev != v) {
                     CANVAS_COLOR_LOG(
-                        "[color:scrub] move dx=%.1fpx value=%.4f -> %.4f (d=%+.4f)",
+                        "[scrub] move dx=%.1fpx value=%.4f -> %.4f (d=%+.4f)",
                         dx, prev, v, v - press_value_);
                 }
             }
@@ -107,7 +107,7 @@ protected:
         if (dragging_) {
             dragging_ = false;
             CANVAS_COLOR_LOG(
-                "[color:scrub] release value=%.4f total_d=%.4f (press=%.4f)",
+                "[scrub] release value=%.4f total_d=%.4f (press=%.4f)",
                 value(), value() - press_value_, press_value_);
         }
         QDoubleSpinBox::mouseReleaseEvent(event);

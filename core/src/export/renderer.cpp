@@ -810,11 +810,6 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
         }
 
         const int src_ch = chunk->channels;
-        // Lane sanity clamp (shared audio_mix law): a float32 monster in this
-        // lane is held to the last valid sample before it mixes. The chunk is
-        // const-shared, so sanitize a mutable copy.
-        std::vector<float> lane = chunk->samples;
-        (void)audio_mix::sanitize_lane(lane.data(), num_frames, src_ch);
         // Per-output-frame gain from the clip's audio IN/OUT transitions
         // (audio_fade_gain returns 1.0 when no audio fade touches the frame) and
         // the track's post-fade gain (db_to_gain law). Fade frames advance on the
@@ -830,15 +825,10 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
         float gl = 1.0f;
         float gr = 1.0f;
         audio_mix::pan_gains(clip->pan, gl, gr);
-        mix_audio_chunk(out->samples, lane, src_ch, out_channels, gains,
+        mix_audio_chunk(out->samples, chunk->samples, src_ch, out_channels, gains,
                         audio_mix::db_to_gain(clip->volume_db) * audio_mix::db_to_gain(track.gain_db),
                         gl, gr);
     }
-    // Master limiter (shared audio_mix law), same as the RenderSession path:
-    // the free-function bus is single-shot per call, so its limiter starts at
-    // unity; the persistent session carries the release across chunks.
-    canvas::core::audio_mix::MasterLimiter lim;
-    for (float& v : out->samples) v = lim.apply(v);
     return out;
 }
 
@@ -1066,19 +1056,17 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
         // filtering at ANY export rate (no fixed-48 kHz bypass like the RNNoise
         // stage above) and writes exactly the frame count it was given, so the
         // per-output-frame gain law below stays in sync. Disabled clips pass
-        // through bit-exact (the settle-to-dry is crossfaded over kGlideFrames
-        // by the bank; export never toggles mid-clip, so its disabled path is
-        // always already settled). An enabled clip's FIRST tick glides dry->wet
-        // over kGlideFrames so a fresh curve fades in click-free.
+        // through bit-exact; the bank drops its filter state then, so toggling
+        // EQ on restarts from a fresh curve.
         std::vector<float> eqd;
         if (den_frames > 0 && pcm) {
-            if (clip->eq_enabled || eq_bank_.wants_samples(clip->id, false)) {
+            if (clip->eq_enabled) {
                 eqd.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
                 // The EQ is stream-in-place and rate-preserving, so it writes
                 // exactly the frames it was given (the returned count is the
                 // no-lookahead contract, asserted here).
-                den_frames = eq_bank_.tick(clip->id, clip->eq_bands, clip->eq_enabled,
-                                           out_sample_rate, den_ch, eqd.data(), den_frames);
+                den_frames = eq_bank_.tick(clip->id, clip->eq_bands, true, out_sample_rate,
+                                           den_ch, eqd.data(), den_frames);
                 pcm = eqd.data();
             } else {
                 (void)eq_bank_.tick(clip->id, clip->eq_bands, false, out_sample_rate, den_ch,
@@ -1096,31 +1084,12 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
             gains[static_cast<std::size_t>(k)] = audio_fade_gain(*clip, frm);
         }
         if (den_frames > 0 && pcm) {
-            // Lane sanity clamp (shared audio_mix law): hold any nonfinite or
-            // >kLaneSanityCeiling sample in this clip's DSP lane to the last
-            // valid sample so a float32 monster never lands in the export.
-            // pcm aliases writable locals (eqd/sped), so the const_cast is safe.
-            (void)audio_mix::sanitize_lane(const_cast<float*>(pcm), den_frames, den_ch);
             // Pan is baked by the retime engine above; the free-function path
             // (render_audio_chunk) still applies pan_gains here itself.
             mix_audio_chunk(out->samples, pcm, den_ch, den_frames, out_channels, gains,
                             audio_mix::db_to_gain(clip->volume_db) * audio_mix::db_to_gain(track.gain_db),
                             1.0f, 1.0f);
         }
-    }
-    // Master limiter (shared audio_mix law): the exported bus must never exceed
-    // kMasterCeiling peak, so loud-but-EQ-boosted program encodes unclipped and
-    // matches the DAC-bound playback bus. Defensive nonfinite hold first (lanes
-    // were sanitized, so this should never trip; a held value stops inf*0 ->
-    // NaN in the limiter).
-    {
-        std::vector<float>& m = out->samples;
-        float last = 0.0f;
-        for (float& v : m) {
-            if (std::isfinite(v)) last = v;
-            else v = last;
-        }
-        for (float& v : m) v = limiter_.apply(v);
     }
     return out;
 }

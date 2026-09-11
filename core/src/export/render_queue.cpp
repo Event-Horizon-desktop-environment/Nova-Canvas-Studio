@@ -374,11 +374,6 @@ void RenderQueue::worker() {
                 }
                 if (on_changed) on_changed();
             };
-            // Route the exporter's throttled live-preview frames up to whoever
-            // bound on_preview_frame (the GUI marshals onto the main thread).
-            ctrl.on_frame = [&](VideoFramePtr frame) {
-                if (on_preview_frame) on_preview_frame(std::move(frame));
-            };
             ok = run_job(project, es, resolver, &ctrl, &cancel_current_, &error);
         }
 

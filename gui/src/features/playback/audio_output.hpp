@@ -68,7 +68,7 @@ public:
     // stats line so starvation-vs-underrun is attributable.
     [[nodiscard]] uint64_t stat_silence_holds() const;
     [[nodiscard]] uint64_t stat_silence_hold_frames() const;
-    [[nodiscard]] uint64_t stat_xruns() const override;
+    [[nodiscard]] uint64_t stat_xruns() const;
 
     // Approximate media-time position (in frames at the opened sample_rate) that is
     // currently AUDIBLE at the speaker — accounts for DMA/device data ahead of the

@@ -139,56 +139,6 @@ bool write_test_wav(const char* path, int seconds = 6) {
     return write_wav(path, seconds, 300.0, 0.8f, 0.0, 1.7);
 }
 
-// Float32 stereo writer whose first `garbage_frames` hold grossly out-of-range
-// samples (1e6..8e18 — corrupt decoder output, the class the field recording
-// carried at its stream head) followed by the same sine tone as write_test_wav.
-bool write_wav_f32(const char* path, int seconds, double base_freq, float amp,
-                   int garbage_frames) {
-    std::FILE* f = std::fopen(path, "wb");
-    if (!f) return false;
-    const int64_t total = static_cast<int64_t>(kRate) * seconds;
-    const std::uint32_t data_bytes = static_cast<std::uint32_t>(total) * kChannels * 4;
-    const std::uint32_t byte_rate = kRate * kChannels * 4;
-    const std::uint16_t block_align = static_cast<std::uint16_t>(kChannels * 4);
-    const std::uint32_t riff = data_bytes + 36;
-    const std::uint32_t fmt_sz = 18;  // float format 3 carries a cbSize word
-    const std::uint16_t fmt1 = 3;
-    const std::uint16_t cb_sz = 0;
-    const std::uint16_t bps = 32;
-    std::fwrite("RIFF", 1, 4, f);
-    std::fwrite(&riff, 4, 1, f);
-    std::fwrite("WAVE", 1, 4, f);
-    std::fwrite("fmt ", 1, 4, f);
-    std::fwrite(&fmt_sz, 4, 1, f);
-    std::fwrite(&fmt1, 2, 1, f);
-    std::fwrite(&kChannels, 2, 1, f);
-    std::fwrite(&kRate, 4, 1, f);
-    std::fwrite(&byte_rate, 4, 1, f);
-    std::fwrite(&block_align, 2, 1, f);
-    std::fwrite(&bps, 2, 1, f);
-    std::fwrite(&cb_sz, 2, 1, f);
-    std::fwrite("data", 1, 4, f);
-    std::fwrite(&data_bytes, 4, 1, f);
-    const float seed[] = {1e6f, -5e4f, 3e12f, -8e18f};
-    for (int64_t i = 0; i < total; ++i) {
-        for (int c = 0; c < kChannels; ++c) {
-            float v;
-            if (i < garbage_frames) {
-                v = seed[(i * kChannels + c) % 4];
-                v *= c ? 1.0f : 1.3f;
-            } else {
-                const float sc = c ? 1.7f : 0.0f;  // same phases as write_test_wav
-                const double ph =
-                    kTau * (base_freq + 100.0 * c) / kRate * static_cast<double>(i) + sc;
-                v = amp * std::sin(static_cast<float>(ph));
-            }
-            std::fwrite(&v, 4, 1, f);
-        }
-    }
-    std::fclose(f);
-    return true;
-}
-
 // Ground-truth float for the same waveform (must match write_wav).
 float exp_wave(int64_t frame, int ch, double base_freq, float amp,
                double start_l, double start_r) {
@@ -217,15 +167,14 @@ bool region_matches(const std::vector<float>& v, std::size_t begin, std::size_t 
     return true;
 }
 
-Project make_project(int64_t src_in, int64_t src_out,
-                     const char* path = "/tmp/canvas_audio_pipe_test.wav") {
+Project make_project(int64_t src_in, int64_t src_out) {
     Project p;
     p.name = "AudioPipelineTest";
     p.sequence.fps = kFps;
 
     MediaEntry m0;
     m0.id = 0;
-    m0.path = path;
+    m0.path = "/tmp/canvas_audio_pipe_test.wav";
     m0.fps = kFps;
     m0.width = 320;
     m0.height = 180;
@@ -256,9 +205,7 @@ struct Harness {
     canvas::gui::AudioPipeline pipe{sink};
     Project project{make_project(0, 180)};
 
-    Harness(int64_t src_in = 0, int64_t src_out = 180,
-            const char* path = "/tmp/canvas_audio_pipe_test.wav")
-        : project(make_project(src_in, src_out, path)) {
+    Harness(int64_t src_in = 0, int64_t src_out = 180) : project(make_project(src_in, src_out)) {
         pipe.set_project(&project);
         pipe.add_media(project.media[0]);
         pipe.open_output();
@@ -422,7 +369,7 @@ int main() {
     //  * -6 dB on A2 halves its contribution (10^(-6/20) ≈ 0.5012).
     {
         const char* wav2 = "/tmp/canvas_audio_pipe_test2.wav";
-        check(write_wav(wav2, 6, 300.0, 0.15f, 0.9, 0.2), "G2: write second tone wav");
+        check(write_wav(wav2, 6, 300.0, 0.5f, 0.9, 0.2), "G2: write second tone wav");
 
         Project p = make_project(0, 180);
         p.name = "MixTest";
@@ -476,7 +423,7 @@ int main() {
                     exp_sample(static_cast<int64_t>(i / kChannels),
                                static_cast<int>(i % kChannels)) +
                     exp_wave(static_cast<int64_t>(i / kChannels),
-                             static_cast<int>(i % kChannels), 300.0, 0.15f, 0.9, 0.2);
+                             static_cast<int>(i % kChannels), 300.0, 0.5f, 0.9, 0.2);
                 if (std::fabs(all[i] - want) > 1e-3f) ok = false;
             }
             check(ok, "G2: two audio tracks SUM at unity");
@@ -489,7 +436,7 @@ int main() {
             bool ok = !all.empty();
             for (std::size_t i = 0; i < all.size() && ok; ++i) {
                 const float want = exp_wave(static_cast<int64_t>(i / kChannels),
-                                            static_cast<int>(i % kChannels), 300.0, 0.15f, 0.9, 0.2);
+                                            static_cast<int>(i % kChannels), 300.0, 0.5f, 0.9, 0.2);
                 if (std::fabs(all[i] - want) > 1e-3f) ok = false;
             }
             check(ok, "G2: muted audio track is silent (A2 alone)");
@@ -503,7 +450,7 @@ int main() {
             bool ok = !all.empty();
             for (std::size_t i = 0; i < all.size() && ok; ++i) {
                 const float want = exp_wave(static_cast<int64_t>(i / kChannels),
-                                            static_cast<int>(i % kChannels), 300.0, 0.15f, 0.9, 0.2);
+                                            static_cast<int>(i % kChannels), 300.0, 0.5f, 0.9, 0.2);
                 if (std::fabs(all[i] - want) > 1e-3f) ok = false;
             }
             check(ok, "G2: solo isolates the soloed track (A1 silenced)");
@@ -518,7 +465,7 @@ int main() {
             for (std::size_t i = 0; i < all.size() && ok; ++i) {
                 const int64_t fr = static_cast<int64_t>(i / kChannels);
                 const int ch = static_cast<int>(i % kChannels);
-                const float s2 = exp_wave(fr, ch, 300.0, 0.15f, 0.9, 0.2);
+                const float s2 = exp_wave(fr, ch, 300.0, 0.5f, 0.9, 0.2);
                 const float want = exp_sample(fr, ch) + (ch == 0 ? 0.0f : s2);
                 if (std::fabs(all[i] - want) > 1e-3f) ok = false;
             }
@@ -536,7 +483,7 @@ int main() {
                 const int ch = static_cast<int>(i % kChannels);
                 const float want =
                     exp_sample(fr, ch) +
-                    exp_wave(fr, ch, 300.0, 0.15f, 0.9, 0.2) * g6;
+                    exp_wave(fr, ch, 300.0, 0.5f, 0.9, 0.2) * g6;
                 if (std::fabs(all[i] - want) > 1.5e-3f) ok = false;
             }
             check(ok, "G2: -6 dB clip volume halves the track's contribution");
@@ -553,7 +500,7 @@ int main() {
                 const int ch = static_cast<int>(i % kChannels);
                 const float want =
                     exp_sample(fr, ch) * g6 +
-                    exp_wave(fr, ch, 300.0, 0.15f, 0.9, 0.2);
+                    exp_wave(fr, ch, 300.0, 0.5f, 0.9, 0.2);
                 if (std::fabs(all[i] - want) > 1.5e-3f) ok = false;
             }
             check(ok, "G3: -6 dB track gain scales only that audio track");
@@ -569,7 +516,7 @@ int main() {
                 const int ch = static_cast<int>(i % kChannels);
                 const float want =
                     exp_sample(fr, ch) +
-                    exp_wave(fr, ch, 300.0, 0.15f, 0.9, 0.2);
+                    exp_wave(fr, ch, 300.0, 0.5f, 0.9, 0.2);
                 if (std::fabs(all[i] - want) > 1e-3f) ok = false;
             }
             check(ok, "G3: 0 dB track gain is a bit-exact sum (unity shortcut)");
@@ -917,8 +864,8 @@ int main() {
     // --- J. Device-bound mix capture: set_wave_capture() writes the exact float
     // mix handed to the sink as a playable float32 WAV, patched on close. This
     // validates the diagnostic path used to chase the field "garbled music"
-    // report (the capture must be parseable and frame-accurate; the master
-    // limiter keeps it inside the 0.98 audio_mix ceiling).
+    // report (the capture must be parseable, frame-accurate, and include mixes
+    // that EXCEED 0 dBFS so clipping shows up in the file, not just the log).
     {
         const char* capWav = "/tmp/canvas_audio_pipe_capture.wav";
         std::remove(capWav);
@@ -959,286 +906,6 @@ int main() {
             std::fclose(f);
         }
         std::remove(capWav);
-    }
-
-    // --- K. Corrupt decoder output (raw-PCM stream-head garbage surfaced after
-    // a re-anchor, the field left-ear pop) is held-to-valid before the mix ----
-    {
-        const char* corr = "/tmp/canvas_audio_pipe_corrupt.wav";
-        std::remove(corr);
-        check(write_wav_f32(corr, 2, 300.0, 0.8f, 4), "K: write float32 wav with corrupt head");
-        Harness h(0, 180, corr);
-        h.pipe.rewind(0, true);
-        h.pipe.preroll(0, 70, true);
-        h.play(0, 5);
-        const std::size_t n = h.sink.all_.size();
-        check(n > 0, "K: playback of corrupt-head media produced samples");
-        double peak = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const double d = std::fabs(static_cast<double>(h.sink.all_[i]));
-            if (d > peak) peak = d;
-        }
-        check(peak <= 1.5, "K: no corrupt sample escapes the mix (held-to-valid)");
-        // Repairs are in place (no drop), so the tone after the garbage head must
-        // still align sample-exactly from abs_frame 4.
-        check(region_matches(h.sink.all_, static_cast<std::size_t>(4) * kChannels, n, 4),
-              "K: tone after the corrupt head stays sample-exact");
-        std::remove(corr);
-    }
-    // --- L. Field-repro: RNNoise(+ENORMOUS bass EQ) on loud content — the
-    // field recording 2026-09-11 18-25-46.mkv captured a LEFT-only full-scale
-    // Nyquist square BURST at the head of every 1600-sample output block
-    // (~92 samples = ~1.9ms, block+99). Sweep stage combinations to find which
-    // stage emits that signature on loud content, with and without the
-    // corrupt-stream-head condition.
-    {
-        // Field profile: low-shelf 20Hz +18.1dB, bell 57Hz +18.1dB, bell 97Hz
-        // +10.5dB, then flat — the curve on nearly every clip of nv.ehproj.
-        auto field_curve = [] {
-            std::array<canvas::core::Clip::EqBand, 6> b{};
-            b[0] = {canvas::core::Clip::EqBand::Type::LowShelf, 20.0f, 18.1f, 1.0f, true};
-            b[1] = {canvas::core::Clip::EqBand::Type::Bell, 57.0f, 18.1f, 1.0f, true};
-            b[2] = {canvas::core::Clip::EqBand::Type::Bell, 97.0f, 10.5f, 1.0f, true};
-            b[3] = {canvas::core::Clip::EqBand::Type::Bell, 1200.0f, 0.0f, 1.0f, true};
-            b[4] = {canvas::core::Clip::EqBand::Type::Bell, 1000.0f, 0.0f, 1.0f, true};
-            b[5] = {canvas::core::Clip::EqBand::Type::Bell, 1000.0f, 0.0f, 1.0f, true};
-            return b;
-        };
-
-        // Nyquist buzz detector: longest run of consecutive same-block samples on
-        // one channel that alternate sign with |v| > 0.95 (a full-scale square
-        // burst). Runs of this shape at a fresh-block head are the recorded artifact.
-        auto buzz_runs = [](const std::vector<float>& pcm, int chs) {
-            struct Run { int chan; int frame; int len; };
-            Run best{};
-            const std::size_t ssz = pcm.size();
-            for (int c = 0; c < chs; ++c) {
-                int run = 0, run_start = 0;
-                for (std::size_t i = c, frame = 0; i < ssz; i += static_cast<std::size_t>(chs), ++frame) {
-                    const float v = pcm[i];
-                    const float nv = (i >= static_cast<std::size_t>(chs)) ? pcm[i - chs] : 0.0f;
-                    const bool alt = std::fabs(v) > 0.95f &&
-                                     (run == 0 || (nv != 0.0f && v != 0.0f && (v > 0.0f) != (nv > 0.0f)));
-                    if (alt) {
-                        if (run == 0) run_start = static_cast<int>(frame);
-                        ++run;
-                        if (run > best.len) best = {c, run_start, run};
-                    } else {
-                        run = 0;
-                    }
-                }
-            }
-            return best;
-        };
-
-        auto field_sweep = [&](const char* tag, const char* wav_path, bool eq, bool voice,
-                               int garbage) {
-            Project p = make_project(0, 180, wav_path);
-            auto& cl = p.sequence.audio_tracks[0].clips[0];
-            cl.eq_enabled = eq;
-            cl.eq_bands = field_curve();
-            cl.voice_isolation =
-                voice ? canvas::core::VoiceIsolationMode::RnNoise : canvas::core::VoiceIsolationMode::None;
-            Harness hraw;  // sink/pipe in a dummy for construction
-            hraw.pipe.set_project(&p);
-            hraw.pipe.add_media(p.media[0]);
-            hraw.pipe.open_output();
-            hraw.pipe.rewind(0, true);
-            hraw.pipe.preroll(0, 70, true);
-            hraw.pipe.play_step(0, 1.0 / kFps, true);  // throw away the preroll lead
-            for (int k = 0; k < 6; ++k) hraw.pipe.play_step(k + 0, 1.0 / kFps, false);
-            auto r = buzz_runs(hraw.sink.all_, kChannels);
-
-            // Per-block corner loudness: how many samples of each 1600-block's
-            // first 150 frames exceed 1.0 on channel 0.
-            double peak = 0.0;
-            std::size_t over = 0;
-            const std::size_t ssz = hraw.sink.all_.size();
-            for (std::size_t i = 0; i < ssz; ++i) {
-                const double d = std::fabs(static_cast<double>(hraw.sink.all_[i]));
-                if (d > peak) peak = d;
-                if (d > 1.0) ++over;
-            }
-            std::printf("L[%s] eq=%d voice=%d garbage=%d peak=%.4f over1=%.2f%% "
-                        "longestNyquistSquare ch=%d frame=%d len=%d\n",
-                        tag, eq, voice, garbage, peak, 100.0 * static_cast<double>(over) / ssz,
-                        r.chan, r.frame, r.len);
-            return r.len;
-        };
-
-        const char* wL1 = "/tmp/canvas_audio_pipe_repro_noise.wav";
-        std::remove(wL1);
-        // Loud 60 Hz tone (in the +18.1dB shelf zone) at 0.75 amplitude.
-        write_wav_f32(wL1, 6, 60.0, 0.75f, 0);
-        field_sweep("noise+eq+voice", wL1, true, true, 0);
-        field_sweep("eq-only", wL1, true, false, 0);
-        field_sweep("voice-only", wL1, false, true, 0);
-        field_sweep("raw", wL1, false, false, 0);
-        field_sweep("corrupt+eq+voice", wL1, true, true, 4);
-        // Root cause (2026-09-11): the field's +18.1 dB bass-shelf curve pushes
-        // loud-bass content to ~7-9.6x (peaks above in the sweep), so the mix
-        // bus exceeded 0 dBFS and the DAC clipped it into the recorded ±1.0
-        // Nyquist squares — the mix had NO ceiling (see the MIX-exceeds-0dBFS
-        // audit log path). Now both audio_mix laws bound it: the per-lane clamp
-        // (kLaneSanityCeiling hold-to-valid) stops any float32 monster in one
-        // clip's DSP, and the master limiter (kMasterCeiling, instant
-        // attack/slow release) keeps the DAC-bound bus <= 0.98 peak, export
-        // included. Sweep now prints evidence only (peak/over/nyquist length
-        // stay ~0/0/0); the enforcement checks are L3 (monster absence) and
-        // L3's ceiling assertion.
-        std::remove(wL1);
-
-        // L2: dump the clean EQ+voice blow-up stream to /tmp so the per-block
-        // burst shape can be inspected (start offset, length, peak per block).
-        {
-            const char* dumpWav = "/tmp/canvas_audio_pipe_repro_noise.wav";
-            std::remove(dumpWav);
-            write_wav_f32(dumpWav, 6, 60.0, 0.75f, 0);
-            Project p = make_project(0, 180, dumpWav);
-            auto& cl = p.sequence.audio_tracks[0].clips[0];
-            cl.eq_enabled = true;
-            cl.eq_bands = field_curve();
-            cl.voice_isolation = canvas::core::VoiceIsolationMode::RnNoise;
-            Harness hraw;
-            hraw.pipe.set_project(&p);
-            hraw.pipe.add_media(p.media[0]);
-            hraw.pipe.open_output();
-            hraw.pipe.rewind(0, true);
-            hraw.pipe.preroll(0, 70, true);
-            hraw.pipe.play_step(0, 1.0 / kFps, true);
-            for (int k = 0; k < 6; ++k) hraw.pipe.play_step(k + 0, 1.0 / kFps, false);
-            // Per-block corners: find every sample where ch0 exceeds 1.0 and
-            // group into contiguous runs by frame; print head/shape data.
-            const auto& A = hraw.sink.all_;
-            const std::size_t ssz = A.size();
-            const std::size_t kCh = static_cast<std::size_t>(kChannels);
-            std::size_t inactive = 0, active = 0;
-            for (std::size_t f = 0; f < ssz / kCh - 3; ++f) {
-                const float a = A[f * kCh], b = A[(f + 1) * kCh];
-                const bool loud = std::fabs(a) > 1.0f && std::fabs(b) > 1.0f;
-                if (loud) ++active; else ++inactive;
-            }
-            std::printf("L2: dump frames=%zu |v|>1 ch0 in-consecutive share=%.1f%%\n",
-                        ssz / kCh,
-                        100.0 * static_cast<double>(active) / (active + inactive));
-            std::FILE* fraw = std::fopen("/tmp/canvas_audio_pipe_repro_boom.f32", "wb");
-            if (fraw) {
-                std::fwrite(A.data(), sizeof(float), A.size(), fraw);
-                std::fclose(fraw);
-                std::printf("L2: wrote /tmp/canvas_audio_pipe_repro_boom.f32 (%zu floats)\n", A.size());
-            }
-            std::remove(dumpWav);
-
-            // L3: hammer the SAME eq+voice config repeatedly; count how often the
-            // exact 'data' magic float (0x61746164) and other gross anomalies
-            // (|v|>100, |v|>2.0) appear, and at which frame/channel.
-            int runs = 25;
-            int data_hits = 0, huge_hits = 0, over2_hits = 0;
-            double mix_max = 0.0;
-            for (int r = 0; r < runs; ++r) {
-                write_wav_f32(dumpWav, 6, 60.0, 0.75f, 0);
-                Project p = make_project(0, 180, dumpWav);
-                auto& cl = p.sequence.audio_tracks[0].clips[0];
-                cl.eq_enabled = true;
-                cl.eq_bands = field_curve();
-                cl.voice_isolation = canvas::core::VoiceIsolationMode::RnNoise;
-                Harness hr;
-                hr.pipe.set_project(&p);
-                hr.pipe.add_media(p.media[0]);
-                hr.pipe.open_output();
-                hr.pipe.rewind(0, true);
-                hr.pipe.preroll(0, 70, true);
-                hr.pipe.play_step(0, 1.0 / kFps, true);
-                for (int k = 0; k < 6; ++k) hr.pipe.play_step(k + 0, 1.0 / kFps, false);
-                const auto& S = hr.sink.all_;
-                const std::size_t kCh = static_cast<std::size_t>(kChannels);
-                for (std::size_t i = 0; i < S.size(); ++i) {
-                    const std::uint32_t bits = std::bit_cast<std::uint32_t>(S[i]);
-                    if (bits == 0x61746164u) ++data_hits;
-                    const double v = std::fabs(static_cast<double>(S[i]));
-                    if (v > 100.0) ++huge_hits;
-                    if (v > 2.0) ++over2_hits;
-                    mix_max = std::max(mix_max, v);
-                }
-                std::remove(dumpWav);
-            }
-            std::printf("L3: %d eq+voice runs: 'data'f32 hits=%d, |v|>100 hits=%d, "
-                        "|v|>2.0 hits=%d, mix_max=%.4g\n",
-                        runs, data_hits, huge_hits, over2_hits, mix_max);
-            // The lane clamp + master limiter (audio_mix: kLaneSanityCeiling
-            // hold-to-valid + kMasterCeiling instant-attack peak law) bound the
-            // EQ-fed lane and the DAC-bound bus, so none of today's float32
-            // monsters (1e10..1e20, some bit-exact 'data'/0x61746164) may reach
-            // the sink, and no sample may exceed the 0.98 peak ceiling. This
-            // check was locked as measure-only while the defect was open
-            // (measured data_hits/huge_hits=394 samples >100 across 25 runs).
-            check(data_hits == 0 && huge_hits == 0,
-                  "L3: no float32 monster (data/1e10-1e20) reaches the sink "
-                  "(lane clamp active)");
-            check(over2_hits == 0 && mix_max <= 0.98 + 1e-6,
-                  "L3: mix stays inside the 0.98 master ceiling (limiter active)");
-        }
-
-        // L4: drive the float32 ParametricEqualizer DIRECTLY (no pipeline, no
-        // media) on the field curve + clean 60 Hz tone. The L2/L3 runs proved
-        // the eq+voice chain occasionally emits a ~9.6e10 / 2.8e20 / nonfinite
-        // single-sample monster at a deterministic per-block offset, and the
-        // pure-EQ run did too — so the suspicion is float32 DF2T state blow-up
-        // inside the biquad cascade at the field's near-unit pole radius
-        // (low-shelf 20 Hz + bell 57/97 Hz, all at +10..18 dB). Confirm here
-        // with zero pipeline involvement.
-        {
-            auto field_curve = [] {
-                std::array<canvas::core::Clip::EqBand, 6> b{};
-                b[0] = {canvas::core::Clip::EqBand::Type::LowShelf, 20.0f, 18.1f, 1.0f, true};
-                b[1] = {canvas::core::Clip::EqBand::Type::Bell, 57.0f, 18.1f, 1.0f, true};
-                b[2] = {canvas::core::Clip::EqBand::Type::Bell, 97.0f, 10.5f, 1.0f, true};
-                b[3] = {canvas::core::Clip::EqBand::Type::Bell, 1200.0f, 0.0f, 1.0f, true};
-                b[4] = {canvas::core::Clip::EqBand::Type::Bell, 1000.0f, 0.0f, 1.0f, true};
-                b[5] = {canvas::core::Clip::EqBand::Type::Bell, 1000.0f, 0.0f, 1.0f, true};
-                return b;
-            };
-            const auto curve = field_curve();
-            constexpr int chs = 2;
-            int monsters = 0, first_block = -1, first_off = -1;
-            float first_v = 0.0f;
-            for (int attempt = 0; attempt < 200; ++attempt) {
-                ParametricEqualizer eq;
-                const bool configured = eq.configure(kRate, chs, curve);
-                if (!configured) {
-                    std::printf("L4: unexpected inactive configure\n");
-                    continue;
-                }
-                for (int blk = 0; blk < 20; ++blk) {
-                    std::vector<float> buf(static_cast<std::size_t>(1600) * chs);
-                    for (int f = 0; f < 1600; ++f)
-                        for (int c = 0; c < chs; ++c)
-                            buf[static_cast<std::size_t>(f) * chs + c] =
-                                0.75f * std::sin(kTau * 60.0 / static_cast<double>(kRate) *
-                                                 static_cast<double>(blk * 1600 + f));
-                    eq.process(buf.data(), 1600);
-                    for (int f = 0; f < 1600; ++f) {
-                        for (int c = 0; c < chs; ++c) {
-                            const float v = buf[static_cast<std::size_t>(f) * chs + c];
-                            if (!std::isfinite(v) || std::fabs(v) > 1e6f) {
-                                ++monsters;
-                                if (first_block < 0) {
-                                    first_block = blk;
-                                    first_off = f;
-                                    first_v = v;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            std::printf("L4: standalone EQ 200 attempts x 20 blocks: monster samples=%d "
-                        "first at block=%d frame=%d v=%g\n",
-                        monsters, first_block, first_off, static_cast<double>(first_v));
-            // A correct float32 DF2T cascade MUST be bounded: unaffected by this
-            // field curve on a unit<1.0 signal. Any monster = a real EQ bug.
-            check(monsters == 0, "L4: float32 EQ cascade must never emit nonfinite/1e6+ monsters");
-        }
     }
     std::remove(wav);
 

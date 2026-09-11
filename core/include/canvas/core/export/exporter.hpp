@@ -1,7 +1,5 @@
 #pragma once
 
-#include "canvas/core/media/frame.hpp"
-
 #include <functional>
 #include <string>
 #include <vector>
@@ -33,11 +31,6 @@ struct ExportControl {
     std::function<bool()> should_cancel = [] { return false; };
     std::function<void(double progress, const std::string& phase)> on_progress =
         [](double, const std::string&) {};
-    // Optional live-preview hook: called with the fully-composited export frame
-    // (RGBA at export resolution) at a throttled wall-clock cadence (~30 fps),
-    // so a viewer can mirror the render as it happens. Exactly the pixels being
-    // handed to the encoder. Not called if unset. Fired on the render thread.
-    std::function<void(VideoFramePtr)> on_frame = [](VideoFramePtr) {};
 };
 
 // Everything needed to produce an output file.

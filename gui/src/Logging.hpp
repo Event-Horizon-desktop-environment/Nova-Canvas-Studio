@@ -63,34 +63,32 @@ inline const char* log_file_path() {
     return path;
 }
 
-// Close and delete the destination log files so every writer starts fresh.
+// Close and delete the destination log file so every writer starts fresh.
 // Both the GUI message_handler and the core CANVAS_LOG/log_error file handles
-// are cached process-wide statics; all must be closed here so they lazily
-// re-open the new files. Called once at app startup.
+// are cached process-wide statics; both must be closed here so they lazily
+// re-open the new file. Called once at app startup.
 inline void reset_log_file() {
-    // Close the core writer's cached handles so it doesn't keep an fd to the
-    // old inodes. All handles lazily re-open (fopen "a") on first use, which
+    // Close the core writer's cached handle so it doesn't keep an fd to the
+    // old inode. Both handles lazily re-open (fopen "a") on first use, which
     // creates a fresh file — so a full remove() guarantees no stale content
     // survives a relaunch.
     canvas::core::log::reset_file();
-    canvas::core::log::reset_route_files();
     std::remove(log_file_path());
-    for (canvas::core::log::Route r : {canvas::core::log::Route::Video,
-                                       canvas::core::log::Route::Render,
-                                       canvas::core::log::Route::Ux,
-                                       canvas::core::log::Route::Playback,
-                                       canvas::core::log::Route::Timeline,
-                                       canvas::core::log::Route::Color,
-                                       canvas::core::log::Route::Thumbs,
-                                       canvas::core::log::Route::Audio})
-        std::remove(canvas::core::log::route_log_path(r));
+}
+
+// Internal: resettable log handle for the Qt message handler. Lazy-open on
+// first message; reset by reset_log_file() so each launch starts clean.
+inline FILE*& gui_log_file() {
+    static FILE* f = nullptr;
+    if (!f) f = std::fopen(log_file_path(), "a");
+    return f;
 }
 
 // Qt message handler: prefixes severity/timestamp/thread and writes to the
 // log file. Verbose debug/info lines are suppressed unless CANVAS_DEBUG is set.
-// The leading [tag] on the message routes it to its category file via the core
-// log routing (same sink as the core writers, one handle set per route).
 inline void message_handler(QtMsgType type, const QMessageLogContext&, const QString& msg) {
+    FILE* f = gui_log_file();
+
     const bool verbose = (type == QtDebugMsg || type == QtInfoMsg);
     if (verbose && !debug_enabled()) return;
 
@@ -100,18 +98,16 @@ inline void message_handler(QtMsgType type, const QMessageLogContext&, const QSt
                       : type == QtCriticalMsg ? "C"
                                               : "F";
     const quint64 tid = reinterpret_cast<quintptr>(QThread::currentThreadId());
-    const QByteArray utf8 = msg.toUtf8();
     const QByteArray line = QString("[eh-gui %1 %2 th=%3] %4")
                                 .arg(QLatin1String(sev),
                                      QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz")))
                                 .arg(tid)
-                                .arg(QString::fromUtf8(utf8))
+                                .arg(msg)
                                 .toUtf8();
 
     std::fwrite(line.constData(), 1, static_cast<std::size_t>(line.size()), stderr);
     std::fputc('\n', stderr);
-    std::lock_guard<std::mutex> lk_(::canvas::core::log::mutex());
-    if (FILE* f = ::canvas::core::log::file_for(utf8.constData()); f) {
+    if (f) {
         std::fwrite(line.constData(), 1, static_cast<std::size_t>(line.size()), f);
         std::fputc('\n', f);
         std::fflush(f);

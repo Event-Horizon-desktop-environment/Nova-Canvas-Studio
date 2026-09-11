@@ -6,7 +6,6 @@
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/media/video_decoder.hpp"
 #include "canvas/core/media/voice_isolation.hpp"
-#include "canvas/core/timeline/audio_mix.hpp"
 #include "canvas/core/timeline/model.hpp"
 #include "canvas/core/timeline/time_stretch.hpp"
 #include "canvas/core/project/project.hpp"
@@ -150,12 +149,6 @@ private:
     // `effective_rate` source frames per output frame, locked to the video
     // path's clip_src_frame law.
     canvas::core::TimeStretchBank stretch_bank_;
-    // Master-bus peak limiter (audio_mix::MasterLimiter law, shared with live
-    // playback): the exported bus must never exceed kMasterCeiling peak, so a
-    // file encodes the same loud-but-unclipped program the DAC-bound playback
-    // bus would have produced. Streamed across audio_chunk() calls (a chunk
-    // that ends mid-release hands continuity to the next).
-    canvas::core::audio_mix::MasterLimiter limiter_;
     const Project* project_ = nullptr;
     int width_ = 0;
     int height_ = 0;

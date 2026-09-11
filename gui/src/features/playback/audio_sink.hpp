@@ -29,10 +29,6 @@ public:
     virtual void set_hold_active(bool on) = 0;
 
     [[nodiscard]] virtual uint64_t stat_written_frames() const = 0;
-    // Device underruns since open (ALSA/PipeWire xruns). A starvation glitch
-    // never appears in the sample stream the pipeline writes, so the audible
-    // "pop/click" must be counted here or it is invisible to the mix audit.
-    [[nodiscard]] virtual uint64_t stat_xruns() const = 0;
     // Frames currently AUDIBLE at the speaker (written minus device latency).
     [[nodiscard]] virtual uint64_t audible_position_frames() const = 0;
     virtual void log_pipeline_stats(const char* tag) const = 0;
