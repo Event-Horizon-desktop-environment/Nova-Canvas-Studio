@@ -38,6 +38,10 @@ namespace canvas::core {
 
 namespace {
 
+// Live-preview cadence for ExportControl::on_frame: ~30 fps wall clock so the
+// viewer mirrors the render without stalling the encode loop per frame.
+constexpr std::chrono::milliseconds kPreviewPushInterval{33};
+
 std::string av_err(int err) {
     char buf[AV_ERROR_MAX_STRING_SIZE] = {0};
     av_strerror(err, buf, sizeof(buf));
@@ -304,6 +308,25 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     };
     const auto progress = [&](double p, const char* phase) {
         if (control && control->on_progress) control->on_progress(p, phase);
+    };
+
+    // Live-preview push: hands the fully-composited export frame to
+    // ExportControl::on_frame at a fixed wall-clock cadence (~30 fps) so the
+    // Deliver-page viewer can mirror the render without stalling the encode
+    // loop or allocating a host frame at full encode speed. `last` starts at
+    // epoch so the first frame previews immediately.
+    struct PreviewThrottle {
+        std::chrono::steady_clock::time_point last{};
+        bool due() {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last < kPreviewPushInterval) return false;
+            last = now;
+            return true;
+        }
+    } preview_throttle;
+    const auto push_preview = [&](const VideoFramePtr& vf) {
+        if (!control || !control->on_frame || !vf) return;
+        control->on_frame(vf);
     };
 
     const AVCodec* vcodec = avcodec_find_encoder_by_name(s.video_codec.c_str());
@@ -815,6 +838,15 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                             fprintf(stderr, "[TIMING] frame=%lld fastpath: frame_gpu=%.3fms resize=%.3fms (avg over %ld)\n",
                                     (long long)f, _st_fg / _cnt, _st_rz / _cnt, _cnt);
                         hw->pts = f;
+                        // Throttled live preview: the fast path composites on
+                        // the device with no host frame to hand off, so pay one
+                        // CPU composite per preview tick (the pixels match — same
+                        // session, same `tl` mapping the encoder frame uses).
+                        if (preview_throttle.due()) {
+                            auto pv = session_ok ? session.frame(tl)
+                                                 : render_video_frame(project, tl, s.width, s.height, 0);
+                            push_preview(pv);
+                        }
                         return {hw, ev, src_ref};
                     }
                     if (src_ref) av_frame_unref(src_ref);
@@ -831,6 +863,9 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         auto vf = session_ok ? session.frame(tl)
                              : render_video_frame(project, tl, s.width, s.height, 0);
         if (!vf) return {nullptr, nullptr, nullptr};
+        // Live preview (zero-copy: hand the shared_ptr holding the frame we are
+        // about to encode; consumer threads marshal it onto the GUI).
+        if (preview_throttle.due()) push_preview(vf);
         ++render_cpu;
         render_comp_ms += std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - comp_t0).count();
@@ -1162,6 +1197,13 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                                 gfi.dx, gfi.dy, gfi.fade);
                         }
                         if (got) {
+                            // Throttled live preview: one CPU composite per tick
+                            // (the hw fast path has no host frame to hand off).
+                            if (preview_throttle.due()) {
+                                auto pv = session_ok ? session.frame(tl)
+                                                     : render_video_frame(project, tl, s.width, s.height, 0);
+                                push_preview(pv);
+                            }
                             hw->pts = frame;
                             avcodec_send_frame(vctx, hw);
                             gpu_composited = true;
@@ -1173,9 +1215,11 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
 
             if (!gpu_composited) {
             const auto comp_t0 = std::chrono::steady_clock::now();
-            auto vf = session_ok ? session.frame(tl)
-                                 : render_video_frame(project, tl, s.width, s.height, 0);
+auto vf = session_ok ? session.frame(tl)
+                             : render_video_frame(project, tl, s.width, s.height, 0);
             if (vf) {
+                // Live preview (zero-copy: the shared_ptr already holds the frame).
+                if (preview_throttle.due()) push_preview(vf);
                 ++render_cpu;
                 render_comp_ms += std::chrono::duration<double, std::milli>(
                                       std::chrono::steady_clock::now() - comp_t0).count();

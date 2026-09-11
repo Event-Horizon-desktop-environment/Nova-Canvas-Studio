@@ -551,6 +551,18 @@ void build_center_workspace(MainWindow& mw) {
                                   Qt::QueuedConnection);
     };
 
+    // Live export preview: the render worker pushes throttled composited export
+    // frames; marshal them onto the GUI thread and present on the shared viewer
+    // (the Deliver page's media preview) — exactly the pixels being encoded,
+    // audio-free. The last preview frame stays on screen after the export ends.
+    mw.render_queue_.on_preview_frame = [&mw](canvas::core::VideoFramePtr frame) {
+        auto rf = std::make_shared<canvas::core::RenderFrame>();
+        rf->a = std::move(frame);
+        QMetaObject::invokeMethod(mw.viewer_,
+                                  [&mw, rf = std::move(rf)] { mw.viewer_->set_frame(std::move(rf)); },
+                                  Qt::QueuedConnection);
+    };
+
     // While a job is being exported, park the thumbnail workers so their
     // full-res NVDEC decodes don't steal the render's GPU/disk bandwidth.
     // set_paused is atomic + CV-notified, so it can be driven straight from

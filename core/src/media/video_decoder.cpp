@@ -636,8 +636,12 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
 }
 
 void VideoDecoder::close() {
-    CANVAS_LOG("video_decoder: close '%s' hw=%d next_frame=%lld",
-           path_.c_str(), (int)hw_avail_, (long long)next_frame_);
+    ::canvas::core::log::log_audio_info(
+        "video_decoder: close '%s' hw=%d next_frame=%lld "
+        "serve_seq=%llu (%.1fms) serve_seek=%llu (%.1fms)",
+        path_.c_str(), (int)hw_avail_, (long long)next_frame_,
+        (unsigned long long)path_seq_, path_seq_ms_, (unsigned long long)path_seeks_,
+        path_seek_ms_);
     if (packet_) av_packet_free(&packet_);
     if (av_frame_) av_frame_free(&av_frame_);
     if (hold_hw_) av_frame_free(&hold_hw_);
@@ -1176,14 +1180,36 @@ const AVFrame* VideoDecoder::decode_to_hw_indexed(const int64_t target, const in
     // traverses one Group of Pictures. Uses the built keyframe index; without
     // one, a plain container seek to the target's presentation time lands on
     // the keyframe at-or-before, which also anchors backward scrubs.
-    const IframeEntry* entry = iframe_at_or_before(t);
-    if (entry) {
-        container_seek_seconds(entry->pts_seconds);
-        CANVAS_LOG(
-            "vdecode hw-indexed target=%lld iframe=%lld gop_secs=%.3f max=%d",
-            (long long)t, (long long)entry->frame, entry->pts_seconds, max_over);
-    } else if (frame_rate_ > 0.0) {
-        container_seek_seconds(static_cast<double>(t) / frame_rate_);
+    //
+    // Sequential lookback: a near-forward target (at-or-ahead of the in-flight
+    // walk, within the same window decode_to_hw treats as "sequential") keeps
+    // riding that walk instead of re-anchoring — the unconditional pre-seek
+    // used to reset next_frame_=0 and re-walk the whole GOP for a +1 step,
+    // pinning every small forward scrub move at ~full-GOP cost. Rules:
+    //   delta < 0  -> behind the walk: must re-anchor (a forward walk cannot go
+    //                backward), keep the seek.
+    //   delta >= 64 -> same stride decode_to_hw considers far: re-anchor on the
+    //                owning I-frame so the walk stays bounded.
+    //   else -> serve from / continue the in-flight walk; decode_to_hw's own
+    //           window checks cannot disagree (identical 64 threshold).
+    const int64_t delta = t - next_frame_;
+    if (delta < 0 || delta >= 64) {
+        const IframeEntry* entry = iframe_at_or_before(t);
+        if (entry) {
+            container_seek_seconds(entry->pts_seconds);
+            CANVAS_LOG(
+                "vdecode hw-indexed serve=SEEK target=%lld delta=%lld iframe=%lld gop_secs=%.3f max=%d",
+                (long long)t, (long long)delta, (long long)entry->frame, entry->pts_seconds,
+                max_over);
+        } else if (frame_rate_ > 0.0) {
+            container_seek_seconds(static_cast<double>(t) / frame_rate_);
+            CANVAS_LOG("vdecode hw-indexed serve=SEEK target=%lld delta=%lld (no iframe index)",
+                       (long long)t, (long long)delta);
+        }
+    } else {
+        ::canvas::core::log::log_audio_info(
+            "vdecode hw-indexed serve=WALK target=%lld delta=%lld next=%lld",
+            (long long)t, (long long)delta, (long long)next_frame_);
     }
     const AVFrame* hw = decode_to_hw(t, max_over == 0 ? kFullResMaxOver : max_over);  // sets next_frame_ internally
     return hw;
@@ -1361,8 +1387,11 @@ VideoFramePtr VideoDecoder::decode_to_frame(int64_t target, int max_output_dim) 
     // (~90ms each) for the whole audio-only share of a project. Serve the
     // cached final frame instead; build the cache once by decoding it exactly.
     if (last_frame_ > 0 && target > last_frame_) {
-        if (hold_rgba_ && hold_rgba_src_ == last_frame_ && hold_rgba_dim_ == out_max_dim_)
+        if (hold_rgba_ && hold_rgba_src_ == last_frame_ && hold_rgba_dim_ == out_max_dim_) {
+            CANVAS_LOG("video_decoder: serve=HOLD target=%lld last=%lld (frozen tail, no re-seek)",
+                       (long long)target, (long long)last_frame_);
             return hold_rgba_;
+        }
         target = last_frame_;
     } else {
         target = clamp_target(target);
@@ -1371,6 +1400,11 @@ VideoFramePtr VideoDecoder::decode_to_frame(int64_t target, int max_output_dim) 
     const auto dbg_start = std::chrono::steady_clock::now();
     const bool dbg_hw = hw_pix_fmt_ != AV_PIX_FMT_NONE;
     VideoFramePtr dbg_out = nullptr;
+    // Serve-mode + re-seek gap: `gap` is how far the request sits from the
+    // in-flight walk position at entry (negative = behind the walk, forcing a
+    // re-anchor; >= 64 = far jump, keyframe seek; [0,64) = sequential walk).
+    const int64_t dbg_gap = target - next_frame_;
+    const char* dbg_serve = "SEEK";
 
 // Give sequential decode a small window of forward progress to avoid a
     // random seek on the common playback path. If we've already moved past the
@@ -1385,6 +1419,7 @@ VideoFramePtr VideoDecoder::decode_to_frame(int64_t target, int max_output_dim) 
         if (frame) {
             next_frame_ = frame->frame_number + 1;
             dbg_out = std::move(frame);
+            dbg_serve = "SEQ";
             ++path_seq_;
             path_seq_ms_ += seq_ms;
         } else {
@@ -1402,8 +1437,9 @@ VideoFramePtr VideoDecoder::decode_to_frame(int64_t target, int max_output_dim) 
     if (dbg_out) {
         const double dbg_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - dbg_start).count();
-        CANVAS_LOG("decode: frame %lld took %.2f ms hw=%d", (long long)dbg_out->frame_number,
-               dbg_ms, (int)dbg_hw);
+        CANVAS_LOG("decode: frame %lld took %.2f ms hw=%d serve=%s gap=%lld",
+               (long long)dbg_out->frame_number, dbg_ms, (int)dbg_hw, dbg_serve,
+               (long long)dbg_gap);
         if (last_frame_ > 0 && dbg_out->frame_number >= last_frame_) {
             hold_rgba_ = dbg_out;
             hold_rgba_src_ = dbg_out->frame_number;

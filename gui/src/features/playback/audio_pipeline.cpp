@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <sys/stat.h>
 
 namespace canvas::gui {
 
@@ -113,18 +114,246 @@ void mix_source_samples(std::vector<float>& out, const int out_channels,
                                        gains.empty() ? nullptr : &gains, vol, gl, gr);
 }
 
+// ---------------------------------------------------------------------------
+// Sample-level corruption repair (definition follows the audit constants):
+// a freshly decoded chunk may carry non-finite or grossly out-of-range samples
+// (raw float PCM inside Matroska mis-segment / stream-head corruption,
+// observed on the field recording that produced the left-ear pop). Such
+// samples are held-to-valid so nothing corrupt ever enters a DSP bank's
+// carried state or the device. Clean chunks leave `out` empty (zero copy).
+// ---------------------------------------------------------------------------
+std::size_t repair_corrupt_samples(const std::vector<float>& in, int ch,
+                                   std::vector<float>& out, std::vector<float>& tail);
+
 void mix_source_chunk(std::vector<float>& out, const int out_channels,
                       const canvas::core::Clip& clip, const float track_gain_db,
                       const float volume_db, const canvas::core::AudioChunkPtr& chunk,
                       const int64_t from_sample, const int out_rate, const double src_fps,
                       const double seq_fps, const double speed = 1.0,
-                      const float pan = 0.0f) {
+                      const float pan = 0.0f,
+                      std::unordered_map<canvas::core::MediaId, std::vector<float>>* clean_tail =
+                          nullptr) {
     const int src_ch = chunk->channels > 0 ? chunk->channels : 1;
     const int frames = static_cast<int>(chunk->samples.size()) / src_ch;
-    mix_source_samples(out, out_channels, clip, track_gain_db, volume_db,
-                       chunk->samples.data(), src_ch, frames, from_sample, out_rate,
-                       src_fps, seq_fps, speed, pan);
+    if (frames <= 0) return;
+    // Same corruption guard as write_mixed's decode boundary: scrub-grain and
+    // reposition feeds then also never play garbage PCM.
+    std::vector<float> repaired;
+    const float* pcm = chunk->samples.data();
+    if (clean_tail) {
+        const std::size_t n_repaired =
+            repair_corrupt_samples(chunk->samples, src_ch, repaired, (*clean_tail)[clip.media]);
+        if (n_repaired > 0) {
+            pcm = repaired.data();
+            ::canvas::core::log::log_audio_warning(
+                "[audio] REPAIR scrub media=%d from=%lld frames=%d ch=%d fixed=%llu "
+                "(corrupt decoder PCM held-to-valid)",
+                clip.media, static_cast<long long>(from_sample), frames, src_ch,
+                static_cast<unsigned long long>(n_repaired));
+        }
+    }
+    mix_source_samples(out, out_channels, clip, track_gain_db, volume_db, pcm, src_ch, frames,
+                       from_sample, out_rate, src_fps, seq_fps, speed, pan);
 }
+
+// ---------------------------------------------------------------------------
+// Sample-level audio audit — ALWAYS ON. This is the "capture every possible
+// cause of a pop" net: per-stage peak + non-finite + *single-sample step*
+// detection (the classic pop shape: a lonely sample that leaps out of a quiet
+// run), a rate-limited one-line-per-second stage telemetry line, a WAV window
+// dump around the first offending sample per stage, slow-step (starvation)
+// warnings, and device-xrun deltas. The scans are a trivial linear pass over
+// already-in-memory buffers (the device-bound mix was already scanned every
+// tick), so always-on costs nothing measurable.
+// ---------------------------------------------------------------------------
+
+// A lone sample >= 2.0 is a loud spike; a one-sample step of >= 0.25 out of a
+// quiet run (< 0.25) is the audible "pop" signature that never trips a peak
+// gate.
+constexpr float kAuditLoud = 2.0f;
+constexpr float kAuditStep = 0.25f;
+constexpr double kAuditSlowStepMs = 18.0;  // > half a 33 ms mix window = starvation risk
+
+struct AuditOutcome {
+    float peak = 0.0f;
+    bool nonfinite = false;
+    int bad_frame = -1;  // frame-space index of first suspicious sample (or -1)
+    int bad_ch = 0;
+    bool step = false;   // flagged by the pop-step rule, not the loud rule
+};
+
+AuditOutcome audit_scan(const float* pcm, const int frames, const int ch) {
+    AuditOutcome o;
+    if (!pcm || frames <= 0 || ch <= 0) return o;
+    const std::size_t n = static_cast<std::size_t>(frames) * static_cast<std::size_t>(ch);
+    // Per-channel predecessor: the scan runs over INTERLEAVED samples, so a single
+    // `prev` would compare a channel against the other channel (decorrelated
+    // stereo permanently false-flags as "pops"). Track the previous sample per
+    // channel and only ever step against the same channel's history.
+    std::vector<float> prev_ch(static_cast<std::size_t>(ch), 0.0f);
+    for (std::size_t i = 0; i < n; ++i) {
+        const float v = pcm[i];
+        if (std::isnan(v) || std::isinf(v)) {
+            o.nonfinite = true;
+            o.bad_frame = static_cast<int>(i / static_cast<std::size_t>(ch));
+            o.bad_ch = static_cast<int>(i % static_cast<std::size_t>(ch));
+            return o;
+        }
+        const float a = std::fabs(v);
+        if (a > o.peak) o.peak = a;
+        const std::size_t frame = i / static_cast<std::size_t>(ch);
+        const std::size_t cidx = i % static_cast<std::size_t>(ch);
+        if (o.bad_frame < 0) {
+            // The step rule needs a real in-buffer predecessor: chunk frame 0 has
+            // none (the mixing bus is zeroed per step and lanes re-seek), so only
+            // the loud rule (and non-finite, above) can flag frame 0. A genuine
+            // splice pop between two consecutive steps is caught by the carry scan
+            // at the mix stage, not by a seeded-zero frame-0 step.
+            if (frame > 0) {
+                const float prev = prev_ch[cidx];
+                const float step = std::fabs(v - prev);
+                if (a >= kAuditLoud ||
+                    (step >= kAuditStep && a >= kAuditStep && std::fabs(prev) < kAuditStep)) {
+                    o.bad_frame = static_cast<int>(frame);
+                    o.bad_ch = static_cast<int>(cidx);
+                    o.step = step >= kAuditStep;
+                }
+            } else if (a >= kAuditLoud) {
+                o.bad_frame = 0;
+                o.bad_ch = static_cast<int>(cidx);
+                o.step = false;
+            }
+        }
+        prev_ch[cidx] = v;
+    }
+    return o;
+}
+
+// Write a small float32 WAV of the samples surrounding frame `center` of a
+// stage buffer, so the raw values around a pop can be inspected offline.
+void audit_dump_wav(const char* stage, const int64_t seq_frame, const std::uint64_t clip_id,
+                    const float* pcm, const int frames, const int ch, const int center,
+                    const int sample_rate) {
+    constexpr int kHalf = 64;
+    const int start = std::max(0, center - kHalf);
+    const int end = std::min(frames, center + kHalf + 1);
+    const int n = end - start;
+    if (n <= 0) return;
+    ::mkdir("/tmp/canvas_audio_audit", 0755);
+    char path[320];
+    std::snprintf(path, sizeof path, "/tmp/canvas_audio_audit/%s_f%lld_m%llu_c%02d.wav", stage,
+                  static_cast<long long>(seq_frame),
+                  static_cast<unsigned long long>(clip_id), center % 1000);
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) return;
+    const std::uint32_t data_bytes = static_cast<std::uint32_t>(n * ch * sizeof(float));
+    const std::uint32_t rate = static_cast<std::uint32_t>(sample_rate);
+    const std::uint16_t channels = static_cast<std::uint16_t>(ch);
+    const std::uint32_t bps = rate * static_cast<std::uint32_t>(ch) * 4u;
+    const std::uint16_t block = static_cast<std::uint16_t>(ch * 4u);
+    const std::uint32_t total = 36u + data_bytes;
+    const std::uint32_t cb = 16u;
+    std::uint32_t v = 0x46464952u;  // RIFF
+    std::fwrite(&v, 4, 1, f);
+    v = total;
+    std::fwrite(&v, 4, 1, f);
+    v = 0x45564157u;  // WAVE
+    std::fwrite(&v, 4, 1, f);
+    v = 0x20746d66u;  // fmt_
+    std::fwrite(&v, 4, 1, f);
+    v = cb;
+    std::fwrite(&v, 4, 1, f);
+    std::uint16_t tag = 3;  // IEEE float
+    std::fwrite(&tag, 2, 1, f);
+    std::fwrite(&channels, 2, 1, f);
+    std::fwrite(&rate, 4, 1, f);
+    std::fwrite(&bps, 4, 1, f);
+    std::fwrite(&block, 2, 1, f);
+    std::uint16_t bits = 32;
+    std::fwrite(&bits, 2, 1, f);
+    v = 0x61746164u;  // data
+    std::fwrite(&v, 4, 1, f);
+    v = data_bytes;
+    std::fwrite(&v, 4, 1, f);
+    std::fwrite(pcm + static_cast<std::size_t>(start) * static_cast<std::size_t>(ch),
+                sizeof(float), static_cast<std::size_t>(n) * static_cast<std::size_t>(ch), f);
+    std::fclose(f);
+    ::canvas::core::log::log_audio_warning(
+        "[audio:audit] STAGE wo dump=%s frame=%lld clip=%llu %d samples -> %s", stage,
+        static_cast<long long>(seq_frame), static_cast<unsigned long long>(clip_id),
+        n * ch, path);
+}
+
+// Scan one stage and, on suspicion, log a full-context line and dump the WAV
+// window. `dsp` is a blame descriptor ("decoder", "rnnoise voice=on",
+// "wsola spd=2 pitch=0.5", "eq 6-band", "lane", "mix").
+void audit_report(const AuditOutcome& o, const char* stage, const int64_t seq_frame,
+                  const std::uint64_t clip_id, const int media, const int64_t from_sample,
+                  const float* pcm, const int frames, const int ch, const char* dsp,
+                  const int sample_rate, const double dec_ms, const double mix_ms) {
+    if (!o.nonfinite && o.peak <= kAuditLoud && o.bad_frame < 0) return;
+    const int bf = o.bad_frame >= 0 ? o.bad_frame : 0;
+    const std::size_t n = static_cast<std::size_t>(frames) * static_cast<std::size_t>(ch);
+    const std::size_t bi = static_cast<std::size_t>(bf) * static_cast<std::size_t>(ch) +
+                           static_cast<std::size_t>(std::max(0, o.bad_ch));
+    const float cur = pcm[std::min(bi, n - 1)];
+    // Same-channel predecessor of the flagged sample (a cross-channel prev lied
+    // in the earlier interleaved scans).
+    const float prev = (bi >= static_cast<std::size_t>(ch))
+                           ? pcm[bi - static_cast<std::size_t>(ch)]
+                           : 0.0f;
+    const char* kind = o.nonfinite ? "NONFINITE" : (o.peak >= kAuditLoud ? "BLAST" : "POP");
+    ::canvas::core::log::log_audio_warning(
+        "[audio:audit] STAGE=%s %s peak=%.4g at_frame=%d ch=%d prev=%.4g cur=%.4g "
+        "mediaSample=%lld clip=%llu media=%d frames=%d seqframe=%lld dec_ms=%.1f "
+        "mix_ms=%.1f dsp=(%s)",
+        stage, kind, static_cast<double>(o.peak), bf, o.bad_ch, static_cast<double>(prev),
+        static_cast<double>(cur), static_cast<long long>(from_sample + bf),
+        static_cast<unsigned long long>(clip_id), media, frames,
+        static_cast<long long>(seq_frame), dec_ms, mix_ms, dsp);
+    if (bf >= 0)
+        audit_dump_wav(stage, seq_frame, clip_id, pcm, frames, ch, bf, sample_rate);
+}
+
+std::size_t repair_corrupt_samples(const std::vector<float>& in, int ch,
+                                   std::vector<float>& out, std::vector<float>& tail) {
+    if (in.empty() || ch <= 0) return 0;
+    const std::size_t n = in.size();
+    const std::size_t cc = static_cast<std::size_t>(ch);
+    if (tail.size() < cc) tail.assign(cc, 0.0f);
+
+    std::size_t first = n;  // first corrupt index, or `n` when the chunk is clean
+    for (std::size_t i = 0; i < n; ++i) {
+        const float v = in[i];
+        if (std::isnan(v) || std::isinf(v) || std::fabs(v) > kAuditLoud) {
+            first = i;
+            break;
+        }
+    }
+    // Refresh the per-channel tails either way, so a corrupt head on the NEXT
+    // chunk holds from the true last-served sample (DSP-state continuity).
+    if (n >= cc) {
+        for (std::size_t c = 0; c < cc; ++c) tail[c] = in[n - cc + c];
+    }
+    if (first == n) return 0;  // clean chunk: fast path, no copy
+
+    out = in;  // copy-on-write: only corrupt chunks pay for the copy
+    std::size_t fixed = 0;
+    for (std::size_t i = first; i < n; ++i) {
+        const float v = out[i];
+        if (std::isnan(v) || std::isinf(v) || std::fabs(v) > kAuditLoud) {
+            out[i] = i >= cc ? out[i - cc] : tail[i % cc];
+            ++fixed;
+        }
+    }
+    if (n >= cc) {
+        for (std::size_t c = 0; c < cc; ++c) tail[c] = out[n - cc + c];
+    }
+    return fixed;
+}
+
+// Device underrun counter tracking (file-static like AudioOutput's own ledger).
+std::uint64_t s_prev_xruns = 0;
 }  // namespace
 
 AudioPipeline::~AudioPipeline() { reset(); }
@@ -149,11 +378,13 @@ void AudioPipeline::add_media(const canvas::core::MediaEntry& entry) {
         decoders_[entry.id] = std::move(adec);
     } else {
         if (adec->has_audio())
-            ::canvas::core::log::log_warning("audio: FAILED to open audio decoder for media %d path=%s",
-                                         entry.id, entry.path.c_str());
+            ::canvas::core::log::log_audio_warning(
+                "audio: FAILED to open audio decoder for media %d path=%s",
+                entry.id, entry.path.c_str());
         else
-            ::canvas::core::log::log_warning("audio: media %d has no audio stream (or open failed) path=%s",
-                                         entry.id, entry.path.c_str());
+            ::canvas::core::log::log_audio_warning(
+                "audio: media %d has no audio stream (or open failed) path=%s",
+                entry.id, entry.path.c_str());
     }
 }
 
@@ -172,6 +403,7 @@ void AudioPipeline::reset() {
     speed_video_ms_ = 0.0;
     speed_audible_ms_ = 0.0;
     feed_watermarks_.clear();
+    clean_tail_.clear();
     last_seq_fed_ = -1;
     last_scrub_audio_target_ = -1;
     last_scrub_audio_at_ = {};
@@ -185,6 +417,8 @@ void AudioPipeline::reset() {
     iso_bank_.clear();
     stretch_bank_.clear();
     eq_bank_.clear();
+    eq_ctx_logged_.clear();
+    limiter_.reset();
 }
 
 void AudioPipeline::set_live_clip_gain(canvas::core::ClipId id, float volume_db) {
@@ -214,7 +448,7 @@ void AudioPipeline::open_output() {
     if (active_) return;
     active_ = sink_.open(rate_, channels_);
     if (!active_)
-        ::canvas::core::log::log_warning(
+        ::canvas::core::log::log_audio_warning(
             "audio: FAILED to open output device rate=%d channels=%d", rate_, channels_);
     CANVAS_LOG("audio: pipeline open output active=%d rate=%d channels=%d", (int)active_, rate_,
                channels_);
@@ -245,10 +479,10 @@ void AudioPipeline::rewind(int64_t seq_frame, bool playing) {
 void AudioPipeline::reanchor_locked(int64_t seq_frame) {
     // New run: the sync log compares A/V offset before vs after the re-anchor.
     ++run_id_;
-    ::canvas::core::log::log_info("[avsync] RE-ANCHOR run=%llu at_seq_frame=%lld device_written=%llu",
-                                 static_cast<unsigned long long>(run_id_),
-                                 static_cast<long long>(seq_frame),
-                                 static_cast<unsigned long long>(sink_.stat_written_frames()));
+    ::canvas::core::log::log_audio_info(
+        "[avsync] RE-ANCHOR run=%llu at_seq_frame=%lld device_written=%llu",
+        static_cast<unsigned long long>(run_id_), static_cast<long long>(seq_frame),
+        static_cast<unsigned long long>(sink_.stat_written_frames()));
     // Remember anchor media sample + device-written counter so the audible
     // position within this run can be derived for A/V sync diagnostics.
     written_at_anchor_ = sink_.stat_written_frames();
@@ -257,6 +491,7 @@ void AudioPipeline::reanchor_locked(int64_t seq_frame) {
     // Fresh run: nothing fed yet, so the feed watermarks start empty and the
     // next preroll/play_step starts at the anchor (no double-handoff).
     feed_watermarks_.clear();
+    clean_tail_.clear();
     last_seq_fed_ = seq_frame;
     CANVAS_LOG("audio: rewind reset feed, anchor_media_sample=%lld rate=%d",
                static_cast<long long>(anchor_media_sample_), rate_);
@@ -268,6 +503,8 @@ void AudioPipeline::reanchor_locked(int64_t seq_frame) {
     // Same rule for the EQ bank: a seek starts a fresh curve, no stale IIR
     // delay memory from the pre-seek stream.
     eq_bank_.drop();
+    eq_ctx_logged_.clear();
+    limiter_.reset();
     // Re-arm the device on every seek so playback restarts from the new
     // playhead; without this, resume would play stale audio from the old spot.
     if (active_) {
@@ -296,7 +533,7 @@ void AudioPipeline::preroll(int64_t seq_frame, int lead_ms, bool playing) {
     const int64_t written = write_mixed(seq_frame, total);
     CANVAS_LOG("audio: preroll lead_ms=%d written_frames=%lld sources=%zu", lead_ms,
                static_cast<long long>(written), sources.size());
-    ::canvas::core::log::log_info(
+    ::canvas::core::log::log_audio_info(
         "[audio:preroll] cur=%lld base_sample=%lld written_frames=%lld audible_before=%llu playing=%d",
         static_cast<long long>(seq_frame), static_cast<long long>(playhead_to_audio_sample(seq_frame)),
         static_cast<long long>(written),
@@ -333,7 +570,7 @@ void AudioPipeline::maybe_wave_capture_open_locked() {
     if (!path || !*path) return;
     wav_capture_f_ = std::fopen(path, "wb");
     if (!wav_capture_f_) {
-        ::canvas::core::log::log_warning("audio: wave capture open FAILED path=%s", path);
+        ::canvas::core::log::log_audio_warning("audio: wave capture open FAILED path=%s", path);
         return;
     }
     wav_capture_frames_ = 0;
@@ -373,7 +610,7 @@ void AudioPipeline::wave_capture_close_locked() {
     patch_wav_header(wav_capture_f_, static_cast<std::size_t>(wav_capture_frames_), channels_);
     std::fclose(wav_capture_f_);
     wav_capture_f_ = nullptr;
-    ::canvas::core::log::log_info(
+    ::canvas::core::log::log_audio_info(
         "audio: wave capture OFF frames=%llu path=%s",
         static_cast<unsigned long long>(wav_capture_frames_), wav_capture_path_.c_str());
 }
@@ -398,7 +635,7 @@ void AudioPipeline::log_feed_ledger_locked(int64_t seq_frame, int64_t start_samp
     const int64_t dev_delta =
         static_cast<int64_t>(dev_written) - static_cast<int64_t>(last_dev_written);
     last_dev_written = dev_written;
-    ::canvas::core::log::log_info(
+    ::canvas::core::log::log_audio_info(
         "[audio:feed] frame=%lld start=%lld from=%lld want=%lld wrote=%lld fed_window=%llu "
         "dev_written_delta=%lld (%.0f/s) pending=%zu (%.0fms) audible=%llu dev_lat_ms=%.1f",
         static_cast<long long>(seq_frame), static_cast<long long>(start_sample),
@@ -452,10 +689,11 @@ void AudioPipeline::play_scrub_grain(int64_t seq_frame) {
     std::vector<float> grain(static_cast<std::size_t>(f) * channels_, 0.0f);
     mix_source_chunk(grain, channels_, *clip, sources[0].gain_db,
                      effective_clip_volume_db(*clip), s, base_sample, rate_, fps_v, seq_fps,
-                     1.0, clip->pan);
+                     1.0, clip->pan, &clean_tail_);
     if (!sink_.write_float(grain.data(), f))
-        ::canvas::core::log::log_warning("[scrub] GRAIN dropped (overflow) at frame=%lld frames=%d",
-                                     static_cast<long long>(seq_frame), f);
+        ::canvas::core::log::log_audio_warning(
+            "[scrub] GRAIN dropped (overflow) at frame=%lld frames=%d",
+            static_cast<long long>(seq_frame), f);
     if (dec_ms > 1.0)
         CANVAS_LOG("[scrub] GRAIN frame=%lld decode_ms=%.2f samples=%zu",
                    static_cast<long long>(seq_frame), dec_ms, s->samples.size());
@@ -507,6 +745,12 @@ std::vector<AudioPipeline::AudioSource> AudioPipeline::audible_sources_at(int64_
     return out;
 }
 
+std::size_t AudioPipeline::repair_corrupt_chunk(const std::vector<float>& in, int ch,
+                                                canvas::core::MediaId media,
+                                                std::vector<float>& out) {
+    return repair_corrupt_samples(in, ch, out, clean_tail_[media]);
+}
+
 // The heart of the multi-track playback mix. Every audible source at `seq_frame`
 // contributes a `want_frames`-long chunk (per-media feed watermark honoring, so
 // pre-rolled lead-ins are never re-written): decode -> fade envelope -> clip
@@ -523,6 +767,7 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
     // Device mix bus in the pipeline's channel config (default stereo).
     std::vector<float> mix(static_cast<std::size_t>(want_frames) * channels_, 0.0f);
     int64_t out_frames = 0;
+    double tick_dec_ms = 0.0;
 
     const auto mix_t0 = Clock::now();
     for (const auto& src : sources) {
@@ -577,6 +822,7 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
         const double dec_ms =
             std::chrono::duration<double, std::milli>(Clock::now() - dec_t0).count();
         step_decode_ms_ += dec_ms;
+        tick_dec_ms += dec_ms;
         if (!chunk || chunk->samples.empty()) continue;
         if (playback_dbg() || cut_diag_ > 0) {
             const int dbg_ch = chunk->channels > 0 ? chunk->channels : 1;
@@ -591,6 +837,32 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
         const int src_ch = chunk->channels > 0 ? chunk->channels : 1;
         const int frames = static_cast<int>(chunk->samples.size()) / src_ch;
         if (frames <= 0) continue;
+        // Repair corrupt decoder output here, BEFORE it reaches any DSP bank's
+        // carried state or the mix: raw float PCM inside Matroska can carry
+        // uninitialized-memory garbage (this field's recording
+        // `2026-09-10 20-21-55.mkv` has 5 permanent garbage samples at stream
+        // head, which a re-anchor resurfaced as the left-ear pop), and a
+        // corrupt sample must be held-to-valid instead of played -- sample-
+        // continuous, so the fix itself introduces no click.
+        std::vector<float> repaired_samples;
+        const std::size_t repaired =
+            repair_corrupt_chunk(chunk->samples, src_ch, clip.media, repaired_samples);
+        if (repaired > 0)
+            ::canvas::core::log::log_audio_warning(
+                "[audio] REPAIR media=%d from=%lld frames=%d ch=%d fixed=%llu "
+                "(corrupt decoder PCM held-to-valid)",
+                clip.media, static_cast<long long>(from), frames, src_ch,
+                static_cast<unsigned long long>(repaired));
+        // The audit scans the repaired buffer: a held-to-valid chunk reads as
+        // clean downstream (that's the point), the REPAIR log above is the
+        // corruption record.
+        const float* dec_pcm =
+            repaired_samples.empty() ? chunk->samples.data() : repaired_samples.data();
+        {
+            const AuditOutcome dec_aud = audit_scan(dec_pcm, frames, src_ch);
+            audit_report(dec_aud, "dec", seq_frame, clip.id, clip.media, from,
+                         dec_pcm, frames, src_ch, "decoder", rate_, dec_ms, 0.0);
+        }
         const int64_t src_out_sample = static_cast<int64_t>(
             std::llround(static_cast<double>(clip.src_out) / src.fps * rate_));
         const int64_t chunk_end = from + static_cast<int64_t>(frames);
@@ -615,7 +887,7 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
         // over the next feed (RNNoise behaves the same), and the mix path
         // writes exactly what it gets.
         std::vector<float> sped;
-        const float* pcm = chunk->samples.data();
+        const float* pcm = dec_pcm;
         int den_ch = src_ch;
         int den_frames = frames;
         const double pitch = canvas::core::cliprate::pitch_factor(clip);
@@ -634,6 +906,11 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
             pcm = sped.data();
             den_frames = written;
             den_ch = out_ch;
+            {
+                const AuditOutcome st_aud = audit_scan(pcm, den_frames, den_ch);
+                audit_report(st_aud, "stretch", seq_frame, clip.id, clip.media, from, pcm,
+                             den_frames, den_ch, "wsola", rate_, dec_ms, 0.0);
+            }
         }
 
         // Per-clip AI voice isolation (RNNoise): denoise this source's PCM
@@ -648,6 +925,12 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
             if (written > 0) {
                 pcm = denoised.data();
                 den_frames = written;
+                {
+                    const AuditOutcome vi_aud = audit_scan(pcm, den_frames, den_ch);
+                    audit_report(vi_aud, "denoise", seq_frame, clip.id, clip.media, from,
+                                 pcm, den_frames, den_ch, "rnnoise voice=on", rate_,
+                                 dec_ms, 0.0);
+                }
             } else {
                 pcm = nullptr;
                 den_frames = 0;
@@ -659,17 +942,46 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
             // order as export. The EQ is pure stream-in-place filtering at any
             // rate (no fixed-48 kHz rule like RNNoise) and always writes the
             // same frame count it was given, so the mix accounting is
-            // untouched. Disabled clips pass through bit-exact; the bank also
-            // drops its filter state then, so toggling EQ on restarts from a
-            // fresh curve rather than stale IIR memory.
+            // untouched. Disabled clips pass through bit-exact; the bank KEEPS
+            // the per-clip filter state across a toggle (disable = pass-through
+            // with carried DF2T state), so re-enabling EQ resumes sample-
+            // continuously instead of cold-starting a zero-state filter whose
+            // first output sample would jump to ~b0*x (a click/static per
+            // toggle). Only drop() (discontinuous seek/rewind) clears it.
             std::vector<float> eqd;
-            if (clip.eq_enabled) {
+            if (clip.eq_enabled || eq_bank_.wants_samples(clip.id, false)) {
+                // Feed real PCM whenever EQ is on OR the bank is still gliding
+                // dry->wet / wet->dry on a toggle edge (the crossfade needs the
+                // raw input to blend against). Once a disabled clip settles dry
+                // the bank reports wants_samples()==false and we hand it the
+                // null/0 no-op call, keeping the disabled-fast path copy-free.
+                // One-shot per-(clip, rate, ch, enabled) EQ context line: names
+                // the media file + timeline geometry the bank is filtering when
+                // the [eq]/[audio] lines fire, so a garbled-audio report is
+                // traceable to a file instead of a bare clip id.
+                const std::uint64_t eq_ctx =
+                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(rate_)) << 33) |
+                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(den_ch)) << 1) |
+                    (clip.eq_enabled ? 1ULL : 0ULL);
+                const auto eqc = eq_ctx_logged_.find(clip.id);
+                if (eqc == eq_ctx_logged_.end() || eqc->second != eq_ctx) {
+                    eq_ctx_logged_[clip.id] = eq_ctx;
+                    const canvas::core::MediaEntry* ment = project_->media_by_id(clip.media);
+                    ::canvas::core::log::log_audio_info(
+                        "[eq] ctx clip=%llu media=%d path=%s tl=%lld..%lld seq=%lld "
+                        "spd=%.3f pitch=%.3f rate=%d ch=%d enabled=%d",
+                        static_cast<unsigned long long>(clip.id), clip.media,
+                        ment ? ment->path.c_str() : "<unknown>",
+                        static_cast<long long>(clip.tl_in), static_cast<long long>(clip.tl_out),
+                        static_cast<long long>(seq_frame), spd, pitch, rate_, den_ch,
+                        clip.eq_enabled ? 1 : 0);
+                }
                 eqd.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
                 // The EQ is stream-in-place and rate-preserving, so it writes
                 // exactly the frames it was given (the returned count is the
                 // no-lookahead contract, asserted here).
-                den_frames = eq_bank_.tick(clip.id, clip.eq_bands, true, rate_, den_ch,
-                                           eqd.data(), den_frames);
+                den_frames = eq_bank_.tick(clip.id, clip.eq_bands, clip.eq_enabled, rate_,
+                                           den_ch, eqd.data(), den_frames);
                 pcm = eqd.data();
             } else {
                 (void)eq_bank_.tick(clip.id, clip.eq_bands, false, rate_, den_ch, nullptr, 0);
@@ -678,15 +990,70 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
         if (pcm && den_frames > 0) {
             // Pan is baked by the retime engine for the DSP path, so the mix
             // applies center (the boundary grain/feed paths pass clip.pan).
+            // Per-lane peak scan: names WHICH source fed the mix a garbage/
+            // nonfinite sample (the EQ bank only scans EQ-shaped lanes, so a
+            // decoded/stretched lane without EQ never trips it — this closes
+            // that blind spot without touching the sample rate scale). Cheap:
+            // the device-bound mix is scanned every tick anyway.
+            float lane_peak = 0.0f;
+            bool lane_nonfinite = false;
+            const std::size_t lane_len = static_cast<std::size_t>(den_frames) * den_ch;
+            for (std::size_t k = 0; k < lane_len; ++k) {
+                if (std::isnan(pcm[k]) || std::isinf(pcm[k])) {
+                    lane_nonfinite = true;
+                    break;
+                }
+                lane_peak = std::max(lane_peak, std::fabs(pcm[k]));
+            }
+            if (lane_peak > 16.0f || lane_nonfinite)
+                ::canvas::core::log::log_audio_warning(
+                    "[audio] LANE %s peak=%.4g clip=%llu media=%d ch=%d frames=%d "
+                    "spd=%.3f pitch=%.3f pan=%.2f vol=%.1fdB eq=%d voice=%d",
+                    lane_nonfinite ? "NONFINITE" : "BLAST",
+                    static_cast<double>(lane_peak), static_cast<unsigned long long>(clip.id),
+                    clip.media, den_ch, den_frames, spd, pitch,
+                    clip.pan == 0.0f ? 0.0f : static_cast<float>(clip.pan),
+                    effective_clip_volume_db(clip), clip.eq_enabled ? 1 : 0,
+                    clip.voice_isolation != canvas::core::VoiceIsolationMode::None ? 1 : 0);
+            {
+                const AuditOutcome lane_aud = audit_scan(pcm, den_frames, den_ch);
+                audit_report(lane_aud, "lane", seq_frame, clip.id, clip.media, from, pcm,
+                             den_frames, den_ch, "post-eq mix source", rate_, dec_ms, 0.0);
+            }
+            // Lane sanity clamp (shared audio_mix law): a float32 monster
+            // (nonfinite or |v| > kLaneSanityCeiling) in ONE clip's DSP is held
+            // to the last valid sample so it can never reach the DAC as a
+            // clipped square. The audit above still names the offender; here
+            // the mix never sees it. pcm may alias the const-shared decode
+            // buffer, so clamp a mutable copy (playback cost is one memcpy of
+            // the lane per step, dwarfed by the DSP above).
+            std::vector<float> lane(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
+            (void)canvas::core::audio_mix::sanitize_lane(lane.data(), den_frames, den_ch);
             mix_source_samples(mix, channels_, clip, src.gain_db,
-                               effective_clip_volume_db(clip), pcm, den_ch, den_frames, from,
-                               rate_, src.fps, seq_fps, spd, 0.0f);
+                               effective_clip_volume_db(clip), lane.data(), den_ch, den_frames,
+                               from, rate_, src.fps, seq_fps, spd, 0.0f);
         }
         out_frames = std::max(out_frames, static_cast<int64_t>(den_frames));
     }
     step_mix_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - mix_t0).count();
 
     if (out_frames <= 0) return 0;
+    // Defensive nonfinite hold on the summed bus (lanes were sanitized, so
+    // this should never trip; a held value stops inf*0 -> NaN in the limiter).
+    {
+        float last = 0.0f;
+        const std::size_t tlen = static_cast<std::size_t>(out_frames) * channels_;
+        for (std::size_t k = 0; k < tlen; ++k) {
+            if (std::isfinite(mix[k])) last = mix[k];
+            else mix[k] = last;
+        }
+    }
+    // Master limiter (shared audio_mix law): the DAC-bound bus never exceeds
+    // kMasterCeiling peak. Without this an EQ-inflated lane (the field profile
+    // measures ~13x on 60 Hz bass) hands >0 dBFS straight to the DAC, which
+    // hard-clips it into the ±1.0 square-burst artifact this captures.
+    for (std::size_t k = 0; k < static_cast<std::size_t>(out_frames) * channels_; ++k)
+        mix[k] = limiter_.apply(mix[k]);
     const auto write_t0 = Clock::now();
     sink_.write_float(mix.data(), static_cast<int>(out_frames));
     step_write_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - write_t0).count();
@@ -696,15 +1063,68 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
     maybe_wave_capture_open_locked();
     wave_capture_write_locked(mix.data(), static_cast<std::size_t>(out_frames));
     float mix_peak = 0.0f;
+    bool mix_nonfinite = false;
     const std::size_t mix_len = static_cast<std::size_t>(out_frames) * channels_;
-    for (std::size_t k = 0; k < mix_len; ++k)
+    for (std::size_t k = 0; k < mix_len; ++k) {
+        if (std::isnan(mix[k]) || std::isinf(mix[k])) {
+            mix_nonfinite = true;
+            break;
+        }
         mix_peak = std::max(mix_peak, std::fabs(mix[k]));
+    }
     static auto last_clip_log = Clock::now();
-    if (mix_peak > 1.0f && Clock::now() - last_clip_log >= std::chrono::seconds(1)) {
+    if (mix_nonfinite && Clock::now() - last_clip_log >= std::chrono::seconds(1)) {
         last_clip_log = Clock::now();
-        ::canvas::core::log::log_warning(
+        ::canvas::core::log::log_audio_warning(
+            "audio: MIX NONFINITE -> DAC garbage: sources=%zu frame=%lld",
+            sources.size(), static_cast<long long>(seq_frame));
+    } else if (mix_peak > 1.0f && Clock::now() - last_clip_log >= std::chrono::seconds(1)) {
+        last_clip_log = Clock::now();
+        ::canvas::core::log::log_audio_warning(
             "audio: MIX exceeds 0 dBFS -> DAC clips: peak=%.3f sources=%zu frame=%lld",
             static_cast<double>(mix_peak), sources.size(), static_cast<long long>(seq_frame));
+    }
+
+    // [audio audit] — always on: final-mix pop-step scan, device-xrun deltas
+    // (underruns are invisible in the sample stream), and starvation warnings
+    // (a mix step that outlives its 33 ms window underruns the DAC and clicks
+    // regardless of what the samples say). The per-tick TICK trace line is
+    // rate-limited to 1/s so the summary stays readable while still tracing
+    // every window's mix peak.
+    {
+        const double tick_mix_ms =
+            std::chrono::duration<double, std::milli>(Clock::now() - mix_t0).count();
+        const AuditOutcome mix_aud =
+            audit_scan(mix.data(), static_cast<int>(out_frames), channels_);
+        audit_report(mix_aud, "mix", seq_frame, 0, -1, 0, mix.data(),
+                     static_cast<int>(out_frames), channels_, "device-bus mix", rate_,
+                     tick_dec_ms, tick_mix_ms);
+        const std::uint64_t xruns = sink_.stat_xruns();
+        const std::uint64_t xruns_d = xruns > s_prev_xruns ? xruns - s_prev_xruns : 0;
+        s_prev_xruns = xruns;
+        if (xruns_d)
+            ::canvas::core::log::log_audio_warning(
+                "[audio:audit] XRUN delta=%llu frame=%lld pending=%zu audible=%llu",
+                static_cast<unsigned long long>(xruns_d),
+                static_cast<long long>(seq_frame), sink_.pending_frames(),
+                static_cast<unsigned long long>(sink_.audible_position_frames()));
+        if (tick_mix_ms > kAuditSlowStepMs)
+            ::canvas::core::log::log_audio_warning(
+                "[audio:audit] SLOW mix_step=%.1fms frame=%lld want=%lld "
+                "(starvation -> underrun click)",
+                tick_mix_ms, static_cast<long long>(seq_frame),
+                static_cast<long long>(want_frames));
+        static auto last_tick_log = Clock::now();
+        if (Clock::now() - last_tick_log >= std::chrono::seconds(1)) {
+            last_tick_log = Clock::now();
+            ::canvas::core::log::log_audio_info(
+                "[audio:audit] TICK frame=%lld srcs=%zu mixPk=%.4g limGain=%.3f "
+                "decMs=%.1f mixMs=%.1f wrote=%lld xruns=%llu",
+                static_cast<long long>(seq_frame), sources.size(),
+                static_cast<double>(mix_peak), static_cast<double>(limiter_.gain_),
+                tick_dec_ms, tick_mix_ms, static_cast<long long>(out_frames),
+                static_cast<unsigned long long>(xruns));
+        }
     }
     return out_frames;
 }
@@ -829,7 +1249,7 @@ void AudioPipeline::log_av_sync(int64_t seq_frame, double video_fps, double step
     speed_video_ms_ = video_ms;
     speed_audible_ms_ = audible_ms;
 
-    ::canvas::core::log::log_info(
+    ::canvas::core::log::log_audio_info(
         "[avsync] run=%llu frame=%lld video_ms=%.1f audible_ms=%.1f av_offset_ms=%.1f "
         "speed_x=%.3f write_to_audible_ms=%.1f step_s=%.4f",
         static_cast<unsigned long long>(run_id_), static_cast<long long>(seq_frame), video_ms,
@@ -848,8 +1268,8 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
         const auto now = Clock::now();
         if (now - last_warn < std::chrono::seconds(1)) return;
         last_warn = now;
-        ::canvas::core::log::log_warning("audio: no output at frame %lld -> %s",
-                                     static_cast<long long>(seq_frame), why);
+        ::canvas::core::log::log_audio_warning("audio: no output at frame %lld -> %s",
+                                           static_cast<long long>(seq_frame), why);
     };
 
     if (!project_ || !active_ || !sink_.is_open()) {
@@ -882,13 +1302,13 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
             if ((++gg_) == 1 || Clock::now() - last_gg >= std::chrono::seconds(1)) {
                 last_gg = Clock::now();
                 if (gg_suppressed_)
-                    ::canvas::core::log::log_info(
+                    ::canvas::core::log::log_audio_info(
                         "audio: GHOST-GUARD frame=%lld enabled=%d media=%d tl=%lld->%lld suppressed=%d",
                         static_cast<long long>(seq_frame), (int)present->enabled, present->media,
                         static_cast<long long>(present->tl_in),
                         static_cast<long long>(present->tl_out), gg_suppressed_);
                 else
-                    ::canvas::core::log::log_info(
+                    ::canvas::core::log::log_audio_info(
                         "audio: GHOST-GUARD frame=%lld enabled=%d media=%d tl=%lld->%lld",
                         static_cast<long long>(seq_frame), (int)present->enabled, present->media,
                         static_cast<long long>(present->tl_in),
@@ -959,9 +1379,9 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
         constexpr int64_t kMaxAvDriftMs = 2000;
         if (std::llabs(drift_ms) > kMaxAvDriftMs) {
             last_drift_anchor_ = Clock::now();
-            ::canvas::core::log::log_warning(
-                "audio: A/V DRIFT re-anchor offset_ms=%lld audible_ms=%.1f video_ms=%.1f",
-                static_cast<long long>(drift_ms), audible_ms, video_ms);
+::canvas::core::log::log_audio_warning(
+            "audio: A/V DRIFT re-anchor offset_ms=%lld audible_ms=%.1f video_ms=%.1f",
+            static_cast<long long>(drift_ms), audible_ms, video_ms);
             reanchor_locked(seq_frame);
         }
     }
@@ -986,7 +1406,7 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
     const bool forward_hop =
         last_seq_fed_ >= 0 && start_sample - from > kForwardReanchorSamples;
     if (backward_jump || forward_hop) {
-        ::canvas::core::log::log_warning(
+        ::canvas::core::log::log_audio_warning(
             "audio: playhead discontinuity at frame=%lld (last_fed=%lld %s) — self re-anchor",
             static_cast<long long>(seq_frame), static_cast<long long>(last_seq_fed_),
             backward_jump ? "backward" : "forward-hop");
@@ -1041,7 +1461,7 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
         const bool near_end = clip->tl_out > 0 && seq_frame > clip->tl_out - 4;
         if (clip_changed || near_start || near_end) cut_diag_ = 40;
         if (clip_changed)
-            ::canvas::core::log::log_info(
+            ::canvas::core::log::log_audio_info(
                 "audio: CUT-BOUNDARY clip=%lld media=%d tl=%lld->%lld src=%lld->%lld frame=%lld",
                 static_cast<long long>(clip->id), clip->media, static_cast<long long>(clip->tl_in),
                 static_cast<long long>(clip->tl_out), static_cast<long long>(clip->src_in),
@@ -1074,7 +1494,7 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
     }
     if (written <= 0 && !deferred) {
         if (playback_dbg())
-            ::canvas::core::log::log_warning(
+            ::canvas::core::log::log_audio_warning(
                 "audio: play step SKIPPED seq_frame=%lld start_sample=%lld from=%lld want=%lld",
                 static_cast<long long>(seq_frame), static_cast<long long>(start_sample),
                 static_cast<long long>(from), static_cast<long long>(want));
@@ -1113,7 +1533,7 @@ void AudioPipeline::play_step(int64_t seq_frame, double step_seconds, bool seek_
             static_cast<double>(anchor_seq_frame_) / seq_fps * 1000.0 +
             static_cast<double>(run_audible) / static_cast<double>(rate_) * 1000.0;
         const double video_ms = static_cast<double>(seq_frame) / seq_fps * 1000.0;
-        ::canvas::core::log::log_info(
+        ::canvas::core::log::log_audio_info(
             "[audio] frame=%lld wrote=%lld req=%lld seek_hop=%d burst=%d audible_ms=%.1f "
             "video_ms=%.1f av_offset_ms=%.1f churn=%d dec_ms=%.2f mix_ms=%.2f write_ms=%.2f "
             "resyncs=%llu",
@@ -1182,7 +1602,7 @@ void AudioPipeline::feed_scrub_audio(int64_t target) {
         std::vector<float> chunk_mix(static_cast<std::size_t>(frames) * channels_, 0.0f);
         mix_source_chunk(chunk_mix, channels_, *clip, sources[0].gain_db,
                          effective_clip_volume_db(*clip), s, base_sample, rate_, fps_v,
-                         seq_fps, 1.0, clip->pan);
+                         seq_fps, 1.0, clip->pan, &clean_tail_);
         ok = sink_.reposition_enqueue(chunk_mix.data(), frames);
     }
     const std::size_t pending_after = sink_.pending_frames();

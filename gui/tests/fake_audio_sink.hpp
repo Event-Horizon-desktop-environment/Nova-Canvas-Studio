@@ -28,6 +28,8 @@ struct FakeAudioSink : AudioSink {
     std::vector<float> queue_;
     uint64_t written_total_ = 0;
     uint64_t latency_ = 0;
+    // Test-set to simulate device underruns (AudioPipeline logs xrun deltas).
+    uint64_t xruns_ = 0;
 
     bool open(int sample_rate, int channels_) override {
         rate = sample_rate;
@@ -61,6 +63,7 @@ struct FakeAudioSink : AudioSink {
     std::size_t pending_frames() const override { return queue_.size() / channels; }
     void set_hold_active(bool on) override { hold_ = on; }
     uint64_t stat_written_frames() const override { return written_total_; }
+    uint64_t stat_xruns() const override { return xruns_; }
     uint64_t audible_position_frames() const override {
         return written_total_ >= latency_ ? written_total_ - latency_ : 0;
     }
