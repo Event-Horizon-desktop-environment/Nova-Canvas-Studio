@@ -178,6 +178,12 @@ std::unique_ptr<ICommand> set_clip_audio_processing(Sequence& seq, Track::Kind k
                                                     float speed_factor, bool speed_enabled,
                                                     bool eq_enabled,
                                                     const std::array<Clip::EqBand, 6>& eq_bands);
+// Sets the AI voice-isolation engine on a clip's audio. If the clip is linked,
+// the mate inherits the same mode (both halves of an A/V pair share one audio
+// treatment). Returns nullptr if the clip is not found.
+std::unique_ptr<ICommand> set_clip_voice_isolation(Sequence& seq, Track::Kind kind,
+                                                   std::size_t track_index, ClipId id,
+                                                   VoiceIsolationMode mode);
 // Sets a video clip's visual transform (Zoom scale_x/scale_y, pixel Position
 // pos_x/pos_y, Rotation in degrees, Anchor offsets in pixels, and the flips).
 // If the clip is linked, its mate inherits the same values (an A/V pair shares

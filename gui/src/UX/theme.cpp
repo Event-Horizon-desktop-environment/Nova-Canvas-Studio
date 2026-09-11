@@ -384,6 +384,23 @@ static QPalette makeHorizonPalette();
 
 const ThemeTokens& tokens() { return builtTokens(); }
 
+namespace {
+
+const QColor kClipColors[12] = {
+    QColor(0xE0, 0x48, 0x3B), QColor(0xF6, 0x7C, 0x1F), QColor(0xBC, 0xAA, 0x30),
+    QColor(0x63, 0xC1, 0x30), QColor(0x2B, 0xC0, 0x82), QColor(0x24, 0xAF, 0xBF),
+    QColor(0x38, 0x8D, 0xE8), QColor(0x5F, 0x6B, 0xC4), QColor(0x8C, 0x5B, 0xC4),
+    QColor(0xB9, 0x5C, 0xB9), QColor(0xBF, 0x8F, 0x60), QColor(0x9A, 0xA0, 0xB0),
+};
+
+}  // namespace
+
+const QColor* clip_color_swatches() { return kClipColors; }
+
+QColor clip_color_for(uint8_t color) {
+    return color == 0 || color > 12 ? QColor() : kClipColors[color - 1];
+}
+
 bool is_light() { return g_light; }
 
 QString css(const QColor& c) {

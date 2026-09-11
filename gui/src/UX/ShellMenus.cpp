@@ -5,10 +5,15 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QBrush>
+#include <QColor>
+#include <QIcon>
 #include <QKeySequence>
 #include <QMenu>
 #include <QMenuBar>
 #include <QObject>
+#include <QPainter>
+#include <QPixmap>
 #include <QSettings>
 
 #include <functional>
@@ -74,6 +79,41 @@ void build_app_menus(MainWindow& mw) {
     auto* clip_menu = mw.ui->menubar->addMenu(MainWindow::tr("&Clip"));
     clip_menu->addAction(MainWindow::tr("Add Transition"), QKeySequence(Qt::CTRL | Qt::Key_T));
     clip_menu->addAction(MainWindow::tr("Link/Unlink"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_L));
+
+    // "Clip Colour >" submenu: the full Resolve-style pinch wheel applied to the
+    // currently selected clip. Each entry carries its 1-12 swatch index (0 = no
+    // colour) and funnels into the SAME edit op the Inspector + context menu use.
+    auto* clip_color_menu = clip_menu->addMenu(MainWindow::tr("Clip Colour") + QStringLiteral(" >"));
+    apply_rounded_menu(clip_color_menu);
+    const auto swatch_action = [&mw](uint8_t color) {
+        QAction* act = new QAction(&mw);
+        act->setData(color);
+        QObject::connect(act, &QAction::triggered, &mw,
+                         [&mw, color]() { mw.apply_clip_color(color); });
+        return act;
+    };
+    const QColor* swatches = clip_color_swatches();
+    for (int i = 0; i < 12; ++i) {
+        QAction* act = swatch_action(static_cast<uint8_t>(i + 1));
+        act->setText(QStringLiteral("#%1").arg(swatches[i].name()));
+        QPixmap pm(16, 16);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setBrush(QBrush(swatches[i]));
+        p.setPen(QPen(QColor(0x55, 0x55, 0x55), 1));
+        p.drawRoundedRect(QRectF(0.5, 0.5, 15, 15), 3, 3);
+        act->setIcon(QIcon(pm));
+        clip_color_menu->addAction(act);
+    }
+    clip_color_menu->addSeparator();
+    QAction* no_color = swatch_action(0);
+    no_color->setText(MainWindow::tr("&No Colour"));
+    clip_color_menu->addAction(no_color);
+    // Only meaningful when a clip is selected; the whole submenu enables with it.
+    QObject::connect(clip_menu, &QMenu::aboutToShow, &mw, [clip_color_menu, &mw]() {
+        clip_color_menu->setEnabled(mw.selected_clip_ != 0);
+    });
 
     auto* mark_menu = mw.ui->menubar->addMenu(MainWindow::tr("&Mark"));
     mark_menu->addAction(MainWindow::tr("Mark In"), QKeySequence(Qt::Key_I));

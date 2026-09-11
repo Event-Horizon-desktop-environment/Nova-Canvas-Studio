@@ -86,12 +86,10 @@ template <typename Container>
 // for wider buses, and stereo sources stay on the front pair. Shared by
 // playback and export so the two mix identically at any channel count.
 inline void mix_chunk(std::vector<float>& out, int out_channels,
-                      const std::vector<float>& src, int src_ch,
+                      const float* src, int src_ch, int frames,
                       const std::vector<float>* gains, float vol, float gl,
                       float gr) {
-    if (out_channels <= 0 || src_ch <= 0 || src.empty() || out.empty()) return;
-    const int frames = static_cast<int>(src.size()) / src_ch;
-    if (frames <= 0) return;
+    if (out_channels <= 0 || src_ch <= 0 || frames <= 0 || !src || out.empty()) return;
     const std::size_t row = static_cast<std::size_t>(out_channels);
     for (int k = 0; k < frames; ++k) {
         const float g = gains ? (*gains)[static_cast<std::size_t>(k)] : 1.0f;
@@ -124,6 +122,19 @@ inline void mix_chunk(std::vector<float>& out, int out_channels,
             }
         }
     }
+}
+
+// Vector convenience overload (the pre-existing surface). The pointer+frames
+// form above is the single shared law so the per-clip AI voice-isolation stage
+// (which hands the mix a possibly-shorter denoised buffer) cannot drift from
+// the export/playback channel-mapping math.
+inline void mix_chunk(std::vector<float>& out, int out_channels,
+                      const std::vector<float>& src, int src_ch,
+                      const std::vector<float>* gains, float vol, float gl,
+                      float gr) {
+    if (out_channels <= 0 || src_ch <= 0 || src.empty() || out.empty()) return;
+    mix_chunk(out, out_channels, src.data(), src_ch,
+              static_cast<int>(src.size()) / src_ch, gains, vol, gl, gr);
 }
 
 }  // namespace audio_mix

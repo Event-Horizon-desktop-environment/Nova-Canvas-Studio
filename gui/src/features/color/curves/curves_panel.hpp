@@ -66,6 +66,8 @@ private:
     QColor tint_;
     std::vector<float> veil_;
     int drag_index_ = -1;
+    // Last plot-space px during a drag, for the per-move delta trace.
+    QPointF last_plot_px_;
 };
 
 // Curves panel: header (curve dropdown + Y/R/G/B channel group) above the

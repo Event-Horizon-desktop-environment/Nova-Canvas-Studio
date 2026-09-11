@@ -45,6 +45,13 @@ class VideoDecoder {
 public:
     VideoDecoder() = default;
     ~VideoDecoder();
+    // Movable: a prepared decode session (e.g. a transition pre-render parked at
+    // the incoming clip's head) can be handed to another owner without tearing
+    // down and re-opening the FFmpeg contexts. Move-assign closes whatever this
+    // decoder currently holds, steals the source's contexts/state, and leaves the
+    // source closed and reusable.
+    VideoDecoder(VideoDecoder&& o) noexcept;
+    VideoDecoder& operator=(VideoDecoder&& o) noexcept;
     VideoDecoder(const VideoDecoder&) = delete;
     VideoDecoder& operator=(const VideoDecoder&) = delete;
 
@@ -249,6 +256,19 @@ private:
     int hold_rgba_dim_ = -1;
     AVFrame* hold_hw_ = nullptr;
     int64_t hold_hw_src_ = -1;
+    // One-frame sequential lookback for the GPU path. When a transition's
+    // fading-out slot runs at a sub-rate (e.g. the B side of a 2:1 clip
+    // ratio), consecutive timeline frames can re-target the SAME source
+    // frame. The repeat would otherwise be served by decode_to_hw_indexed,
+    // whose container seek resets next_frame_ to 0 and forces a full-GOP
+    // re-walk (~54ms on 2K60) for every repeated B frame. retain_hw_ keeps a
+    // ref-counted copy of the last device frame decode_to_hw actually served
+    // (retain_hw_src_ = its frame number); decode_to_hw_indexed serves that
+    // exact copy instead of re-seeking when the walk is already parked past
+    // it, leaving next_frame_ untouched so the following distinct frame keeps
+    // riding the cheap sequential path.
+    AVFrame* retain_hw_ = nullptr;
+    int64_t retain_hw_src_ = -1;
     // Sequential-walk vs keyframe-seek path accounting (see PathStats).
     std::uint64_t path_seq_ = 0;
     std::uint64_t path_seeks_ = 0;

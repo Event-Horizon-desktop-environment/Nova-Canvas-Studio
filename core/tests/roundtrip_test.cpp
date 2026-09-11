@@ -200,6 +200,14 @@ int main() {
         check(p.sequence.video_tracks[0].clips[0].duration() == 30, "ripple delete leaves 30-frame clip");
         check(p.sequence.duration_frames() == 60, "ripple delete closes gap (end frame 60)");
 
+        // Clip metadata (tag / colour / comments) must survive the round-trip.
+        p.sequence.video_tracks[0].clips[0].clip_tag = Clip::ClipTag::GoodTake;
+        p.sequence.video_tracks[0].clips[0].clip_color = 7;
+        p.sequence.video_tracks[0].clips[0].comments = "keeper shot";
+        // Speed Change (whole-clip retime) fields must also survive the round-trip.
+        p.sequence.video_tracks[0].clips[0].speed_enabled = true;
+        p.sequence.video_tracks[0].clips[0].speed_factor = 2.0;
+
         // Serialize.
         std::string err;
         check(save_project(p, "/tmp/opencode/media/roundtrip.ehproj", &err), "save_project");
@@ -208,6 +216,11 @@ int main() {
         check(load_project(loaded, "/tmp/opencode/media/roundtrip.ehproj", &err), "load_project");
         check(tracks_equal(p.sequence.video_tracks, loaded.sequence.video_tracks),
               "video tracks identical after round-trip");
+        const Clip& lc = loaded.sequence.video_tracks[0].clips[0];
+        check(lc.clip_tag == Clip::ClipTag::GoodTake, "clip tag preserved");
+        check(lc.clip_color == 7, "clip colour preserved");
+        check(lc.comments == "keeper shot", "clip comments preserved");
+        check(lc.speed_enabled && lc.speed_factor == 2.0, "speed fields preserved");
         check(p.media.size() == loaded.media.size(), "media registry preserved");
         check(loaded.media.size() == 1 && loaded.media[0].bin == "Scratch", "media bin preserved");
         check(loaded.bins.size() == 1 && loaded.bins[0] == "Scratch", "bins list preserved");

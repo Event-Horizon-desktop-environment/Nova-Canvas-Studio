@@ -296,6 +296,9 @@ signals:
     void clear_transition_requested(const canvas::core::Clip* clip);
     // Emitted when the user clears a clip's IN (leading-edge) transition.
     void clear_transition_in_requested(const canvas::core::Clip* clip);
+    // Emitted when the user picks a clip colour from the context menu's
+    // "Clip Colour" submenu: `color` is the 1-12 swatch index, 0 = no colour.
+    void clip_color_requested(const canvas::core::Clip* clip, uint8_t color);
     // Emitted when the transition handle drag finishes with a new duration;
     // the outgoing clip receives the change.
     void transition_resized(const canvas::core::Clip* clip, int64_t duration);

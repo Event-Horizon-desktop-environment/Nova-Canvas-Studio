@@ -4,6 +4,7 @@
 #include "sync_constants.hpp"
 #include "canvas/core/timeline/audio_fade.hpp"
 #include "canvas/core/timeline/audio_mix.hpp"
+#include "canvas/core/timeline/clip_rate.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <algorithm>
@@ -53,10 +54,14 @@ double media_fps_of(const canvas::core::Project& project, const canvas::core::Cl
 // Per-source fade envelope for a decoded chunk: one gain per output frame from
 // the clip's IN/OUT audio transitions (1.0 everywhere when no audio fade touches
 // this span). Leaves `out` empty for the unity case so callers pass nullptr and
-// skip the per-sample multiply entirely.
+// skip the per-sample multiply entirely. `speed` is the clip's Speed Change
+// factor: an output frame k maps to media position (from_sample - base) + k*
+// speed, and that media offset sits `1/speed` earlier in timeline seconds, so
+// fade frames land on the same timeline frames write_mixed() voices them at
+// (speed 1 = plain playback law).
 void compute_fade_gains(const canvas::core::Clip& clip, const int64_t from_sample,
                         const int out_rate, const double src_fps, const double seq_fps,
-                        const int frames, std::vector<float>* out) {
+                        const double speed, const int frames, std::vector<float>* out) {
     const bool has_fade =
         (clip.transition_in_duration > 0 &&
          canvas::core::is_audio_transition(clip.transition_in)) ||
@@ -67,13 +72,18 @@ void compute_fade_gains(const canvas::core::Clip& clip, const int64_t from_sampl
     // audio map back to timeline frames at the sequence rate, with the clip
     // start positioned by the source's own media fps. Mixed frame-rate clips
     // therefore fade in the same realtime position write_mixed() voices them at.
+    // With Speed Change an output frame k sits at media offset from_sample +
+    // k*speed (source advanced `speed` per output frame), and that media offset
+    // spans (from_sample - base)/speed + k output-frame-seconds of timeline.
     const double base_sample = static_cast<double>(clip.src_in) / src_fps * out_rate;
     out->resize(static_cast<std::size_t>(frames));
     for (int k = 0; k < frames; ++k) {
         // Floor, not llround: the gains land on the same whole frames the
         // renderer's audio_chunk uses (llround shifts frame boundaries).
+        const double media_off = (static_cast<double>(from_sample) - base_sample) +
+                                 static_cast<double>(k) * speed;
         const int64_t tl = clip.tl_in + static_cast<int64_t>(std::floor(
-            (static_cast<double>(from_sample + k) - base_sample) / out_rate * seq_fps));
+            media_off / out_rate * seq_fps / speed));
         (*out)[static_cast<std::size_t>(k)] = canvas::core::audio_fade_gain(clip, tl);
     }
 }
@@ -84,22 +94,34 @@ void compute_fade_gains(const canvas::core::Clip& clip, const int64_t from_sampl
 // upmixed to the front pair, >2ch sources fold down for stereo buses or map
 // channel-for-channel for wider ones. `volume_db` is the clip's mix gain (the
 // live-drag override when one is active, else the clip's own volume_db).
-void mix_source_chunk(std::vector<float>& out, const int out_channels,
-                      const canvas::core::Clip& clip, const float track_gain_db,
-                      const float volume_db, const canvas::core::AudioChunkPtr& chunk,
-                      const int64_t from_sample, const int out_rate, const double src_fps,
-                      const double seq_fps) {
-    const int src_ch = chunk->channels > 0 ? chunk->channels : 1;
-    const int frames = static_cast<int>(chunk->samples.size()) / src_ch;
-    if (frames <= 0) return;
+// The raw-samples form exists so the per-clip voice-isolation stage can hand
+// in a possibly-shorter denoised buffer; the chunk form delegates to it.
+void mix_source_samples(std::vector<float>& out, const int out_channels,
+                        const canvas::core::Clip& clip, const float track_gain_db,
+                        const float volume_db, const float* samples, const int src_ch,
+                        const int frames, const int64_t from_sample, const int out_rate,
+                        const double src_fps, const double seq_fps, const double speed = 1.0) {
+    if (frames <= 0 || !samples) return;
     std::vector<float> gains;
-    compute_fade_gains(clip, from_sample, out_rate, src_fps, seq_fps, frames, &gains);
+    compute_fade_gains(clip, from_sample, out_rate, src_fps, seq_fps, speed, frames, &gains);
     float gl = 1.0f, gr = 1.0f;
     canvas::core::audio_mix::pan_gains(clip.pan, gl, gr);
     const float vol = canvas::core::audio_mix::db_to_gain(volume_db) *
                       canvas::core::audio_mix::db_to_gain(track_gain_db);
-    canvas::core::audio_mix::mix_chunk(out, out_channels, chunk->samples, src_ch,
+    canvas::core::audio_mix::mix_chunk(out, out_channels, samples, src_ch, frames,
                                        gains.empty() ? nullptr : &gains, vol, gl, gr);
+}
+
+void mix_source_chunk(std::vector<float>& out, const int out_channels,
+                      const canvas::core::Clip& clip, const float track_gain_db,
+                      const float volume_db, const canvas::core::AudioChunkPtr& chunk,
+                      const int64_t from_sample, const int out_rate, const double src_fps,
+                      const double seq_fps, const double speed = 1.0) {
+    const int src_ch = chunk->channels > 0 ? chunk->channels : 1;
+    const int frames = static_cast<int>(chunk->samples.size()) / src_ch;
+    mix_source_samples(out, out_channels, clip, track_gain_db, volume_db,
+                       chunk->samples.data(), src_ch, frames, from_sample, out_rate,
+                       src_fps, seq_fps, speed);
 }
 }  // namespace
 
@@ -158,6 +180,8 @@ void AudioPipeline::reset() {
     last_primary_clip_ = -1;
     cut_diag_ = 0;
     live_gain_db_.clear();
+    iso_bank_.clear();
+    stretch_bank_.clear();
 }
 
 void AudioPipeline::set_live_clip_gain(canvas::core::ClipId id, float volume_db) {
@@ -234,6 +258,10 @@ void AudioPipeline::reanchor_locked(int64_t seq_frame) {
     CANVAS_LOG("audio: rewind reset feed, anchor_media_sample=%lld rate=%d",
                static_cast<long long>(anchor_media_sample_), rate_);
     for (auto& [id, adec] : decoders_) adec->reset();
+    // The position jumped: per-clip RNNoise GRU state must not carry across
+    // the discontinuity (a seek is a brand-new contiguous stream).
+    iso_bank_.drop();
+    stretch_bank_.drop();
     // Re-arm the device on every seek so playback restarts from the new
     // playhead; without this, resume would play stale audio from the old spot.
     if (active_) {
@@ -500,9 +528,12 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
         // alongside it is never sped up or slowed. Media-clock stepping would
         // feed `rate_/src.fps` samples per seq frame, halving or doubling the
         // stream for any source whose fps differs from the sequence.
+        // Speed Change (clip_rate) multiplies ONLY the timeline-consumed
+        // offset; the src_in trim start stays fixed.
+        const double spd = canvas::core::cliprate::effective_rate(clip);
         const int64_t start_sample = static_cast<int64_t>(std::llround(
             (static_cast<double>(clip.src_in) / src.fps +
-             static_cast<double>(seq_frame - clip.tl_in) / seq_fps) *
+             (static_cast<double>(seq_frame - clip.tl_in) / seq_fps) * spd) *
             rate_));
         // Per-CLIP feed watermark (a media placed twice on the timeline has two
         // independent feed positions; keying by media let a clip change keep the
@@ -512,7 +543,10 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
         const bool have_wm = wit != feed_watermarks_.end();
         const int64_t wm = have_wm ? wit->second : start_sample;
         const int64_t from = have_wm ? std::max(start_sample, wm) : start_sample;
-        const int64_t span = start_sample + want_frames - from;
+        // Media-domain span for this step: `want_frames` OUTPUT frames need
+        // want_frames * speed media samples.
+        const int64_t want_media = canvas::core::cliprate::media_span_for_output(clip, want_frames);
+        const int64_t span = start_sample + want_media - from;
         if (cut_diag_ > 0 && span <= 0)
             CANVAS_LOG(
                 "[diag:cut]   STALE clip=%lld media=%d start=%lld wm=%lld span=%lld (write skip)",
@@ -531,7 +565,7 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
         // `want` (the old fixed `want_frames` request let a short chunk appear
         // as a whole producing a silent zero-filled step).
         const auto dec_t0 = Clock::now();
-        auto chunk = ait->second->decode(from, static_cast<int>(std::min<int64_t>(span, want_frames)),
+        auto chunk = ait->second->decode(from, static_cast<int>(std::min<int64_t>(span, want_media)),
                                          rate_);
         const double dec_ms =
             std::chrono::duration<double, std::milli>(Clock::now() - dec_t0).count();
@@ -565,9 +599,52 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
                 static_cast<long long>(feed_watermarks_[clip.id]),
                 static_cast<long long>(src_out_sample));
 
-        mix_source_chunk(mix, channels_, clip, src.gain_db, effective_clip_volume_db(clip), chunk,
-                         from, rate_, src.fps, seq_fps);
-        out_frames = std::max(out_frames, static_cast<int64_t>(frames));
+        // Per-clip Speed Change (pitch-preserving WSOLA): stretch the decoded
+        // media to output frames sized by the realtime clock (want_frames).
+        // The engine streams per clip and returns fewer frames than requested
+        // only while it primes its first ~40 ms window; those gaps even out
+        // over the next feed (RNNoise behaves the same), and the mix path
+        // writes exactly what it gets.
+        std::vector<float> sped;
+        const float* pcm = chunk->samples.data();
+        int den_ch = src_ch;
+        int den_frames = frames;
+        if (spd != 1.0) {
+            const int want = static_cast<int>(std::max<int64_t>(
+                1, std::min<int64_t>(
+                       canvas::core::cliprate::output_frames_from_media(
+                           clip, static_cast<int64_t>(frames)),
+                       want_frames)));
+            const int written = stretch_bank_.tick(clip.id, spd, rate_, src_ch,
+                                                   chunk->samples.data(), frames, want, sped);
+            if (written <= 0) continue;  // stretch priming: nothing to mix this step
+            pcm = sped.data();
+            den_frames = written;
+        }
+
+        // Per-clip AI voice isolation (RNNoise): denoise this source's PCM
+        // BEFORE it mixes, at the pipeline's native 48 kHz. The bank streams
+        // per clip and returns fewer frames only while the network primes
+        // (<=10 ms); those frames are mixed exactly as decoded would be.
+        std::vector<float> denoised;
+        if (clip.voice_isolation != canvas::core::VoiceIsolationMode::None) {
+            denoised.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
+            const int written = iso_bank_.tick(clip.id, clip.voice_isolation, rate_, src_ch,
+                                               denoised.data(), den_frames);
+            if (written > 0) {
+                pcm = denoised.data();
+                den_frames = written;
+            } else {
+                pcm = nullptr;
+                den_frames = 0;
+            }
+        }
+        if (pcm && den_frames > 0) {
+            mix_source_samples(mix, channels_, clip, src.gain_db,
+                               effective_clip_volume_db(clip), pcm, den_ch, den_frames, from,
+                               rate_, src.fps, seq_fps, spd);
+        }
+        out_frames = std::max(out_frames, static_cast<int64_t>(den_frames));
     }
     step_mix_ms_ += std::chrono::duration<double, std::milli>(Clock::now() - mix_t0).count();
 
@@ -614,10 +691,12 @@ int64_t AudioPipeline::playhead_to_audio_sample(int64_t seq_frame) const {
     const double seq_fps = project_->sequence.fps;
     if (seq_fps <= 0.0) return 0;
     // Mirror write_mixed(): src_in positions the clip in the source's own media
-    // time; the seq-frame offset advances by SEQUENCE time (1:1 realtime).
+    // time; the seq-frame offset advances by SEQUENCE time (1:1 realtime),
+    // scaled by the clip's Speed Change factor (whole-clip retime).
+    const double spd = canvas::core::cliprate::effective_rate(*clip);
     return static_cast<int64_t>(std::llround(
         (static_cast<double>(clip->src_in) / fps_v +
-         static_cast<double>(seq_frame - clip->tl_in) / seq_fps) *
+         (static_cast<double>(seq_frame - clip->tl_in) / seq_fps) * spd) *
         rate_));
 }
 
@@ -650,8 +729,11 @@ int64_t AudioPipeline::audio_sample_to_seq_frame(int64_t media_sample) const {
             if (secs_in < 0.0 ||
                 secs_in >= static_cast<double>(c.src_out - c.src_in) / fps_v)
                 continue;  // outside this clip's trim
+            // Speed Change consumes the source at factor×, so a media sample
+            // that far into the trim maps to 1/factor the timeline distance.
+            const double spd = canvas::core::cliprate::effective_rate(c);
             const int64_t seq_frame =
-                c.tl_in + static_cast<int64_t>(std::llround(secs_in * seq_fps));
+                c.tl_in + static_cast<int64_t>(std::llround(secs_in / spd * seq_fps));
             return seq_frame;
         }
     }

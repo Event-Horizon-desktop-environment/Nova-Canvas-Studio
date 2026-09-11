@@ -39,12 +39,15 @@ namespace canvas::gui {
 
 namespace {
 
-// Grade-preview snapshot throttle: the worker rebuilds the whole decode stack
-// per SetProject (~217ms measured drain), so pushing on every wheel/curve
-// mouse-move out-runs it and floods the queue. 250ms ≈ the worker's drain rate;
-// dragging then coalesces to ~1-in-flight instead of a ~200-deep backlog, while
-// the final params_committed still lands the exact end state as one undo step.
-constexpr std::chrono::milliseconds kGradePreviewThrottle{250};
+// Grade-preview snapshot throttle: the grade rides on the present path as a
+// GPU-sampled 3D LUT, and preview ticks route through swap_project() — which
+// keeps the decode stack warm and just re-presents the current frame (~2ms, a
+// retain-hit), instead of rebuilding every decoder per SetProject (~217ms as the
+// old push_snapshot() path did). 33ms ≈ one playhead cadence at 30fps, so a drag
+// lands a fresh preview at realtime rate; SwapProject requests are also
+// coalesced in the worker queue so only the newest survives while draining. The
+// final params_committed still lands the exact end state as one undo step.
+constexpr std::chrono::milliseconds kGradePreviewThrottle{33};
 
 // One placeholder stills/gallery cell: a rounded gradient well with an index
 // and a timecode readout. Stands in for real captured thumbnails until the
@@ -209,6 +212,10 @@ GradeGraph make_grade_graph(const WheelPanelState& state, const CurveParams& cur
     qWarning().nospace()
         << "[grade] graph-built " << graph_census(g)
         << " curves_in_panel=" << (curves.is_identity() ? 0 : 1);
+    CANVAS_COLOR_LOG(
+        "[graph] built nodes=%zu edges=%zu curves_in_panel=%d census=%s",
+        g.num_nodes(), g.edges().size(), curves.is_identity() ? 0 : 1,
+        graph_census(g).toStdString().c_str());
     return g;
 }
 
@@ -702,8 +709,18 @@ void build_color_page(MainWindow& mw) {
     const auto resolve_grade_target =
         [&mw](canvas::core::Track::Kind& kind, std::size_t& index,
               canvas::core::Clip& clip) -> bool {
-        if (mw.find_selected_clip(kind, index, clip)) return true;
-        if (!mw.project_) return false;
+        if (mw.find_selected_clip(kind, index, clip)) {
+            CANVAS_COLOR_LOG(
+                "[target] resolve SELECTED kind=%d index=%zu clip=%llu frame=%lld",
+                static_cast<int>(kind), static_cast<unsigned long long>(index),
+                static_cast<unsigned long long>(clip.id),
+                static_cast<long long>(mw.controller_.current_frame()));
+            return true;
+        }
+        if (!mw.project_) {
+            CANVAS_COLOR_LOG("[target] resolve NO-PROJECT");
+            return false;
+        }
         const auto& seq = mw.project_->sequence;
         const int64_t frame = mw.controller_.current_frame();
         for (std::size_t i = seq.video_tracks.size(); i-- > 0;) {
@@ -716,8 +733,17 @@ void build_color_page(MainWindow& mw) {
             qWarning().nospace()
                 << "[grade] fallback no-selection -> playhead clip=" << clip.id
                 << " track=" << index << " frame=" << frame;
+            CANVAS_COLOR_LOG(
+                "[target] resolve FALLBACK-PLAYHEAD track=%zu clip=%llu frame=%lld",
+                static_cast<unsigned long long>(index),
+                static_cast<unsigned long long>(clip.id),
+                static_cast<long long>(frame));
             return true;
         }
+        CANVAS_COLOR_LOG(
+            "[target] resolve MISS frame=%lld tracks=%zu",
+            static_cast<long long>(frame),
+            static_cast<unsigned long long>(seq.video_tracks.size()));
         return false;
     };
     // Monotone change-token stamped onto every grade graph so the always-on
@@ -779,35 +805,51 @@ void build_color_page(MainWindow& mw) {
             grade_state_digest(wheels->state(), curves->params()).toStdString().c_str());
         mw.has_unsaved_changes_ = true;
         mw.refresh_timeline();
-        mw.push_snapshot();
+        mw.push_grade_snapshot();
     };
     // Live movement previews through the same law without an undo entry.
-    //
-    // THROTTLED: each preview push_snapshot() tears down the entire decode
-    // stack (decoder_.close() + reopen every media + full-res re-decode ~217ms
-    // measured), so pushing on EVERY mouse-move floods the worker queue with
-    // stale SetProject commands — a ~200-deep backlog that keeps draining for
-    // ~36s after the drag ends (the "slow as balls" scrub feel). Only the NEWEST
-    // grade matters while dragging, so drop intermediate ticks in lockstep with
-    // the worker's drain rate instead of out-running it.
-    static auto last_preview_push = std::chrono::steady_clock::time_point::min();
+    // THROTTLED: preview ticks re-present the current frame through warm decoders
+    // (swap_project, ~2ms) instead of rebuilding the decode stack, so a realtime
+    // ~30Hz cadence is affordable — but pushing on EVERY mouse-move is still
+    // wasteful when the worker is mid-present, and only the NEWEST grade matters
+    // while dragging. The throttle + queue coalescing keep the preview at display
+    // rate without ever out-running the worker.
+    // NOTE: never initialize these to time_point::min() — `now - min()` on a
+    // nanosecond-rep steady_clock OVERFLOWS int64 and wraps negative, so
+    // `now - last_preview_push < kGradePreviewThrottle` becomes permanently
+    // true and the preview is throttled forever (the "color only applies on
+    // drag release" bug). Seed them from wall "now" instead: the first drag
+    // tick lands immediately, then a sane ~30Hz throttle cadence takes over.
+    static auto last_preview_push = std::chrono::steady_clock::now() - kGradePreviewThrottle;
     static auto preview_drops = std::size_t{0};
-    static auto last_preview_summary = std::chrono::steady_clock::time_point::min();
+    static auto last_preview_summary = std::chrono::steady_clock::now();
     // "Drag just started" detector for the color archive: any preview activity
     // (accepted OR throttled-dropped) refreshes this, so a quiet gap > 800ms
     // before an accepted tick means a NEW wheel/curve interaction began — the
     // point where the pre-change snapshot must be taken (by commit time the
-    // sequence already carries the drag's results).
-    static auto last_preview_any = std::chrono::steady_clock::time_point::min();
+    // sequence already carries the drag's results). Seeded 1s in the past so
+    // the FIRST interaction reads as a fresh drag begin too.
+    static auto last_preview_any =
+        std::chrono::steady_clock::now() - std::chrono::seconds(1);
     const auto preview_grade = [&mw, wheels, curves, resolve_grade_target] {
         static constexpr auto kDragBeginGap = std::chrono::milliseconds(800);
         const auto now = std::chrono::steady_clock::now();
         const bool drag_begin = now - last_preview_any > kDragBeginGap;
         last_preview_any = now;
-        if (now - last_preview_push < kGradePreviewThrottle) {
+        // EXTREME-TRACE: every preview invocation, throttled or not, lands one
+        // archive line. If wheel drags log `[wheels] move` lines but NO
+        // `[preview] in` lines follow, the params_preview signal -> preview_grade
+        // connection is dead; if `[preview] in ... throttled=1` appears forever
+        // without a `[grade] preview seq=`, the throttle is stuck.
+        const bool throttled = now - last_preview_push < kGradePreviewThrottle;
+        CANVAS_COLOR_LOG(
+            "[preview] in drag_begin=%d throttled=%d dropped=%zu throttle_ms=%lld",
+            drag_begin ? 1 : 0, throttled ? 1 : 0, preview_drops,
+            static_cast<long long>(kGradePreviewThrottle.count()));
+        if (throttled) {
             // Throttle-drop counter: collapsed into one line when the drag
             // finally lands so the always-on log never floods at mouse-move
-            // rate, but the ~4Hz effective preview cadence — and how stale
+            // rate, but the ~30Hz effective preview cadence — and how stale
             // the live view is — stays visible.
             ++preview_drops;
             if (now - last_preview_summary >= std::chrono::seconds(1)) {
@@ -847,10 +889,10 @@ void build_color_page(MainWindow& mw) {
         if (!cmd) return;
         cmd->redo(mw.project_->sequence);
         mw.refresh_timeline();
-        mw.push_snapshot();
-        // Preview cadence trace: every ACCEPTED push (≈4/s while dragging),
+        mw.push_grade_snapshot();
+        // Preview cadence trace: every ACCEPTED push (≈30/s while dragging),
         // with the drop count since the last accepted one. This is the log the
-        // throttle fix is judged against — a healthy read is ~4 preview lines
+        // throttle fix is judged against — a healthy read is ~30 preview lines
         // a second and a monotone drop count that stays small per pause.
         qWarning().nospace()
             << "[grade] preview seq=" << g.change_seq
@@ -871,10 +913,23 @@ void build_color_page(MainWindow& mw) {
             g.num_nodes(), g.edges().size(),
             grade_state_digest(wheels->state(), curves->params()).toStdString().c_str());
         preview_drops = 0;
-        last_preview_summary = std::chrono::steady_clock::time_point::min();
+        last_preview_summary = now;
     };
-    QObject::connect(wheels, &ColorWheelsPanel::params_committed, &mw, commit_grade);
-    QObject::connect(wheels, &ColorWheelsPanel::params_preview, &mw, preview_grade);
+    const auto commit_conn =
+        QObject::connect(wheels, &ColorWheelsPanel::params_committed, &mw, commit_grade);
+    const auto preview_conn =
+        QObject::connect(wheels, &ColorWheelsPanel::params_preview, &mw, preview_grade);
+    // Wiring probe: proves at runtime that BOTH signal->lambda connections were
+    // actually registered on the live panel object (a silently-zero connection
+    // here is the prime suspect when wheel drags log moves but never preview).
+    CANVAS_COLOR_LOG(
+        "[preview] wiring preview_conn=%d commit_conn=%d wheels=%p preview_throttle=%lldms",
+        (preview_conn ? 1 : 0), (commit_conn ? 1 : 0),
+        static_cast<void*>(wheels),
+        static_cast<long long>(kGradePreviewThrottle.count()));
+    qWarning().nospace()
+        << "[grade] wiring preview_conn=" << (preview_conn ? 1 : 0)
+        << " commit_conn=" << (commit_conn ? 1 : 0);
     // Reset-all is a page-level action: the wheels panel reverted itself, so
     // here we ALSO clear the Curves panel (the wheels panel can't see it) and
     // write a truly EMPTY grade — the clip goes fully ungraded and the decoder
@@ -919,7 +974,7 @@ void build_color_page(MainWindow& mw) {
             static_cast<long long>(mw.controller_.current_frame()));
         mw.has_unsaved_changes_ = true;
         mw.refresh_timeline();
-        mw.push_snapshot();
+        mw.push_grade_snapshot();
     };
     QObject::connect(wheels, &ColorWheelsPanel::reset_all_requested, &mw, reset_all_grades);
     QObject::connect(curves, &CurvesPanel::curves_committed, &mw, commit_grade);

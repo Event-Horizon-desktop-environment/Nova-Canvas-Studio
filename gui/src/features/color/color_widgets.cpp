@@ -29,6 +29,7 @@
 #include <utility>
 
 #include "UX/theme.hpp"
+#include "canvas/core/util/color_log.hpp"
 #include "features/color/scopes/chromaticity/chromaticity_widget.hpp"
 #include "features/color/scopes/histogram/histogram_scope.hpp"
 #include "features/color/scopes/parade/parade_scope.hpp"
@@ -39,10 +40,10 @@ namespace canvas::gui {
 
 using namespace canvas::core::colorsci;
 
-// A puck released within this normalized radius of the disc center ([-1,1]^2)
-// is a "return-to-center" gesture: the wheel keeps its last committed grade
-// rather than committing the neutral puck values. ~5% of the disc radius, in
-// line with the small center ring drawn over the wheel face.
+// A color knob released within this normalized radius of the disc center
+// ([-1,1]^2) is a "return-to-center" gesture: the wheel keeps its last
+// committed grade rather than committing the neutral knob values. ~5% of the
+// disc radius, in line with the small center ring drawn over the wheel face.
 constexpr double kCenterReleaseRadius = 0.05;
 
 // ── ToneField ────────────────────────────────────────────────────────────────
@@ -74,6 +75,9 @@ protected:
             press_value_ = value();
             dragging_ = true;
             setFocus(Qt::MouseFocusReason);
+            CANVAS_COLOR_LOG(
+                "[scrub] press x=%.0f value=%.4f units_per_px=%.5f range=(%.2f,%.2f)",
+                press_x_, press_value_, units_per_px_, field_lo_, field_hi_);
         }
         QDoubleSpinBox::mousePressEvent(event);
     }
@@ -82,9 +86,16 @@ protected:
         if (dragging_ && (event->buttons() & Qt::LeftButton)) {
             const double dx = event->position().x() - press_x_;
             if (dx != 0.0) {
-                setValue(std::clamp(press_value_ + dx * units_per_px_,
-                                    field_lo_, field_hi_));
+                const double v =
+                    std::clamp(press_value_ + dx * units_per_px_, field_lo_, field_hi_);
+                const double prev = value();
+                setValue(v);
                 selectAll();
+                if (prev != v) {
+                    CANVAS_COLOR_LOG(
+                        "[scrub] move dx=%.1fpx value=%.4f -> %.4f (d=%+.4f)",
+                        dx, prev, v, v - press_value_);
+                }
             }
             event->accept();
             return;
@@ -93,7 +104,12 @@ protected:
     }
 
     void mouseReleaseEvent(QMouseEvent* event) override {
-        dragging_ = false;
+        if (dragging_) {
+            dragging_ = false;
+            CANVAS_COLOR_LOG(
+                "[scrub] release value=%.4f total_d=%.4f (press=%.4f)",
+                value(), value() - press_value_, press_value_);
+        }
         QDoubleSpinBox::mouseReleaseEvent(event);
     }
 
@@ -105,6 +121,17 @@ private:
     double press_x_ = 0.0;
     bool dragging_ = false;
 };
+
+// Extreme color-knob geometry for the archive traces: normalized xy on the
+// wheel disc -> radius (0..1) and hue angle in degrees (0..360). Printed on
+// every press/move/release so the color.log records the knob's exact path.
+double knob_radius(const QPointF& xy) { return std::hypot(xy.x(), xy.y()); }
+
+double knob_angle_deg(const QPointF& xy) {
+    double a = std::atan2(xy.y(), xy.x()) * 180.0 / M_PI;
+    if (a < 0.0) a += 360.0;
+    return a;
+}
 }  // namespace
 
 // SwatchStrip (at canvas::gui scope so it completes the header forward
@@ -221,6 +248,10 @@ ToneField::ToneField(const QString& label, double lo, double hi, double value,
         reset_->setToolTip(tr("Reset to default"));
         apply_theme_style(reset_, &flat_tool_style);
         QObject::connect(reset_, &QToolButton::clicked, this, [this] {
+            CANVAS_COLOR_LOG(
+                "[tone] reset button '%s' value=%.4f -> %.4f",
+                label_ ? label_->text().toStdString().c_str() : "?",
+                this->value(), reset_value_);
             set_value(reset_value_);
             emit reset_clicked();
         });
@@ -390,13 +421,20 @@ void MiniKnob::mousePressEvent(QMouseEvent* event) {
     dragging_ = true;
     press_t01_ = t01_;
     press_pos_ = event->position();
+    CANVAS_COLOR_LOG("[knobmaster] press t01=%.3f y=%.0f", press_t01_, press_pos_.y());
 }
 
 void MiniKnob::mouseMoveEvent(QMouseEvent* event) {
     if (!dragging_) return;
     const qreal dy = press_pos_.y() - event->position().y();
+    const float before = t01_;
     // Full range over ~80px of roll.
     set_value01(press_t01_ + static_cast<float>(dy / 80.0));
+    if (t01_ != before) {
+        CANVAS_COLOR_LOG(
+            "[knobmaster] move dy=%.1fpx t01=%.3f -> %.3f (d=%+.3f)",
+            dy, before, t01_, t01_ - press_t01_);
+    }
     emit value_changed(t01_);
     update();
 }
@@ -404,6 +442,9 @@ void MiniKnob::mouseMoveEvent(QMouseEvent* event) {
 void MiniKnob::mouseReleaseEvent(QMouseEvent* event) {
     if (!dragging_ || event->button() != Qt::LeftButton) return;
     dragging_ = false;
+    CANVAS_COLOR_LOG(
+        "[knobmaster] release t01=%.3f (press=%.3f d=%+.3f)", t01_, press_t01_,
+        t01_ - press_t01_);
     emit value_committed(t01_);
 }
 
@@ -511,7 +552,7 @@ void ColorWheelWidget::paintEvent(QPaintEvent* event) {
     p.setBrush(Qt::NoBrush);
     p.drawEllipse(c, r * 0.055, r * 0.055);
 
-    // Position marker.
+    // Position marker: the color knob.
     const QPointF dot = xy_to_pos(xy_);
     p.setPen(QPen(active_ ? t.accent : t.ink, 2.0));
     p.setBrush(active_ ? t.accent_soft : QColor(Qt::transparent));
@@ -523,18 +564,41 @@ void ColorWheelWidget::paintEvent(QPaintEvent* event) {
 
 void ColorWheelWidget::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) return;
-    const QPointF d = event->position() - disc_rect().center();
-    if (d.manhattanLength() > disc_rect().width() / 2.0 + 2.0) return;
+    const QPointF pos = event->position();
+    const QPointF d = pos - disc_rect().center();
+    if (d.manhattanLength() > disc_rect().width() / 2.0 + 2.0) {
+        CANVAS_COLOR_LOG(
+            "[knob] press REJECTED outside wheel pos=(%.0f,%.0f) disc_r=%.0f "
+            "cur_xy=(%.3f,%.3f)",
+            pos.x(), pos.y(), disc_rect().width() / 2.0, xy_.x(), xy_.y());
+        return;
+    }
     dragging_ = true;
     active_ = true;
-    set_xy(pos_to_xy(event->position()));
+    const QPointF xy = pos_to_xy(pos);
+    last_xy_ = xy;
+    CANVAS_COLOR_LOG(
+        "[knob] press pos=(%.0f,%.0f) xy=(%.3f,%.3f) radius=%.3f angle=%.1fdeg "
+        "snapped-from=(%.3f,%.3f)",
+        pos.x(), pos.y(), xy.x(), xy.y(), knob_radius(xy), knob_angle_deg(xy),
+        xy_.x(), xy_.y());
+    set_xy(xy);
     update();
 }
 
 void ColorWheelWidget::mouseMoveEvent(QMouseEvent* event) {
     if (!dragging_) return;
-    set_xy(pos_to_xy(event->position()));
-    emit xy_changed(xy_);
+    const QPointF pos = event->position();
+    const QPointF xy = pos_to_xy(pos);
+    const QPointF dxy = xy - last_xy_;
+    last_xy_ = xy;
+    CANVAS_COLOR_LOG(
+        "[knob] move pos=(%.0f,%.0f) xy=(%.3f,%.3f) radius=%.3f angle=%.1fdeg "
+        "dxy=(%.3f,%.3f)",
+        pos.x(), pos.y(), xy.x(), xy.y(), knob_radius(xy), knob_angle_deg(xy),
+        dxy.x(), dxy.y());
+    set_xy(xy);
+    emit xy_changed(xy);
     update();
 }
 
@@ -544,9 +608,17 @@ void ColorWheelWidget::mouseReleaseEvent(QMouseEvent* event) {
         return;
     }
     dragging_ = false;
-    set_xy(pos_to_xy(event->position()));
-    emit xy_changed(xy_);
-    emit xy_committed(xy_);
+    const QPointF pos = event->position();
+    const QPointF xy = pos_to_xy(pos);
+    last_xy_ = xy;
+    CANVAS_COLOR_LOG(
+        "[knob] release pos=(%.0f,%.0f) xy=(%.3f,%.3f) radius=%.3f angle=%.1fdeg"
+        " center=%.3f",
+        pos.x(), pos.y(), xy.x(), xy.y(), knob_radius(xy), knob_angle_deg(xy),
+        knob_radius(xy));
+    set_xy(xy);
+    emit xy_changed(xy);
+    emit xy_committed(xy);
     update();
 }
 
@@ -593,6 +665,14 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
     // reset_all_requested in the header) and write a truly empty grade.
     make_header_icon("reset", tr("Reset all grades"), [this] {
         qWarning().nospace() << "[grade] reset-all";
+        CANVAS_COLOR_LOG(
+            "[wheels] reset-all pressed lift_m=%.3f gamma_m=%.3f gain_m=%.3f "
+            "offset_m=%.3f black=%.3f",
+            static_cast<double>(state_.lgg.lift_master),
+            static_cast<double>(state_.lgg.gamma_master),
+            static_cast<double>(state_.lgg.gain_master),
+            static_cast<double>(state_.offset.master),
+            static_cast<double>(state_.black_offset));
         reset_panel(state_);
         set_state(state_);
         emit reset_all_requested();
@@ -729,6 +809,10 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
                          });
         QObject::connect(reset, &QToolButton::clicked, this, [this, idx] {
             qWarning().nospace() << "[grade] wheel-reset idx=" << idx;
+            CANVAS_COLOR_LOG(
+                "[wheels] wheel-reset pressed idx=%d xy_before=(%.3f,%.3f)",
+                idx, static_cast<double>(wheels_[idx]->xy().x()),
+                static_cast<double>(wheels_[idx]->xy().y()));
             wheels_[idx]->set_xy(QPointF(0.0, 0.0));
             masters_[idx]->set_value01(0.5f);
             // Reset through the controller law so the state matches the widgets.
@@ -820,6 +904,18 @@ void ColorWheelsPanel::set_state(const canvas::core::colorsci::WheelPanelState& 
         << " offset_m=" << state_.offset.master
         << " lift_r=" << state_.lgg.lift_r
         << " temp=" << state_.temp << " contrast=" << state_.contrast;
+    CANVAS_COLOR_LOG(
+        "[wheels] load lift_m=%.3f gamma_m=%.3f gain_m=%.3f offset_m=%.3f "
+        "lift_r=%.3f temp=%.1f tint=%.1f contrast=%.2f pivot=%.2f "
+        "mid_detail=%.1f black_offset=%.3f",
+        static_cast<double>(state_.lgg.lift_master),
+        static_cast<double>(state_.lgg.gamma_master),
+        static_cast<double>(state_.lgg.gain_master),
+        static_cast<double>(state_.offset.master),
+        static_cast<double>(state_.lgg.lift_r), static_cast<double>(state_.temp),
+        static_cast<double>(state_.tint), static_cast<double>(state_.contrast),
+        static_cast<double>(state_.pivot), static_cast<double>(state_.mid_detail),
+        static_cast<double>(state_.black_offset));
 }
 
 canvas::core::colorsci::WheelPanelState ColorWheelsPanel::state() const {
@@ -834,7 +930,7 @@ void ColorWheelsPanel::wheel_moved(int index, const QPointF& xy) {
     // them exactly.
     apply_primaries_wheel(state_, wheel, xy.x(), xy.y(), master01);
     if (is_center_release(xy)) {
-        // Center = revert: a puck moved back onto the disc center reverts this
+        // Center = revert: a color knob moved back onto the disc center reverts this
         // wheel to identity (same law as the per-wheel reset button). Preview
         // matches the commit rule so a center release commits what was shown.
         reset_primaries_wheel(state_, wheel);
@@ -858,6 +954,19 @@ void ColorWheelsPanel::wheel_moved(int index, const QPointF& xy) {
             << QString::number(off[1], 'f', 3) << ","
             << QString::number(off[2], 'f', 3) << ")";
     }
+    {
+        const float radius = std::hypot(xy.x(), xy.y());
+        const float scale = canvas::core::colorsci::detail::kWheelMeta[index].scale;
+        const auto off = wheel_offset_for_roundtrip(index);
+        CANVAS_COLOR_LOG(
+            "[wheels] move idx=%d xy=(%.3f,%.3f) radius=%.3f angle=%.1fdeg "
+            "scale=%.3f master01=%.3f revert=%d off=(%.3f,%.3f,%.3f)",
+            index, static_cast<double>(xy.x()), static_cast<double>(xy.y()),
+            static_cast<double>(radius), knob_angle_deg(xy), static_cast<double>(scale),
+            static_cast<double>(master01), is_center_release(xy) ? 1 : 0,
+            static_cast<double>(off[0]), static_cast<double>(off[1]),
+            static_cast<double>(off[2]));
+    }
     emit params_preview();
 }
 
@@ -866,8 +975,8 @@ bool ColorWheelsPanel::is_center_release(const QPointF& xy) const {
 }
 
 // Post-law per-channel offset that a wheel's state currently holds — the exact
-// terms the LUT bake consumes (not the puck xy, which the scale law transforms
-// before it reaches the state). Printed alongside radius/scale in the
+// terms the LUT bake consumes (not the color-knob xy, which the scale law
+// transforms before it reaches the state). Printed alongside radius/scale in the
 // move/release traces so a "small-feeling drag" can be checked end-to-end:
 // radius -> scaled offset -> committed grade, all in one log.
 std::array<float, 3> ColorWheelsPanel::wheel_offset_for_roundtrip(int index) const {
@@ -895,7 +1004,7 @@ void ColorWheelsPanel::wheel_committed(int index, const QPointF& xy) {
     const float master01 = masters_[index]->value01();
     apply_primaries_wheel(state_, wheel, xy.x(), xy.y(), master01);
     if (is_center_release(xy)) {
-        // Return-to-center reverts, not cancels: releasing a puck back on the
+        // Return-to-center reverts, not cancels: releasing a color knob back on the
         // disc center clears this wheel's grade to identity, same law as the
         // per-wheel reset button. The committed params below carry identity for
         // this wheel (other wheels/tone keep their committed values).
@@ -921,6 +1030,14 @@ void ColorWheelsPanel::wheel_committed(int index, const QPointF& xy) {
             << " -> off=(" << QString::number(off[0], 'f', 3) << ","
             << QString::number(off[1], 'f', 3) << ","
             << QString::number(off[2], 'f', 3) << ")";
+        CANVAS_COLOR_LOG(
+            "[wheels] release idx=%d xy=(%.3f,%.3f) radius=%.3f angle=%.1fdeg "
+            "scale=%.3f master01=%.3f revert=%d off=(%.3f,%.3f,%.3f) -> commit",
+            index, static_cast<double>(xy.x()), static_cast<double>(xy.y()),
+            static_cast<double>(radius), knob_angle_deg(xy), static_cast<double>(scale),
+            static_cast<double>(master01), is_center_release(xy) ? 1 : 0,
+            static_cast<double>(off[0]), static_cast<double>(off[1]),
+            static_cast<double>(off[2]));
     }
     commit();
 }
@@ -934,6 +1051,13 @@ void ColorWheelsPanel::master_moved(int index, float t01) {
             << "[grade] master-move idx=" << index
             << " t01=" << QString::number(t01, 'f', 3);
     }
+    const auto meta = canvas::core::colorsci::detail::kWheelMeta[index];
+    const float value =
+        master_to_value(t01, meta.lo_master, meta.hi_master, meta.id_master);
+    CANVAS_COLOR_LOG(
+        "[wheels] master-move idx=%d t01=%.3f value=%.4f xy=(%.3f,%.3f)",
+        index, static_cast<double>(t01), static_cast<double>(value),
+        static_cast<double>(xy.x()), static_cast<double>(xy.y()));
     emit params_preview();
 }
 
@@ -996,6 +1120,14 @@ void ColorWheelsPanel::tone_param_changed(int param, double value) {
             << "[grade] tone-param param=" << param
             << " value=" << QString::number(value, 'f', 2);
     }
+    CANVAS_COLOR_LOG(
+        "[tone] param=%d value=%.4f (temp=%.1f tint=%.1f hue=%.1f contrast=%.2f "
+        "pivot=%.2f mid=%.1f black=%.3f)",
+        param, value, static_cast<double>(state_.temp),
+        static_cast<double>(state_.tint), static_cast<double>(state_.hue_deg),
+        static_cast<double>(state_.contrast), static_cast<double>(state_.pivot),
+        static_cast<double>(state_.mid_detail),
+        static_cast<double>(state_.black_offset));
     commit();
 }
 
@@ -1011,6 +1143,14 @@ void ColorWheelsPanel::commit() {
             << " gain_m=" << state_.lgg.gain_master
             << " offset_m=" << state_.offset.master;
     }
+    CANVAS_COLOR_LOG(
+        "[wheels] commit lift_m=%.3f gamma_m=%.3f gain_m=%.3f offset_m=%.3f "
+        "black=%.3f -> emit params_committed",
+        static_cast<double>(state_.lgg.lift_master),
+        static_cast<double>(state_.lgg.gamma_master),
+        static_cast<double>(state_.lgg.gain_master),
+        static_cast<double>(state_.offset.master),
+        static_cast<double>(state_.black_offset));
     emit params_committed(state_);
 }
 

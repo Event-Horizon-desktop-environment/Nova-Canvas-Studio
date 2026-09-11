@@ -81,6 +81,7 @@ void build_inspector_audio(MainWindow& main_window, QVBoxLayout* audio_layout,
 void attach_inspector_audio(MainWindow& main_window, TimelineWidget* timeline);
 void update_inspector_audio_full(MainWindow& main_window);
 void apply_inspector_audio_processing(MainWindow& main_window);
+void apply_inspector_voice_isolation(MainWindow& main_window);
 void build_inspector_transition(MainWindow& main_window, QVBoxLayout* transition_layout,
                                 QToolButton* transition_mode_btn);
 void attach_inspector_transition(MainWindow& main_window, TimelineWidget* timeline);
@@ -163,6 +164,10 @@ private:
     // stopping playback or tearing down decoders, so volume/pan/pitch/EQ edits
     // land in the next mixed buffer as video keeps playing.
     void push_audio_mix_snapshot();
+    // Grade-only snapshot (Color page): pushes the project via swap_project so
+    // wheel/curve previews re-present the current frame with the new 3D-LUT grade
+    // instead of paying set_project()'s decode-stack teardown each tick.
+    void push_grade_snapshot();
     void delete_selected_clip(bool ripple);
     void delete_selected_media();
     void delete_selected_media_and_clips();
@@ -170,6 +175,9 @@ private:
     void toggle_transition_on_selected();
     void remove_all_transitions();
     void toggle_bookmark_at_playhead();
+    // Applies a clip colour (1-12) — or 0 for no colour — to the selected clip
+    // as one undoable edit, mirroring the Inspector's metadata commit path.
+    void apply_clip_color(uint8_t color);
     // Grows the sequence's track list of the given kind until it covers
     // `index` (inclusive), naming new channels Vn/An by their 1-based order.
     void ensure_tracks_at(canvas::core::Track::Kind kind, std::size_t index);
@@ -267,6 +275,7 @@ private:
     friend void attach_inspector_audio(MainWindow& main_window, TimelineWidget* timeline);
     friend void update_inspector_audio_full(MainWindow& main_window);
     friend void apply_inspector_audio_processing(MainWindow& main_window);
+    friend void apply_inspector_voice_isolation(MainWindow& main_window);
     friend void build_inspector_transition(MainWindow& main_window, QVBoxLayout* transition_layout,
                                            QToolButton* transition_mode_btn);
     friend void attach_inspector_transition(MainWindow& main_window, TimelineWidget* timeline);

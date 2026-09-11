@@ -87,7 +87,8 @@ private:
     bool syncing_ = false;
 };
 
-// Circular hue/saturation disc with a draggable position marker. The wheel is a
+// Circular hue/saturation disc with a draggable position marker (the "color
+// knob"). The wheel is a
 // "where is the current adjustment pointing" proxy — it exposes normalized
 // xy (-1..1, x = right = red, y = up = red too, matching the hue ring) but does
 // not yet map into a real grade.
@@ -120,6 +121,8 @@ private:
     QImage face_cache_;
     QSize face_cache_size_;
     QPointF xy_ = QPointF(0.0, 0.0);
+    // Last knob position during a drag, for the per-move delta trace.
+    QPointF last_xy_ = QPointF(0.0, 0.0);
     bool active_ = false;
     bool dragging_ = false;
 };
@@ -190,8 +193,8 @@ private:
     void refresh_wheel_readout(int index);
     void commit();
 
-    // Is a puck release at `xy` a "return-to-center" (revert) gesture? Within
-    // a small dead zone around the disc center, releasing the puck commits
+    // Is a color-knob release at `xy` a "return-to-center" (revert) gesture?
+    // Within a small dead zone around the disc center, releasing the color knob commits
     // identity for that wheel (same law as the per-wheel reset button).
     [[nodiscard]] bool is_center_release(const QPointF& xy) const;
     [[nodiscard]] std::array<float, 3> wheel_offset_for_roundtrip(int index) const;

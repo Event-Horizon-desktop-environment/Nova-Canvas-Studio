@@ -265,6 +265,104 @@ gpu::ColorRange cached_color_range_probe(const std::string& path) {
 
 VideoDecoder::~VideoDecoder() { close(); }
 
+VideoDecoder::VideoDecoder(VideoDecoder&& o) noexcept { *this = std::move(o); }
+
+VideoDecoder& VideoDecoder::operator=(VideoDecoder&& o) noexcept {
+    if (this == &o) return *this;
+    close();
+    // Steal the FFmpeg/resource contexts; every pointer taken from `o` is nulled
+    // there so its destructor's close() is a safe no-op on the moved-from state.
+    fmt_ctx_ = o.fmt_ctx_;
+    o.fmt_ctx_ = nullptr;
+    codec_ctx_ = o.codec_ctx_;
+    o.codec_ctx_ = nullptr;
+    sws_ctx_ = o.sws_ctx_;
+    o.sws_ctx_ = nullptr;
+    av_frame_ = o.av_frame_;
+    o.av_frame_ = nullptr;
+    packet_ = o.packet_;
+    o.packet_ = nullptr;
+    hold_hw_ = o.hold_hw_;
+    o.hold_hw_ = nullptr;
+    hold_hw_src_ = o.hold_hw_src_;
+    o.hold_hw_src_ = -1;
+    retain_hw_ = o.retain_hw_;
+    o.retain_hw_ = nullptr;
+    retain_hw_src_ = o.retain_hw_src_;
+    o.retain_hw_src_ = -1;
+    hold_rgba_ = std::move(o.hold_rgba_);
+    hold_rgba_src_ = o.hold_rgba_src_;
+    o.hold_rgba_src_ = -1;
+    hold_rgba_dim_ = o.hold_rgba_dim_;
+    o.hold_rgba_dim_ = -1;
+    audio_fmt_ctx_ = o.audio_fmt_ctx_;
+    o.audio_fmt_ctx_ = nullptr;
+    audio_codec_ = o.audio_codec_;
+    o.audio_codec_ = nullptr;
+    swr_ctx_ = o.swr_ctx_;
+    o.swr_ctx_ = nullptr;
+    audio_frame_ = o.audio_frame_;
+    o.audio_frame_ = nullptr;
+    audio_packet_ = o.audio_packet_;
+    o.audio_packet_ = nullptr;
+    audio_sample_rate_ = o.audio_sample_rate_;
+    o.audio_sample_rate_ = 0;
+    audio_channels_ = o.audio_channels_;
+    o.audio_channels_ = 0;
+    audio_samples_total_ = o.audio_samples_total_;
+    o.audio_samples_total_ = 0;
+    audio_next_sample_ = o.audio_next_sample_;
+    o.audio_next_sample_ = 0;
+    audio_tb_ = o.audio_tb_;
+    // Decode/stream state.
+    hw_pix_fmt_ = o.hw_pix_fmt_;
+    o.hw_pix_fmt_ = AV_PIX_FMT_NONE;
+    hw_avail_ = o.hw_avail_;
+    o.hw_avail_ = false;
+    hw_engaged_ = o.hw_engaged_;
+    o.hw_engaged_ = false;
+    soft_only_ = o.soft_only_;
+    o.soft_only_ = false;
+    video_stream_ = o.video_stream_;
+    o.video_stream_ = -1;
+    stream_tb_ = o.stream_tb_;
+    width_ = o.width_;
+    o.width_ = 0;
+    height_ = o.height_;
+    o.height_ = 0;
+    frame_rate_ = o.frame_rate_;
+    o.frame_rate_ = 0.0;
+    duration_seconds_ = o.duration_seconds_;
+    o.duration_seconds_ = 0.0;
+    total_frames_ = o.total_frames_;
+    o.total_frames_ = -1;
+    matrix_ = o.matrix_;
+    range_ = o.range_;
+    last_frame_ = o.last_frame_;
+    o.last_frame_ = -1;
+    next_frame_ = o.next_frame_;
+    o.next_frame_ = 0;
+    draining_ = o.draining_;
+    o.draining_ = false;
+    out_max_dim_ = o.out_max_dim_;
+    o.out_max_dim_ = 0;
+    // Path amounts to the keyframe-index cache key (s_iframe_cache), shared with
+    // any decoder that has opened the same file: moving it carries the index
+    // along, so the adopted session keeps its built index.
+    path_ = std::move(o.path_);
+    path_seq_ = o.path_seq_;
+    o.path_seq_ = 0;
+    path_seeks_ = o.path_seeks_;
+    o.path_seeks_ = 0;
+    path_seq_ms_ = o.path_seq_ms_;
+    o.path_seq_ms_ = 0.0;
+    path_seek_ms_ = o.path_seek_ms_;
+    o.path_seek_ms_ = 0.0;
+    convert_ms_ = o.convert_ms_;
+    o.convert_ms_ = 0.0;
+    return *this;
+}
+
 bool VideoDecoder::open(const std::string& path, std::string* error,
                         const AVBufferRef* hw_device_ctx) {
     close();
@@ -544,6 +642,8 @@ void VideoDecoder::close() {
     if (av_frame_) av_frame_free(&av_frame_);
     if (hold_hw_) av_frame_free(&hold_hw_);
     hold_hw_src_ = -1;
+    if (retain_hw_) av_frame_free(&retain_hw_);
+    retain_hw_src_ = -1;
     hold_rgba_.reset();
     hold_rgba_src_ = -1;
     hold_rgba_dim_ = -1;
@@ -981,6 +1081,13 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
                 CANVAS_LOG("video_decoder: decode_to_hw OK target=%lld got=%lld",
                        (long long)target, (long long)number);
                 decode_ok();
+                if (!retain_hw_) retain_hw_ = av_frame_alloc();
+                if (retain_hw_ && av_frame_ref(retain_hw_, av_frame_) == 0) {
+                    retain_hw_src_ = number;
+                } else {
+                    av_frame_free(&retain_hw_);
+                    retain_hw_src_ = -1;
+                }
                 return av_frame_;
             }
             if (ret == AVERROR_EOF) {
@@ -1046,6 +1153,18 @@ const AVFrame* VideoDecoder::decode_to_hw_indexed(const int64_t target, const in
     if (!hw_avail_ || hw_pix_fmt_ != AV_PIX_FMT_CUDA) return nullptr;
     refine_last_frame();
     int64_t t = clamp_target(target);
+
+    // One-frame sequential lookback: when consecutive timeline frames re-target
+    // the same source (the B side of a 2:1 transition round-trips onto one
+    // frame), the repeat arrives here with src < next_frame_ and would trigger
+    // a container seek below — which resets next_frame_ to 0 and re-walks a
+    // whole GOP (~54ms on 2K60). If decode_to_hw just served this exact frame,
+    // return that retained copy and leave next_frame_ where the walk parked it,
+    // so the next DISTINCT target keeps riding the cheap sequential path.
+    if (retain_hw_ && t == retain_hw_src_ && next_frame_ > t) {
+        CANVAS_LOG("video_decoder: retain-hit target=%lld (no re-seek)", (long long)t);
+        return retain_hw_;
+    }
 
     // Jump to the keyframe that owns this target so the forward walk only
     // traverses one Group of Pictures. Uses the built keyframe index; without

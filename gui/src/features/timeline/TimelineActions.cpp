@@ -26,6 +26,24 @@ void MainWindow::activate_color_clip(const canvas::core::ClipId id) {
     selected_clip_ids_ = {id};
 }
 
+void MainWindow::apply_clip_color(const uint8_t color) {
+    if (!project_ || selected_clip_ == 0) return;
+    canvas::core::Track::Kind kind;
+    std::size_t index;
+    canvas::core::Clip clip;
+    if (!find_selected_clip(kind, index, clip)) return;
+    if (clip.clip_color == color) return;
+
+    auto cmd = canvas::core::set_clip_metadata(project_->sequence, kind, index, clip.id,
+                                               clip.clip_tag, color, clip.comments, clip.name);
+    if (!cmd) return;
+    undo_.record(std::move(cmd));
+    has_unsaved_changes_ = true;
+    push_snapshot();
+    refresh_timeline();
+    update_inspector_file(*this);
+}
+
 void MainWindow::connect_timeline() {
     timeline_->set_sequence(&project_->sequence);
 
@@ -57,6 +75,13 @@ void MainWindow::connect_timeline() {
                 selected_clip_ids_ = timeline_->selected_clip_ids();
                 update_inspector_audio_full(*this);
                 update_inspector_file(*this);
+            });
+
+    connect(timeline_, &TimelineWidget::clip_color_requested, this,
+            [this](const canvas::core::Clip* clip, uint8_t color) {
+                if (!clip || !project_) return;
+                selected_clip_ = clip->id;
+                apply_clip_color(color);
             });
 
     connect(timeline_, &TimelineWidget::clips_range_selected, this,

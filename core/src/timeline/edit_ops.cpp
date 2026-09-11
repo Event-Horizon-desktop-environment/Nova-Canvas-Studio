@@ -1649,6 +1649,38 @@ std::unique_ptr<ICommand> set_clip_audio_processing(
     return std::make_unique<EditCommand>("clip audio processing", std::move(before), std::move(after));
 }
 
+std::unique_ptr<ICommand> set_clip_voice_isolation(Sequence& seq, const Track::Kind kind,
+                                                   const std::size_t track_index, const ClipId id,
+                                                   const VoiceIsolationMode mode) {
+    Track* t = seq.track(kind, track_index);
+    const Clip* c = t ? t->clip_with_id(id) : nullptr;
+    if (!c) return nullptr;
+
+    std::vector<TrackRef> involved{{kind, track_index}};
+    Track* mate_track = nullptr;
+    ClipId mate_id = 0;
+    if (c->linked_id != 0) {
+        if (const auto ref = find_clip_ref(seq, c->linked_id, &mate_track)) {
+            collect_track(involved, seq, *ref);
+            mate_id = c->linked_id;
+        }
+    }
+
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+
+    auto set_fields = [&](Clip& cc) { cc.voice_isolation = mode; };
+    for (auto& cc : t->clips) {
+        if (cc.id == id) { set_fields(cc); break; }
+    }
+    if (mate_track && mate_id != 0) {
+        for (auto& mc : mate_track->clips)
+            if (mc.id == mate_id) { set_fields(mc); break; }
+    }
+
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>("voice isolation", std::move(before), std::move(after));
+}
+
 std::unique_ptr<ICommand> set_clip_transition_curve(Sequence& seq, const Track::Kind kind,
                                                     const std::size_t track_index, const ClipId id,
                                                     const bool in_edge, const float ease_amount,

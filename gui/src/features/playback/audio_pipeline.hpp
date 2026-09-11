@@ -21,7 +21,9 @@
 // stay a direct include: unordered_map<unique_ptr<Incomplete>> cannot be
 // default-constructed in the header, and audio_decoder.hpp is Qt-free anyway.
 #include "canvas/core/media/audio_decoder.hpp"
+#include "canvas/core/media/voice_isolation.hpp"
 #include "canvas/core/project/project.hpp"
+#include "canvas/core/timeline/time_stretch.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -187,6 +189,20 @@ private:
     // volume_db used at mix time. Consulted (under mutex_) by the mix paths;
     // cleared by reset()/clear_live_clip_gains().
     std::unordered_map<canvas::core::ClipId, float> live_gain_db_;
+
+    // Per-clip AI voice-isolation state (RNNoise GRU bank) applied in
+    // write_mixed() before gains/mix. Dropped on every re-anchor (seek/rewind)
+    // because the tab state must not span a discontinuity, and cleared on full
+    // reset().
+    canvas::core::VoiceIsolationBank iso_bank_;
+
+    // Per-clip pitch-preserving Speed Change state (WSOLA time-stretch bank)
+    // applied in write_mixed() before voice isolation. The stretch consumes
+    // `effective_rate` source frames per output frame (the same timeline law
+    // the video path uses), so retimed audio never drifts from retimed video.
+    // Dropped on every re-anchor (seek/rewind) — a seek is a brand-new
+    // contiguous stream — and cleared on full reset(), mirroring iso_bank_.
+    canvas::core::TimeStretchBank stretch_bank_;
 
     // A/V sync diagnostic anchors (protected by mutex_). Each time audio is
     // re-armed we record the media sample the run starts at and the device's

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "canvas/core/grade_graph/graph.hpp"
+#include "canvas/core/media/voice_isolation.hpp"
 
 #include <array>
 #include <cstdint>
@@ -175,6 +176,13 @@ struct Clip {
     }
     bool eq_enabled = false;
     std::array<EqBand, 6> eq_bands = default_eq_bands();
+
+    // AI voice isolation engine applied to this clip's audio BEFORE its gains
+    // and mix, in both playback and export. `None` by default so existing clips
+    // (and untouched projects) decode identically. Stored per-clip so the
+    // track-snapshot undo machinery restores it automatically. The engine names
+    // in `voice_isolation_mode_name()` back the Inspector's dropdown.
+    VoiceIsolationMode voice_isolation = VoiceIsolationMode::None;
 
     // Clip metadata — tag (good-take / rejected), colour swatch (0 = none,
     // 1–12 = swatch index), and free-form comments. Stored per-clip so undo

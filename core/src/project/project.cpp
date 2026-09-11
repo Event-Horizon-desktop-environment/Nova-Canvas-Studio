@@ -39,6 +39,7 @@ json clip_to_json(const Clip& c) {
                 {"transition_in_end_ratio", c.transition_in_end_ratio},
                 {"volume_db", c.volume_db},
                 {"pan", c.pan},
+                {"voice_isolation", static_cast<int>(c.voice_isolation)},
                 {"scale_x", c.scale_x},
                 {"scale_y", c.scale_y},
                 {"pos_x", c.pos_x},
@@ -50,7 +51,12 @@ json clip_to_json(const Clip& c) {
                 {"flip_v", c.flip_v},
                 {"opacity", c.opacity},
                 {"blend_mode", static_cast<int>(c.blend_mode)},
-                {"name", c.name}};
+                {"name", c.name},
+                {"clip_tag", static_cast<int>(c.clip_tag)},
+                {"clip_color", c.clip_color},
+                {"comments", c.comments},
+                {"speed_enabled", c.speed_enabled},
+                {"speed_factor", c.speed_factor}};
     if (c.has_grade()) j["grade"] = grade_graph::grade_graph_to_json(c.grade);
     return j;
 }
@@ -91,6 +97,9 @@ Clip clip_from_json(const json& j) {
         j.at("transition_in_end_ratio").get_to(c.transition_in_end_ratio);
     if (j.contains("volume_db")) j.at("volume_db").get_to(c.volume_db);
     if (j.contains("pan")) j.at("pan").get_to(c.pan);
+    if (j.contains("voice_isolation"))
+        c.voice_isolation =
+            static_cast<VoiceIsolationMode>(j.at("voice_isolation").get<int>());
     if (j.contains("scale_x")) j.at("scale_x").get_to(c.scale_x);
     if (j.contains("scale_y")) j.at("scale_y").get_to(c.scale_y);
     if (j.contains("pos_x")) j.at("pos_x").get_to(c.pos_x);
@@ -104,6 +113,12 @@ Clip clip_from_json(const json& j) {
     if (j.contains("blend_mode"))
         c.blend_mode = static_cast<BlendMode>(j.at("blend_mode").get<int>());
     if (j.contains("name")) j.at("name").get_to(c.name);
+    if (j.contains("clip_tag"))
+        c.clip_tag = static_cast<Clip::ClipTag>(j.at("clip_tag").get<int>());
+    if (j.contains("clip_color")) j.at("clip_color").get_to(c.clip_color);
+    if (j.contains("comments")) j.at("comments").get_to(c.comments);
+    if (j.contains("speed_enabled")) j.at("speed_enabled").get_to(c.speed_enabled);
+    if (j.contains("speed_factor")) j.at("speed_factor").get_to(c.speed_factor);
     // A malformed grade must not kill the whole project load; drop the grade
     // block and keep the clip (matches the deliver-settings tolerance below).
     if (j.contains("grade")) {

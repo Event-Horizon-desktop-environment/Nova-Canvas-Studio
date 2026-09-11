@@ -3,6 +3,7 @@
 #include "sync_constants.hpp"
 
 #include "canvas/core/gpu/cuda_convert.hpp"
+#include "canvas/core/timeline/clip_rate.hpp"
 #include "canvas/core/util/color_log.hpp"
 #include "canvas/core/util/log.hpp"
 
@@ -18,6 +19,11 @@ namespace {
 double media_fps_of(const canvas::core::Project& project, const canvas::core::Clip& clip);
 int64_t seq_to_src_frame(const canvas::core::Project& project, const canvas::core::Clip& clip,
                          int64_t seq_frame);
+// Shared NV12 staging for the slot decode path and the off-thread transition
+// bake (defined below with the other helpers).
+canvas::core::Nv12FramePtr host_nv12_from_hw(const AVFrame* hw, std::int64_t src_frame,
+                                             const canvas::core::gpu::ColorSpec& spec,
+                                             int max_dim);
 }  // namespace
 
 void TimelineDecoder::add_media(const canvas::core::MediaEntry& entry) {
@@ -44,7 +50,56 @@ void TimelineDecoder::add_media(const canvas::core::MediaEntry& entry) {
            entry.path.c_str());
 }
 
+void TimelineDecoder::open_b_slot(const canvas::core::Project& project,
+                                  const canvas::core::Clip& clip) {
+    // A true two-clip cross-dissolve on the SAME media needs a second decode
+    // position from the same file. The main slot walks A's tail; the B slot
+    // walks B's pre-roll independently, so neither side has to seek back on
+    // the shared session (which re-walks a whole GOP per frame — the ~10fps
+    // stall + 4.4s A/V drift seen in the first pass at this fix). The two
+    // slots share the CUDA device but own separate decode sessions.
+    if (b_slots_.count(clip.media) > 0) return;
+    const auto it = std::find_if(project.media.begin(), project.media.end(),
+                                 [&](const canvas::core::MediaEntry& m) { return m.id == clip.media; });
+    if (it == project.media.end()) return;
+    auto slot = std::make_unique<DecoderSlot>();
+    std::string error;
+    if (slot->decoder.open(it->path, &error, hw_.device_ctx())) {
+        slot->loaded = true;
+        ::canvas::core::log::log_warning(
+            "[dec] B-slot open id=%d hw=%s path=%s", clip.media,
+            slot->decoder.is_hardware() ? "yes" : "no", it->path.c_str());
+    } else {
+        ::canvas::core::log::log_warning("[dec] B-slot OPEN-FAILED id=%d err=%s path=%s",
+                                         clip.media,
+                                         error.empty() ? "unknown" : error.c_str(),
+                                         it->path.c_str());
+    }
+    b_slots_[clip.media] = std::move(slot);
+}
+
 void TimelineDecoder::close() {
+    // Stop the transition-bake thread FIRST: it holds its own decoder sessions
+    // and reads hardware-frames from the shared device, so it must be joined
+    // before the slots (and the device) are torn down. bake_stop_ aborts an
+    // in-flight bake at the next frame boundary; the worker picks up the result
+    // — if any — like any other frame, but close also drops it so nothing stale
+    // survives the teardown. bake_thread_ is left non-joinable and the object
+    // reusable (tests call add_media after close).
+    {
+        std::lock_guard<std::mutex> lk(bake_mutex_);
+        bake_stop_ = true;
+        bake_cv_.notify_all();
+    }
+    if (bake_thread_.joinable()) bake_thread_.join();
+    {
+        std::lock_guard<std::mutex> lk(bake_mutex_);
+        bake_stop_ = false;  // tests reuse the object after close()
+        bake_job_.reset();
+        bake_inflight_ = false;
+        bake_result_.reset();
+    }
+
     // Project-switch census: how many decoder slots were torn down and how many
     // had gone hardware, so add_media storms (one decode init per media) are
     // attributable to the switch rather than to a fill_lookahead loop.
@@ -55,6 +110,7 @@ void TimelineDecoder::close() {
                                  slots_.size(), hw_slots, preview_cache_.size(),
                                  grade_lut_cache_.size());
     slots_.clear();
+    b_slots_.clear();
     preview_cache_.clear();
     preview_lru_.clear();
     grade_lut_cache_.clear();
@@ -63,6 +119,7 @@ void TimelineDecoder::close() {
 void TimelineDecoder::invalidate(const canvas::core::MediaId media) {
     const size_t before_slots = slots_.size();
     slots_.erase(media);
+    b_slots_.erase(media);
     for (auto it = preview_cache_.begin(); it != preview_cache_.end();) {
         if (it->first.media == media) {
             preview_lru_.erase(std::remove(preview_lru_.begin(), preview_lru_.end(), it->first),
@@ -165,7 +222,8 @@ canvas::core::grade_graph::GradeLutPtr TimelineDecoder::grade_lut_for(
     const canvas::core::Clip& clip) {
     if (!clip.has_grade()) return nullptr;
 
-    const auto it = grade_lut_cache_.find(&clip);
+    const GradeLutKey key{clip.id, clip.grade.change_seq};
+    const auto it = grade_lut_cache_.find(key);
     if (it != grade_lut_cache_.end()) return it->second;
 
     static canvas::core::ClipId engaged_clip_ = 0;
@@ -262,7 +320,7 @@ canvas::core::grade_graph::GradeLutPtr TimelineDecoder::grade_lut_for(
             digest.skin[0], digest.skin[1], digest.skin[2], digest.max_dev,
             changed ? 1 : 0);
     }
-    grade_lut_cache_.emplace(&clip, lut);
+    grade_lut_cache_.emplace(key, lut);
     return lut;
 }
 
@@ -468,17 +526,23 @@ canvas::core::VideoFramePtr TimelineDecoder::make_black_frame(const canvas::core
 }
 
 canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Project& project,
-                                                    const canvas::core::Clip& clip,
-                                                    const std::int64_t seq_frame,
-                                                    const int max_dim) {
-    (void)project;
+                                                     const canvas::core::Clip& clip,
+                                                     const std::int64_t seq_frame,
+                                                     const int max_dim) {
     if (clip.media < 0) return nullptr;
     if (!clip.enabled) return nullptr;
     if (!canvas::core::gpu::cuda_available()) return nullptr;
 
     auto it = slots_.find(clip.media);
     if (it == slots_.end() || !it->second->loaded) return nullptr;
-    auto* slot = it->second.get();
+    return decode_nv12_slot(it->second.get(), project, clip, seq_frame, max_dim);
+}
+
+canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
+                                                         const canvas::core::Project& project,
+                                                         const canvas::core::Clip& clip,
+                                                         const std::int64_t seq_frame,
+                                                         const int max_dim) {
     // Build the I-frame index lazily on the GPU path too: decode_to_hw_indexed
     // needs it to anchor a scrub/commit on the owning keyframe. Without it the
     // fallback is a plain container seek + forward decode on every position
@@ -532,44 +596,19 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
     hw_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hw_t0).count();
     if (!hw || !hw->data[0] || !hw->data[1]) return nullptr;
 
-    // Same reduce rule as decode_to_frame: cap the longest edge at max_dim
-    // (0 = native), preserving aspect. The viewer letterboxes the quad, so the
-    // composite needs no bars (dst == full canvas).
-    int out_w = hw->width;
-    int out_h = hw->height;
-    if (max_dim > 0 && (out_w > max_dim || out_h > max_dim)) {
-        const double scale = static_cast<double>(max_dim) / std::max(out_w, out_h);
-        out_w = std::max(2, static_cast<int>(std::llround(out_w * scale)) & ~1);
-        out_h = std::max(2, static_cast<int>(std::llround(out_h * scale)) & ~1);
-    } else {
-        out_w &= ~1;
-        out_h &= ~1;
-    }
-    out_w = std::max(2, out_w);
-    out_h = std::max(2, out_h);
-
-    auto frame = std::make_shared<canvas::core::Nv12Frame>();
-    frame->frame_number = src_frame;
-    frame->width = out_w;
-    frame->height = out_h;
-    frame->y_pitch = static_cast<std::size_t>(out_w);
-    frame->uv_pitch = static_cast<std::size_t>(out_w);
-    // The shaders decode these raw planes with the slot file's resolved color
-    // spec — matrix and (probe-reconciled) range — not with assumed 709-limited.
+    // Shared NV12 staging with the off-thread transition bake
+    // (host_nv12_from_hw), so both paths are pixel-identical: same reduce rule
+    // (longest edge capped at max_dim, 0 = native, even dims), same on-GPU
+    // resize/download, same resolved color spec. The viewer letterboxes the
+    // quad, so the composite needs no bars (dst == full canvas).
     const canvas::core::gpu::ColorSpec spec = slot->decoder.color_spec();
-    frame->matrix = spec.matrix;
-    frame->range = spec.range;
     const auto gpu_t0 = std::chrono::steady_clock::now();
-    if (!canvas::core::gpu::convert_nv12_resize_to_host(
-            reinterpret_cast<const uint8_t*>(hw->data[0]),
-            reinterpret_cast<const uint8_t*>(hw->data[1]),
-            hw->width, hw->height,
-            static_cast<std::size_t>(hw->linesize[0]),
-            static_cast<std::size_t>(hw->linesize[1]),
-            out_w, out_h, out_w, out_h, 0, 0, &frame->y, &frame->uv))
-        return nullptr;
+    auto frame = host_nv12_from_hw(hw, src_frame, spec, max_dim);
+    if (!frame) return nullptr;
     const double gpu_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gpu_t0).count();
+    const int out_w = frame->width;
+    const int out_h = frame->height;
     // NV12 GPU fast-path timing: decode_to_hw (NVDEC) vs the on-GPU resize/composite
     // download, so a GPU-path regression (driver, memory pressure, slice layout)
     // shows up as hw_ms/gpu_ms climbing in the ~1s aggregate.
@@ -624,15 +663,23 @@ double media_fps_of(const canvas::core::Project& project, const canvas::core::Cl
 // Time-based clip mapping: a seq-frame offset advances the source by the
 // media/sequence fps ratio, so 60fps footage on a 30fps timeline strides two
 // source frames per timeline frame (the clip plays at its intended speed)
-// instead of halving the content. 1:1 whenever the rates match. A clip's
-// src_in/src_out are indices into the SOURCE's own frame rate.
+// instead of halving the content. 1:1 whenever the rates match. Speed Change
+// (clip_rate) multiplies the offset for a whole-clip retime, keeping playback
+// and export on the same law. A clip's src_in/src_out are indices into the
+// SOURCE's own frame rate.
 int64_t seq_to_src_frame(const canvas::core::Project& project, const canvas::core::Clip& clip,
                          int64_t seq_frame) {
     const double mf = media_fps_of(project, clip);
     const double sf = project.sequence.fps;
-    if (mf <= 0.0 || sf <= 0.0) return clip.src_in + (seq_frame - clip.tl_in);
+    if (mf <= 0.0 || sf <= 0.0) {
+        return clip.src_in +
+               canvas::core::cliprate::scaled_frame_offset(clip, seq_frame - clip.tl_in);
+    }
     return clip.src_in + static_cast<int64_t>(std::llround(
-                             static_cast<double>(seq_frame - clip.tl_in) * mf / sf));
+                             static_cast<double>(
+                                 canvas::core::cliprate::scaled_frame_offset(
+                                     clip, seq_frame - clip.tl_in)) *
+                             mf / sf));
 }
 
 // Maps a core transition kind to the renderable viewer mode. Audio-only
@@ -667,6 +714,49 @@ void apply_clip_visual(canvas::core::RenderFrame& out,
     out.flip_h = a.flip_h;
     out.flip_v = a.flip_v;
 }
+
+// Shared NV12 staging: resize the borrowed hardware frame on the GPU and
+// download the Y/UV planes the viewer's NV12 shader uploads. Same reduce rule
+// as the RGBA path (longest edge capped at max_dim, 0 = native, even dims) —
+// the viewer letterboxes the quad, so the composite needs no bars (dst == full
+// canvas). Called by the slot decode path (decode_nv12_slot) AND the off-thread
+// transition bake (run_transition_bake), so the two paths are pixel-identical.
+// The returned frame carries the source file's resolved color spec (matrix +
+// probe-reconciled range) so the shaders decode the raw planes correctly.
+canvas::core::Nv12FramePtr host_nv12_from_hw(const AVFrame* hw, std::int64_t src_frame,
+                                             const canvas::core::gpu::ColorSpec& spec,
+                                             int max_dim) {
+    int out_w = hw->width;
+    int out_h = hw->height;
+    if (max_dim > 0 && (out_w > max_dim || out_h > max_dim)) {
+        const double scale = static_cast<double>(max_dim) / std::max(out_w, out_h);
+        out_w = std::max(2, static_cast<int>(std::llround(out_w * scale)) & ~1);
+        out_h = std::max(2, static_cast<int>(std::llround(out_h * scale)) & ~1);
+    } else {
+        out_w &= ~1;
+        out_h &= ~1;
+    }
+    out_w = std::max(2, out_w);
+    out_h = std::max(2, out_h);
+
+    auto frame = std::make_shared<canvas::core::Nv12Frame>();
+    frame->frame_number = src_frame;
+    frame->width = out_w;
+    frame->height = out_h;
+    frame->y_pitch = static_cast<std::size_t>(out_w);
+    frame->uv_pitch = static_cast<std::size_t>(out_w);
+    frame->matrix = spec.matrix;
+    frame->range = spec.range;
+    if (!canvas::core::gpu::convert_nv12_resize_to_host(
+            reinterpret_cast<const uint8_t*>(hw->data[0]),
+            reinterpret_cast<const uint8_t*>(hw->data[1]),
+            hw->width, hw->height,
+            static_cast<std::size_t>(hw->linesize[0]),
+            static_cast<std::size_t>(hw->linesize[1]),
+            out_w, out_h, out_w, out_h, 0, 0, &frame->y, &frame->uv))
+        return nullptr;
+    return frame;
+}
 }  // namespace
 
 const canvas::core::Clip* TimelineDecoder::top_video_clip_at(const canvas::core::Project& project,
@@ -681,8 +771,298 @@ const canvas::core::Clip* TimelineDecoder::top_video_clip_at(const canvas::core:
     return nullptr;
 }
 
+std::optional<TimelineDecoder::TransitionBakeCandidate>
+TimelineDecoder::next_transition_bake_candidate(const canvas::core::Project& project,
+                                                std::int64_t seq_frame) const {
+    TransitionBakeJob job;
+    if (!transition_bake_candidate(project, seq_frame, &job)) return std::nullopt;
+    return TransitionBakeCandidate{job.win_start, job.win_end};
+}
+
+// Nearest qualifying same-media OUT-transition window at-or-ahead of `seq_frame`
+// that the off-thread pre-render would cover. Mirrors the live path's B search
+// (incoming clip exactly at A's cut on any unlocked video track) and requires
+// the two media ids to match — the far-GOP double-walk only exists for a SAME
+// file — and A to still be the topmost picture at the window head (a higher
+// track covering the head would take precedence at present time and waste the
+// bake). Pure timeline scan: no I/O, no thread.
+bool TimelineDecoder::transition_bake_candidate(const canvas::core::Project& project,
+                                                std::int64_t seq_frame,
+                                                TransitionBakeJob* out) const {
+    const canvas::core::Sequence& seq = project.sequence;
+    const canvas::core::Clip* a_win = nullptr;
+    const canvas::core::Clip* b_win = nullptr;
+    for (const auto& track : seq.video_tracks) {
+        if (track.locked) continue;
+        for (const auto& a : track.clips) {
+            if (!a.enabled) continue;
+            if (!a.has_transition_out() ||
+                canvas::core::is_audio_transition(a.transition_out))
+                continue;
+            const std::int64_t dur_out = a.transition_out_duration;
+            if (dur_out <= 0 || dur_out > kTransitionBakeMaxFrames) continue;
+            const std::int64_t win_start = a.tl_out - dur_out;
+            if (win_start < a.tl_in) continue;  // window must fit inside the clip
+            const std::int64_t lead = win_start - seq_frame;
+            if (lead < 0 || lead > kTransitionBakeLead) continue;
+            const canvas::core::Clip* b = nullptr;
+            for (const auto& t2 : seq.video_tracks) {
+                if (t2.locked) continue;
+                for (const auto& cc : t2.clips) {
+                    if (cc.tl_in == a.tl_out && cc.id != a.id) { b = &cc; break; }
+                }
+                if (b) break;
+            }
+            if (!b || !b->enabled || b->media != a.media) continue;
+            if (top_video_clip_at(project, win_start) != &a) continue;
+            if (!a_win || win_start < a_win->tl_out - a_win->transition_out_duration) {
+                a_win = &a;
+                b_win = b;
+            }
+        }
+    }
+    if (!a_win || !b_win) return false;
+
+    auto entry_for = [&](canvas::core::MediaId id) -> const canvas::core::MediaEntry* {
+        const auto it = std::find_if(project.media.begin(), project.media.end(),
+                                     [&](const canvas::core::MediaEntry& m) { return m.id == id; });
+        return it != project.media.end() ? &*it : nullptr;
+    };
+    const canvas::core::MediaEntry* ae = entry_for(a_win->media);
+    const canvas::core::MediaEntry* be = entry_for(b_win->media);
+    if (!ae || !be) return false;
+
+    out->a_entry = *ae;
+    out->b_entry = *be;
+    out->seq_fps = project.sequence.fps;
+    out->a = *a_win;
+    out->b = *b_win;
+    out->win_start = a_win->tl_out - a_win->transition_out_duration;
+    out->win_end = a_win->tl_out;
+    return true;
+}
+
+void TimelineDecoder::maybe_start_transition_bake(const canvas::core::Project& project,
+                                                  std::int64_t seq_frame) {
+    if (!canvas::core::gpu::cuda_available() || hw_.device_name() != "cuda") return;
+    TransitionBakeJob job;
+    if (!transition_bake_candidate(project, seq_frame, &job)) return;
+    const std::int64_t lead = job.win_start - seq_frame;
+    const std::int64_t win_start = job.win_start;
+    const std::int64_t win_end = job.win_end;
+    const canvas::core::MediaId media = job.a.media;
+    std::lock_guard<std::mutex> lk(bake_mutex_);
+    if (bake_stop_ || bake_inflight_) return;
+    // Already serving this window from a finished bake: don't re-kick.
+    if (bake_result_ && seq_frame < bake_result_->win_end) return;
+    bake_job_ = std::make_unique<TransitionBakeJob>(std::move(job));
+    bake_inflight_ = true;
+    if (!bake_thread_.joinable())
+        bake_thread_ = std::thread(&TimelineDecoder::transition_bake_thread, this);
+    bake_cv_.notify_all();
+    ::canvas::core::log::log_warning(
+        "[trans-bake] kick media=%d win=[%lld,%lld) lead=%lld seq=%lld",
+        static_cast<int>(media), static_cast<long long>(win_start),
+        static_cast<long long>(win_end), static_cast<long long>(lead),
+        static_cast<long long>(seq_frame));
+}
+
+void TimelineDecoder::adopt_or_clear_transition_bake(std::int64_t seq_frame) {
+    std::lock_guard<std::mutex> lk(bake_mutex_);
+    if (!bake_result_ || seq_frame < bake_result_->win_end) return;
+    const canvas::core::MediaId b_media = bake_result_->b_media;
+    if (bake_result_->parked_b && bake_result_->parked_b->is_open()) {
+        const auto it = slots_.find(b_media);
+        if (it != slots_.end() && it->second->loaded) {
+            it->second->decoder = std::move(*bake_result_->parked_b);
+            // The worker's B slot for this media is now redundant (the adopted
+            // main slot is already parked at B's head); drop it so a future cut
+            // on the same file reopens fresh instead of pinning two sessions.
+            b_slots_.erase(b_media);
+            ::canvas::core::log::log_warning(
+                "[trans-bake] adopt parked-B media=%d seq=%lld served=%lld",
+                static_cast<int>(b_media), static_cast<long long>(seq_frame),
+                static_cast<long long>(bake_result_->served));
+        } else {
+            ::canvas::core::log::log_warning(
+                "[trans-bake] adopt-DROPPED media=%d (main slot gone) seq=%lld",
+                static_cast<int>(b_media), static_cast<long long>(seq_frame));
+        }
+    }
+    bake_result_.reset();
+}
+
+void TimelineDecoder::transition_bake_thread() {
+    for (;;) {
+        std::unique_ptr<TransitionBakeJob> job;
+        {
+            std::unique_lock<std::mutex> lk(bake_mutex_);
+            bake_cv_.wait(lk, [this] { return bake_stop_ || bake_job_ != nullptr; });
+            if (bake_stop_) return;
+            job = std::move(bake_job_);
+        }
+        run_transition_bake(*job);
+        {
+            std::lock_guard<std::mutex> lk(bake_mutex_);
+            bake_inflight_ = false;
+        }
+    }
+}
+
+// Walks the whole bake window with TWO dedicated decoder sessions (A's tail +
+// B's pre-roll), converting each frame to the in-memory NV12 planes the viewer
+// crossfades — the exact decode+composite work the playback thread would have
+// done live, minus the multi-second far keyframe walks (B's open + the main
+// slot's post-cut jump), done here AHEAD of the playhead. The B session, parked
+// at B's head when the walk ends, is handed to the worker as `parked_b`. Never
+// blocks playback: a completed result is simply matched by win bounds in frame().
+void TimelineDecoder::run_transition_bake(const TransitionBakeJob& job) {
+    const auto t0 = std::chrono::steady_clock::now();
+    std::string error;
+    canvas::core::VideoDecoder decA, decB;
+    if (!decA.open(job.a_entry.path, &error, hw_.device_ctx()) ||
+        !decB.open(job.b_entry.path, &error, hw_.device_ctx())) {
+        ::canvas::core::log::log_warning(
+            "[trans-bake] open-FAILED win=[%lld,%lld) err=%s",
+            static_cast<long long>(job.win_start), static_cast<long long>(job.win_end),
+            error.c_str());
+        return;
+    }
+    if (!decA.is_hardware() || !decB.is_hardware() || hw_.device_name() != "cuda") {
+        ::canvas::core::log::log_warning(
+            "[trans-bake] no-hw-skip win=[%lld,%lld)",
+            static_cast<long long>(job.win_start), static_cast<long long>(job.win_end));
+        return;
+    }
+    if (!decA.has_iframe_index()) decA.build_iframe_index();
+    if (!decB.has_iframe_index()) decB.build_iframe_index();
+
+    const double bsf = job.seq_fps;
+    const double amf = (job.a_entry.fps > 0.0) ? job.a_entry.fps : bsf;
+    const double bmf = (job.b_entry.fps > 0.0) ? job.b_entry.fps : bsf;
+    const double bratio = (bmf > 0.0 && bsf > 0.0) ? bsf / bmf : 1.0;
+    const std::int64_t dur_out = job.win_end - job.win_start;
+    const std::int64_t n = job.win_end - job.win_start;
+
+    // Decode strategy mirrors the worker's prepared-playback branch
+    // (decode_nv12_slot): anchor each session ONCE on the owning keyframe, then
+    // ride decode_to_hw's cheap sequential walk for the rest of the window.
+    // Calling decode_to_hw_indexed for EVERY frame would container-seek +
+    // codec-flush per frame (the seek resets the walk position), re-climbing a
+    // whole GOP per frame on both sessions — measured: a 14-frame bake ~2.9s,
+    // which never beat the 0.47s window and so never engaged the serve path.
+    std::vector<std::pair<canvas::core::Nv12FramePtr, canvas::core::Nv12FramePtr>> planes;
+    planes.reserve(static_cast<std::size_t>(n));
+    bool failed = false;
+    bool a_indexed = true;
+    bool b_indexed = true;
+    canvas::core::Nv12FramePtr prev_pb;  // reused for rate-rounded B repeats
+    std::int64_t prev_b_src = -1;
+    for (std::int64_t i = 0; i < n; ++i) {
+        {
+            std::lock_guard<std::mutex> lk(bake_mutex_);
+            if (bake_stop_) {
+                failed = true;
+                break;
+            }
+        }
+        const std::int64_t seq_frame = job.win_start + i;
+        const std::int64_t a_src = job.a.src_in +
+            static_cast<std::int64_t>(std::llround(
+                static_cast<double>(seq_frame - job.a.tl_in) * amf / bsf));
+        std::int64_t b_seq = job.b.tl_in + static_cast<std::int64_t>(std::llround(
+            (static_cast<double>(seq_frame - job.win_start) - dur_out) * bratio));
+        if (b_seq < 0) b_seq = 0;
+        const AVFrame* ha = a_indexed ? decA.decode_to_hw_indexed(a_src)
+                                      : decA.decode_to_hw(a_src);
+        a_indexed = false;
+        if (!ha || !ha->data[0]) {
+            failed = true;
+            break;
+        }
+        auto pa = host_nv12_from_hw(ha, a_src, decA.color_spec(), 0);
+        if (!pa) {
+            failed = true;
+            break;
+        }
+        // B's pre-roll can land on the SAME source frame for consecutive window
+        // frames (the 2:1 rate rounds tl offsets onto one media frame). The live
+        // path serves that repeat from its retain-hit cache; here a sequential
+        // walk cannot step backward, so reuse the previously baked B plane —
+        // pixel-identical to what the live retain-hit would render.
+        canvas::core::Nv12FramePtr pb;
+        if (b_seq == prev_b_src && prev_pb) {
+            pb = prev_pb;
+        } else {
+            const AVFrame* hb = b_indexed ? decB.decode_to_hw_indexed(b_seq)
+                                          : decB.decode_to_hw(b_seq);
+            b_indexed = false;
+            if (!hb || !hb->data[0]) {
+                failed = true;
+                break;
+            }
+            pb = host_nv12_from_hw(hb, b_seq, decB.color_spec(), 0);
+            if (!pb) {
+                failed = true;
+                break;
+            }
+            prev_pb = pb;
+            prev_b_src = b_seq;
+        }
+        planes.emplace_back(std::move(pa), std::move(pb));
+    }
+    if (failed) {
+        ::canvas::core::log::log_warning(
+            "[trans-bake] %s win=[%lld,%lld) planes=%zu",
+            bake_stop_ ? "ABORTED" : "FAILED",
+            static_cast<long long>(job.win_start), static_cast<long long>(job.win_end),
+            planes.size());
+        return;
+    }
+
+    // Park the B session AT B's clip head (the source of the first post-window
+    // frame). On a distant-source same-media cut the window's last pre-roll frame
+    // sits FAR before src_in (this project: 1678 vs 3448); a parked decoder left
+    // there forces the worker's very next frame to re-walk the whole GOP
+    // (~200ms) — the visible 1-frame stutter at the cut. Positioning on src_in
+    // now, off-thread and absorbed by the bake's lead, makes that first post-cut
+    // frame a decode_to_hw_indexed retain-hit, so the boundary is a free
+    // sequential continue. The indexed entry preserves an incumbent retain when
+    // src_in was already the last walked source (no over-walk to src_in+1).
+    if (!bake_stop_) decB.decode_to_hw_indexed(job.b.src_in);
+
+    // Captured under no lock (this thread alone touches the B session now) so the
+    // completion log below is safe after the result is published.
+    const std::int64_t parked_at = decB.current_frame();
+    {
+        std::lock_guard<std::mutex> lk(bake_mutex_);
+        if (bake_stop_) return;
+        auto res = std::make_unique<BakedTransition>();
+        res->a_id = job.a.id;
+        res->b_media = job.b.media;
+        res->win_start = job.win_start;
+        res->win_end = job.win_end;
+        res->planes = std::move(planes);
+        res->parked_b = std::make_unique<canvas::core::VideoDecoder>(std::move(decB));
+        bake_result_ = std::move(res);
+    }
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    ::canvas::core::log::log_warning(
+        "[trans-bake] DONE win=[%lld,%lld) frames=%lld parkedB@%lld (%.2fs)",
+        static_cast<long long>(job.win_start), static_cast<long long>(job.win_end),
+        static_cast<long long>(n), static_cast<long long>(parked_at), secs);
+}
+
 canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project& project,
                                                 std::int64_t seq_frame) {
+    // Off-thread transition pre-render lifecycle (all no-ops outside a bake):
+    // past a baked window, adopt its parked-B decoder into the main slot so the
+    // post-cut boundary is a sequential continue; then look ahead and kick the
+    // next bake-eligible window before the playhead reaches it.
+    adopt_or_clear_transition_bake(seq_frame);
+    maybe_start_transition_bake(project, seq_frame);
+
     auto out = std::make_shared<canvas::core::RenderFrame>();
 
     const canvas::core::Clip* a = top_video_clip_at(project, seq_frame);
@@ -713,6 +1093,73 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                              seq_frame >= a->tl_in && seq_frame < a->tl_in + dur_in;
 
     if (in_in_trans || in_out_trans) {
+        // [trans-bake] Serve-from-cache: a completed off-thread pre-render covers
+        // this OUT window — hand the baked A/B NV12 planes to the viewer's
+        // crossfade shader with the SAME mode/progress/grades the live path would
+        // attach, so the playback thread does ZERO decoding across the dissolve
+        // (the two far keyframe walks the bake absorbed are both gone). Re-attach
+        // grade LUTs from the CURRENT project at present-time — the bake only
+        // captures decode, so a grade change mid-window still displays correctly.
+        {
+            bool serve = false;
+            bool first_serve = false;
+            {
+                std::lock_guard<std::mutex> lk(bake_mutex_);
+                BakedTransition* bt = bake_result_.get();
+                if (bt && in_out_trans && bt->a_id == a->id &&
+                    bt->win_start == tr_out_start && bt->win_end == a->tl_out &&
+                    seq_frame >= bt->win_start && seq_frame < bt->win_end) {
+                    const std::size_t idx =
+                        static_cast<std::size_t>(seq_frame - bt->win_start);
+                    if (idx < bt->planes.size() && bt->planes[idx].first) {
+                        first_serve = (bt->served++ == 0);
+                        out->nv12 = bt->planes[idx].first;
+                        out->b_nv12 = bt->planes[idx].second;
+                        serve = true;
+                    }
+                }
+            }
+            if (serve) {
+                if (first_serve)
+                    ::canvas::core::log::log_warning(
+                        "[trans-bake] serve win=[%lld,%lld) seq=%lld idx=%zu planes=%zu",
+                        static_cast<long long>(tr_out_start),
+                        static_cast<long long>(a->tl_out), static_cast<long long>(seq_frame),
+                        static_cast<std::size_t>(seq_frame - tr_out_start),
+                        bake_result_ ? bake_result_->planes.size() : 0u);
+                out->grade = grade_a
+                                 ? grade_lut_for(*a)
+                                 : canvas::core::grade_graph::GradeLutPtr{};
+                // Re-resolve the incoming clip so grade_b keys on THIS project's
+                // Clip (grade_lut_cache_ is keyed by clip id + grade change_seq,
+                // so the id/seq pair is what must match the owner project) —
+                // never a bake copy. b_nv12 being null means the bake had no
+                // incoming clip (fade-to-black fallback), matching the live no-b
+                // branch.
+                if (out->b_nv12) {
+                    const canvas::core::Sequence& seq = project.sequence;
+                    const canvas::core::Clip* b = nullptr;
+                    for (const auto& track : seq.video_tracks) {
+                        if (track.locked) continue;
+                        for (const auto& cc : track.clips)
+                            if (cc.tl_in == a->tl_out) { b = &cc; break; }
+                        if (b) break;
+                    }
+                    out->grade_b = (b && b != a && b->has_grade())
+                                       ? grade_lut_for(*b)
+                                       : canvas::core::grade_graph::GradeLutPtr{};
+                }
+                if (grade_a && cpu_graded_preview_enabled_)
+                    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
+                                                         kPreviewMaxDim));
+                out->mode = to_render_mode(a->transition_out);
+                if (dur_out > 0)
+                    out->progress = static_cast<float>(seq_frame - tr_out_start) /
+                                    static_cast<float>(dur_out);
+                if (!out->b_nv12) out->fade_to_black = true;
+                return out;
+            }
+        }
         // GPU transition path: try to deliver A (and B, once visible mid-window)
         // as hardware NV12 planes so a cut/cross-fade stays on the GPU fast path
         // instead of the two full-res CPU RGBA decodes that collapsed the
@@ -759,19 +1206,40 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                 if (b_seq < 0) b_seq = 0;
                 auto nvB = [&]() -> canvas::core::Nv12FramePtr {
                     // Same clip media => the adjacent clips share ONE hardware
-                    // decoder slot. B's pre-roll handle coincides with A's source
-                    // position (B sits at the cut, so b->tl_in == a->tl_out, and
-                    // the seq->media map makes b_seq == seq_frame), i.e. B would
-                    // decode the exact frame A already has. Decoding it would
-                    // re-seek the shared CUDA session backward to a target only A
-                    // has reached, re-decoding up to a full 10s keyframe GOP per
-                    // transition frame (~250ms on 2K60 — the exact stutter seen in
-                    // the logs). Reuse A's planes instead: crossfading identical
-                    // frames is the seamless-cut the dissolve intends, and matches
-                    // what the RGBA path rendered.
-                    if (b->media == a->media) return nvA;
-                    // Distinct media => its own decoder slot; the handle advances
-                    // forward every frame, so the per-media decode stays sequential.
+                    // decoder slot. Reuse A's planes ONLY when B's pre-roll
+                    // decodes to the exact media frame A already decoded — a true
+                    // 1:1 seamless blade (source ranges contiguous AND rates
+                    // matching, which is what maps b_seq back onto A's frame).
+                    // Crossfading identical frames is then the seamless-cut the
+                    // dissolve intends, and matches what the RGBA path rendered
+                    // without re-seeking the shared CUDA session (which would
+                    // re-walk up to a full keyframe GOP just to re-decode a
+                    // picture we already hold).
+                    //
+                    // When the pre-roll lands on DIFFERENT footage (trimmed or
+                    // retimed cut, gaps in the source, cross-rate project like
+                    // 60fps media on a 30fps timeline), aliasing A here would
+                    // freeze the dissolve on A for the whole window — mix(A, A,
+                    // t) is A for every t. Decode B real footage instead.
+                    //
+                    // SAME media: A and B share source file but need TWO decode
+                    // positions (A's tail + B's pre-roll). A dedicated B slot
+                    // walks the pre-roll forward independently of A's session;
+                    // decoding B on A's slot would re-walk a whole GOP each
+                    // frame (the ~10fps stall / 4.4s A/V drift seen in the
+                    // first pass). Distinct media needs no B slot — the two
+                    // media slots already decode independently.
+                    if (b->media == a->media) {
+                        if (seq_to_src_frame(project, *b, b_seq) ==
+                            seq_to_src_frame(project, *a, seq_frame))
+                            return nvA;
+                        open_b_slot(project, *b);
+                        auto bit = b_slots_.find(b->media);
+                        if (bit != b_slots_.end() && bit->second->loaded)
+                            return decode_nv12_slot(bit->second.get(), project, *b,
+                                                    b_seq, 0);
+                        return {};
+                    }
                     return decode_nv12(project, *b, b_seq, 0);
                 }();
                 if (nvB) {
@@ -977,14 +1445,24 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                         (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
                     if (b_seq < 0) b_seq = 0;
                     auto nvB = [&]() -> canvas::core::Nv12FramePtr {
-                        // Same clip media => the adjacent clips share ONE hardware
-                        // decoder slot, and B would decode the exact frame A already
-                        // has (b->tl_in == a->tl_out maps b_seq == seq_frame).
-                        // Re-decoding re-seeks the shared CUDA session backward,
-                        // re-walking up to a full keyframe GOP per transition frame.
-                        // Reuse A's planes: crossfading identical frames is the
-                        // seamless-cut the dissolve intends.
-                        if (b->media == a->media) return nvA;
+                        // Same clip media => the adjacent clips share ONE media
+                        // file but the pre-roll may land on DIFFERENT footage
+                        // (trimmed/retimed cut, source gaps, cross-rate project
+                        // like 60fps media on a 30fps timeline). Reuse A's
+                        // planes ONLY on the true 1:1 seamless blade. Otherwise
+                        // decode B for real via its own B slot (a shared-slot
+                        // decode would re-walk a GOP every preview frame).
+                        if (b->media == a->media) {
+                            if (seq_to_src_frame(project, *b, b_seq) ==
+                                seq_to_src_frame(project, *a, seq_frame))
+                                return nvA;
+                            open_b_slot(project, *b);
+                            auto bit = b_slots_.find(b->media);
+                            if (bit != b_slots_.end() && bit->second->loaded)
+                                return decode_nv12_slot(bit->second.get(), project,
+                                                        *b, b_seq, max_dim);
+                            return {};
+                        }
                         return decode_nv12(project, *b, b_seq, max_dim);
                     }();
                     if (nvB) {

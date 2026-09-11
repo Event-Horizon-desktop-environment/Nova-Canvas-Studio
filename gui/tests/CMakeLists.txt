@@ -32,6 +32,16 @@ canvas_add_headless_test(timeline_decoder_test
     ../src/features/playback/timeline_decoder.cpp
 )
 
+# transition_bake_test: exercises the off-thread transition pre-render's pure
+# DISCOVERY (next_transition_bake_candidate) headlessly — the
+# 1-frame same-media cross-dissolve from the far-source freeze fix. The
+# thread/GPU half of the bake needs a CUDA device + running timeline, so only
+# the scan is unit-tested here (same seam guarantee: linked no-Qt).
+canvas_add_headless_test(transition_bake_test
+    transition_bake_test.cpp
+    ../src/features/playback/timeline_decoder.cpp
+)
+
 # audio_pipeline_test: exercises AudioPipeline headless against an in-memory
 # fake sink. Compiles audio_pipeline.cpp directly (same seam guarantee). The
 # trim-head + forward-jump cases are the regression guards for the AudioDecoder

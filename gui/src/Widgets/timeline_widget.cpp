@@ -4,9 +4,11 @@
 
 #include <QColor>
 #include <QContextMenuEvent>
+#include <QIcon>
 #include <QMenu>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QPixmap>
 #include <QScrollBar>
 #include <QKeyEvent>
 #include <QWheelEvent>
@@ -552,6 +554,7 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     QAction* clear_transition_in_action = nullptr;
     std::vector<QAction*> transition_actions;
     std::vector<QAction*> transition_in_actions;
+    std::vector<QAction*> color_actions;
     if (hit_clip) {
         emit clip_selected(hit_clip->clip);
         // Checkable "Link Clips" action: checked when this clip is part of a
@@ -608,6 +611,38 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
         clear_transition_action = menu.addAction(tr("Clear Out Transition"));
         clear_transition_in_action = menu.addAction(tr("Clear In Transition"));
 
+        // "Clip Colour >" submenu (Resolve-style): the full 12-swatch palette
+        // plus "No Colour". Carries the swatch index in the action data so the
+        // post-exec handler just reads it back; the CLIP itself is captured by
+        // the hit_clip variable at the top of this block.
+        auto* color_menu = menu.addMenu(tr("Clip Colour") + QStringLiteral(" >"));
+        apply_rounded_menu(color_menu);
+        const auto swatch_icon = [](const QColor& c) {
+            QPixmap pm(16, 16);
+            pm.fill(Qt::transparent);
+            QPainter p(&pm);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setBrush(QBrush(c));
+            p.setPen(QPen(QColor(0x55, 0x55, 0x55), 1));
+            p.drawRoundedRect(QRectF(0.5, 0.5, 15, 15), 3, 3);
+            return QIcon(pm);
+        };
+        const QColor* swatches = clip_color_swatches();
+        for (int i = 0; i < 12; ++i) {
+            QAction* act = color_menu->addAction(
+                QStringLiteral("#%1").arg(swatches[i].name()));
+            act->setIcon(swatch_icon(swatches[i]));
+            act->setData(i + 1);
+            act->setCheckable(true);
+            act->setChecked(hit_clip->clip->clip_color == static_cast<uint8_t>(i + 1));
+            color_actions.push_back(act);
+        }
+        color_menu->addSeparator();
+        QAction* color_none = color_menu->addAction(tr("&No Colour"));
+        color_none->setCheckable(true);
+        color_none->setChecked(hit_clip->clip->clip_color == 0);
+        color_actions.push_back(color_none);
+
         menu.addSeparator();
     }
 
@@ -652,6 +687,13 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
         emit clear_transition_requested(hit_clip->clip);
     } else if (chosen == clear_transition_in_action) {
         emit clear_transition_in_requested(hit_clip->clip);
+    } else if (std::find(color_actions.begin(), color_actions.end(), chosen) !=
+               color_actions.end()) {
+        const uint8_t color = static_cast<uint8_t>(chosen->data().toInt());
+        if (debug_enabled())
+            qDebug() << "timeline: clip color menu on clip" << hit_clip->clip->id
+                     << "color=" << static_cast<int>(color);
+        emit clip_color_requested(hit_clip->clip, color);
     } else if (chosen) {
         // A transition submenu entry was chosen; resolve OUT vs IN by which
         // action list the chosen action belongs to.

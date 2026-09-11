@@ -17,11 +17,24 @@
 #include <QVBoxLayout>
 
 #include "UX/theme.hpp"
+#include "canvas/core/util/color_log.hpp"
 #include "features/color/color_widgets.hpp"
 
 namespace canvas::gui {
 
 using canvas::core::colorsci::eval_curve;
+
+namespace {
+// Extreme curve-gesture geometry: plot px -> normalized point (0..1) on both
+// axes, clamped to the editor's 2% inset. One line per mouse event in the
+// archive, so color.log captures the exact path every control point takes.
+QPointF plot_px_to_p01(const QRectF& r, const QPointF& pos) {
+    QPointF p((pos.x() - r.left()) / r.width(), 1.0 - (pos.y() - r.top()) / r.height());
+    p.setX(std::clamp(p.x(), 0.02, 0.98));
+    p.setY(std::clamp(p.y(), 0.02, 0.98));
+    return p;
+}
+}  // namespace
 
 // ── CurveEditor ──────────────────────────────────────────────────────────────
 
@@ -144,20 +157,33 @@ void CurveEditor::mousePressEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
         if (hit >= 0) {
             drag_index_ = hit;
+            last_plot_px_ = pos;
+            CANVAS_COLOR_LOG(
+                "[curve] press GRAB point pos=(%.0f,%.0f) idx=%d pts=%d p=(%.3f,%.3f)",
+                pos.x(), pos.y(), hit, points_.size(),
+                static_cast<double>(points_[hit].x()),
+                static_cast<double>(points_[hit].y()));
         } else {
             const QRectF r = plot_rect();
-            QPointF p((pos.x() - r.left()) / r.width(), 1.0 - (pos.y() - r.top()) / r.height());
-            p.setX(std::clamp(p.x(), 0.02, 0.98));
-            p.setY(std::clamp(p.y(), 0.02, 0.98));
+            QPointF p = plot_px_to_p01(r, pos);
             points_.append(p);
             std::sort(points_.begin(), points_.end(),
                       [](const QPointF& a, const QPointF& b) { return a.x() < b.x(); });
             drag_index_ = hit_point(pos);
+            last_plot_px_ = pos;
+            CANVAS_COLOR_LOG(
+                "[curve] press ADD point pos=(%.0f,%.0f) p=(%.3f,%.3f) pts=%d "
+                "drag_idx=%d",
+                pos.x(), pos.y(), static_cast<double>(p.x()),
+                static_cast<double>(p.y()), points_.size(), drag_index_);
         }
         emit points_changed();
         update();
     } else if (event->button() == Qt::RightButton) {
         if (!points_.isEmpty()) {
+            CANVAS_COLOR_LOG(
+                "[curve] press RIGHT-CLICK reset pts_before=%d pos=(%.0f,%.0f)",
+                points_.size(), pos.x(), pos.y());
             points_.clear();
             emit points_changed();
             emit points_committed();
@@ -169,21 +195,33 @@ void CurveEditor::mousePressEvent(QMouseEvent* event) {
 void CurveEditor::mouseMoveEvent(QMouseEvent* event) {
     if (drag_index_ < 0 || drag_index_ >= points_.size()) return;
     const QRectF r = plot_rect();
-    QPointF p((event->position().x() - r.left()) / r.width(),
-              1.0 - (event->position().y() - r.top()) / r.height());
-    p.setX(std::clamp(p.x(), 0.02, 0.98));
-    p.setY(std::clamp(p.y(), 0.02, 0.98));
+    const QPointF pos = event->position();
+    QPointF p = plot_px_to_p01(r, pos);
+    const QPointF prev_p = points_[drag_index_];
+    const QPointF d_plot = pos - last_plot_px_;
+    last_plot_px_ = pos;
     points_[drag_index_] = p;
     std::sort(points_.begin(), points_.end(),
               [](const QPointF& a, const QPointF& b) { return a.x() < b.x(); });
     drag_index_ = hit_point(event->position());
+    CANVAS_COLOR_LOG(
+        "[curve] move pos=(%.0f,%.0f) p=(%.3f,%.3f) prev=(%.3f,%.3f) dpx=(%.1f,%.1f) "
+        "pts=%d drag_idx=%d",
+        pos.x(), pos.y(), static_cast<double>(p.x()), static_cast<double>(p.y()),
+        static_cast<double>(prev_p.x()), static_cast<double>(prev_p.y()),
+        static_cast<double>(d_plot.x()), static_cast<double>(d_plot.y()),
+        points_.size(), drag_index_);
     emit points_changed();
     update();
 }
 
 void CurveEditor::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton && drag_index_ >= 0) {
+        const int released_idx = drag_index_;
         drag_index_ = -1;
+        CANVAS_COLOR_LOG(
+            "[curve] release pos=(%.0f,%.0f) idx=%d pts=%d -> committed",
+            event->position().x(), event->position().y(), released_idx, points_.size());
         emit points_committed();
     }
     QWidget::mouseReleaseEvent(event);
@@ -192,6 +230,10 @@ void CurveEditor::mouseReleaseEvent(QMouseEvent* event) {
 void CurveEditor::mouseDoubleClickEvent(QMouseEvent* event) {
     const int hit = hit_point(event->position());
     if (hit >= 0) {
+        CANVAS_COLOR_LOG(
+            "[curve] double-click DELETE idx=%d p=(%.3f,%.3f) pts_before=%d",
+            hit, static_cast<double>(points_[hit].x()),
+            static_cast<double>(points_[hit].y()), points_.size());
         points_.removeAt(hit);
         emit points_changed();
         emit points_committed();
@@ -288,6 +330,7 @@ CurvesPanel::CurvesPanel(QWidget* parent) : QWidget(parent) {
 
 void CurvesPanel::set_channel(int channel) {
     save_active_channel();
+    const int from = active_channel_;
     active_channel_ = channel;
     switch (channel) {
         case kLuma: editor_->set_tint(QColor(235, 235, 235)); break;
@@ -299,10 +342,20 @@ void CurvesPanel::set_channel(int channel) {
     qWarning().nospace()
         << "[grade] curve-channel=" << channel
         << " pts=" << channel_points_[channel].size();
+    CANVAS_COLOR_LOG(
+        "[curve] channel switch %d -> %d pts=[Y:%d R:%d G:%d B:%d]",
+        from, channel,
+        static_cast<int>(channel_points_[0].size()),
+        static_cast<int>(channel_points_[1].size()),
+        static_cast<int>(channel_points_[2].size()),
+        static_cast<int>(channel_points_[3].size()));
 }
 
 void CurvesPanel::save_active_channel() {
     channel_points_[active_channel_] = editor_->points();
+    CANVAS_COLOR_LOG(
+        "[curve] save-active channel=%d pts=%d",
+        active_channel_, static_cast<int>(editor_->points().size()));
 }
 
 bool CurvesPanel::interaction_log_gate() {
@@ -320,6 +373,14 @@ void CurvesPanel::editor_points_changed() {
             << "[grade] curve-drag channel=" << active_channel_
             << " pts=" << channel_points_[active_channel_].size();
     }
+    const auto& pts = channel_points_[active_channel_];
+    CANVAS_COLOR_LOG(
+        "[curve] live-feed channel=%d pts=%d head=(%.3f,%.3f) tail=(%.3f,%.3f)",
+        active_channel_, static_cast<int>(pts.size()),
+        pts.isEmpty() ? 0.0 : static_cast<double>(pts.first().x()),
+        pts.isEmpty() ? 0.0 : static_cast<double>(pts.first().y()),
+        pts.isEmpty() ? 0.0 : static_cast<double>(pts.last().x()),
+        pts.isEmpty() ? 0.0 : static_cast<double>(pts.last().y()));
     emit curves_preview();
 }
 
@@ -331,6 +392,18 @@ void CurvesPanel::editor_points_committed() {
     qWarning().nospace()
         << "[grade] curve-commit channel=" << active_channel_
         << " pts=" << channel_points_[active_channel_].size();
+    QString dump;
+    for (int ch = 0; ch < 4; ++ch) {
+        dump += QStringLiteral("ch%1=%2;").arg(ch).arg(channel_points_[ch].size());
+        for (const QPointF& pt : channel_points_[ch]) {
+            dump += QStringLiteral("(%1,%2)").arg(QString::number(pt.x(), 'f', 2),
+                                                  QString::number(pt.y(), 'f', 2));
+        }
+    }
+    CANVAS_COLOR_LOG(
+        "[curve] committed channel=%d pts=%d dump=%s", active_channel_,
+        static_cast<int>(channel_points_[active_channel_].size()),
+        dump.toStdString().c_str());
     emit curves_committed(params());
     emit curves_preview();
 }
@@ -343,6 +416,11 @@ void CurvesPanel::tone_changed(int field, double value) {
             << "[grade] curve-tone field=" << field
             << " value=" << QString::number(value, 'f', 2);
     }
+    CANVAS_COLOR_LOG(
+        "[curve] tone field=%d value=%.2f soft=(low=%.1f lowsoft=%.1f highsoft=%.1f "
+        "high=%.1f)",
+        field, value, tone_fields_[0]->value(), tone_fields_[1]->value(),
+        tone_fields_[2]->value(), tone_fields_[3]->value());
     // Soft-clip rows commit on every change, matching the wheels' tone rows.
     emit curves_committed(params());
 }
@@ -378,6 +456,16 @@ void CurvesPanel::set_params(const CurveParams& params) {
     tone_fields_[3]->set_value(params.soft_clip.high * 100.0);
     editor_->set_points(channel_points_[active_channel_]);
     syncing_ = false;
+    CANVAS_COLOR_LOG(
+        "[curve] load pts=[Y:%d R:%d G:%d B:%d] soft=(%.1f,%.1f,%.1f,%.1f)",
+        static_cast<int>(channel_points_[0].size()),
+        static_cast<int>(channel_points_[1].size()),
+        static_cast<int>(channel_points_[2].size()),
+        static_cast<int>(channel_points_[3].size()),
+        static_cast<double>(params.soft_clip.low * 100.0),
+        static_cast<double>(params.soft_clip.low_soft * 100.0),
+        static_cast<double>(params.soft_clip.high_soft * 100.0),
+        static_cast<double>(params.soft_clip.high * 100.0));
 }
 
 void CurvesPanel::set_veil(const std::vector<float>& col_heights) {

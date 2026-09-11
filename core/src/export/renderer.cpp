@@ -7,6 +7,7 @@
 #include "canvas/core/media/video_decoder.hpp"
 #include "canvas/core/timeline/audio_fade.hpp"
 #include "canvas/core/timeline/audio_mix.hpp"
+#include "canvas/core/timeline/clip_rate.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <algorithm>
@@ -51,15 +52,21 @@ double media_fps_for(const Project& project, const Clip& clip) {
 }
 
 // Timeline frame -> source media frame for a clip. Time-based: a seq-frame
-// offset advances the source by the media/sequence fps ratio, so 60fps footage
+// offset advances the source by the media/sequence fps ratio so 60fps footage
 // on a 30fps timeline strides two source frames per timeline frame (full
-// intended motion) instead of halving the content. Matches the playback path.
+// intended motion) instead of halving the content. Speed Change (clip_rate)
+// multiplies the offset for a whole-clip retime. Matches the playback path.
 int64_t clip_src_frame(const Project& project, const Clip& clip, int64_t tl_frame) {
     const double mf = media_fps_for(project, clip);
     const double sf = project.sequence.fps;
-    if (mf <= 0.0 || sf <= 0.0) return clip.src_in + (tl_frame - clip.tl_in);
-    return clip.src_in + static_cast<int64_t>(
-                             std::llround(static_cast<double>(tl_frame - clip.tl_in) * mf / sf));
+    if (mf <= 0.0 || sf <= 0.0) {
+        return clip.src_in +
+               cliprate::scaled_frame_offset(clip, tl_frame - clip.tl_in);
+    }
+    return clip.src_in + static_cast<int64_t>(std::llround(
+                             static_cast<double>(
+                                 cliprate::scaled_frame_offset(clip, tl_frame - clip.tl_in)) *
+                             mf / sf));
 }
 
 // Returns the first enabled clip on `kind` tracks at `tl_frame`, preferring the
@@ -83,6 +90,15 @@ void mix_audio_chunk(std::vector<float>& out, const std::vector<float>& src, int
                      int out_channels, const std::vector<float>& gains, float vol,
                      float gl, float gr) {
     audio_mix::mix_chunk(out, out_channels, src, src_ch, &gains, vol, gl, gr);
+}
+
+// Raw-samples form of the above: the per-clip voice-isolation stage hands the
+// mix a possibly-shorter denoised buffer (RNNoise stream lookahead), so the
+// pointer+frames overload of audio_mix::mix_chunk is the shared single law.
+void mix_audio_chunk(std::vector<float>& out, const float* src, int src_ch, int frames,
+                     int out_channels, const std::vector<float>& gains, float vol,
+                     float gl, float gr) {
+    audio_mix::mix_chunk(out, out_channels, src, src_ch, frames, &gains, vol, gl, gr);
 }
 
 // 2D box blit that composites a decoded source RGBA frame onto a canvas,
@@ -893,25 +909,46 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
             atd.active_clip = clip;
             atd.active_media = clip->media;
             atd.active_tl_in = clip->tl_in;
+            // New clip (or a re-entered one after a backtrack): the RNNoise GRU
+            // state must not carry across the boundary; the position jumps even
+            // when the media id is the same. tick() re-creates fresh state on
+            // the next use.
+            iso_bank_.drop(clip->id);
+            // Same seam for the Speed Change stretch: analysis/synthesis
+            // cursors must not span the boundary.
+            stretch_bank_.drop(clip->id);
         }
 
         const double media_fps = media_fps_for(*project_, *clip);
         if (media_fps <= 0.0) continue;
+        // Speed Change (whole-clip retime): the timeline-consumed offset is
+        // scaled by the factor so the media cursor advances speed× per output
+        // frame, in lockstep with clip_src_frame's video law.
+        const double spd = cliprate::effective_rate(*clip);
         const int64_t src_frame = clip_src_frame(*project_, *clip, start_tl_frame);
         // Media position from CONTINUOUS timeline time: (tl_sec - tl_in/seq_fps)
-        // seconds into the clip at natural speed. When export fps == sequence fps
-        // (tl_sec*fps an exact integer) this is identical to the old frame-law;
-        // when they differ it advances exactly num_frames per call instead of
-        // rate/seq_fps, so the decoder stays inside its forward window.
+        // seconds into the clip, advanced at the clip's speed. When export fps
+        // == sequence fps (tl_sec*fps an exact integer) this is identical to the
+        // old frame-law; when they differ it advances exactly num_frames per
+        // call instead of rate/seq_fps, so the decoder stays inside its forward
+        // window.
         const int64_t start_media_sample =
             (seq_fps > 0.0 && tl_sec >= static_cast<double>(clip->tl_in) / seq_fps)
                 ? static_cast<int64_t>(std::llround(
                       (static_cast<double>(clip->src_in) / media_fps +
-                       (tl_sec - static_cast<double>(clip->tl_in) / seq_fps)) *
+                       (tl_sec - static_cast<double>(clip->tl_in) / seq_fps) * spd) *
                       out_sample_rate))
                 : 0;
 
-        auto chunk = atd.dec->decode(start_media_sample, num_frames, out_sample_rate);
+        // num_frames OUTPUT frames need num_frames * speed media samples. A
+        // retimed clip additionally pre-feeds one WSOLA lookahead window so
+        // the stretch can complete every grain inside this call and return
+        // exactly num_frames (the exporter must not produce a short audio
+        // chunk for a video frame).
+        int media_req = static_cast<int>(std::max<int64_t>(
+            1, cliprate::media_span_for_output(*clip, num_frames)));
+        if (spd != 1.0) media_req += TimeStretch::lookahead_frames(out_sample_rate);
+        auto chunk = atd.dec->decode(start_media_sample, media_req, out_sample_rate);
         if (!chunk || chunk->samples.empty()) {
             CANVAS_LOG("RenderSession::audio_chunk decode EMPTY media=%d src=%lld sample=%lld",
                    clip->media, (long long)src_frame, (long long)start_media_sample);
@@ -944,23 +981,83 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
         ++_d_call;
 
         const int src_ch = chunk->channels;
+        // Per-clip Speed Change (pitch-preserving WSOLA): stretch the decoded
+        // media to the export clock's num_frames-sized output window (mirrors
+        // playback's write_mixed stage). The media cursor stays in the
+        // source's domain; only the mixed stream is stretched. The extra
+        // lookahead feed above lets the engine return a full chunk every
+        // call; near clip EOF it may legitimately return less.
+        const float* pcm = chunk->samples.data();
+        int den_ch = src_ch;
+        int den_frames = static_cast<int>(chunk->samples.size()) / src_ch;
+        std::vector<float> sped;
+        if (spd != 1.0) {
+            const int want = static_cast<int>(std::max<int64_t>(
+                1, std::min<int64_t>(
+                       cliprate::output_frames_from_media(*clip, den_frames),
+                       num_frames)));
+            const int written = stretch_bank_.tick(
+                clip->id, spd, out_sample_rate, src_ch, chunk->samples.data(),
+                static_cast<int>(chunk->samples.size()) / src_ch, want, sped);
+            if (written > 0) {
+                pcm = sped.data();
+                den_frames = written;
+            } else {
+                pcm = nullptr;
+                den_frames = 0;
+            }
+        }
+
+        // Per-clip AI voice isolation (RNNoise) applied BEFORE gains/mix, so the
+        // denoised PCM feeds the same fade/volume/pan law as decoding would.
+        // The network is fixed at 48 kHz; at any other export rate the stage is
+        // skipped (with a one-time warning) and the clip goes out raw — the
+        // Inspector hints at this too. The stage streams across chunk calls
+        // within one clip (the persistent decoder keeps GRU state continuous)
+        // and is dropped on clip re-open (above).
+        std::vector<float> denoised;
+        if (clip->voice_isolation != VoiceIsolationMode::None) {
+            if (out_sample_rate != VoiceIsolation::kSampleRate) {
+                static bool warned = false;
+                if (!warned) {
+                    log::log_warning(
+                        "RenderSession::audio_chunk: voice isolation needs 48 kHz, "
+                        "bypassing at %d Hz export rate",
+                        out_sample_rate);
+                    warned = true;
+                }
+            } else if (den_frames > 0) {
+                denoised.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * src_ch);
+                const int written = iso_bank_.tick(clip->id, clip->voice_isolation,
+                                                   out_sample_rate, src_ch,
+                                                   denoised.data(), den_frames);
+                if (written > 0) {
+                    pcm = denoised.data();
+                    den_frames = written;
+                } else {
+                    pcm = nullptr;
+                    den_frames = 0;
+                }
+            }
+        }
         // Per-output-frame gain from the clip's audio IN/OUT transitions
         // (audio_fade_gain returns 1.0 when no audio fade touches the frame).
         // Fade frames advance on the TIMELINE clock (seq_fps), matching the
         // media-sample law above and reducing to `* fps` when they coincide.
-        std::vector<float> gains(static_cast<std::size_t>(num_frames));
-        for (int k = 0; k < num_frames; ++k) {
+        std::vector<float> gains(static_cast<std::size_t>(den_frames));
+        for (int k = 0; k < den_frames; ++k) {
             const int64_t frm = start_tl_frame + static_cast<int64_t>(
                 static_cast<double>(k) / out_sample_rate * seq_fps);
             gains[static_cast<std::size_t>(k)] = audio_fade_gain(*clip, frm);
         }
-        // Mix: sum with the clip's volume, the track's gain, and the pan balance.
-        float gl = 1.0f;
-        float gr = 1.0f;
-        audio_mix::pan_gains(clip->pan, gl, gr);
-        mix_audio_chunk(out->samples, chunk->samples, src_ch, out_channels, gains,
-                        audio_mix::db_to_gain(clip->volume_db) * audio_mix::db_to_gain(track.gain_db),
-                        gl, gr);
+        if (den_frames > 0 && pcm) {
+            float gl = 1.0f;
+            float gr = 1.0f;
+            audio_mix::pan_gains(clip->pan, gl, gr);
+            mix_audio_chunk(out->samples, pcm, src_ch, den_frames, out_channels, gains,
+                            audio_mix::db_to_gain(clip->volume_db) * audio_mix::db_to_gain(track.gain_db),
+                            gl, gr);
+        }
     }
     return out;
 }

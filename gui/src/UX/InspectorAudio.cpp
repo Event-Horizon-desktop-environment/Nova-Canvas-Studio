@@ -14,6 +14,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QSlider>
+#include <QStandardItemModel>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -224,7 +225,14 @@ struct AudioControls {
     std::vector<QDoubleSpinBox*> eq_q;
     std::vector<QComboBox*> eq_type;
 
-    InspectorCategory* ai_vocal = nullptr;
+    // AI Voice Isolation: per-clip engine picker. Backed by the real model
+    // field (None / RNNoise / DeepFilterNet) and applied before the clip's
+    // gains/mix in both playback and export. Engine entries whose backend is
+    // not compiled in (voice_isolation_supported()==false, i.e. DeepFilterNet)
+    // are listed but disabled.
+    InspectorCategory* iso_cat = nullptr;
+    QComboBox* iso_combo = nullptr;
+
     InspectorCategory* ai_leveler = nullptr;
     InspectorCategory* ai_remix = nullptr;
     QDoubleSpinBox* ai_amount = nullptr;
@@ -253,7 +261,8 @@ void set_processing_enabled(AudioControls& ac, bool on) {
     for (QDoubleSpinBox* s : ac.eq_gain) s->setEnabled(on);
     for (QDoubleSpinBox* s : ac.eq_q) s->setEnabled(on);
     for (QComboBox* c : ac.eq_type) c->setEnabled(on);
-    for (InspectorCategory* cat : {ac.speed_cat, ac.eq_cat})
+    if (ac.iso_combo) ac.iso_combo->setEnabled(on);
+    for (InspectorCategory* cat : {ac.speed_cat, ac.eq_cat, ac.iso_cat})
         if (cat) {
             cat->set_feature_toggle_enabled(on);
             cat->setEnabled(on);
@@ -279,6 +288,8 @@ void populate_from_clip(AudioControls& ac, const canvas::core::Clip& clip) {
         if (i < ac.eq_q.size() && ac.eq_q[i]) ac.eq_q[i]->setValue(b.q);
     }
     if (ac.eq_graph) ac.eq_graph->set_bands(clip.eq_bands);
+    if (ac.iso_combo)
+        ac.iso_combo->setCurrentIndex(static_cast<int>(clip.voice_isolation));
     ac.updating = false;
 }
 
@@ -380,8 +391,24 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
                                        2, host, &s3, &sp3);
     ac.speed_slider = s3;
     ac.speed_factor = sp3;
-    add_property_row(ac.speed_cat->body_layout(), tr("Factor"), speed_row);
+    QToolButton* speed_row_reset = nullptr;
+    add_property_row(ac.speed_cat->body_layout(), tr("Factor"), speed_row,
+                     /*with_reset=*/true, &speed_row_reset);
     audio_layout->addWidget(ac.speed_cat);
+
+    // "Reset to default": the category-header reset AND the Factor-row reset
+    // both restore the speed to 1.00 (disabled tempo) and commit one undoable
+    // edit. spin->setValue() keeps the linked slider in sync.
+    const auto reset_speed = [&mw]() {
+        AudioControls* acc = audio_lookup(mw);
+        if (!acc || !acc->speed_factor) return;
+        acc->speed_factor->setValue(1.0);
+        apply_inspector_audio_processing(mw);
+    };
+    if (auto* rb = ac.speed_cat->reset_button())
+        QObject::connect(rb, &QToolButton::clicked, &mw, reset_speed);
+    if (speed_row_reset)
+        QObject::connect(speed_row_reset, &QToolButton::clicked, &mw, reset_speed);
 
     // --- Equalizer ------------------------------------------------------------
     // Open by default so the bands are immediately editable — no collapsed/
@@ -432,6 +459,44 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         ac.eq_cat->body_layout()->addWidget(row);
     }
 
+    // --- AI Voice Isolation --------------------------------------------------
+    // Real per-clip engine picker (model-backed, applied before the gains/mix
+    // in playback AND export). A dropdown row = the engine list; "None" is the
+    // default/off state. Modes whose backend isn't compiled in this build stay
+    // listed but greyed (DeepFilterNet voice-from-music — seam reserved).
+    ac.iso_cat = new InspectorCategory(tr("AI Voice Isolation"), true, /*has_enable=*/false, host);
+    {
+        auto* row = new QWidget(host);
+        auto* lay = new QHBoxLayout(row);
+        lay->setContentsMargins(0, 0, 0, 0);
+        lay->setSpacing(6);
+        auto* combo = make_dark_combo(row);
+        // Index i == VoiceIsolationMode i (None=0, RnNoise=1, DeepFilterNet=2);
+        // keep this aligned with the enum order.
+        combo->addItem(tr("None"));
+        combo->addItem(tr("RNNoise — Noise Suppression"));
+        combo->addItem(tr("DeepFilterNet — Voice from Music"));
+        combo->setItemData(2, tr("Engine not built into this build"),
+                           Qt::ToolTipRole);
+        if (!canvas::core::voice_isolation_supported(
+                canvas::core::VoiceIsolationMode::DeepFilterNet)) {
+            if (auto* model_ = qobject_cast<QStandardItemModel*>(combo->model())) {
+                if (QStandardItem* item = model_->item(2)) {
+                    item->setEnabled(false);
+                    item->setToolTip(MainWindow::tr(
+                        "DeepFilterNet is not built into this build — RNNoise is the "
+                        "shipped engine."));
+                }
+            }
+        }
+        lay->addWidget(combo, 1);
+        ac.iso_combo = combo;
+        add_property_row(ac.iso_cat->body_layout(), tr("Isolate"), row);
+        QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw,
+                         [&mw]() { apply_inspector_voice_isolation(mw); });
+    }
+    audio_layout->addWidget(ac.iso_cat);
+
     // --- AI sections (UI placeholders, not wired to the model) ---------------
     const auto make_ai = [&](const QString& title, bool with_amount) -> InspectorCategory* {
         auto* cat = new InspectorCategory(title, true, /*has_enable=*/true, host);
@@ -463,7 +528,6 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         audio_layout->addWidget(cat);
         return cat;
     };
-    ac.ai_vocal = make_ai(tr("AI Voice Isolation"), /*with_amount=*/true);
     ac.ai_leveler = make_ai(tr("AI Dialogue Leveler"), /*with_amount=*/false);
     ac.ai_remix = make_ai(tr("AI Music Remixer"), /*with_amount=*/false);
 
@@ -601,6 +665,36 @@ void apply_inspector_audio_processing(MainWindow& mw) {
                << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                << "track=" << index << "clip=" << clip.id << "semi=" << semi << "cents=" << cents
                << "speed=" << speed << "eq_on=" << eq_on;
+}
+
+void apply_inspector_voice_isolation(MainWindow& mw) {
+    AudioControls* ac = audio_lookup(mw);
+    if (!ac || ac->updating || !ac->iso_combo) return;
+
+    canvas::core::Track::Kind kind;
+    std::size_t index;
+    canvas::core::Clip clip;
+    // Target the selected audio clip, or the linked audio mate of a video clip.
+    if (!mw.find_audio_target(kind, index, clip)) return;
+
+    const auto mode = static_cast<canvas::core::VoiceIsolationMode>(
+        ac->iso_combo->currentIndex());
+    // An unsupported engine (DeepFilterNet) must never be selectable at commit
+    // time even if the entry was force-enabled somehow.
+    if (!canvas::core::voice_isolation_supported(mode)) return;
+    if (clip.voice_isolation == mode) return;
+
+    auto cmd = canvas::core::set_clip_voice_isolation(mw.project_->sequence, kind, index,
+                                                      clip.id, mode);
+    if (!cmd) return;
+    mw.undo_.record(std::move(cmd));
+    mw.has_unsaved_changes_ = true;
+    mw.refresh_timeline();
+    mw.push_audio_mix_snapshot();
+    qWarning() << "[edit] CLIP-VOICE-ISOLATION kind="
+               << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
+               << "track=" << index << "clip=" << clip.id
+               << "mode=" << canvas::core::voice_isolation_mode_name(mode);
 }
 
 }  // namespace canvas::gui

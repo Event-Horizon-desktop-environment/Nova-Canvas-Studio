@@ -65,6 +65,12 @@ void apply_panel_shadow(QWidget* w);
 
 const ThemeTokens& tokens();
 
+// Resolve-style clip colour swatches (12 entries, indexed 0-11 = colour 1-12).
+// Shared by the File-inspector picker and the timeline clip stripe so the two
+// never drift.
+const QColor* clip_color_swatches();
+QColor clip_color_for(uint8_t color); // 0 -> invalid QColor (no colour)
+
 // QSS-safe colour string (#rrggbb, or rgba(r,g,b,a) when translucent).
 QString css(const QColor& c);
 

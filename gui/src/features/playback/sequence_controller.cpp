@@ -45,7 +45,9 @@ void SequenceController::push(Request request) {
                            [&](const Request& r) {
                                return (is_seek_cmd(request.command) && is_seek_cmd(r.command)) ||
                                       (request.command == Command::Pause && r.command == Command::Play) ||
-                                      (request.command == Command::Play && is_seek_cmd(r.command));
+                                      (request.command == Command::Play && is_seek_cmd(r.command)) ||
+                                      (request.command == Command::SwapProject &&
+                                       r.command == Command::SwapProject);
                            }),
             queue_.end());
         queue_.push_back(std::move(request));
@@ -59,6 +61,14 @@ void SequenceController::push(Request request) {
 void SequenceController::set_project(std::shared_ptr<const canvas::core::Project> project,
                                      const int64_t initial_frame) {
     push({Command::SetProject, initial_frame, std::move(project), {}});
+}
+
+void SequenceController::swap_project(std::shared_ptr<const canvas::core::Project> project) {
+    if (!project) return;
+    // Coalescing of stale swaps happens inside push() (under the queue lock): while
+    // a wheel/curve drag is live only the NEWEST grade matters, so pending
+    // SwapProject requests are dropped before the new one lands.
+    push({Command::SwapProject, 0, std::move(project), {}});
 }
 
 void SequenceController::update_audio_mix(std::shared_ptr<const canvas::core::Project> project) {
@@ -199,6 +209,9 @@ void SequenceController::worker_loop() {
                 return;
             case Command::SetProject:
                 handle_set_project(std::move(req.project), req.arg);
+                break;
+            case Command::SwapProject:
+                handle_swap_project(std::move(req.project));
                 break;
             case Command::UpdateAudioMix:
                 handle_update_audio_mix(std::move(req.project));
@@ -366,6 +379,26 @@ void SequenceController::handle_update_audio_mix(
     // presenting and the next mixed buffer uses the new per-clip mix params.
     if (debug_enabled())
         qDebug() << "playback: LIVE audio mix swap (playing=" << playing_.load() << ")";
+}
+
+void SequenceController::handle_swap_project(std::shared_ptr<const canvas::core::Project> project) {
+    if (!project) return;
+    // Grade-only swap: point audio + project_ at the new snapshot WITHOUT tearing
+    // down the decode stack. The grade never re-decodes anything — it rides on the
+    // present path as a GPU-sampled 3D LUT (timeline_decoder applies it per frame)
+    // — so re-presenting the current frame through the warm decoder (a retain-hit
+    // with the dissolve fast path) shows the new grade in ~2ms. This replaces the
+    // ~217ms teardown+reopen that every set_project() snapshot pays, which is what
+    // forced the Color page's old ~4Hz preview throttle.
+    audio_.update_project(project.get());
+    project_ = std::move(project);
+    fps_.store(project_->sequence.fps);
+    total_frames_.store(project_->sequence.duration_frames());
+    const int64_t cur = current_frame_.load();
+    if (debug_enabled())
+        qDebug() << "playback: GRADE swap (playing=" << playing_.load()
+                 << ") re-present at frame=" << cur;
+    if (cur >= 0) handle_seek(cur);
 }
 
 void SequenceController::handle_add_media(const canvas::core::MediaEntry& entry) {

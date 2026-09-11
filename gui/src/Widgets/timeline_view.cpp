@@ -22,6 +22,7 @@
 #include <QGraphicsPixmapItem>
 #include <QGraphicsBlurEffect>
 #include <QGraphicsLineItem>
+#include <QGraphicsPathItem>
 #include <QGraphicsSimpleTextItem>
 #include <QPainterPath>
 #include <QPainter>
@@ -572,6 +573,17 @@ void TimelineWidget::draw_ruler() {
 
 namespace {
 
+// Blends `over` onto `base` by `t` (0 = base, 1 = over). Used to tone the clip
+// swatches a little toward the dark body fills so a coloured clip reads as
+// tinted rather than neon.
+QColor blend_colors(const QColor& over, const QColor& base, double t) {
+    const auto l = [t](int oc, int bc) {
+        return static_cast<int>(std::lround(bc + (oc - bc) * t));
+    };
+    return QColor(l(over.red(), base.red()), l(over.green(), base.green()),
+                  l(over.blue(), base.blue()), base.alpha());
+}
+
 // Renders one bundled SVG icon to a tinted pixmap and places it as a
 // QGraphicsPixmapItem at (x, y) in the scene, returning the item.
 QGraphicsPixmapItem* add_icon(QGraphicsScene& scene, const QString& name, double x, double y,
@@ -760,9 +772,17 @@ void TimelineWidget::draw_tracks() {
             // Flat fill exactly abutting neighbours (a centred pen on the bounding
             // rect would overhang into the adjacent clip at a cut). The outline
             // stroke is inset by pen/2 so its outer edge lands on the clip's edge.
+            // Clip colour recolours the shell itself (Resolve-style): the whole
+            // body takes the swatch as its real fill — the filmstrip cells ride
+            // ABOVE it (z 1) so thumbnails are never covered by the colour.
+            const QColor cc_v = clip_color_for(clip.clip_color);
+            // Shell gets the swatch blended 65% onto the normal dark body fill so
+            // a coloured clip reads as a bold tint, not a flat neon slab.
+            const QColor shell_v =
+                cc_v.isValid() ? blend_colors(cc_v, t.clip_video, 0.65) : t.clip_video;
             auto* shell = scene_.addPath(
                 rounded_rect_path(QRectF(0, 0, cw, ch), 6),
-                QPen(Qt::NoPen), QBrush(t.clip_video));
+                QPen(Qt::NoPen), QBrush(shell_v));
             shell->setPos(QPointF(cx, cy));
             shell->setAcceptedMouseButtons(Qt::NoButton);
             auto* outline = scene_.addPath(
@@ -774,10 +794,12 @@ void TimelineWidget::draw_tracks() {
             outline->setAcceptedMouseButtons(Qt::NoButton);
 
             // Semi-rounded label bar: flat muted blue strip with the clip filename,
-            // hugging the bottom of the clip.
+            // hugging the bottom of the clip. Toned toward black a bit more than
+            // the shell (135 = ~0.74x) so the filename stays legible.
             auto* label_bar = scene_.addPath(
                 rounded_rect_path(QRectF(0, body_h, cw, label_h), 6),
-                QPen(Qt::NoPen), QBrush(t.clip_label));
+                QPen(Qt::NoPen),
+                QBrush(cc_v.isValid() ? shell_v.darker(135) : t.clip_label));
             label_bar->setPos(QPointF(cx, cy));
             label_bar->setZValue(0);
 
@@ -963,9 +985,14 @@ void TimelineWidget::draw_tracks() {
             rect->setAcceptedMouseButtons(Qt::NoButton);
             // Flat sage fill abutting neighbours exactly; the outline stroke is
             // inset by pen/2 so it never overhangs into an abutting clip.
+            // Clip colour recolours the shell itself (see video branch): the
+            // waveform rides ABOVE it (z 1) and is never covered.
+            const QColor cc_a = clip_color_for(clip.clip_color);
+            const QColor shell_a =
+                cc_a.isValid() ? blend_colors(cc_a, t.clip_audio, 0.65) : t.clip_audio;
             auto* shell = scene_.addPath(
                 rounded_rect_path(QRectF(0, 0, cw, ch), 6),
-                QPen(Qt::NoPen), QBrush(t.clip_audio));
+                QPen(Qt::NoPen), QBrush(shell_a));
             shell->setPos(QPointF(cx, cy));
             shell->setAcceptedMouseButtons(Qt::NoButton);
             auto* outline = scene_.addPath(

@@ -70,6 +70,7 @@ public:
         reset->setIconSize(QSize(14, 14));
         reset->setAutoRaise(true);
         reset->setToolTip(tr("Reset to default"));
+        reset_ = reset;
 
         auto* header_row = new QWidget(this);
         header_row->setObjectName(QStringLiteral("inspectorCardHeader"));
@@ -108,6 +109,10 @@ public:
 
     QVBoxLayout* body_layout() { return body_layout_; }
 
+    // The category-header reset icon ("Reset to default"): callers wire it to
+    // restore every property of the category, or leave it a no-op.
+    QToolButton* reset_button() { return reset_; }
+
     // Enable-toggle state; always true when the category has no enable toggle.
     [[nodiscard]] bool feature_enabled() const { return !enable_ || enable_->isChecked(); }
     void set_feature_enabled(bool on) {
@@ -122,14 +127,17 @@ signals:
 
 private:
     QToolButton* enable_ = nullptr;
+    QToolButton* reset_ = nullptr;
     QToolButton* header_ = nullptr;
     QWidget* body_ = nullptr;
     QVBoxLayout* body_layout_ = nullptr;
 };
 
 // One property row: label | field | optional per-property reset icon.
+// `reset_out` (when non-null) receives the reset button so the caller can wire
+// "restore this field to its default" into it.
 inline void add_property_row(QVBoxLayout* body, const QString& label, QWidget* field,
-                             bool with_reset = true) {
+                             bool with_reset = true, QToolButton** reset_out = nullptr) {
     auto* row = new QHBoxLayout;
     row->setSpacing(6);
     auto* lbl = new QLabel(label);
@@ -147,6 +155,7 @@ inline void add_property_row(QVBoxLayout* body, const QString& label, QWidget* f
         reset->setAutoRaise(true);
         reset->setFixedWidth(18);
         row->addWidget(reset);
+        if (reset_out) *reset_out = reset;
     }
     body->addLayout(row);
 }

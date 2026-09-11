@@ -7,6 +7,29 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libswresample
 )
 
+# Vendored xiph/rnnoise (BSD-3-Clause) — the real-time speech noise-suppression
+# engine behind Clip::voice_isolation = RnNoise. Self-contained: the model
+# weights are compiled in via src/rnn_data.c, so no external .rnnn file ships.
+# `-w` suppresses warnings for this third-party C library (it is exempt from the
+# repo's zero-warning discipline); `-D_GNU_SOURCE` is the feature-test macro the
+# upstream autotools build provides via AC_USE_SYSTEM_EXTENSIONS (exposes M_PI).
+enable_language(C)
+add_library(rnnoise STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/denoise.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/rnn.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/rnn_data.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/kiss_fft.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/pitch.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/celt_lpc.c
+)
+target_include_directories(rnnoise PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src
+)
+target_compile_options(rnnoise PRIVATE -w)
+target_compile_definitions(rnnoise PRIVATE _GNU_SOURCE=1)
+set_target_properties(rnnoise PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+
 find_package(Threads REQUIRED)
 
 # Optional CUDA acceleration (GPU RGBA->NV12 conversion to feed NVENC directly).
@@ -80,8 +103,10 @@ add_library(canvas_core STATIC
     src/media/audio_decoder.cpp
     src/media/hw_device.cpp
     src/media/audio_waveform.cpp
+    src/media/voice_isolation.cpp
     src/timeline/model.cpp
     src/timeline/edit_ops.cpp
+    src/timeline/time_stretch.cpp
     src/colorsci/wheels_ui.cpp
     src/colorsci/curves.cpp
     src/colorsci/histogram.cpp
@@ -105,6 +130,7 @@ target_include_directories(canvas_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/includ
 target_link_libraries(canvas_core PUBLIC
     PkgConfig::LIBAV
     Threads::Threads
+    rnnoise
 )
 
 if(CANVAS_CUDA_ENABLED)
@@ -167,3 +193,13 @@ add_executable(canvas_visual_render_test tests/visual_render_test.cpp)
 target_link_libraries(canvas_visual_render_test PRIVATE canvas_core)
 set_target_properties(canvas_visual_render_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME visual_render COMMAND canvas_visual_render_test)
+
+add_executable(canvas_voice_isolation_test tests/voice_isolation_test.cpp)
+target_link_libraries(canvas_voice_isolation_test PRIVATE canvas_core)
+set_target_properties(canvas_voice_isolation_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME voice_isolation COMMAND canvas_voice_isolation_test)
+
+add_executable(canvas_clip_rate_test tests/clip_rate_test.cpp)
+target_link_libraries(canvas_clip_rate_test PRIVATE canvas_core)
+set_target_properties(canvas_clip_rate_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME clip_rate COMMAND canvas_clip_rate_test)

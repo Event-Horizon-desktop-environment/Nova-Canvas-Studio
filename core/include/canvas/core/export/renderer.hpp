@@ -4,7 +4,9 @@
 #include "canvas/core/media/audio_decoder.hpp"
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/media/video_decoder.hpp"
+#include "canvas/core/media/voice_isolation.hpp"
 #include "canvas/core/timeline/model.hpp"
+#include "canvas/core/timeline/time_stretch.hpp"
 #include "canvas/core/project/project.hpp"
 
 #include <cstdint>
@@ -130,6 +132,17 @@ private:
 
     std::vector<TrackDecoder> tracks_;
     std::vector<AudioTrackDecoder> audio_tracks_;
+    // Per-clip AI voice-isolation state (RNNoise bank), streamed across
+    // audio_chunk() calls within a clip and dropped whenever a clip's decoder
+    // re-opens (tracked by the AudioTrackDecoder reset). Only used at 48 kHz
+    // (the RNNoise rate); other export rates bypass the stage with a warning.
+    canvas::core::VoiceIsolationBank iso_bank_;
+    // Per-clip pitch-preserving Speed Change state (WSOLA time-stretch bank),
+    // streamed across audio_chunk() calls within a clip and dropped whenever a
+    // clip's decoder re-opens, mirroring iso_bank_. Consumes
+    // `effective_rate` source frames per output frame, locked to the video
+    // path's clip_src_frame law.
+    canvas::core::TimeStretchBank stretch_bank_;
     const Project* project_ = nullptr;
     int width_ = 0;
     int height_ = 0;

@@ -45,22 +45,6 @@ using canvas::core::Clip;
 using canvas::core::MediaEntry;
 using canvas::core::Track;
 
-// Resolve-style clip colour swatches (RGB, matching the inspector's 12 palette).
-inline const QColor kClipColors[12] = {
-    QColor(0xE0, 0x48, 0x3B), QColor(0xF6, 0x7C, 0x1F), QColor(0xBC, 0xAA, 0x30),
-    QColor(0x63, 0xC1, 0x30), QColor(0x2B, 0xC0, 0x82), QColor(0x24, 0xAF, 0xBF),
-    QColor(0x38, 0x8D, 0xE8), QColor(0x5F, 0x6B, 0xC4), QColor(0x8C, 0x5B, 0xC4),
-    QColor(0xB9, 0x5C, 0xB9), QColor(0xBF, 0x8F, 0x60), QColor(0x9A, 0xA0, 0xB0),
-};
-
-uint8_t color_index_for(uint8_t color) {
-    return color > 0 && color <= 12 ? color : 0;
-}
-
-QColor color_for(uint8_t color) {
-    return color == 0 ? QColor() : kClipColors[color - 1];
-}
-
 QString muted_label_style() {
     return QStringLiteral("color: %1; font-size: 11px;").arg(css(tokens().ink_muted));
 }
@@ -338,11 +322,11 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     for (int i = 0; i < 12; ++i) {
         auto* sw = new QToolButton(fc.swatch_row);
         sw->setFixedSize(16, 16);
-        sw->setToolTip(QStringLiteral("#%1").arg(kClipColors[i].name()));
+        sw->setToolTip(QStringLiteral("#%1").arg(clip_color_swatches()[i].name()));
         apply_theme_style(sw, [i] {
             return QStringLiteral(
                        "background-color: %1; border: 1px solid %2; border-radius: 4px;")
-                .arg(kClipColors[i].name(), css(tokens().border_soft));
+                .arg(clip_color_swatches()[i].name(), css(tokens().border_soft));
         });
         fc.swatches.push_back(sw);
         swatch_layout->addWidget(sw);
@@ -461,7 +445,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     // Colour swatches commit immediately (single click = one undo step).
     const auto apply_swatch = [&mw, &fc, commit_metadata](uint8_t color) {
         fc.pending_color = color;
-        const QColor c = color_for(color);
+        const QColor c = clip_color_for(color);
         fc.tag_swatch->setStyleSheet(
             c.isValid() ? QStringLiteral("background-color: %1; border-radius: 7px;").arg(c.name())
                         : QStringLiteral("background-color: transparent; border-radius: 7px;"));
@@ -593,9 +577,9 @@ void update_inspector_file(MainWindow& mw) {
     fc->ed_timecode->setText(hms_frames(clip.tl_in, fps));
     fc->ed_tag->setCurrentIndex(static_cast<int>(clip.clip_tag));
     fc->tag_swatch->setStyleSheet(
-        color_for(clip.clip_color).isValid()
+        clip_color_for(clip.clip_color).isValid()
             ? QStringLiteral("background-color: %1; border-radius: 7px;")
-                  .arg(color_for(clip.clip_color).name())
+                  .arg(clip_color_for(clip.clip_color).name())
             : QStringLiteral("background-color: transparent; border-radius: 7px;"));
     fc->pending_color.reset();
     fc->ed_name->setText(clip.name.empty() ? QString() : QString::fromStdString(clip.name));

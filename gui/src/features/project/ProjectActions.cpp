@@ -418,11 +418,18 @@ int MainWindow::import_media_paths(const QStringList& paths) {
             // A fresh (untitled) project starts at the default 30fps; adopt the
             // first video's own rate so a 60fps clip plays at 60fps cadence
             // instead of a halved 30fps scrub/present. Guarded to the untouched
-            // sequence (default fps, no media, no placed clips) — a project whose
-            // user picked a rate or already has content keeps it.
-            if (project_->sequence.fps == 30.0 && project_->media.empty() &&
-                project_->sequence.video_tracks.empty() &&
-                project_->sequence.audio_tracks.empty()) {
+            // sequence (default fps, no media, no placed clips). The default
+            // V1/A1 tracks always exist but are empty, so "untouched" must mean
+            // no clips anywhere — a project whose user picked a rate or already
+            // has media/placed content keeps it.
+            const bool any_clips =
+                std::any_of(project_->sequence.video_tracks.begin(),
+                            project_->sequence.video_tracks.end(),
+                            [](const canvas::core::Track& t) { return !t.clips.empty(); }) ||
+                std::any_of(project_->sequence.audio_tracks.begin(),
+                            project_->sequence.audio_tracks.end(),
+                            [](const canvas::core::Track& t) { return !t.clips.empty(); });
+            if (project_->sequence.fps == 30.0 && project_->media.empty() && !any_clips) {
                 const double first_fps = probe.frame_rate();
                 if (first_fps > 0.0) {
                     project_->sequence.fps = first_fps;

@@ -252,6 +252,17 @@ void MainWindow::push_audio_mix_snapshot() {
     controller_.update_audio_mix(std::move(snapshot));
 }
 
+void MainWindow::push_grade_snapshot() {
+    if (!project_) return;
+    // Grade-only snapshot for the Color page. A plain push_snapshot() would fire
+    // SetProject, which tears down + rebuilds the entire decode stack (~217ms per
+    // tick — the reason the page's preview used to run at ~4Hz). swap_project
+    // keeps the decoders warm and just re-presents the current frame with the new
+    // 3D-LUT grade, making wheel/curve previews effectively realtime.
+    auto snapshot = std::make_shared<canvas::core::Project>(*project_);
+    controller_.swap_project(std::move(snapshot));
+}
+
 void MainWindow::open_source_preview(const canvas::core::MediaEntry& media) {
     src_preview_.open_media(media, project_ ? project_->sequence.fps : 30.0);
 }
