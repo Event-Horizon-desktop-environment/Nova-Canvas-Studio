@@ -1,5 +1,7 @@
 #include "canvas/core/grade_graph/serialize.hpp"
 
+#include "canvas/core/grade_graph/op.hpp"
+
 #include <span>
 #include <string>
 
@@ -42,16 +44,6 @@ std::span<const EnumStrings<PipeType>> pipe_table() {
     return k;
 }
 
-std::span<const EnumStrings<CorrectMode>> mode_table() {
-    static const EnumStrings<CorrectMode> k[] = {
-        {"identity", CorrectMode::kIdentity},
-        {"lgg", CorrectMode::kLgg},
-        {"cdl", CorrectMode::kCdl},
-        {"curves", CorrectMode::kCurves},
-    };
-    return k;
-}
-
 std::span<const EnumStrings<KeyMixMode>> keymix_table() {
     static const EnumStrings<KeyMixMode> k[] = {
         {"add", KeyMixMode::kAdd},
@@ -76,6 +68,20 @@ std::span<const EnumStrings<BlendMode>> blend_table() {
     return k;
 }
 
+std::span<const EnumStrings<CompositeOp>> composite_table() {
+    static const EnumStrings<CompositeOp> k[] = {
+        {"over", CompositeOp::kOver},
+        {"in", CompositeOp::kIn},
+        {"out", CompositeOp::kOut},
+        {"atop", CompositeOp::kAtop},
+        {"xor", CompositeOp::kXor},
+        {"disjoint", CompositeOp::kDisjoint},
+        {"mask", CompositeOp::kMask},
+        {"stencil", CompositeOp::kStencil},
+    };
+    return k;
+}
+
 template <typename E>
 const char* to_string(std::span<const EnumStrings<E>> table, E value, const char* fallback) {
     for (const auto& e : table)
@@ -92,9 +98,9 @@ E from_string(std::span<const EnumStrings<E>> table, const std::string& s, E fal
 
 const char* kind_name(const NodeKind k) { return to_string(kind_table(), k, "corrector"); }
 const char* pipe_name(const PipeType t) { return to_string(pipe_table(), t, "rgb"); }
-const char* mode_name(const CorrectMode m) { return to_string(mode_table(), m, "identity"); }
 const char* keymix_name(const KeyMixMode m) { return to_string(keymix_table(), m, "add"); }
 const char* blend_name(const BlendMode b) { return to_string(blend_table(), b, "normal"); }
+const char* composite_name(const CompositeOp o) { return to_string(composite_table(), o, "over"); }
 
 json pipe_to_json(const PipeId& p) {
     return json{{"node", p.node}, {"type", pipe_name(p.type)}, {"port", p.port}};
@@ -116,9 +122,11 @@ json node_to_json(const Node& n) {
            {"opacity", n.opacity},
            {"partner", n.partner},
            {"shared_source", n.shared_source},
-           {"correct_mode", mode_name(n.correct_mode)},
+           {"correct_mode", op_name(n.correct_mode)},
            {"key_mode", keymix_name(n.key_mode)},
-           {"blend", blend_name(n.blend)}};
+           {"blend", blend_name(n.blend)},
+           {"composite_op", composite_name(n.composite_op)},
+           {"additive", n.additive}};
     if (n.lgg) {
         const colorsci::LGG& p = *n.lgg;
         j["lgg"] = json{{"lift_master", p.lift_master},
@@ -226,13 +234,15 @@ GradeGraph grade_graph_from_json(const json& j) {
         n.opacity = nj.value("opacity", n.opacity);
         n.partner = nj.value("partner", n.partner);
         n.shared_source = nj.value("shared_source", n.shared_source);
-        n.correct_mode =
-            from_string(mode_table(), nj.value("correct_mode", std::string("identity")),
-                        CorrectMode::kIdentity);
+        n.correct_mode = op_from_name(nj.value("correct_mode", std::string("identity")));
         n.key_mode = from_string(keymix_table(), nj.value("key_mode", std::string("add")),
                                  KeyMixMode::kAdd);
         n.blend =
             from_string(blend_table(), nj.value("blend", std::string("normal")), BlendMode::kNormal);
+        n.composite_op = from_string(composite_table(),
+                                     nj.value("composite_op", std::string("over")),
+                                     CompositeOp::kOver);
+        n.additive = nj.value("additive", n.additive);
         if (nj.contains("lgg")) {
             const json& p = nj.at("lgg");
             n.lgg.emplace();

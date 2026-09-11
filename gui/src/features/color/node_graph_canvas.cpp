@@ -4,6 +4,7 @@
 #include <QGraphicsPathItem>
 #include <QGraphicsScene>
 #include <QHeaderView>
+#include <QKeyEvent>
 #include <QLinearGradient>
 #include <QMenu>
 #include <QMouseEvent>
@@ -88,6 +89,7 @@ public:
     }
 
     [[nodiscard]] int index() const { return index_; }
+    void set_index(int index) { index_ = index; }
     [[nodiscard]] QString kind() const { return kind_; }
 
 private:
@@ -112,6 +114,7 @@ NodeGraphCanvas::NodeGraphCanvas(QWidget* parent) : QGraphicsView(parent) {
     setRenderHint(QPainter::Antialiasing);
     setViewportUpdateMode(QGraphicsView::BoundingRectViewportUpdate);
     setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+    setFocusPolicy(Qt::StrongFocus);
     apply_theme_style(this, [] {
         return QStringLiteral("QGraphicsView { background-color: %1; border: 1px solid %2;"
                               " border-radius: 8px; }")
@@ -243,9 +246,49 @@ void NodeGraphCanvas::open_context_menu(const QPoint& pos) {
     add_kind(QStringLiteral("Highlight"), QStringLiteral("Node %1").arg(node_items_.size() + 1));
     add_kind(QStringLiteral("Noise"), QStringLiteral("Node %1").arg(node_items_.size() + 1));
     menu.addSeparator();
+    auto* hit = dynamic_cast<NodeGraphItem*>(itemAt(pos));
+    if (hit) {
+        scene_->clearSelection();
+        hit->setSelected(true);
+    }
+    QAction* del = menu.addAction(QStringLiteral("Delete"));
+    del->setEnabled(hit != nullptr || !scene_->selectedItems().isEmpty());
+    QObject::connect(del, &QAction::triggered, this, &NodeGraphCanvas::delete_selected_nodes);
     QAction* fit = menu.addAction(QStringLiteral("Fit nodes to view"));
     QObject::connect(fit, &QAction::triggered, this, &NodeGraphCanvas::fit_to_content);
     menu.exec(mapToGlobal(pos));
+}
+
+void NodeGraphCanvas::delete_selected_nodes() {
+    QVector<QGraphicsItem*> keep;
+    keep.reserve(node_items_.size());
+    for (auto* item : node_items_) {
+        if (item->isSelected()) {
+            scene_->removeItem(item);
+            delete item;
+        } else {
+            keep.append(item);
+        }
+    }
+    if (keep.size() == node_items_.size()) {
+        return;  // nothing was selected
+    }
+    node_items_ = keep;
+    for (int i = 0; i < node_items_.size(); ++i) {
+        static_cast<NodeGraphItem*>(node_items_[i])->set_index(i);
+    }
+    scene_->clearSelection();
+    layout_nodes();
+    rebuild_connections();
+}
+
+void NodeGraphCanvas::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
+        delete_selected_nodes();
+        event->accept();
+        return;
+    }
+    QGraphicsView::keyPressEvent(event);
 }
 
 void NodeGraphCanvas::mousePressEvent(QMouseEvent* event) {
@@ -259,6 +302,7 @@ void NodeGraphCanvas::mousePressEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
         // Clicking a node bubbles index-> handler; clicking the canvas clears.
         NodeGraphItem* item = dynamic_cast<NodeGraphItem*>(itemAt(event->position().toPoint()));
+        setFocus();
         if (item) {
             emit node_activated(item->index());
             scene_->clearSelection();

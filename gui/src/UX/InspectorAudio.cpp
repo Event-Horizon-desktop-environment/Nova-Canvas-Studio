@@ -3,24 +3,30 @@
 #include "UX/InspectorShared.hpp"
 #include "UX/MainWindow.hpp"
 
+#include "canvas/core/media/equalizer.hpp"
 #include "canvas/core/timeline/audio_mix.hpp"
 #include "canvas/core/timeline/audio_processing.hpp"
 #include "canvas/core/timeline/edit_ops.hpp"
 
+#include <QButtonGroup>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QSlider>
 #include <QStandardItemModel>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 #include <QWidget>
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <vector>
 
@@ -33,15 +39,55 @@ namespace {
 
 // ── EQ response graph ─────────────────────────────────────────────────────
 // A hand-painted frequency-response plot: x = Hz (log), y = dB (-24..+24).
-// Only a visual reference — spin boxes drive the band values, the curve is a
-// smooth path through the six band-gain points (shelves/rolloffs simplified as
-// waypoint interpolation).
+// The curve is the TRUE 6-band cascade magnitude (RBJ biquads via the shared
+// headless law canvas::core::equalizer_response) — the same math the
+// playback/export DSP runs, so what the plot shows is exactly what the clip
+// filters. The band markers sit at each band's nominal (type/freq/gain/Q)
+// params and are purely handles — the curve already reflects their real
+// interaction.
+//
+// Two views (View toggle above the category):
+//   Curve — the classic node graph. Interaction model (Resolve-style):
+//   • LMB-drag a node = frequency + gain (joint). Hold Shift → frequency only;
+//     hold Ctrl/Alt → gain only.
+//   • Mouse wheel over a node (or over the selected band) = Q, in log steps.
+//   • Click a node to select it (echoed by a ring + the numeric row highlight).
+//   • Double-click a node = toggle that band's enable (hollow/dim + dropped
+//     from the cascade curve). Same rule drives the row's enable dot.
+//   • LowPass/HighPass have no meaningful gain — vertical drag is refused for
+//     them and the node stays pinned to its (locked) gain line.
+//   Bands — one vertical gain fader per band arranged as a row of columns,
+//   the layout EasyEffects uses. Drag a column = that band's gain (the only
+//   axis); wheel = Q; the dot atop each column toggles the band.
+//   • Live band edits stream through `on_edit`; a drag release / double-click /
+//     wheel settle calls `on_commit` exactly once, so each gesture is one undoable
+//     audio-processing edit.
 class EqGraphWidget final : public QWidget {
 public:
+    using Bands = std::array<canvas::core::Clip::EqBand, 6>;
+
+    // Two render modes, switched by the View toggle above the category:
+    //   Curve       — classic node graph on the log-frequency axis (drag
+    //                 joints / Shift / Ctrl-Alt, wheel = Q). Default.
+    //   EasyEffects — one vertical gain fader per band, arranged as a row of
+    //                 columns exactly like EasyEffects' band columns. Dragging
+    //                 a fader rides a single band's gain; the Q knob still
+    //                 follows the wheel; the dot on top toggles the band.
+    enum class View : int { Curve = 0, Bands = 1 };
+
     explicit EqGraphWidget(QWidget* parent = nullptr) : QWidget(parent) {
         bands_ = canvas::core::Clip::default_eq_bands();
-        setMinimumHeight(140);
+        setMinimumHeight(150);
+        setMouseTracking(true);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        // Debounce wheel-Q commits: a scroll gets ONE undoable edit once the
+        // wheel settles (240 ms) instead of one per notch.
+        wheel_timer_.setSingleShot(true);
+        wheel_timer_.setInterval(240);
+        connect(&wheel_timer_, &QTimer::timeout, this, [this] {
+            dragging_ = false;
+            if (on_commit) on_commit();
+        });
         apply_theme_style(this, [] {
             const ThemeTokens& t = tokens();
             return QStringLiteral("background-color: %1; border: 1px solid %2;"
@@ -50,16 +96,65 @@ public:
         });
     }
 
-    void set_bands(const std::array<canvas::core::Clip::EqBand, 6>& bands) {
+    void set_bands(const Bands& bands) {
         bands_ = bands;
+        if (selected_ >= 0 && selected_ < static_cast<int>(bands_.size())) {
+            // Selection survives a refresh only if that band is still present
+            // (it always is — six slots) — keep it so the row stays in sync.
+        } else {
+            selected_ = -1;
+        }
         update();
+        emit_selection();
+    }
+
+    const Bands& bands() const { return bands_; }
+    int selected() const { return selected_; }
+
+    View view() const { return view_; }
+    void set_view(View v) {
+        if (view_ == v) return;
+        view_ = v;
+        // The two views share the same bands, but a drag's axis mental-model
+        // does not survive the switch — drop any in-flight gesture and return
+        // to a plain arrow so a stale press across modes can't grab a fader.
+        dragging_ = false;
+        drag_band_ = -1;
+        wheel_timer_.stop();
+        setCursor(Qt::ArrowCursor);
+        update();
+    }
+
+    // Selection echo → row highlight + clear-on-commit state.
+    void set_selected(int index) {
+        selected_ = index;
+        update();
+        emit_selection();
+    }
+
+    // Callbacks wired by build_inspector_audio. `on_edit` fires on every live
+    // band change (drag/wheel/type/enable via the graph); `on_commit` fires
+    // once when a gesture settles and wants one undoable edit recorded.
+    std::function<void(int index)> on_edit;
+    std::function<void()> on_commit;
+    std::function<void(int index)> on_selection_changed;
+
+    // Per-band accent hues, shared by the graph nodes and the row labels so the
+    // two never drift.
+    static QColor band_hue(int index) {
+        static const QColor hues[6] = {
+            QColor(0xF2, 0x6D, 0x5B), QColor(0xF7, 0xB7, 0x33),
+            QColor(0xBF, 0xD6, 0x3C), QColor(0x59, 0xC2, 0x8D),
+            QColor(0x47, 0xB5, 0xDE), QColor(0x8C, 0x8F, 0xEE),
+        };
+        return hues[std::clamp(index, 0, 5)];
     }
 
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        const QRectF r = rect().adjusted(6, 6, -6, -6);
+        const QRectF r = plot_rect();
         constexpr double kMinDb = -24.0;
         constexpr double kMaxDb = 24.0;
         constexpr double kMinHz = 20.0;
@@ -73,6 +168,11 @@ protected:
             const double f = (std::clamp(db, kMinDb, kMaxDb) - kMinDb) / (kMaxDb - kMinDb);
             return r.bottom() - f * r.height();
         };
+
+        if (view_ == View::Bands) {
+            paint_bands(p, r, y_for);
+            return;
+        }
 
         // Grid: reference Hz ticks + 0 dB axis.
         const ThemeTokens& t = tokens();
@@ -92,30 +192,301 @@ protected:
         p.drawText(QPointF(r.left() + 1, y_for(-24.0) + 6), QStringLiteral("-24"));
         p.drawText(QPointF(r.left() + 1, y_for(24.0) - 2), QStringLiteral("+24"));
 
-        // Response curve through the six bands.
+        // Response curve: the TRUE 6-band cascade magnitude, sampled on a log
+        // grid at the canonical 48 kHz pipeline rate. The equalizer law is
+        // rate-independent across the display band (see equalizer.hpp), so the
+        // plot matches what every playback/export rate actually runs. Disabled
+        // bands are excluded by equalizer_response() itself (it shares
+        // band_filters() with the DSP cascade).
         QPainterPath path;
-        bool first = true;
-        for (const auto& b : bands_) {
-            const QPointF pt(x_for(b.frequency), y_for(b.gain));
-            if (first) {
-                path.moveTo(pt);
-                first = false;
-            } else {
-                path.lineTo(pt);
+        {
+            constexpr int kSamples = 160;
+            bool first = true;
+            for (int i = 0; i <= kSamples; ++i) {
+                const double hz = kMinHz * std::pow(kMaxHz / kMinHz,
+                                                    static_cast<double>(i) / kSamples);
+                const double db = canvas::core::equalizer_response(bands_, 48000, hz);
+                const QPointF pt(x_for(hz), y_for(db));
+                if (first) {
+                    path.moveTo(pt);
+                    first = false;
+                } else {
+                    path.lineTo(pt);
+                }
             }
         }
         p.setPen(QPen(t.accent, 2));
         p.drawPath(path);
 
-        // Band markers.
-        p.setBrush(t.accent);
-        p.setPen(Qt::NoPen);
-        for (const auto& b : bands_)
-            p.drawEllipse(QPointF(x_for(b.frequency), y_for(b.gain)), 3.0, 3.0);
+        // Band nodes: filled when enabled, hollow + dim when bypassed. The
+        // selected node gets an accent ring; LP/HP nodes draw their vertical
+        // handle at the locked-gain line (they have no gain knob, matching the
+        // greyed row spinbox). The node hue doubles as the band identity shared
+        // with the numeric rows.
+        constexpr double kNodeR = 4.5;
+        constexpr double kHitR = 9.0;
+        const auto node_gain = [&](const canvas::core::Clip::EqBand& b) {
+            return gain_locked(b) ? 0.0 : static_cast<double>(b.gain);
+        };
+        for (int i = 0; i < static_cast<int>(bands_.size()); ++i) {
+            const auto& b = bands_[i];
+            const QPointF c(x_for(b.frequency), y_for(node_gain(b)));
+            const QColor hue = band_hue(i);
+            p.setBrush(b.enabled ? hue : Qt::NoBrush);
+            p.setPen(QPen(b.enabled ? hue : with_alpha(hue, 120), b.enabled ? 2.0 : 1.2));
+            p.drawEllipse(c, kNodeR, kNodeR);
+            if (i == selected_) {
+                p.setPen(QPen(t.accent, 1.4));
+                p.setBrush(Qt::NoBrush);
+                p.drawEllipse(c, kNodeR + kHitR * 0.6, kNodeR + kHitR * 0.6);
+            }
+        }
+    }
+
+    void paint_bands(QPainter& p, const QRectF& r,
+                     const std::function<double(double)>& y_for) {
+        const ThemeTokens& t = tokens();
+        constexpr double kMinDb = -24.0;
+        constexpr double kMaxDb = 24.0;
+
+        // 0 dB reference line spans all columns.
+        p.setPen(QPen(t.border, 1));
+        p.drawLine(QPointF(r.left(), y_for(0.0)), QPointF(r.right(), y_for(0.0)));
+
+        const int count = static_cast<int>(bands_.size());
+        const double col_w = r.width() / count;
+        const double gap = 4.0;
+        for (int i = 0; i < count; ++i) {
+            const auto& b = bands_[i];
+            const bool sel = i == selected_;
+            const bool locked = gain_locked(b);
+            const double g = locked ? 0.0 : std::clamp(static_cast<double>(b.gain),
+                                                       kMinDb, kMaxDb);
+            const QColor hue = band_hue(i);
+            const QRectF col(r.left() + i * col_w + gap / 2, r.top(),
+                             col_w - gap, r.height());
+
+            // Column track background (accent-tinted when selected).
+            p.setPen(Qt::NoPen);
+            p.setBrush(sel ? with_alpha(t.accent, 14) : with_alpha(t.surface_higher, 90));
+            p.drawRoundedRect(col, 3, 3);
+
+            // Gain fill from the 0 dB line to the band gain.
+            const double y0 = y_for(0.0);
+            const double yg = y_for(g);
+            const double top = std::min(y0, yg);
+            const double h = std::abs(yg - y0);
+            if (h > 0.5 && b.enabled) {
+                p.setBrush(with_alpha(hue, locked ? 90 : 150));
+                p.setPen(Qt::NoPen);
+                p.drawRoundedRect(QRectF(col.left() + 1, top, col.width() - 2, h), 2, 2);
+            }
+
+            // Gain handle at the current level.
+            p.setPen(b.enabled ? QPen(hue, 2.0) : QPen(with_alpha(hue, 110), 1.2));
+            p.setBrush(b.enabled ? hue : Qt::NoBrush);
+            const QPointF hc(col.center().x(), yg);
+            p.drawEllipse(hc, 4.5, 4.5);
+            if (sel) {
+                p.setPen(QPen(t.accent, 1.4));
+                p.setBrush(Qt::NoBrush);
+                p.drawEllipse(hc, 4.5 + 3.2, 4.5 + 3.2);
+            }
+
+            // Enable dot at the column top (mirrors the row dot).
+            const QPointF dot(col.center().x(), r.top() + 7);
+            p.setPen(b.enabled ? QPen(hue, 1.4) : QPen(with_alpha(hue, 100), 1.2));
+            p.setBrush(b.enabled ? hue : Qt::NoBrush);
+            p.drawEllipse(dot, 3.0, 3.0);
+        }
+
+        // Band labels under the handle... drawn below the plot as a footer so
+        // the columns keep all their height; the row numbers stay in sync.
+        p.setPen(t.ink_faint);
+        p.setFont(QFont(QStringLiteral("DejaVu Sans"), 7));
+        for (int i = 0; i < count; ++i) {
+            const double cx = r.left() + (i + 0.5) * col_w;
+            p.drawText(QPointF(cx - 6, rect().bottom() - 2),
+                       QStringLiteral("B%1").arg(i + 1));
+        }
+    }
+
+    [[nodiscard]] int column_at(double px) const {
+        const QRectF r = plot_rect();
+        if (px < r.left() || px > r.right()) return -1;
+        const int count = static_cast<int>(bands_.size());
+        const double col_w = r.width() / count;
+        const int i = static_cast<int>((px - r.left()) / col_w);
+        return (i >= 0 && i < count) ? i : -1;
+    }
+
+    void mousePressEvent(QMouseEvent* e) override {
+        if (e->button() != Qt::LeftButton) return;
+        const int idx = view_ == View::Bands ? column_at(e->position().x())
+                                             : node_at(e->position());
+        if (idx < 0) {
+            // Clicking the empty plot clears the selection.
+            set_selected(-1);
+            return;
+        }
+        // Any in-flight wheel commit is superseded by the drag that just began.
+        wheel_timer_.stop();
+        set_selected(idx);
+        dragging_ = true;
+        drag_band_ = idx;
+        setCursor(Qt::ClosedHandCursor);
+    }
+
+    void mouseMoveEvent(QMouseEvent* e) override {
+        const QPointF pos = e->position();
+        if (!dragging_ || drag_band_ < 0) {
+            const int idx = view_ == View::Bands ? column_at(pos.x())
+                                                 : node_at(pos);
+            setCursor(idx >= 0 ? Qt::OpenHandCursor : Qt::ArrowCursor);
+            return;
+        }
+        auto& b = bands_[drag_band_];
+        const QRectF r = plot_rect();
+        const auto inv_x = [&](double px) {
+            const double lg = std::clamp((px - r.left()) / r.width(), 0.0, 1.0);
+            return kMinHzV() * std::pow(kMaxHzV() / kMinHzV(), lg);
+        };
+        const auto inv_y = [&](double py) {
+            const double f = std::clamp((r.bottom() - py) / r.height(), 0.0, 1.0);
+            return kMinDbV() + f * (kMaxDbV() - kMinDbV());
+        };
+
+        if (view_ == View::Bands) {
+            // EasyEffects columns: the vertical axis is the only control; the
+            // horizontal position within the column is meaningless.
+            if (gain_locked(b)) return;
+            const double gain =
+                std::clamp(inv_y(pos.y()), kMinDbV(), kMaxDbV());
+            if (gain == b.gain) return;
+            b.gain = static_cast<float>(gain);
+            update();
+            if (on_edit) on_edit(drag_band_);
+            return;
+        }
+
+        const bool gain_only = e->modifiers() & (Qt::ControlModifier | Qt::AltModifier);
+        const bool freq_only = e->modifiers() & Qt::ShiftModifier;
+        // Which axes may actually change this move.
+        const bool freq_writable = !gain_only;
+        const bool gain_writable = !freq_only && !gain_locked(b);
+
+        double freq = b.frequency;
+        double gain = b.gain;
+        if (freq_writable) freq = inv_x(pos.x());
+        if (gain_writable) gain = inv_y(pos.y());
+        freq = std::clamp(freq, static_cast<double>(canvas::core::audio_processing::kEqFreqMin),
+                          static_cast<double>(canvas::core::audio_processing::kEqFreqMax));
+        gain = std::clamp(gain, static_cast<double>(canvas::core::audio_processing::kEqGainMin),
+                          static_cast<double>(canvas::core::audio_processing::kEqGainMax));
+        if ((freq_writable && freq != b.frequency) ||
+            (gain_writable && gain != b.gain)) {
+            if (freq_writable) b.frequency = static_cast<float>(freq);
+            if (gain_writable) b.gain = static_cast<float>(gain);
+            update();
+            if (on_edit) on_edit(drag_band_);
+        }
+    }
+
+    void mouseReleaseEvent(QMouseEvent* e) override {
+        if (e->button() != Qt::LeftButton) return;
+        if (dragging_) {
+            dragging_ = false;
+            setCursor(Qt::ArrowCursor);
+            if (on_commit) on_commit();
+        }
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent* e) override {
+        const auto pos = e->position();
+        const int idx = view_ == View::Bands ? column_at(pos.x()) : node_at(pos);
+        if (idx < 0) return;
+        bands_[idx].enabled = !bands_[idx].enabled;
+        set_selected(idx);
+        update();
+        if (on_edit) on_edit(idx);
+        // Double-click = one discrete edit → commit immediately.
+        if (on_commit) on_commit();
+    }
+
+    void wheelEvent(QWheelEvent* e) override {
+        // Wheel targets the band under the cursor, else the selected band.
+        const auto pos = e->position();
+        int idx = view_ == View::Bands ? column_at(pos.x()) : node_at(pos);
+        if (idx < 0) idx = selected_;
+        if (idx < 0) return;
+        auto& b = bands_[idx];
+        const double steps = static_cast<double>(e->angleDelta().y()) / 120.0;
+        const double lo = canvas::core::audio_processing::kEqQMin;
+        const double hi = canvas::core::audio_processing::kEqQMax;
+        // Log Q steps: ~1.15x per notch, so a full sweep 0.1→10 is ~32 notches.
+        const double scale = std::pow(1.15, steps);
+        const double nq = std::clamp(static_cast<double>(b.q) * scale, lo, hi);
+        if (nq != b.q) {
+            b.q = static_cast<float>(nq);
+            set_selected(idx);
+            update();
+            if (on_edit) on_edit(idx);
+            wheel_timer_.start();  // debounced single commit
+        }
     }
 
 private:
-    std::array<canvas::core::Clip::EqBand, 6> bands_{};
+    [[nodiscard]] static constexpr double kMinHzV() { return 20.0; }
+    [[nodiscard]] static constexpr double kMaxHzV() { return 20000.0; }
+    [[nodiscard]] static constexpr double kMinDbV() { return -24.0; }
+    [[nodiscard]] static constexpr double kMaxDbV() { return 24.0; }
+
+    [[nodiscard]] QRectF plot_rect() const { return rect().adjusted(6, 6, -6, -6); }
+
+    // The band index under `pos` (nearest node within the hit radius), or -1.
+    [[nodiscard]] int node_at(const QPointF& pos) const {
+        const QRectF r = plot_rect();
+        const auto x_for = [&](double hz) {
+            const double lg = std::log(hz / kMinHzV()) / std::log(kMaxHzV() / kMinHzV());
+            return r.left() + lg * r.width();
+        };
+        const auto y_for = [&](double db) {
+            const double f = (std::clamp(db, kMinDbV(), kMaxDbV()) - kMinDbV()) /
+                             (kMaxDbV() - kMinDbV());
+            return r.bottom() - f * r.height();
+        };
+        int best = -1;
+        double best_d = 9.0;
+        for (int i = 0; i < static_cast<int>(bands_.size()); ++i) {
+            const auto& b = bands_[i];
+            const double y = y_for(gain_locked(b) ? 0.0 : static_cast<double>(b.gain));
+            const QPointF c(x_for(b.frequency), y);
+            const double d = std::hypot(pos.x() - c.x(), pos.y() - c.y());
+            if (d < best_d) {
+                best_d = d;
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    // LP/HP have no gain knob: the node is pinned to the 0 dB line and vertical
+    // drag is refused (both here and via the greyed row spinbox).
+    [[nodiscard]] static bool gain_locked(const canvas::core::Clip::EqBand& b) {
+        return b.type == canvas::core::Clip::EqBand::Type::LowPass ||
+               b.type == canvas::core::Clip::EqBand::Type::HighPass;
+    }
+
+    void emit_selection() {
+        if (on_selection_changed) on_selection_changed(selected_);
+    }
+
+    Bands bands_ = canvas::core::Clip::default_eq_bands();
+    View view_ = View::Curve;
+    int selected_ = -1;
+    int drag_band_ = -1;
+    bool dragging_ = false;
+    QTimer wheel_timer_;
 };
 
 // ── Slider + numeric spin composite row ───────────────────────────────────
@@ -220,10 +591,15 @@ struct AudioControls {
 
     InspectorCategory* eq_cat = nullptr;
     EqGraphWidget* eq_graph = nullptr;
+    QButtonGroup* eq_view_group = nullptr;  // Curve / EasyEffects view switch
+    QToolButton* eq_view_curve = nullptr;
+    QToolButton* eq_view_bands = nullptr;
     std::vector<QDoubleSpinBox*> eq_freq;
     std::vector<QDoubleSpinBox*> eq_gain;
     std::vector<QDoubleSpinBox*> eq_q;
     std::vector<QComboBox*> eq_type;
+    std::vector<QToolButton*> eq_enable;  // per-band bypass dots (mirror EqBand.enabled)
+    std::vector<QLabel*> eq_labels;       // B1..B6 labels, recoloured on selection
 
     // AI Voice Isolation: per-clip engine picker. Backed by the real model
     // field (None / RNNoise / DeepFilterNet) and applied before the clip's
@@ -261,6 +637,22 @@ void set_processing_enabled(AudioControls& ac, bool on) {
     for (QDoubleSpinBox* s : ac.eq_gain) s->setEnabled(on);
     for (QDoubleSpinBox* s : ac.eq_q) s->setEnabled(on);
     for (QComboBox* c : ac.eq_type) c->setEnabled(on);
+    for (QToolButton* b : ac.eq_enable) if (b) b->setEnabled(on);
+    if (ac.eq_view_group) {
+        for (QAbstractButton* b : ac.eq_view_group->buttons()) b->setEnabled(on);
+    }
+    if (ac.eq_graph) {
+        ac.eq_graph->setEnabled(on);
+        // LP/HP rows have no gain control — greyed even when the section is on.
+        for (std::size_t i = 0; i < ac.eq_type.size() && i < ac.eq_gain.size(); ++i) {
+            if (!ac.eq_type[i] || !ac.eq_gain[i]) continue;
+            ac.eq_gain[i]->setEnabled(
+                on && ac.eq_type[i]->currentIndex() !=
+                          static_cast<int>(canvas::core::Clip::EqBand::Type::LowPass) &&
+                ac.eq_type[i]->currentIndex() !=
+                    static_cast<int>(canvas::core::Clip::EqBand::Type::HighPass));
+        }
+    }
     if (ac.iso_combo) ac.iso_combo->setEnabled(on);
     for (InspectorCategory* cat : {ac.speed_cat, ac.eq_cat, ac.iso_cat})
         if (cat) {
@@ -286,8 +678,14 @@ void populate_from_clip(AudioControls& ac, const canvas::core::Clip& clip) {
         if (i < ac.eq_freq.size() && ac.eq_freq[i]) ac.eq_freq[i]->setValue(b.frequency);
         if (i < ac.eq_gain.size() && ac.eq_gain[i]) ac.eq_gain[i]->setValue(b.gain);
         if (i < ac.eq_q.size() && ac.eq_q[i]) ac.eq_q[i]->setValue(b.q);
+        if (i < ac.eq_enable.size() && ac.eq_enable[i])
+            ac.eq_enable[i]->setChecked(b.enabled);
     }
-    if (ac.eq_graph) ac.eq_graph->set_bands(clip.eq_bands);
+    if (ac.eq_graph) {
+        ac.eq_graph->set_bands(clip.eq_bands);
+        // Entering a new clip clears the node/row selection.
+        ac.eq_graph->set_selected(-1);
+    }
     if (ac.iso_combo)
         ac.iso_combo->setCurrentIndex(static_cast<int>(clip.voice_isolation));
     ac.updating = false;
@@ -418,17 +816,90 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     // The EQ section sits at the bottom of the audio tab and gets generous
     // spacing so every value/suffix stays fully visible at any dock width.
     ac.eq_cat->body_layout()->setSpacing(12);
+
+    // View toggle: Curve (node graph) vs EasyEffects (band fader columns). A
+    // lightweight segmented pair, identical to the page-bar pills in style.
+    {
+        auto* view_row = new QWidget(host);
+        auto* view_lay = new QHBoxLayout(view_row);
+        view_lay->setContentsMargins(0, 0, 0, 0);
+        view_lay->setSpacing(4);
+        auto* seg = new QWidget(view_row);
+        auto* seg_lay = new QHBoxLayout(seg);
+        seg_lay->setContentsMargins(0, 0, 0, 0);
+        seg_lay->setSpacing(0);
+        auto* curve_btn = new QToolButton(seg);
+        curve_btn->setCheckable(true);
+        curve_btn->setChecked(true);
+        curve_btn->setText(tr("Curve"));
+        auto* bands_btn = new QToolButton(seg);
+        bands_btn->setCheckable(true);
+        bands_btn->setText(tr("EasyEffects"));
+        ac.eq_view_group = new QButtonGroup(seg);
+        ac.eq_view_group->setExclusive(true);
+        ac.eq_view_group->addButton(curve_btn, 0);
+        ac.eq_view_group->addButton(bands_btn, 1);
+        ac.eq_view_curve = curve_btn;
+        ac.eq_view_bands = bands_btn;
+        curve_btn->setFixedHeight(20);
+        bands_btn->setFixedHeight(20);
+        const auto seg_style = [] {
+            const ThemeTokens& t = tokens();
+            return QStringLiteral(
+                       "QToolButton { background: %1; color: %2; border: none;"
+                       "  padding: 1px 10px; font-size: 10px;"
+                       "  border-right: 1px solid %3; }"
+                       "QToolButton:first { border-top-left-radius: 8px;"
+                       "  border-bottom-left-radius: 8px; }"
+                       "QToolButton:last { border-right: none;"
+                       "  border-top-right-radius: 8px;"
+                       "  border-bottom-right-radius: 8px; }"
+                       "QToolButton:checked { background: %4; color: %5; }")
+                .arg(css(t.surface_raised), css(t.ink_muted), css(t.border_soft),
+                     css(t.surface_highest), css(t.ink));
+        };
+        apply_theme_style(curve_btn, seg_style);
+        apply_theme_style(bands_btn, seg_style);
+        seg_lay->addWidget(curve_btn);
+        seg_lay->addWidget(bands_btn);
+        auto* view_lbl = new QLabel(tr("View"), view_row);
+        apply_theme_style(view_lbl, [] {
+            return QStringLiteral("color: %1; font-size: 10px;")
+                .arg(css(tokens().ink_muted));
+        });
+        view_lay->addWidget(view_lbl);
+        view_lay->addWidget(seg);
+        view_lay->addStretch(1);
+        ac.eq_cat->body_layout()->addWidget(view_row);
+    }
+
     ac.eq_graph = new EqGraphWidget(host);
     ac.eq_cat->body_layout()->addWidget(ac.eq_graph);
 
-    // Band rows: B1..B6 | type | freq | gain | Q. All five columns are always
-    // shown — never folded away per filter type — so the row layout is stable
-    // and no label/value is ever hidden.
+    // Band rows: [dot] B1..B6 | type | freq | gain | Q. All six columns are
+    // always shown — never folded away per filter type — so the row layout is
+    // stable and no label/value is ever hidden. The leading dot is the per-band
+    // bypass toggle (EqBand.enabled): the same rule the graph's double-click
+    // uses. The band label picks up the band hue while its node is selected,
+    // mirroring the graph's selection ring.
     for (int i = 0; i < canvas::core::audio_processing::kEqBandCount; ++i) {
         auto* row = new QWidget(host);
         auto* lay = new QHBoxLayout(row);
         lay->setContentsMargins(0, 0, 0, 0);
         lay->setSpacing(8);
+        auto* dot = new QToolButton(row);
+        dot->setCheckable(true);
+        dot->setChecked(true);
+        dot->setFixedSize(14, 14);
+        apply_theme_style(dot, [i] {
+            const QColor hue = EqGraphWidget::band_hue(i);
+            const ThemeTokens& t = tokens();
+            return QStringLiteral(
+                       "QToolButton { border-radius: 7px; border: 1px solid %1;"
+                       "  background-color: %2; }"
+                       "QToolButton:checked { background-color: %3; border: 1px solid %3; }")
+                .arg(css(with_alpha(hue, 120)), css(t.surface_low), css(hue));
+        });
         auto* lbl = new QLabel(QStringLiteral("B%1").arg(i + 1), row);
         lbl->setFixedWidth(22);
         apply_theme_style(lbl, [] {
@@ -446,12 +917,15 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         gain->setSuffix(QStringLiteral("dB"));
         auto* q = make_band_spin(canvas::core::audio_processing::kEqQMin,
                                  canvas::core::audio_processing::kEqQMax, 1, 1.0, row, 54);
+        lay->addWidget(dot);
         lay->addWidget(lbl);
         lay->addWidget(type, 1);
         lay->addWidget(freq);
         lay->addWidget(gain);
         lay->addWidget(q);
 
+        ac.eq_enable.push_back(dot);
+        ac.eq_labels.push_back(lbl);
         ac.eq_type.push_back(type);
         ac.eq_freq.push_back(freq);
         ac.eq_gain.push_back(gain);
@@ -563,10 +1037,13 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         QObject::connect(spin, &QDoubleSpinBox::editingFinished, &mw, commit_processing);
     for (QComboBox* combo : ac.eq_type)
         QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw, commit_processing);
+    for (QToolButton* dot : ac.eq_enable)
+        QObject::connect(dot, &QToolButton::toggled, &mw, commit_processing);
     QObject::connect(ac.speed_cat, &InspectorCategory::feature_toggled, &mw, commit_processing);
     QObject::connect(ac.eq_cat, &InspectorCategory::feature_toggled, &mw, commit_processing);
 
-    // Keep the EQ graph in sync with gain/freq edits live.
+    // Live graph <-> rows echo (no commit): any spin/type/dot edit repaints the
+    // curve from the widgets, preserving each band's enabled dot.
     const auto refresh_graph = [&ac]() {
         if (!ac.eq_graph) return;
         std::array<canvas::core::Clip::EqBand, 6> bands;
@@ -578,13 +1055,72 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
                                 ? static_cast<canvas::core::Clip::EqBand::Type>(
                                       ac.eq_type[i]->currentIndex())
                                 : canvas::core::Clip::EqBand::Type::Bell;
+            bands[i].enabled = i < static_cast<int>(ac.eq_enable.size()) &&
+                               ac.eq_enable[i] && ac.eq_enable[i]->isChecked();
         }
         ac.eq_graph->set_bands(bands);
     };
+    for (QDoubleSpinBox* spin : ac.eq_freq)
+        QObject::connect(spin, &QDoubleSpinBox::valueChanged, &mw, refresh_graph);
     for (QDoubleSpinBox* spin : ac.eq_gain)
+        QObject::connect(spin, &QDoubleSpinBox::valueChanged, &mw, refresh_graph);
+    for (QDoubleSpinBox* spin : ac.eq_q)
         QObject::connect(spin, &QDoubleSpinBox::valueChanged, &mw, refresh_graph);
     for (QComboBox* combo : ac.eq_type)
         QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw, refresh_graph);
+    // View toggle: Curve ↔ EasyEffects fader columns. The graph paints from
+    // whatever mode is selected; selection is shared across both views.
+    if (ac.eq_view_group) {
+        QObject::connect(
+            ac.eq_view_group, qOverload<int>(&QButtonGroup::idClicked), &mw,
+            [&ac](int id) {
+                if (!ac.eq_graph) return;
+                ac.eq_graph->set_view(id == 1 ? EqGraphWidget::View::Bands
+                                              : EqGraphWidget::View::Curve);
+            });
+    }
+    // LP/HP bands carry no gain: grey the row spin as the graph disables its
+    // vertical drag, and keep it in lock-step with a type change.
+    const auto refresh_band_gain_editable = [&ac]() {
+        for (std::size_t i = 0; i < ac.eq_type.size() && i < ac.eq_gain.size(); ++i) {
+            if (!ac.eq_type[i] || !ac.eq_gain[i]) continue;
+            const auto ty = static_cast<canvas::core::Clip::EqBand::Type>(
+                ac.eq_type[i]->currentIndex());
+            ac.eq_gain[i]->setEnabled(ty != canvas::core::Clip::EqBand::Type::LowPass &&
+                                      ty != canvas::core::Clip::EqBand::Type::HighPass);
+        }
+    };
+    for (QComboBox* combo : ac.eq_type)
+        QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw, refresh_band_gain_editable);
+
+    // Graph gestures → live row echo + one settled commit.
+    ac.eq_graph->on_edit = [&ac](int idx) {
+        if (idx < 0 || idx >= static_cast<int>(ac.eq_freq.size())) return;
+        const auto& b = ac.eq_graph->bands()[idx];
+        ac.eq_freq[idx]->setValue(b.frequency);
+        ac.eq_gain[idx]->setValue(b.gain);
+        ac.eq_q[idx]->setValue(b.q);
+        ac.eq_enable[idx]->setChecked(b.enabled);
+    };
+    ac.eq_graph->on_commit = [&mw]() { apply_inspector_audio_processing(mw); };
+    ac.eq_graph->on_selection_changed = [&ac](int idx) {
+        // The numeric row echoes the selected node: the B-label takes the band's
+        // hue + weight, the others fall back to muted ink.
+        for (std::size_t i = 0; i < ac.eq_labels.size(); ++i) {
+            const bool sel = static_cast<int>(i) == idx;
+            apply_theme_style(ac.eq_labels[i], [sel, i] {
+                if (sel) {
+                    return QStringLiteral("color: %1; font-size: 10px; font-weight: 600;")
+                        .arg(css(EqGraphWidget::band_hue(i)));
+                }
+                return QStringLiteral("color: %1; font-size: 10px;")
+                    .arg(css(tokens().ink_muted));
+            });
+        }
+    };
+    // A cell click (or Escape) on the row widgets re-syncs the graph; the
+    // selection ring itself is drawn by the graph and echoed here above.
+    ac.eq_graph->set_selected(-1);  // harmless no-op initial state
 }
 
 void attach_inspector_audio(MainWindow& mw, TimelineWidget* timeline) {
@@ -642,11 +1178,18 @@ void apply_inspector_audio_processing(MainWindow& mw) {
 
     std::array<canvas::core::Clip::EqBand, 6> bands{};
     for (int i = 0; i < 6; ++i) {
-        bands[i].type = static_cast<canvas::core::Clip::EqBand::Type>(
-            ac->eq_type[i] ? ac->eq_type[i]->currentIndex() : 0);
-        bands[i].frequency = static_cast<float>(ac->eq_freq[i]->value());
-        bands[i].gain = static_cast<float>(ac->eq_gain[i]->value());
-        bands[i].q = static_cast<float>(ac->eq_q[i]->value());
+        const bool has = i < static_cast<int>(ac->eq_type.size()) &&
+                         i < static_cast<int>(ac->eq_freq.size()) &&
+                         i < static_cast<int>(ac->eq_gain.size()) &&
+                         i < static_cast<int>(ac->eq_q.size());
+        bands[i].type = has ? static_cast<canvas::core::Clip::EqBand::Type>(
+                                  ac->eq_type[i]->currentIndex())
+                            : canvas::core::Clip::EqBand::Type::Bell;
+        bands[i].frequency = has ? static_cast<float>(ac->eq_freq[i]->value()) : 1000.0f;
+        bands[i].gain = has ? static_cast<float>(ac->eq_gain[i]->value()) : 0.0f;
+        bands[i].q = has ? static_cast<float>(ac->eq_q[i]->value()) : 1.0f;
+        bands[i].enabled = i < static_cast<int>(ac->eq_enable.size()) && ac->eq_enable[i] &&
+                           ac->eq_enable[i]->isChecked();
     }
 
     const bool same = clip.pitch_semitones == semi && clip.pitch_cents == cents &&

@@ -189,13 +189,11 @@ int main() {
     report(rp && (rp->a || rp->nv12), "preview() assembles pixels at seq_frame");
 
     // Phase 6 live graded preview + Phase LUT: a clip owning a grade tree is
-    // baked to a 3D LUT attached to the RenderFrame (the viewer's NV12 shader
-    // samples it) and the CPU RGBA path applies the same LUT, so preview ==
-    // export by construction. Graded clips ride the NV12 fast path on GPU
-    // machines; the small CPU `a` (the Color-page scopes feed) is gated behind
-    // set_cpu_graded_preview_enabled() and OFF by default — see below. On
-    // software-only machines the graded RGBA path delivers the pixels with no
-    // LUT carried (the frame holds no NV12 planes then).
+    // baked to a 3D LUT attached to the RenderFrame (the viewer shaders sample
+    // it), so preview == export by construction. The CPU never grades pixels:
+    // on GPU machines the graded clip rides the NV12 fast path (NV12 plane +
+    // LUT, no CPU `a`); on software-only machines the CPU RGBA path delivers
+    // RAW decoded pixels with the LUT carried for the shader to apply.
     {
         Project pgraded = project;
         Clip graded = clip;
@@ -210,30 +208,32 @@ int main() {
         graded.grade = g;
         pgraded.sequence.video_tracks[0].clips[0] = graded;
 
-        // The CPU graded-preview feed is OFF by default (Edit-tab playback stays
-        // on the pure GPU fast path). This block exercises the Color-page feed:
-        // opt in explicitly so the graded-rgba assertions below are valid on
-        // both GPU (NV12 + LUT) and software-only machines.
-        decoder.set_cpu_graded_preview_enabled(true);
-
+        // The CPU never grades pixels anymore (zero-CPU directive): the decoded
+        // planes are raw and the clip's baked 3D LUT rides on the RenderFrame
+        // for the viewer shader to sample. Assert the LUT rides along on both
+        // the NV12 fast path and the software RGBA fallback.
         auto gf = decoder.frame(pgraded, 5);
-        report(gf && gf->a && gf->a->width == kWidth && gf->a->height == kHeight,
-               "graded clip frame() carries full-res graded pixels");
-        report(gf && (!gf->nv12 || (gf->grade && gf->grade->valid())),
-               "graded clip frame() NV12 path attaches a valid grade LUT");
+        report(gf && (gf->nv12 || (gf->a && gf->a->width == kWidth &&
+                                   gf->a->height == kHeight)),
+               "graded clip frame() carries pixels (NV12 plane or CPU RGBA)");
+        report(gf && gf->grade && gf->grade->valid(),
+               "graded clip frame() attaches a valid grade LUT");
 
         auto raw = decoder.decode(project, clip, 5);
-        bool differs = false;
+        bool raw_unchanged = true;  // vacuous on the NV12 path (no `a` to compare)
         if (gf && gf->a && raw && gf->a->rgba.size() == raw->rgba.size()) {
             for (std::size_t i = 0; i < raw->rgba.size(); ++i) {
-                if (raw->rgba[i] != gf->a->rgba[i]) { differs = true; break; }
+                if (raw->rgba[i] != gf->a->rgba[i]) { raw_unchanged = false; break; }
             }
+        } else if (gf && gf->a) {
+            raw_unchanged = false;
         }
-        report(differs, "graded clip frame() pixels differ from raw media");
+        report(raw_unchanged,
+               "graded clip frame() never CPU-grades its rgba (raw or absent; grade rides the LUT)");
 
         auto gp = decoder.preview(pgraded, 5, 40);
-        report(gp && gp->a && (!gp->nv12 || (gp->grade && gp->grade->valid())),
-               "graded clip preview() carries graded pixels (LUT on NV12 path)");
+        report(gp && (gp->a || gp->nv12) && gp->grade && gp->grade->valid(),
+               "graded clip preview() carries pixels + valid grade LUT");
     }
 
     // Disabled clip → black fallback frame of the media dims, all-zero pixels.

@@ -285,7 +285,7 @@ void ThumbnailService::clear_cache() {
 void ThumbnailService::worker_loop() {
     // Each worker owns its own hardware-decode device to avoid racing on the
     // lazy init and sharing a single GPU context across threads.
-    canvas::core::HwDeviceManager hw;
+    canvas::core::HwDeviceManager hw{"thumbs"};
     while (true) {
         ThumbRequest req;
         {

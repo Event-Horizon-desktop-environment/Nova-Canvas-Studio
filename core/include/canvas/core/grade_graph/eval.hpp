@@ -60,8 +60,12 @@ struct EvalResult {
 // expectation: frames are shared_const, never mutated after evaluation.
 [[nodiscard]] EvalResult evaluate_graph(const GradeGraph& g, const FrameF& source);
 
-// Blend equation used by Layer Mixing: `layer` composited over `acc` with the
-// given mode, three floats per pixel, N pixels. Alpha is carried by acc.
+// Over-with-blend compositing law (see composite.hpp): `layer` is composited
+// over `acc` with the given blend family, Porter-Duff alpha recomputed from
+// each pixel's alpha (source = layer[3], backdrop = acc[3]). Opaque inputs
+// reproduce the classic blend-family "replace" behavior. The Layer Mixer uses
+// the per-node composite law directly (folding key*opacity into coverage);
+// this convenience stays available for exact-Over callers.
 void blend_into(const float* acc, const float* layer, float* out, std::size_t n,
                 BlendMode blend);
 

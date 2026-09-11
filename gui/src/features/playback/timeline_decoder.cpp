@@ -24,6 +24,51 @@ int64_t seq_to_src_frame(const canvas::core::Project& project, const canvas::cor
 canvas::core::Nv12FramePtr host_nv12_from_hw(const AVFrame* hw, std::int64_t src_frame,
                                              const canvas::core::gpu::ColorSpec& spec,
                                              int max_dim);
+
+// The most recent decode_nv12()/decode_nv12_slot() null reason, published at
+// each early return and consumed by frame()/preview() right after an NV12
+// attempt fails, so the CPU-RGBA fallback line says WHY it ran. The ~1Hz
+// full-res decode() with 195ms-5.4s stalls in the logs is this fallback, and
+// without the reason it looks like a random re-decode. thread_local: the
+// playback worker, transition-bake thread and tests interleave, but the reason
+// is always consumed on the same thread that set it.
+thread_local const char* g_last_nv12_null_reason = "never-tried";
+thread_local std::int64_t g_last_nv12_null_ms = 0;
+
+// Every-fallback trace: each occurrence is a full-res CPU decode on the
+// playback/scrub path (0.4-6s stalls), so throttling would lose the very frames
+// being chased. `why`/`nv12_ms` are captured BEFORE the CPU decode runs (from
+// the thread-local reason the NV12 attempt published), `decode_ms` after — the
+// pair shows whether the stall is the NV12 miss itself or the CPU GOP re-walk.
+void trace_rgba_fallback(const char* side, int media, std::int64_t seq_frame,
+                         std::int64_t tl_in, const char* why,
+                         std::int64_t nv12_ms, double decode_ms) {
+    ::canvas::core::log::log_warning(
+        "[dec] RGBA-FALLBACK side=%s media=%d seq=%lld tl_in=%lld why=%s "
+        "nv12_ms=%.2f decode_ms=%.2f",
+        side, media, static_cast<long long>(seq_frame),
+        static_cast<long long>(tl_in), why, static_cast<double>(nv12_ms),
+        decode_ms);
+}
+
+// Full-res decode() attribution. A full-res CPU decode on the playback path is
+// almost always frame()'s NV12-fallback (RGBA-FALLBACK) — but the 02:50 log had
+// 13 fullres decodes (0.07-1.3s each) with NO RGBA-FALLBACK, implying decode()
+// is reached from a context that never attempted the NV12 fast path. Every
+// decode() call then logs an ungated FULLRES-CALLED line carrying the origin
+// (0=none, 1=frame(), 2=preview()) plus whatever reason the last NV12 attempt
+// published, so the next stall run names its caller even without CANVAS_DEBUG.
+thread_local int t_decode_origin = 0;
+class DecodeOriginGuard {
+public:
+    explicit DecodeOriginGuard(int context) : saved_(t_decode_origin) {
+        t_decode_origin = context;
+    }
+    ~DecodeOriginGuard() { t_decode_origin = saved_; }
+
+private:
+    int saved_;
+};
 }  // namespace
 
 void TimelineDecoder::add_media(const canvas::core::MediaEntry& entry) {
@@ -147,75 +192,6 @@ TimelineDecoder::GradeStats TimelineDecoder::take_grade_stats() {
     grade_ms_sum_ = 0.0;
     grade_ms_max_ = 0.0;
     return out;
-}
-
-// Phase 6 live graded preview: applies `clip`'s grade to the decoded RGBA
-// frame. Returns the frame untouched when the clip owns no grade tree, or when
-// the evaluator has no terminal to evaluate, so callers always keep real
-// pixels (never a dropped presentation).
-//
-// Realtime telemetry — ALWAYS-ON, no CANVAS_DEBUG / no cmd needed (stderr +
-// ~/studio/canvas_debug.log, flushed per line):
-//   * `[grade] engaged`      per clip change: id, source frame, dims, and a
-//                            node census (lgg/curves/other counts). The node
-//                            census says what a slowdown should be blamed on:
-//                            wheels vs curves vs a multi-node tree.
-//   * `[grade] SPIKE`        a single apply above ~12ms, warned immediately
-//                            (throttled to 1/3s) — a one-frame pathology that a
-//                            pure averages window would smooth away.
-//   * `[grade] avg/peak`     per-30-frame window summary at INFO level (~1
-//                            line/sec at 30fps playback). The dims field tells
-//                            preview (≤640 cap) from full-res playback apart.
-// Cross-frame totals accrue into take_grade_stats() for the controller's
-// per-second `[play]` health line.
-canvas::core::VideoFramePtr TimelineDecoder::grade_clip_frame(
-    const canvas::core::Clip& clip, canvas::core::VideoFramePtr frame) {
-    const canvas::core::grade_graph::GradeLutPtr lut = grade_lut_for(clip);
-    if (!frame || !lut) return frame;
-
-    const auto t0 = std::chrono::steady_clock::now();
-    const auto graded = canvas::core::grade_graph::apply_grade_lut(*frame, *lut);
-    const double ms = std::chrono::duration<double, std::milli>(
-                          std::chrono::steady_clock::now() - t0)
-                          .count();
-
-    grade_samples_ += 1u;
-    grade_ms_sum_ += ms;
-    if (ms > grade_ms_max_) grade_ms_max_ = ms;
-
-    static constexpr double kSpikeMs = 12.0;
-    static constexpr double kCooldownSec = 3.0;
-    static auto last_spike_ = std::chrono::steady_clock::time_point{};
-    const auto now = std::chrono::steady_clock::now();
-    if (ms > kSpikeMs && (last_spike_ == std::chrono::steady_clock::time_point{} ||
-                          now - last_spike_ >= std::chrono::duration<double>(kCooldownSec))) {
-        last_spike_ = now;
-        ::canvas::core::log::log_warning(
-            "[grade] SPIKE clip=%llu src=%lld dims=%dx%d apply_ms=%.2f (CPU LUT)",
-            static_cast<unsigned long long>(clip.id),
-            static_cast<long long>(frame->frame_number), frame->width, frame->height, ms);
-    }
-
-    static constexpr std::uint64_t kReportEvery = 30;
-    static std::uint64_t window_frames_ = 0;
-    static double window_ms_ = 0.0;
-    static double window_peak_ms_ = 0.0;
-    window_frames_ += 1u;
-    window_ms_ += ms;
-    if (ms > window_peak_ms_) window_peak_ms_ = ms;
-    if (window_frames_ >= kReportEvery) {
-        ::canvas::core::log::log_info(
-            "[grade] clip=%llu src=%lld dims=%dx%d apply_ms=%.2f avg_ms=%.2f peak_ms=%.2f "
-            "last=%llu frames (CPU LUT)",
-            static_cast<unsigned long long>(clip.id),
-            static_cast<long long>(frame->frame_number), frame->width, frame->height, ms,
-            window_ms_ / static_cast<double>(window_frames_), window_peak_ms_,
-            static_cast<unsigned long long>(window_frames_));
-        window_frames_ = 0u;
-        window_ms_ = 0.0;
-        window_peak_ms_ = 0.0;
-    }
-    return graded ? graded : frame;
 }
 
 canvas::core::grade_graph::GradeLutPtr TimelineDecoder::grade_lut_for(
@@ -428,13 +404,13 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
         // would later get frame N when src_frame M was asked for). A miss just
         // re-decodes.
         if (frame && frame->frame_number == src_frame) slot->cache.put(frame);
-        if (::canvas::core::log::enabled())
-            ::canvas::core::log::log_warning(
-                "[dec] fullres DECODE media=%d seq=%lld src=%lld ms=%.2f hw=%d dims=%dx%d got=%d",
-                clip.media, static_cast<long long>(seq_frame),
-                static_cast<long long>(src_frame), dec_ms,
-                (int)slot->decoder.is_hardware(), slot->decoder.width(),
-                slot->decoder.height(), frame ? frame->width : 0);
+        ::canvas::core::log::log_warning(
+            "[dec] FULLRES-CALLED media=%d seq=%lld src=%lld ms=%.1f hw=%d dims=%dx%d "
+            "origin=%d nv12_reason=%s",
+            clip.media, static_cast<long long>(seq_frame),
+            static_cast<long long>(src_frame), dec_ms,
+            (int)slot->decoder.is_hardware(), slot->decoder.width(),
+            slot->decoder.height(), t_decode_origin, g_last_nv12_null_reason);
     } else {
         ++fullres_hits_;
     }
@@ -529,12 +505,24 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
                                                      const canvas::core::Clip& clip,
                                                      const std::int64_t seq_frame,
                                                      const int max_dim) {
-    if (clip.media < 0) return nullptr;
-    if (!clip.enabled) return nullptr;
-    if (!canvas::core::gpu::cuda_available()) return nullptr;
+    if (clip.media < 0) {
+        g_last_nv12_null_reason = "media-id-negative";
+        return nullptr;
+    }
+    if (!clip.enabled) {
+        g_last_nv12_null_reason = "clip-disabled";
+        return nullptr;
+    }
+    if (!canvas::core::gpu::cuda_available()) {
+        g_last_nv12_null_reason = "no-cuda";
+        return nullptr;
+    }
 
     auto it = slots_.find(clip.media);
-    if (it == slots_.end() || !it->second->loaded) return nullptr;
+    if (it == slots_.end() || !it->second->loaded) {
+        g_last_nv12_null_reason = "slot-missing-or-not-loaded";
+        return nullptr;
+    }
     return decode_nv12_slot(it->second.get(), project, clip, seq_frame, max_dim);
 }
 
@@ -550,7 +538,10 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
     if (!slot->decoder.has_iframe_index()) slot->decoder.build_iframe_index();
     // decode_to_hw serves only the CUDA device and the composite kernel consumes
     // CUDA device pointers, so require hardware decode + a CUDA device.
-    if (!slot->decoder.is_hardware() || hw_.device_name() != "cuda") return nullptr;
+    if (!slot->decoder.is_hardware() || hw_.device_name() != "cuda") {
+        g_last_nv12_null_reason = "not-hardware-or-device-not-cuda";
+        return nullptr;
+    }
 
     const int64_t src_frame = seq_to_src_frame(project, clip, seq_frame);
     // Two GPU decode strategies, chosen by path:
@@ -594,7 +585,11 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
         }
     }
     hw_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hw_t0).count();
-    if (!hw || !hw->data[0] || !hw->data[1]) return nullptr;
+    if (!hw || !hw->data[0] || !hw->data[1]) {
+        g_last_nv12_null_reason = "decode-to-hw-null";
+        g_last_nv12_null_ms = static_cast<std::int64_t>(hw_ms);
+        return nullptr;
+    }
 
     // Shared NV12 staging with the off-thread transition bake
     // (host_nv12_from_hw), so both paths are pixel-identical: same reduce rule
@@ -604,7 +599,11 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
     const canvas::core::gpu::ColorSpec spec = slot->decoder.color_spec();
     const auto gpu_t0 = std::chrono::steady_clock::now();
     auto frame = host_nv12_from_hw(hw, src_frame, spec, max_dim);
-    if (!frame) return nullptr;
+    if (!frame) {
+        g_last_nv12_null_reason = "host-nv12-staging-null";
+        g_last_nv12_null_ms = 0;
+        return nullptr;
+    }
     const double gpu_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gpu_t0).count();
     const int out_w = frame->width;
@@ -747,15 +746,29 @@ canvas::core::Nv12FramePtr host_nv12_from_hw(const AVFrame* hw, std::int64_t src
     frame->uv_pitch = static_cast<std::size_t>(out_w);
     frame->matrix = spec.matrix;
     frame->range = spec.range;
-    if (!canvas::core::gpu::convert_nv12_resize_to_host(
-            reinterpret_cast<const uint8_t*>(hw->data[0]),
-            reinterpret_cast<const uint8_t*>(hw->data[1]),
-            hw->width, hw->height,
-            static_cast<std::size_t>(hw->linesize[0]),
-            static_cast<std::size_t>(hw->linesize[1]),
-            out_w, out_h, out_w, out_h, 0, 0, &frame->y, &frame->uv))
-        return nullptr;
-    return frame;
+    // Staging is a plain per-frame cudaMalloc + resize + memcpy. Transient
+    // cudaMalloc flakiness at ~30 allocs/sec surfaced as 1/sec host-nv12-staging
+    // nulls that dropped the playhead to the multi-hundred-ms CPU GOP re-walk;
+    // retry once, and log attempt-1 with the captured CUDA error + frame layout
+    // so the failure is attributable (and known recoverable) by the next run.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (canvas::core::gpu::convert_nv12_resize_to_host(
+                reinterpret_cast<const uint8_t*>(hw->data[0]),
+                reinterpret_cast<const uint8_t*>(hw->data[1]),
+                hw->width, hw->height,
+                static_cast<std::size_t>(hw->linesize[0]),
+                static_cast<std::size_t>(hw->linesize[1]),
+                out_w, out_h, out_w, out_h, 0, 0, &frame->y, &frame->uv))
+            return frame;
+        if (attempt == 0)
+            ::canvas::core::log::log_warning(
+                "[dec] NV12-STAGING-FAIL src=%lld dims=%dx%d host=%dx%d "
+                "ls=%d/%d cuda_err=%s",
+                static_cast<long long>(src_frame), hw->width, hw->height, out_w, out_h,
+                hw->linesize[0], hw->linesize[1],
+                canvas::core::gpu::cuda_last_error_string());
+    }
+    return nullptr;
 }
 }  // namespace
 
@@ -1056,6 +1069,7 @@ void TimelineDecoder::run_transition_bake(const TransitionBakeJob& job) {
 
 canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project& project,
                                                 std::int64_t seq_frame) {
+    DecodeOriginGuard origin_frame(1);
     // Off-thread transition pre-render lifecycle (all no-ops outside a bake):
     // past a baked window, adopt its parked-B decoder into the main slot so the
     // post-cut boundary is a sequential continue; then look ahead and kick the
@@ -1149,9 +1163,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                                        ? grade_lut_for(*b)
                                        : canvas::core::grade_graph::GradeLutPtr{};
                 }
-                if (grade_a && cpu_graded_preview_enabled_)
-                    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
-                                                         kPreviewMaxDim));
                 out->mode = to_render_mode(a->transition_out);
                 if (dur_out > 0)
                     out->progress = static_cast<float>(seq_frame - tr_out_start) /
@@ -1172,9 +1183,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
             if (in_in_trans && !in_out_trans) {
                 out->nv12 = std::move(nvA);
                 out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
-                if (grade_a && cpu_graded_preview_enabled_)
-                    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
-                                                         kPreviewMaxDim));
                 out->mode = to_render_mode(a->transition_in);
                 if (dur_in > 0)
                     out->progress = static_cast<float>(seq_frame - a->tl_in) /
@@ -1238,6 +1246,7 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                         if (bit != b_slots_.end() && bit->second->loaded)
                             return decode_nv12_slot(bit->second.get(), project, *b,
                                                     b_seq, 0);
+                        g_last_nv12_null_reason = "b-slot-not-open";
                         return {};
                     }
                     return decode_nv12(project, *b, b_seq, 0);
@@ -1251,9 +1260,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                     out->grade_b = b->has_grade()
                                        ? grade_lut_for(*b)
                                        : canvas::core::grade_graph::GradeLutPtr{};
-                    if (grade_a && cpu_graded_preview_enabled_)
-                        out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
-                                                             kPreviewMaxDim));
                     out->mode = to_render_mode(a->transition_out);
                     if (dur_out > 0)
                         out->progress = static_cast<float>(seq_frame - tr_out_start) /
@@ -1267,9 +1273,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                 // fade A itself out to black over the transition window.
                 out->nv12 = std::move(nvA);
                 out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
-                if (grade_a && cpu_graded_preview_enabled_)
-                    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
-                                                         kPreviewMaxDim));
                 out->mode = to_render_mode(a->transition_out);
                 if (dur_out > 0) {
                     out->progress = static_cast<float>(seq_frame - tr_out_start) /
@@ -1291,17 +1294,24 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
         if (nv12) {
             out->nv12 = std::move(nv12);
             out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
-            // The GPU fast path is the whole story when the Color page is NOT
-            // active: display rides the NV12 planes + shader LUT, and there is
-            // nothing consuming the small CPU `a`.
-            if (grade_a && cpu_graded_preview_enabled_)
-                out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
-                                                     kPreviewMaxDim));
             return out;
         }
     }
 
-    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame));
+    // CPU decode fallback (NV12 fast path unavailable at this position). The
+    // clip's grade is NEVER evaluated here on the CPU: the baked 3D LUT rides
+    // on the RenderFrame and the viewer's fragment shader applies it to the
+    // RGBA texture exactly like the NV12 shader does — zero CPU LUT work on
+    // the playback path.
+    const auto fb_t0 = std::chrono::steady_clock::now();
+    const char* const fb_why = g_last_nv12_null_reason;
+    const auto fb_nv12_ms = g_last_nv12_null_ms;
+    out->a = decode(project, *a, seq_frame);
+    const double fb_ms = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - fb_t0).count();
+    trace_rgba_fallback("A-main", a->media, seq_frame, a->tl_in, fb_why,
+                        fb_nv12_ms, fb_ms);
+    if (grade_a) out->grade = grade_lut_for(*a);
 
     if (in_in_trans) {
         out->mode = to_render_mode(a->transition_in);
@@ -1342,7 +1352,15 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
             int64_t b_seq = b->tl_in + static_cast<int64_t>(std::llround(
                 (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
             if (b_seq < 0) b_seq = 0;
-            out->b = grade_clip_frame(*b, decode(project, *b, b_seq));
+            const auto fbB0 = std::chrono::steady_clock::now();
+            const char* const fbB_why = g_last_nv12_null_reason;
+            const auto fbB_nv12_ms = g_last_nv12_null_ms;
+            out->b = decode(project, *b, b_seq);
+            const double fbB_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fbB0).count();
+            trace_rgba_fallback("B-out", b->media, b_seq, b->tl_in, fbB_why,
+                                fbB_nv12_ms, fbB_ms);
+            if (b->has_grade()) out->grade_b = grade_lut_for(*b);
             if (dur_out > 0)
                 out->progress = static_cast<float>(seq_frame - tr_out_start) /
                                 static_cast<float>(dur_out);
@@ -1367,6 +1385,7 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
 canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Project& project,
                                                   std::int64_t seq_frame,
                                                   int max_dim) {
+    DecodeOriginGuard origin_preview(2);
     auto out = std::make_shared<canvas::core::RenderFrame>();
     const canvas::core::Clip* a = top_video_clip_at(project, seq_frame);
 
@@ -1414,8 +1433,6 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
             if (in_in_trans && !in_out_trans) {
                 out->nv12 = std::move(nvA);
                 out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
-                if (grade_a && cpu_graded_preview_enabled_)
-                    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame, max_dim));
                 out->mode = to_render_mode(a->transition_in);
                 if (dur_in > 0)
                     out->progress = static_cast<float>(seq_frame - a->tl_in) /
@@ -1461,6 +1478,7 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                             if (bit != b_slots_.end() && bit->second->loaded)
                                 return decode_nv12_slot(bit->second.get(), project,
                                                         *b, b_seq, max_dim);
+                            g_last_nv12_null_reason = "b-slot-not-open";
                             return {};
                         }
                         return decode_nv12(project, *b, b_seq, max_dim);
@@ -1474,9 +1492,6 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                         out->grade_b = b->has_grade()
                                            ? grade_lut_for(*b)
                                            : canvas::core::grade_graph::GradeLutPtr{};
-                        if (grade_a && cpu_graded_preview_enabled_)
-                            out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
-                                                                 max_dim));
                         out->mode = to_render_mode(a->transition_out);
                         if (dur_out > 0)
                             out->progress = static_cast<float>(seq_frame - tr_out_start) /
@@ -1490,9 +1505,6 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                     // track): fade A itself out to black over the window.
                     out->nv12 = std::move(nvA);
                     out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
-                    if (grade_a && cpu_graded_preview_enabled_)
-                        out->a = grade_clip_frame(*a, decode(project, *a, seq_frame,
-                                                             max_dim));
                     out->mode = to_render_mode(a->transition_out);
                     if (dur_out > 0)
                         out->progress = static_cast<float>(seq_frame - tr_out_start) /
@@ -1505,18 +1517,24 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                 out->nv12 = std::move(nvA);
                 if (a->has_grade()) {
                     out->grade = grade_lut_for(*a);
-                    // The GPU path needs no CPU rgba to display; the small graded
-                    // feed only exists for the Color-page scopes.
-                    if (cpu_graded_preview_enabled_)
-                        out->a = grade_clip_frame(*a, decode(project, *a, seq_frame, max_dim));
                 }
                 return out;
             }
         }
     }
 
-    out->a = grade_clip_frame(*a, decode(project, *a, seq_frame, max_dim));
-    if (out->a) rgba_had = true;
+    const auto fbA0 = std::chrono::steady_clock::now();
+    const char* const fbA_why = g_last_nv12_null_reason;
+    const auto fbA_nv12_ms = g_last_nv12_null_ms;
+    out->a = decode(project, *a, seq_frame, max_dim);
+    const double fbA_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - fbA0).count();
+    trace_rgba_fallback("A-preview", a->media, seq_frame, a->tl_in, fbA_why,
+                        fbA_nv12_ms, fbA_ms);
+    if (out->a) {
+        rgba_had = true;
+        if (grade_a) out->grade = grade_lut_for(*a);
+    }
 
     if (in_in_trans) {
         out->mode = to_render_mode(a->transition_in);
@@ -1547,7 +1565,15 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
             int64_t b_seq = b->tl_in + static_cast<int64_t>(std::llround(
                 (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
             if (b_seq < 0) b_seq = 0;
-            out->b = grade_clip_frame(*b, decode(project, *b, b_seq, max_dim));
+            const auto fbB0b = std::chrono::steady_clock::now();
+            const char* const fbBb_why = g_last_nv12_null_reason;
+            const auto fbBb_nv12_ms = g_last_nv12_null_ms;
+            out->b = decode(project, *b, b_seq, max_dim);
+            const double fbBb_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fbB0b).count();
+            trace_rgba_fallback("B-preview", b->media, b_seq, b->tl_in, fbBb_why,
+                                fbBb_nv12_ms, fbBb_ms);
+            if (out->b && b->has_grade()) out->grade_b = grade_lut_for(*b);
             if (dur_out > 0) out->progress = static_cast<float>(seq_frame - tr_out_start) /
                                              static_cast<float>(dur_out);
             out->mode = to_render_mode(a->transition_out);

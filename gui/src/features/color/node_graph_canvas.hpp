@@ -16,6 +16,7 @@
 
 class QGraphicsScene;
 class QGraphicsPathItem;
+class QKeyEvent;
 
 namespace canvas::gui {
 
@@ -40,12 +41,14 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
 
 private:
     void fit_to_content();
     void rebuild_connections();
     void layout_nodes();
     void open_context_menu(const QPoint& pos);
+    void delete_selected_nodes();
 
     QGraphicsScene* scene_ = nullptr;
     QVector<QGraphicsItem*> node_items_;

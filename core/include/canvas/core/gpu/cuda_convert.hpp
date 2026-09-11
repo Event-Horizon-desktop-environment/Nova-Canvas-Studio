@@ -49,6 +49,7 @@ inline bool convert_nv12_resize_to_host(const uint8_t*, const uint8_t*, int, int
                                         std::vector<uint8_t>*, std::vector<uint8_t>*) {
     return false;
 }
+inline const char* cuda_last_error_string() { return "no-cuda"; }
 inline void* grade_lut_upload(const float*, int) { return nullptr; }
 inline void grade_lut_free(void*) {}
 inline bool convert_nv12_grade_resize_async(const uint8_t*, const uint8_t*, int, int,
@@ -103,6 +104,10 @@ bool convert_nv12_resize_to_host(const uint8_t* srcY, const uint8_t* srcUV,
                                  int out_w, int out_h, int dst_w, int dst_h,
                                  int dx, int dy,
                                  std::vector<uint8_t>* outY, std::vector<uint8_t>* outUV);
+
+// Human-readable description of the last CUDA runtime error (consumes the sticky
+// error like cudaGetLastError), or a stable fallback when CUDA isn't compiled in.
+const char* cuda_last_error_string();
 
 // Uploads a baked grade grid (GradeLut3D::data) into device memory for the
 // grade kernel. Returns a device pointer (caller frees with grade_lut_free()),

@@ -2,6 +2,7 @@
 
 #include "canvas/core/grade_graph/lut.hpp"
 #include "canvas/core/media/audio_decoder.hpp"
+#include "canvas/core/media/equalizer.hpp"
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/media/video_decoder.hpp"
 #include "canvas/core/media/voice_isolation.hpp"
@@ -137,6 +138,11 @@ private:
     // re-opens (tracked by the AudioTrackDecoder reset). Only used at 48 kHz
     // (the RNNoise rate); other export rates bypass the stage with a warning.
     canvas::core::VoiceIsolationBank iso_bank_;
+    // Per-clip parametric EQ state (6-band RBJ biquad bank), streamed across
+    // audio_chunk() calls within a clip and dropped whenever a clip's decoder
+    // re-opens, mirroring iso_bank_. Rate-independent (unlike the 48 kHz
+    // RNNoise stage), so it runs at every export rate without a bypass.
+    canvas::core::EqualizerBank eq_bank_;
     // Per-clip pitch-preserving Speed Change state (WSOLA time-stretch bank),
     // streamed across audio_chunk() calls within a clip and dropped whenever a
     // clip's decoder re-opens, mirroring iso_bank_. Consumes

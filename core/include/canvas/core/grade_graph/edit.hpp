@@ -83,10 +83,12 @@ struct NodePorts {
 // is whichever edge comes first, not port order). This module emits base first;
 // callers must not reorder those two add_edge calls.
 //
-// kParallel requires a real wired source (the evaluator's A+B-base needs both
-// operands); kLayer tolerates an unwired base (both reads fall back to the
-// clip source). Returns the MIXER node id, or -1 for an invalid kind / sink /
-// missing-parallel-source.
+// BOTH branch kinds require a real wired source on `sink` (an unwired base is
+// refused): the evaluator treats a lone layer edge as the base — skipping its
+// key gate — and a Parallel Mixer with a missing first operand yields null, so
+// inserting over the chain head is not well-defined until a source-bridge
+// node exists (Phase 6+ follow-up). Returns the MIXER node id, or -1 for an
+// invalid kind / sink / missing source.
 [[nodiscard]] int insert_branch(GradeGraph& g, NodeKind kind, int sink);
 
 // Append `layer` as the next (topmost) layer input of a Layer Mixer, assigning

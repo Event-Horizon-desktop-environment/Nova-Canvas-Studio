@@ -917,6 +917,9 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
             // Same seam for the Speed Change stretch: analysis/synthesis
             // cursors must not span the boundary.
             stretch_bank_.drop(clip->id);
+            // And for the EQ: a fresh curve, no stale IIR memory across the
+            // re-open.
+            eq_bank_.drop(clip->id);
         }
 
         const double media_fps = media_fps_for(*project_, *clip);
@@ -1045,6 +1048,29 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
                     pcm = nullptr;
                     den_frames = 0;
                 }
+            }
+        }
+        // Per-clip parametric EQ: the 6-band biquad cascade (RBJ Cookbook)
+        // applied after voice isolation and before the gains/fade mix — the
+        // same stage order as playback. The EQ is pure stream-in-place
+        // filtering at ANY export rate (no fixed-48 kHz bypass like the RNNoise
+        // stage above) and writes exactly the frame count it was given, so the
+        // per-output-frame gain law below stays in sync. Disabled clips pass
+        // through bit-exact; the bank drops its filter state then, so toggling
+        // EQ on restarts from a fresh curve.
+        std::vector<float> eqd;
+        if (den_frames > 0 && pcm) {
+            if (clip->eq_enabled) {
+                eqd.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
+                // The EQ is stream-in-place and rate-preserving, so it writes
+                // exactly the frames it was given (the returned count is the
+                // no-lookahead contract, asserted here).
+                den_frames = eq_bank_.tick(clip->id, clip->eq_bands, true, out_sample_rate,
+                                           den_ch, eqd.data(), den_frames);
+                pcm = eqd.data();
+            } else {
+                (void)eq_bank_.tick(clip->id, clip->eq_bands, false, out_sample_rate, den_ch,
+                                    nullptr, 0);
             }
         }
         // Per-output-frame gain from the clip's audio IN/OUT transitions

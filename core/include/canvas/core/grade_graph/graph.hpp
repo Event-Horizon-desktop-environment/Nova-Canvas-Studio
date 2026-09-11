@@ -51,12 +51,34 @@ enum class NodeKind {
     kOutput,         // graph terminal; exactly one rgb in
 };
 
-// What a Corrector/Parallel/Layer/Outside node's own formula computes. The
-// full wheel/tone parameter set lands in Phase 3; identity is the safe
-// default so an empty node is a no-op.
-enum class CorrectMode { kIdentity, kLgg, kCdl, kCurves };
+// The per-node op slot (see op.hpp/.cpp for the registry that owns apply /
+// identity / name dispatch). What a Corrector/Parallel/Layer/Outside node's
+// own formula computes; identity is the safe default so an empty node is a
+// no-op. Phase 6b widened this from CorrectMode to OpKind so Phase 7 effect
+// ops land under the same slot; `CorrectMode` is kept as a deprecated alias
+// for the existing callers/project files.
+enum class OpKind { kIdentity, kLgg, kCdl, kCurves };
+using CorrectMode = OpKind;  // deprecated spelling, kept for source compat
 
 enum class KeyMixMode { kAdd, kSubtract, kIntersect, kInvert };
+
+// Porter–Duff compositing operator a Layer Mixer applies when folding a layer
+// in (Phase 6a). kOver + kNormal reproduces the throwback straight composite
+// for opaque sources; the rest are the classic set (Fusion Merge naming). The
+// law equations live in composite.hpp/.cpp — the model only stores the choice.
+// Semantics at opaque coverage: Over/In/Atop/Disjoint reproduce the source (or
+// its blend-family result), Out/XOr/Stencil cut to transparent, Mask keeps the
+// backdrop under the source alpha, Stencil cuts a hole with the inverse.
+enum class CompositeOp {
+    kOver,
+    kIn,
+    kOut,
+    kAtop,
+    kXor,
+    kDisjoint,
+    kMask,
+    kStencil,
+};
 
 enum class BlendMode {
     kNormal,      // straight alpha composite: below*(1-k) + layer*k
@@ -82,8 +104,9 @@ struct Node {
     // shared base both branches start from.
     int shared_source = -1;
 
-    // Corrector flavor + params (Phase 1 laws; Phase 3 adds the full tone set).
-    CorrectMode correct_mode = CorrectMode::kIdentity;
+    // Op slot (OpKind) + params (Phase 1 laws; Phase 3 adds the full tone set).
+    // The field keeps its Phase 3 name for JSON/project-file compatibility.
+    OpKind correct_mode = OpKind::kIdentity;
     std::optional<colorsci::LGG> lgg;
     std::optional<colorsci::Cdl> cdl;
     std::optional<colorsci::Offset> offset;  // Primaries Offset wheel, applied before LGG
@@ -91,6 +114,12 @@ struct Node {
 
     KeyMixMode key_mode = KeyMixMode::kAdd;
     BlendMode blend = BlendMode::kNormal;
+    // Layer-fold law (Layer Mixer reads these per layer node): the composite
+    // operator and Fusion-style additive/subtractive knob (0.0 = subtractive,
+    // premultiplied edges; 1.0 = additive, backdrop unattenuated). Ignored by
+    // serial/parallel/corrector nodes.
+    CompositeOp composite_op = CompositeOp::kOver;
+    float additive = 0.0f;
 };
 
 struct PipeId {

@@ -1082,6 +1082,12 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
                        (long long)target, (long long)number);
                 decode_ok();
                 if (!retain_hw_) retain_hw_ = av_frame_alloc();
+                // av_frame_ref() requires a CLEAN destination (it neither unrefs
+                // nor overwrites existing buffer refs); re-ref'ing the retained
+                // copy without av_frame_unref() first leaked one NVDEC device
+                // surface per decode here — ~5.5MB × 30fps ≈ 166MB/s of VRAM,
+                // enough to fill the card in ~90s of playback.
+                if (retain_hw_) av_frame_unref(retain_hw_);
                 if (retain_hw_ && av_frame_ref(retain_hw_, av_frame_) == 0) {
                     retain_hw_src_ = number;
                 } else {

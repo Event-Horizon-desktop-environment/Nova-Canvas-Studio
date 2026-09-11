@@ -62,7 +62,7 @@ All follow existing snapshot-based undo pattern. Linked mates inherit values.
 | # | Category | Controls | Wired |
 |---|----------|----------|-------|
 | 1 | Audio (Volume/Pan) | Volume dB spin (-60..+24), Pan spin (-1..+1) | Yes (moved from ShellDocks) |
-| 2 | Pitch | Semi Tones spin+slider (-12..+12), Cents spin+slider (-100..+100) | Yes |
+| 2 | Pitch | Semi Tones spin+slider (-12..+12), Cents spin+slider (-100..+100) | Yes — now audible (2026-09-11: windowed-sinc SRC front-end in the retime engine) |
 | 3 | Speed Change | Enable toggle, Speed factor spin+slider (0.1..10.0) | Yes |
 | 4 | Equalizer | Enable toggle, EQ graph widget, 6 bands × (type/freq/gain/Q) | Yes |
 | 5 | AI Voice Isolation | Enable toggle (placeholder), Amount slider | No (UI only) |
@@ -71,19 +71,29 @@ All follow existing snapshot-based undo pattern. Linked mates inherit values.
 
 ### EQ Band defaults:
 
-| Band | Type | Freq | Gain | Q |
-|------|------|------|------|---|
-| B1 | LowShelf | 20 Hz | +18.1 dB | — |
-| B2 | Bell | 57 Hz | +18.1 dB | — |
-| B3 | Bell | 97 Hz | +10.5 dB | 1.0 |
-| B4 | Bell | 1.2K Hz | 0.0 dB | 1.0 |
-| B5 | HighShelf | 6.0K Hz | 0.0 dB | — |
-| B6 | LowPass | 19.0K Hz | — | — |
+Flat — enabling EQ is silent until the user shapes it. All six bands are
+Bell @ 1 kHz, 0 dB, Q 1.0 (a bit-exact pass-through until edited).
 
 ### Key behavior:
 - Tab **only enabled** when audio clip selected (`clip->kind == Track::Kind::Audio`)
 - Video clip selected → tab greys out or shows only Volume/Pan
 - All changes via `set_clip_audio_processing` → undo → snapshot push
+
+### Interactive EQ graph (`EqGraphWidget` in `InspectorAudio.cpp`):
+- **View toggle** above the graph switches between **Curve** (classic node graph) and **EasyEffects** (six vertical gain-fader columns). Selection is shared across both views.
+- **Curve view:**
+  - **Drag a node** = frequency + gain together; **Shift = frequency only**; **Ctrl/Alt = gain only**.
+  - **Mouse wheel** over a node (else over the selected band) = Q in log steps (~1.15×/notch, 0.1 → 10); the scroll settles for 240 ms then records **one** undoable edit.
+  - **Click** selects a node (accent ring + the matching B-label takes the band hue in the row); clicking empty plot clears selection.
+  - **Double-click** toggles the band's per-band bypass (`EqBand.enabled`, persisted) — disabled nodes render hollow/dim and drop out of the cascade curve.
+- **EasyEffects view:**
+  - Each of the six columns is one band's **vertical gain fader**, laid out exactly like EasyEffects' band columns.
+  - **Drag a fader** = that band's gain (the only axis; the fader is pinned to 0 dB for LowPass/HighPass).
+  - **Mouse wheel** over a column = Q, same log-step + 240 ms commit as the curve.
+  - **Click** the column selects the band; **double-click** its top dot toggles the band's bypass.
+- **LowPass/HighPass** have no gain knob: the node/fader is pinned to the 0 dB line, vertical drag is refused, and the row gain spinbox greys out.
+- Live row ↔ graph echo (spins update during a drag, graph repaints on spin edits); each gesture settles into exactly one `set_clip_audio_processing` commit.
+- Curve is the true 6-band cascade magnitude (`equalizer_response`, shares `band_filters()` with the DSP), excluding bypassed bands.
 
 ---
 
@@ -209,6 +219,13 @@ zero-warning, `ctest --test-dir build` passes **13/13** (incl. the new
 flips/identity are byte-exact), and `./scripts/check_qtdep.sh` passes.
 
 Deviation notes vs. the plan above (all deliberate, documented in code):
+
+- **Pitch now applies to audio** (2026-09-11): the Pitch category was wired to
+  `set_clip_audio_processing` from the start, but playback/export only started
+  honouring it when the retime engine gained its windowed-sinc pitch front-end and
+  pan output stage (`time_stretch.hpp/.cpp`; ratio `spd/pitch`, shared
+  `audio_mix::pan_gains` law, mono upmix at non-center). Without that the field
+  only round-tripped.
 
 - **Audio tab gating:** the Audio page is enabled only when an audio-kind clip
   is selected (per-user decision); a video clip selection greys the whole tab.

@@ -146,32 +146,26 @@ struct Clip {
         float frequency = 1000.0f;
         float gain = 0.0f;
         float q = 1.0f;
+        // Per-band bypass: a disabled band is excluded from the cascade and the
+        // displayed curve, but keeps its settings so toggling it back on restores
+        // the exact band. Defaults to enabled so existing clips/bands behave
+        // identically.
+        bool enabled = true;
         bool operator==(const EqBand&) const = default;
     };
-    // The reference EQ curve shown when a clip first gains EqBand defaults
-    // (mirrors the reference app's six-band layout).
+    // The EQ curve a clip starts with. Flat by default: enabling EQ must be
+    // silent until the user shapes it (a 0 dB five-band lift would otherwise
+    // boom the mix the moment EQ is toggled on). All-Bell so a fresh EQ is a
+    // bit-exact pass-through (LowPass/HighPass/Notch always filter, even at
+    // 0 dB of gain).
     [[nodiscard]] static std::array<EqBand, 6> default_eq_bands() noexcept {
         std::array<EqBand, 6> bands{};
-        bands[0].type = EqBand::Type::LowShelf;
-        bands[0].frequency = 20.0f;
-        bands[0].gain = 18.1f;
-        bands[1].type = EqBand::Type::Bell;
-        bands[1].frequency = 57.0f;
-        bands[1].gain = 18.1f;
-        bands[2].type = EqBand::Type::Bell;
-        bands[2].frequency = 97.0f;
-        bands[2].gain = 10.5f;
-        bands[2].q = 1.0f;
-        bands[3].type = EqBand::Type::Bell;
-        bands[3].frequency = 1200.0f;
-        bands[3].gain = 0.0f;
-        bands[3].q = 1.0f;
-        bands[4].type = EqBand::Type::HighShelf;
-        bands[4].frequency = 6000.0f;
-        bands[4].gain = 0.0f;
-        bands[5].type = EqBand::Type::LowPass;
-        bands[5].frequency = 19000.0f;
-        bands[5].gain = 0.0f;
+        for (auto& b : bands) {
+            b.type = EqBand::Type::Bell;
+            b.frequency = 1000.0f;
+            b.gain = 0.0f;
+            b.q = 1.0f;
+        }
         return bands;
     }
     bool eq_enabled = false;

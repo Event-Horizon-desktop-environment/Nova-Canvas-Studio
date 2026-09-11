@@ -104,6 +104,7 @@ add_library(canvas_core STATIC
     src/media/hw_device.cpp
     src/media/audio_waveform.cpp
     src/media/voice_isolation.cpp
+    src/media/equalizer.cpp
     src/timeline/model.cpp
     src/timeline/edit_ops.cpp
     src/timeline/time_stretch.cpp
@@ -112,6 +113,9 @@ add_library(canvas_core STATIC
     src/colorsci/histogram.cpp
     src/grade_graph/graph.cpp
     src/grade_graph/eval.cpp
+    src/grade_graph/composite.cpp
+    src/grade_graph/op.cpp
+    src/grade_graph/edit.cpp
     src/grade_graph/serialize.cpp
     src/grade_graph/lut.cpp
     src/project/project.cpp
@@ -164,6 +168,21 @@ target_link_libraries(canvas_graph_test PRIVATE canvas_core)
 set_target_properties(canvas_graph_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME graph COMMAND canvas_graph_test)
 
+add_executable(canvas_graph_edit_test tests/graph_edit_test.cpp)
+target_link_libraries(canvas_graph_edit_test PRIVATE canvas_core)
+set_target_properties(canvas_graph_edit_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME graph_edit COMMAND canvas_graph_edit_test)
+
+add_executable(canvas_composite_test tests/composite_test.cpp)
+target_link_libraries(canvas_composite_test PRIVATE canvas_core)
+set_target_properties(canvas_composite_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME composite COMMAND canvas_composite_test)
+
+add_executable(canvas_op_test tests/op_test.cpp)
+target_link_libraries(canvas_op_test PRIVATE canvas_core)
+set_target_properties(canvas_op_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME op COMMAND canvas_op_test)
+
 add_executable(canvas_lut_test tests/lut_test.cpp)
 target_link_libraries(canvas_lut_test PRIVATE canvas_core)
 set_target_properties(canvas_lut_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
@@ -199,7 +218,17 @@ target_link_libraries(canvas_voice_isolation_test PRIVATE canvas_core)
 set_target_properties(canvas_voice_isolation_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME voice_isolation COMMAND canvas_voice_isolation_test)
 
+add_executable(canvas_vram_leak_test tests/vram_leak_test.cpp)
+target_link_libraries(canvas_vram_leak_test PRIVATE canvas_core)
+set_target_properties(canvas_vram_leak_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME vram_leak COMMAND canvas_vram_leak_test)
+
 add_executable(canvas_clip_rate_test tests/clip_rate_test.cpp)
 target_link_libraries(canvas_clip_rate_test PRIVATE canvas_core)
 set_target_properties(canvas_clip_rate_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME clip_rate COMMAND canvas_clip_rate_test)
+
+add_executable(canvas_equalizer_test tests/equalizer_test.cpp)
+target_link_libraries(canvas_equalizer_test PRIVATE canvas_core)
+set_target_properties(canvas_equalizer_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME equalizer COMMAND canvas_equalizer_test)

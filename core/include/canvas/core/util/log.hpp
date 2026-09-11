@@ -65,14 +65,24 @@ inline const char* default_log_path() {
     return path;
 }
 
-inline FILE* file() {
-    static FILE* f = [] {
+inline FILE*& file() {
+    static FILE* f = nullptr;
+    if (!f) {
         const char* path = std::getenv("CANVAS_LOG_FILE");
         if (!path || !*path) path = default_log_path();
-        FILE* h = std::fopen(path, "a");
-        return h;
-    }();
+        f = std::fopen(path, "a");
+    }
     return f;
+}
+
+// Close the cached log handle so the next write re-opens the file fresh.
+// Called from the GUI's reset_log_file() so the core writer doesn't keep a
+// stale fd to an old inode after the file is removed and recreated.
+inline void reset_file() {
+    if (FILE* old = file()) {
+        std::fclose(old);
+        file() = nullptr;
+    }
 }
 
 inline std::mutex& mutex() {

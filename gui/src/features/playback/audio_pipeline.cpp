@@ -184,6 +184,7 @@ void AudioPipeline::reset() {
     live_gain_db_.clear();
     iso_bank_.clear();
     stretch_bank_.clear();
+    eq_bank_.clear();
 }
 
 void AudioPipeline::set_live_clip_gain(canvas::core::ClipId id, float volume_db) {
@@ -264,6 +265,9 @@ void AudioPipeline::reanchor_locked(int64_t seq_frame) {
     // the discontinuity (a seek is a brand-new contiguous stream).
     iso_bank_.drop();
     stretch_bank_.drop();
+    // Same rule for the EQ bank: a seek starts a fresh curve, no stale IIR
+    // delay memory from the pre-seek stream.
+    eq_bank_.drop();
     // Re-arm the device on every seek so playback restarts from the new
     // playhead; without this, resume would play stale audio from the old spot.
     if (active_) {
@@ -647,6 +651,28 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
             } else {
                 pcm = nullptr;
                 den_frames = 0;
+            }
+        }
+        if (pcm && den_frames > 0) {
+            // Per-clip parametric EQ: the 6-band biquad cascade (RBJ Cookbook)
+            // shapes the denoised PCM BEFORE its gains/mix — the same stage
+            // order as export. The EQ is pure stream-in-place filtering at any
+            // rate (no fixed-48 kHz rule like RNNoise) and always writes the
+            // same frame count it was given, so the mix accounting is
+            // untouched. Disabled clips pass through bit-exact; the bank also
+            // drops its filter state then, so toggling EQ on restarts from a
+            // fresh curve rather than stale IIR memory.
+            std::vector<float> eqd;
+            if (clip.eq_enabled) {
+                eqd.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
+                // The EQ is stream-in-place and rate-preserving, so it writes
+                // exactly the frames it was given (the returned count is the
+                // no-lookahead contract, asserted here).
+                den_frames = eq_bank_.tick(clip.id, clip.eq_bands, true, rate_, den_ch,
+                                           eqd.data(), den_frames);
+                pcm = eqd.data();
+            } else {
+                (void)eq_bank_.tick(clip.id, clip.eq_bands, false, rate_, den_ch, nullptr, 0);
             }
         }
         if (pcm && den_frames > 0) {

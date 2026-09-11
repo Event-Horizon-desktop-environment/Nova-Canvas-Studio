@@ -21,6 +21,7 @@
 // stay a direct include: unordered_map<unique_ptr<Incomplete>> cannot be
 // default-constructed in the header, and audio_decoder.hpp is Qt-free anyway.
 #include "canvas/core/media/audio_decoder.hpp"
+#include "canvas/core/media/equalizer.hpp"
 #include "canvas/core/media/voice_isolation.hpp"
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/time_stretch.hpp"
@@ -195,6 +196,14 @@ private:
     // because the tab state must not span a discontinuity, and cleared on full
     // reset().
     canvas::core::VoiceIsolationBank iso_bank_;
+
+    // Per-clip parametric EQ state (6-band RBJ biquad bank) applied in
+    // write_mixed() after voice isolation and before gains/mix. Pure
+    // stream-in-place filtering — no lookahead, so `want_frames` accounting is
+    // untouched — and rate-independent (unlike RNNoise's fixed 48 kHz), so it
+    // runs at any pipeline rate. Dropped on every re-anchor (seek/rewind) and
+    // cleared on full reset(), mirroring iso_bank_/stretch_bank_.
+    canvas::core::EqualizerBank eq_bank_;
 
     // Per-clip pitch-preserving Speed Change state (WSOLA time-stretch bank)
     // applied in write_mixed() before voice isolation. The stretch consumes

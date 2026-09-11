@@ -1,5 +1,6 @@
 #include "canvas/core/grade_graph/graph.hpp"
 
+#include <cstddef>
 #include <queue>
 #include <set>
 

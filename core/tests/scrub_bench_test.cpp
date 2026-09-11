@@ -249,7 +249,7 @@ int main() {
         // GPU NV12 paths couldn't run even warmed; still report the skip.
         std::printf("GPU  (CUDA unavailable - GPU sub-benchmarks not exercised)\n");
     } else {
-        HwDeviceManager hw;
+        HwDeviceManager hw{"test"};
         VideoDecoder dec;
         std::string open_err;
         const bool gpu_ok = dec.open(src, &open_err, hw.device_ctx()) && dec.is_hardware();

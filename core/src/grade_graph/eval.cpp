@@ -1,5 +1,8 @@
 #include "canvas/core/grade_graph/eval.hpp"
 
+#include "canvas/core/grade_graph/composite.hpp"
+#include "canvas/core/grade_graph/op.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -40,23 +43,8 @@ GrayF GrayF::filled(int w, int h, float value) {
 namespace {
 
 // ---- per-node correction (the spec's "corrected" operand) -----------------
-
-colorsci::RGBF apply_correction(const colorsci::RGBF& p, const Node& node) {
-    switch (node.correct_mode) {
-        case CorrectMode::kLgg: {
-            colorsci::RGBF out = p;
-            if (node.offset) out = colorsci::apply_offset(out, *node.offset);
-            return colorsci::apply_lgg(out, node.lgg.value_or(colorsci::LGG{}));
-        }
-        case CorrectMode::kCdl:
-            return colorsci::apply_cdl(p, node.cdl.value_or(colorsci::Cdl{}));
-        case CorrectMode::kCurves:
-            return colorsci::apply_curves(p, node.curves.value_or(colorsci::CurveParams{}));
-        case CorrectMode::kIdentity:
-            break;
-    }
-    return p;
-}
+// The op's pointwise law lives in the op registry (op.hpp/.cpp) so Phase 7
+// effect ops register without touching the evaluator topology.
 
 std::shared_ptr<FrameF> corrected_image(const FrameF& in, const Node& node) {
     auto out = std::make_shared<FrameF>(FrameF::filled(in.w, in.h, 0.0f, 0.0f, 0.0f));
@@ -64,7 +52,7 @@ std::shared_ptr<FrameF> corrected_image(const FrameF& in, const Node& node) {
         for (int x = 0; x < in.w; ++x) {
             const float* src = in.at(x, y);
             float* dst = out->at(x, y);
-            const colorsci::RGBF res = apply_correction({src[0], src[1], src[2]}, node);
+            const colorsci::RGBF res = op_apply(node, colorsci::RGBF{src[0], src[1], src[2]});
             dst[0] = res.r;
             dst[1] = res.g;
             dst[2] = res.b;
@@ -144,47 +132,27 @@ struct EvalState {
 
 }  // namespace
 
+// Step-composite `layer` over `acc` with the given blend family. This is the
+// Porter–Duff Over-with-blend law from composite.hpp with the source's OWN
+// alpha as its coverage (no key/opacity — the caller in the mixer folds those
+// in separately). For opaque inputs it reduces to the classic blend-family
+// "replace" law, so legacy callers and blend vectors keep their numbers; the
+// alpha channel is now genuinely recomputed instead of copied from `acc`:
+//
+//   as = layer[3], ab = acc[3]; ao = as + ab(1-as)
+//   out = W3C over-with-blend(...);  out[3] = ao
 void blend_into(const float* acc, const float* layer, float* out, std::size_t n,
                 BlendMode blend) {
     for (std::size_t i = 0; i < n; ++i) {
         const float* a = &acc[i * 4];
         const float* l = &layer[i * 4];
         float* o = &out[i * 4];
-        for (int c = 0; c < 3; ++c) {
-            const float A = a[c];
-            const float B = l[c];
-            switch (blend) {
-                case BlendMode::kScreen:
-                    o[c] = 1.0f - (1.0f - A) * (1.0f - B);
-                    break;
-                case BlendMode::kMultiply:
-                    o[c] = A * B;
-                    break;
-                case BlendMode::kOverlay:
-                    o[c] = A <= 0.5f ? 2.0f * A * B : 1.0f - 2.0f * (1.0f - A) * (1.0f - B);
-                    break;
-                case BlendMode::kSoftLight:
-                    o[c] = B <= 0.5f ? A - (1.0f - 2.0f * B) * A * (1.0f - A)
-                                     : A + (2.0f * B - 1.0f) *
-                                               (A <= 0.25f ? ((16.0f * A - 12.0f) * A + 4.0f) * A
-                                                           : std::sqrt(A) - A);
-                    break;
-                case BlendMode::kAdd:
-                    o[c] = A + B;
-                    break;
-                case BlendMode::kSubtract:
-                    o[c] = A - B;
-                    break;
-                case BlendMode::kDifference:
-                    o[c] = std::fabs(A - B);
-                    break;
-                case BlendMode::kNormal:
-                default:
-                    o[c] = B;
-                    break;
-            }
-        }
-        o[3] = a[3];
+        const CompositeSample s = composite_sample(a[0], a[1], a[2], a[3], l[0], l[1], l[2], l[3],
+                                                   CompositeOp::kOver, blend, 0.0f);
+        o[0] = s.r;
+        o[1] = s.g;
+        o[2] = s.b;
+        o[3] = s.a;
     }
 }
 
@@ -298,9 +266,11 @@ std::shared_ptr<const FrameF> eval_node(EvalState& st, const Node& n) {
             const FrameF* base = ins[0].second >= 0 ? st.rgb[ins[0].second].get() : &st.source;
             if (!base) return nullptr;
             auto acc = std::make_shared<FrameF>(*base);
-            auto tmp = std::make_shared<FrameF>(*base);
             const std::size_t npx = static_cast<std::size_t>(st.source.w) * st.source.h;
-            // Remaining inputs, in port order, composite bottom-to-top.
+            // Remaining inputs, in port order, composite bottom-to-top. Each
+            // layer's coverage folds key * opacity * its OWN alpha together, so
+            // the Porter–Duff law sees true premultiplied sources; serial
+            // correctors before the stack keep their keyed-veil law intact.
             std::vector<std::pair<int, int>> layers(ins.begin() + 1, ins.end());
             std::stable_sort(layers.begin(), layers.end(),
                              [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
@@ -311,15 +281,19 @@ std::shared_ptr<const FrameF> eval_node(EvalState& st, const Node& n) {
                 if (src < 0) continue;
                 const std::shared_ptr<const FrameF> layer = st.rgb[src];
                 if (!layer) continue;
-                blend_into(acc->rgba.data(), layer->rgba.data(), tmp->rgba.data(), npx,
-                           st.graph.node(src).blend);
+                const Node& ln = st.graph.node(src);
                 const std::shared_ptr<const GrayF> k = st.key_for(src);
-                const float op = st.graph.node(src).opacity;
                 for (std::size_t i = 0; i < npx; ++i) {
-                    const float eff = k->v[i] * op;
-                    for (int c = 0; c < 3; ++c) {
-                        acc->rgba[i * 4 + c] += (tmp->rgba[i * 4 + c] - acc->rgba[i * 4 + c]) * eff;
-                    }
+                    float* o = &acc->rgba[i * 4];
+                    const float* l = &layer->rgba[i * 4];
+                    const float as = std::clamp(l[3] * k->v[i] * ln.opacity, 0.0f, 1.0f);
+                    const CompositeSample s =
+                        composite_sample(o[0], o[1], o[2], o[3], l[0], l[1], l[2], as,
+                                         ln.composite_op, ln.blend, ln.additive);
+                    o[0] = s.r;
+                    o[1] = s.g;
+                    o[2] = s.b;
+                    o[3] = s.a;
                 }
             }
             return acc;

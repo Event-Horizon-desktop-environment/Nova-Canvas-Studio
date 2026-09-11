@@ -4,6 +4,7 @@
 #include "canvas/core/util/log.hpp"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <fstream>
 #include <iterator>
 #include <chrono>
@@ -56,7 +57,20 @@ json clip_to_json(const Clip& c) {
                 {"clip_color", c.clip_color},
                 {"comments", c.comments},
                 {"speed_enabled", c.speed_enabled},
-                {"speed_factor", c.speed_factor}};
+                {"speed_factor", c.speed_factor},
+                {"pitch_semitones", c.pitch_semitones},
+                {"pitch_cents", c.pitch_cents},
+                {"eq_enabled", c.eq_enabled},
+                {"eq_bands", [&]() {
+                     json arr = json::array();
+                     for (const Clip::EqBand& b : c.eq_bands)
+                         arr.push_back({{"type", static_cast<int>(b.type)},
+                                        {"frequency", b.frequency},
+                                        {"gain", b.gain},
+                                        {"q", b.q},
+                                        {"enabled", b.enabled}});
+                     return arr;
+                 }()}};
     if (c.has_grade()) j["grade"] = grade_graph::grade_graph_to_json(c.grade);
     return j;
 }
@@ -119,6 +133,25 @@ Clip clip_from_json(const json& j) {
     if (j.contains("comments")) j.at("comments").get_to(c.comments);
     if (j.contains("speed_enabled")) j.at("speed_enabled").get_to(c.speed_enabled);
     if (j.contains("speed_factor")) j.at("speed_factor").get_to(c.speed_factor);
+    if (j.contains("pitch_semitones")) j.at("pitch_semitones").get_to(c.pitch_semitones);
+    if (j.contains("pitch_cents")) j.at("pitch_cents").get_to(c.pitch_cents);
+    if (j.contains("eq_enabled")) j.at("eq_enabled").get_to(c.eq_enabled);
+    if (j.contains("eq_bands")) {
+        const auto& arr = j.at("eq_bands");
+        const std::size_t n = std::min(arr.size(), c.eq_bands.size());
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto& bj = arr[i];
+            Clip::EqBand b;
+            if (bj.contains("type"))
+                b.type = static_cast<Clip::EqBand::Type>(bj.at("type").get<int>());
+            if (bj.contains("frequency")) bj.at("frequency").get_to(b.frequency);
+            if (bj.contains("gain")) bj.at("gain").get_to(b.gain);
+            if (bj.contains("q")) bj.at("q").get_to(b.q);
+            // Pre-enabled files omit `enabled`; treat the band as enabled.
+            if (bj.contains("enabled")) bj.at("enabled").get_to(b.enabled);
+            c.eq_bands[i] = b;
+        }
+    }
     // A malformed grade must not kill the whole project load; drop the grade
     // block and keep the clip (matches the deliver-settings tolerance below).
     if (j.contains("grade")) {

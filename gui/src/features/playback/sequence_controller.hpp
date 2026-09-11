@@ -83,13 +83,6 @@ public:
     void set_scrub_audio_enabled(bool on) { scrub_audio_enabled_.store(on); }
     [[nodiscard]] bool scrub_audio_enabled() const { return scrub_audio_enabled_.load(); }
 
-    // Gate the CPU graded-preview feed (decoder-level flag, default OFF so
-    // play/edit stay on the pure GPU NV12 fast path). The Color page enables it
-    // on enter so its scopes/curve-veil read graded pixels; it then re-presents
-    // the current frame to seed them.
-    void set_cpu_graded_preview_enabled(bool on) { decoder_.set_cpu_graded_preview_enabled(on); }
-    [[nodiscard]] bool cpu_graded_preview_enabled() const { return decoder_.cpu_graded_preview_enabled(); }
-
     // Monitoring volume / mute, forwarded to the audio output. Volume is [0,1];
     // setting volume un-mutes. Mute silences without losing the volume.
     void set_volume(float volume) { audio_out_.set_volume(volume); }

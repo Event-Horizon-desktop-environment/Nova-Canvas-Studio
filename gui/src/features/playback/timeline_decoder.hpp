@@ -97,11 +97,11 @@ public:
         std::uint64_t evictions = 0;
     };
     [[nodiscard]] PreviewStats take_preview_stats();
-    // Window accrual of the per-frame grade-apply cost (Phase 6 live graded
-    // preview). The decoder's `[grade]` lines own the throttled per-frame
-    // reporting (engage census, per-30 summary, apply-spike warning); this is
-    // the cross-frame totals the controller folds into its per-second `[play]`
-    // health snapshot. Resets on every read.
+    // Cross-frame grade statistics for the controller's per-second `[play]`
+    // health snapshot. All grading now happens GPU-side (shader-sampled 3D LUT
+    // on the NV12/RGBA planes — see viewer_gl.cpp), so no CPU LUT cost is
+    // accrued any more and these read back as zeros; kept so the health line's
+    // grade slot still exists. Resets on every read.
     struct GradeStats {
         std::uint64_t samples = 0;
         double ms_sum = 0.0;
@@ -115,16 +115,6 @@ public:
 
     // Shared hardware-decode device (probed once; falls back to software).
     [[nodiscard]] const canvas::core::HwDeviceManager& hw() const noexcept { return hw_; }
-
-    // CPU-graded CPU preview feed for the Color-page scopes. On the GPU fast
-    // path a graded clip needs no CPU pixels to DISPLAY (the grade rides as a
-    // GPU-sampled 3D LUT on the NV12 planes), so the extra 640x360 RGBA decode
-    // + CPU LUT apply per frame is a pure cost — it exists only so the Color
-    // page's scopes/curve-veil can read graded pixels. Off by default: Edit-tab
-    // and media playback stay on the GPU fast path. The Color page enables it
-    // on enter (and re-presents the current frame) so its scopes show signal.
-    void set_cpu_graded_preview_enabled(bool on) { cpu_graded_preview_enabled_ = on; }
-    [[nodiscard]] bool cpu_graded_preview_enabled() const noexcept { return cpu_graded_preview_enabled_; }
 
     // Slot diagnostics for the [scrub:BAD] trace (media slot loaded / hw-decoding).
     [[nodiscard]] bool is_loaded(canvas::core::MediaId id) const;
@@ -177,12 +167,7 @@ private:
     std::uint64_t preview_misses_ = 0;
     std::uint64_t preview_evictions_ = 0;
 
-    canvas::core::HwDeviceManager hw_;
-
-    // Off by default → Edit-tab/media playback stay pure GPU (NV12 fast path +
-    // GPU LUT); set only while the Color page is active so its scopes/veil can
-    // read the CPU-graded preview feed.
-    bool cpu_graded_preview_enabled_ = false;
+    canvas::core::HwDeviceManager hw_{"playback"};
 
     // Topmost unlocked video clip covering `seq_frame` (bottom-to-top scan).
     const canvas::core::Clip* top_video_clip_at(const canvas::core::Project& project,
@@ -206,15 +191,6 @@ private:
     // use; pruned with the rest on close()/invalidate().
     void open_b_slot(const canvas::core::Project& project,
                      const canvas::core::Clip& clip);
-
-    // Phase 6 live graded preview: applies `clip`'s grade to a decoded RGBA
-    // frame (returns the raw frame when the clip has no grade or the evaluator
-    // has no terminal to evaluate). Emits the always-on `[grade]` telemetry and
-    // accrues apply-time into the take_grade_stats() window. Private member so
-    // the stats land on the decoder (not file-local); the frozen public surface
-    // is untouched by this addition.
-    canvas::core::VideoFramePtr grade_clip_frame(const canvas::core::Clip& clip,
-                                                 canvas::core::VideoFramePtr frame);
 
     // Resolve-style grade flattening: returns the baked 3D LUT for `clip`'s
     // grade tree (nullptr when the clip has no wired grade => passthrough).

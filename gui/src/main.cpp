@@ -100,7 +100,7 @@ int main(int argc, char* argv[]) {
     // Feeding the manager triggers its own themed probe log ([hw] probing...),
     // so we just surface the outcome here rather than re-probing.
     const auto env_t0 = std::chrono::steady_clock::now();
-    canvas::core::HwDeviceManager hw;
+    canvas::core::HwDeviceManager hw{"main"};
     (void)hw.device_ctx();
     const double env_probe_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - env_t0).count();

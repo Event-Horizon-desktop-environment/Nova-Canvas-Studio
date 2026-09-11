@@ -207,6 +207,17 @@ int main() {
         // Speed Change (whole-clip retime) fields must also survive the round-trip.
         p.sequence.video_tracks[0].clips[0].speed_enabled = true;
         p.sequence.video_tracks[0].clips[0].speed_factor = 2.0;
+        // Pitch shift and the 6-band parametric EQ (with a disabled band) must
+        // survive too — these were lost before per-clip audio-processing
+        // serialization landed, silently resetting every EQ/pitch edit on load.
+        p.sequence.video_tracks[0].clips[0].pitch_semitones = 2.0f;
+        p.sequence.video_tracks[0].clips[0].pitch_cents = 50.0f;
+        p.sequence.video_tracks[0].clips[0].eq_enabled = true;
+        auto& eq = p.sequence.video_tracks[0].clips[0].eq_bands;
+        eq[1].gain = -4.5f;
+        eq[1].q = 2.0f;
+        eq[3].frequency = 4000.0f;
+        eq[4].enabled = false;
 
         // Serialize.
         std::string err;
@@ -221,6 +232,13 @@ int main() {
         check(lc.clip_color == 7, "clip colour preserved");
         check(lc.comments == "keeper shot", "clip comments preserved");
         check(lc.speed_enabled && lc.speed_factor == 2.0, "speed fields preserved");
+        check(lc.pitch_semitones == 2.0f && lc.pitch_cents == 50.0f, "pitch fields preserved");
+        check(lc.eq_enabled, "eq_enabled preserved");
+        check(lc.eq_bands[1].gain == -4.5f && lc.eq_bands[1].q == 2.0f,
+              "eq band gain/q preserved");
+        check(lc.eq_bands[3].frequency == 4000.0f, "eq band frequency preserved");
+        check(!lc.eq_bands[4].enabled, "eq band disabled flag preserved");
+        check(lc.eq_bands[4].type == Clip::default_eq_bands()[4].type, "eq band type preserved");
         check(p.media.size() == loaded.media.size(), "media registry preserved");
         check(loaded.media.size() == 1 && loaded.media[0].bin == "Scratch", "media bin preserved");
         check(loaded.bins.size() == 1 && loaded.bins[0] == "Scratch", "bins list preserved");

@@ -11,6 +11,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdio>
+#include <mutex>
 
 namespace canvas::core::gpu {
 
@@ -524,6 +525,21 @@ bool convert_nv12_resize(const uint8_t* srcY, const uint8_t* srcUV, int src_w, i
     return cudaGetLastError() == cudaSuccess;
 }
 
+namespace {
+
+// Persistent host-staging buffers for convert_nv12_resize_to_host. The
+// playback path calls this ~30x/sec; a per-frame cudaMalloc pair churned the
+// device heap and, once fragmented, failed with "out of memory" on ~1 alloc/sec
+// — dropping the playhead to the multi-hundred-ms CPU GOP re-walk. Cache two
+// device buffers (grow-only) and fence them with a mutex so the playback thread
+// and the transition-bake thread share them safely.
+std::mutex g_staging_mtx;
+uint8_t* g_staging_y = nullptr;
+uint8_t* g_staging_uv = nullptr;
+std::size_t g_staging_y_size = 0;
+std::size_t g_staging_uv_size = 0;
+}  // namespace
+
 bool convert_nv12_resize_to_host(const uint8_t* srcY, const uint8_t* srcUV,
                                  int src_w, int src_h,
                                  std::size_t src_y_pitch, std::size_t src_uv_pitch,
@@ -534,30 +550,42 @@ bool convert_nv12_resize_to_host(const uint8_t* srcY, const uint8_t* srcUV,
         out_h <= 0 || dst_w <= 0 || dst_h <= 0)
         return false;
 
-    uint8_t* dY = nullptr;
-    uint8_t* dUV = nullptr;
+    // Persistent grow-only host-staging pool (see g_staging_y/uv): the
+    // playback path calls this ~30x/sec, and a per-frame cudaMalloc pair
+    // churned the device heap until ~1 alloc/sec failed "out of memory",
+    // dropping the playhead to the multi-hundred-ms CPU GOP re-walk.
     const std::size_t y_sz = static_cast<std::size_t>(out_w) * out_h;
     const std::size_t uv_sz = static_cast<std::size_t>(out_w) * (out_h / 2);
-    if (cudaMalloc(&dY, y_sz) != cudaSuccess) return false;
-    if (cudaMalloc(&dUV, uv_sz) != cudaSuccess) {
-        cudaFree(dY);
-        return false;
+    std::lock_guard<std::mutex> lk(g_staging_mtx);
+    if (y_sz > g_staging_y_size) {
+        if (g_staging_y) cudaFree(g_staging_y);
+        g_staging_y = nullptr;
+        if (cudaMalloc(&g_staging_y, y_sz) != cudaSuccess) return false;
+        g_staging_y_size = y_sz;
+    }
+    if (uv_sz > g_staging_uv_size) {
+        if (g_staging_uv) cudaFree(g_staging_uv);
+        g_staging_uv = nullptr;
+        if (cudaMalloc(&g_staging_uv, uv_sz) != cudaSuccess) return false;
+        g_staging_uv_size = uv_sz;
     }
 
     bool ok = false;
     if (convert_nv12_resize(srcY, srcUV, src_w, src_h, src_y_pitch, src_uv_pitch,
-                            dY, static_cast<std::size_t>(out_w),
-                            dUV, static_cast<std::size_t>(out_w),
+                            g_staging_y, static_cast<std::size_t>(out_w),
+                            g_staging_uv, static_cast<std::size_t>(out_w),
                             out_w, out_h, dst_w, dst_h, dx, dy)) {
         outY->resize(y_sz);
         outUV->resize(uv_sz);
-        const cudaError_t ey = cudaMemcpy(outY->data(), dY, y_sz, cudaMemcpyDeviceToHost);
-        const cudaError_t euv = cudaMemcpy(outUV->data(), dUV, uv_sz, cudaMemcpyDeviceToHost);
+        const cudaError_t ey = cudaMemcpy(outY->data(), g_staging_y, y_sz, cudaMemcpyDeviceToHost);
+        const cudaError_t euv = cudaMemcpy(outUV->data(), g_staging_uv, uv_sz, cudaMemcpyDeviceToHost);
         ok = (ey == cudaSuccess) && (euv == cudaSuccess);
     }
-    cudaFree(dUV);
-    cudaFree(dY);
     return ok;
+}
+
+const char* cuda_last_error_string() {
+    return cudaGetErrorString(cudaGetLastError());
 }
 
 void* grade_lut_upload(const float* data, int size) {

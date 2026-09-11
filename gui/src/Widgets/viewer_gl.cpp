@@ -232,6 +232,10 @@ void main() {
 constexpr const char* kFragSrc = R"(
 uniform sampler2D u_tex;      // outgoing (A)
 uniform sampler2D u_tex_b;    // incoming (B), during a transition
+uniform sampler3D u_grade;    // A's baked 3D RGB->RGB grade LUT (RGB32F)
+uniform sampler3D u_grade_b;  // B's baked 3D RGB->RGB grade LUT (RGB32F)
+uniform int    u_grade_size;  // N for A; <2 => no grade on A
+uniform int    u_grade_b_size; // N for B; <2 => no grade on B
 uniform int    u_mode;        // TransitionRenderMode
 uniform float  u_progress;    // 0..1 transition progress
 uniform float  u_aspect;      // texture aspect (w/h) for circular/wipe shapes
@@ -250,13 +254,23 @@ const int MODE_WIPEUP       = 7;
 const int MODE_WIPEDOWN     = 8;
 const int MODE_FADEIN_A     = 9;   // single-clip: fade the A texture itself in from black
 
+vec4 grade_rgb(vec4 p, sampler3D lut, int size) {
+    if (size < 2) return p;
+    vec3 rgb = clamp(p.rgb, 0.0, 1.0);
+    // Same r-major / x-fastest orientation as kFragNv12Src: the uploaded 3D
+    // texture stores gridpoint (r=z, g=y, b=x) at texel (x,y,z), so swap R/B in
+    // the coordinate to evaluate gridpoint (r,g,b) like the CPU path.
+    vec3 coord = vec3(rgb.b, rgb.g, rgb.r) * float(size - 1) / float(size) + 0.5 / float(size);
+    return vec4(texture(lut, coord).rgb, p.a);
+}
+
 void main() {
-    vec4 a = texture(u_tex, v_uv);
+    vec4 a = grade_rgb(texture(u_tex, v_uv), u_grade, u_grade_size);
     if (u_mode == MODE_NONE) {
         fragColor = a;
         return;
     }
-    vec4 b = texture(u_tex_b, v_uv);
+    vec4 b = grade_rgb(texture(u_tex_b, v_uv), u_grade_b, u_grade_b_size);
     float t = clamp(u_progress, 0.0, 1.0);
 
     if (u_mode == MODE_FADEIN_A) {
@@ -638,6 +652,134 @@ qDebug() << "[viewer] UPSCALE"
         valid = true;
     };
 
+    // Grade-LUT upload: the clip's baked 3D RGB->RGB LUT rides on the
+    // RenderFrame (u_grade/u_grade_b, RGB32F, trilinear, GL texture units 4/5).
+    // Uploaded as 3D textures only when the LUT pointer changed — rebaking is
+    // decode-side and cached, so identical lookups across successive frames skip
+    // the upload.
+    //
+    // QOpenGLTexture forbids setSize/setFormat/allocateStorage once storage is
+    // allocated, and re-allocating anyway is driver-dependent garbage (can
+    // visibly corrupt the sampled LUT). So the immutable parts run only on a
+    // fresh texture; later re-uploads are setData-only overwrites. The grid is
+    // size-33 by default and cached decode-side, so grids rarely change; a
+    // different size still rebuilds the texture object.
+    //
+    // Runs on every upload path that carries grades (NV12 fast path, the
+    // small-preview NV12->RGBA conversion, and the CPU-RGBA fallback), so the
+    // shader grades A and B wherever either is drawn — the CPU never applies a
+    // grade on the viewer path.
+    auto upload_grades = [this](const canvas::core::RenderFrame* rf) {
+        {   // A-side LUT → grade_tex_a_
+            const canvas::core::grade_graph::GradeLut3D* lut = rf->grade.get();
+            if (lut && lut->valid() && lut != grade_a_uploaded_) {
+                const int n = lut->size;
+                if (grade_tex_a_ &&
+                    grade_tex_a_->isStorageAllocated() &&
+                    grade_tex_a_->width() != n) {
+                    grade_tex_a_.reset();
+                }
+                const bool fresh = !grade_tex_a_ || !grade_tex_a_->isStorageAllocated();
+                if (!grade_tex_a_) {
+                    grade_tex_a_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target3D);
+                    grade_tex_a_->setMinificationFilter(QOpenGLTexture::Linear);
+                    grade_tex_a_->setMagnificationFilter(QOpenGLTexture::Linear);
+                    grade_tex_a_->setWrapMode(QOpenGLTexture::ClampToEdge);
+                }
+                if (fresh) {
+                    grade_tex_a_->setSize(n, n, n);
+                    grade_tex_a_->setFormat(QOpenGLTexture::RGB32F);
+                    grade_tex_a_->allocateStorage();
+                }
+                const auto up0 = std::chrono::steady_clock::now();
+                grade_tex_a_->setData(0, 0, 0, n, n, n, QOpenGLTexture::RGB,
+                                      QOpenGLTexture::Float32, lut->data.data());
+                const double up_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - up0)
+                                         .count();
+                const auto digest = canvas::core::grade_graph::grade_lut_digest(*lut);
+                qDebug().nospace()
+                    << "[grade] viewer LUT-A upload seq=" << lut->change_seq
+                    << " t=" << canvas::core::log::epoch_ms()
+                    << " size=" << n << " up_ms=" << QString::number(up_ms, 'f', 3)
+                    << " frame=" << (rf->a ? rf->a->frame_number : -1)
+                    << " realloc=" << (fresh ? 1 : 0)
+                    << " tex=" << static_cast<const void*>(grade_tex_a_.get())
+                    << " hash=" << QString::number(digest.hash, 16)
+                    << " mid=(" << QString::number(digest.mid[0], 'f', 3) << ","
+                    << QString::number(digest.mid[1], 'f', 3) << ","
+                    << QString::number(digest.mid[2], 'f', 3) << ")"
+                    << " black=(" << QString::number(digest.black[0], 'f', 3) << ","
+                    << QString::number(digest.black[1], 'f', 3) << ","
+                    << QString::number(digest.black[2], 'f', 3) << ")"
+                    << " skin=(" << QString::number(digest.skin[0], 'f', 3) << ","
+                    << QString::number(digest.skin[1], 'f', 3) << ","
+                    << QString::number(digest.skin[2], 'f', 3) << ")"
+                    << " maxdev=" << QString::number(digest.max_dev, 'f', 3);
+                CANVAS_COLOR_LOG(
+                    "[viewer] upload A seq=%llu size=%d hash=%016llx "
+                    "mid=(%.3f,%.3f,%.3f) skin=(%.3f,%.3f,%.3f) maxdev=%.3f",
+                    static_cast<unsigned long long>(lut->change_seq), n,
+                    static_cast<unsigned long long>(digest.hash), digest.mid[0],
+                    digest.mid[1], digest.mid[2], digest.skin[0], digest.skin[1],
+                    digest.skin[2], digest.max_dev);
+                grade_a_uploaded_ = lut;
+            } else if (!lut) {
+                grade_tex_a_.reset();
+                grade_a_uploaded_ = nullptr;
+            }
+        }
+        {   // B-side LUT → grade_tex_b_
+            const canvas::core::grade_graph::GradeLut3D* lut = rf->grade_b.get();
+            if (lut && lut->valid() && lut != grade_b_uploaded_) {
+                const int n = lut->size;
+                if (grade_tex_b_ &&
+                    grade_tex_b_->isStorageAllocated() &&
+                    grade_tex_b_->width() != n) {
+                    grade_tex_b_.reset();
+                }
+                const bool fresh = !grade_tex_b_ || !grade_tex_b_->isStorageAllocated();
+                if (!grade_tex_b_) {
+                    grade_tex_b_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target3D);
+                    grade_tex_b_->setMinificationFilter(QOpenGLTexture::Linear);
+                    grade_tex_b_->setMagnificationFilter(QOpenGLTexture::Linear);
+                    grade_tex_b_->setWrapMode(QOpenGLTexture::ClampToEdge);
+                }
+                if (fresh) {
+                    grade_tex_b_->setSize(n, n, n);
+                    grade_tex_b_->setFormat(QOpenGLTexture::RGB32F);
+                    grade_tex_b_->allocateStorage();
+                }
+                const auto up0 = std::chrono::steady_clock::now();
+                grade_tex_b_->setData(0, 0, 0, n, n, n, QOpenGLTexture::RGB,
+                                      QOpenGLTexture::Float32, lut->data.data());
+                const double up_ms = std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - up0)
+                                         .count();
+                const auto digest = canvas::core::grade_graph::grade_lut_digest(*lut);
+                qDebug().nospace()
+                    << "[grade] viewer LUT-B upload seq=" << lut->change_seq
+                    << " t=" << canvas::core::log::epoch_ms()
+                    << " size=" << n << " up_ms=" << QString::number(up_ms, 'f', 3)
+                    << " frame=" << (rf->b ? rf->b->frame_number : -1)
+                    << " realloc=" << (fresh ? 1 : 0)
+                    << " tex=" << static_cast<const void*>(grade_tex_b_.get())
+                    << " hash=" << QString::number(digest.hash, 16)
+                    << " mid=(" << QString::number(digest.mid[0], 'f', 3) << ","
+                    << QString::number(digest.mid[1], 'f', 3) << ","
+                    << QString::number(digest.mid[2], 'f', 3) << ")"
+                    << " skin=(" << QString::number(digest.skin[0], 'f', 3) << ","
+                    << QString::number(digest.skin[1], 'f', 3) << ","
+                    << QString::number(digest.skin[2], 'f', 3) << ")"
+                    << " maxdev=" << QString::number(digest.max_dev, 'f', 3);
+                grade_b_uploaded_ = lut;
+            } else if (!lut) {
+                grade_tex_b_.reset();
+                grade_b_uploaded_ = nullptr;
+            }
+        }
+    };
+
     // NV12 GPU fast path: upload the two planes as R8 (luma) + RG8 (CbCr)
     // textures; the per-frame-spec YUV->RGB conversion (u_matrix/u_range) is
     // applied in the fragment shader.
@@ -678,10 +820,10 @@ qDebug() << "[viewer] UPSCALE"
             rgba->height = h;
             rgba->stride = static_cast<std::size_t>(w) * 4;
 
-            // Convert to RGBA, then apply the clip's grade LUT on the CPU so the
-            // small-preview fallback shows (and scopes keep reading) the graded
-            // pixels exactly as the GPU NV12 path would. The grade, if any, lives
-            // on the RenderFrame (not the NV12 planes), so carry it over.
+            // Convert to RGBA; the clip's grade is NOT applied here. The baked 3D
+            // LUT is carried on the RenderFrame and applied by the fragment
+            // shader below (upload_grades + kFragSrc's u_grade), exactly like
+            // the NV12 fast path — the CPU never grades pixels on the viewer.
             rgba->rgba.assign(rgba->stride * static_cast<std::size_t>(h), 0);
             const int y_p = static_cast<int>(n->y_pitch);
             const int uv_p = static_cast<int>(n->uv_pitch);
@@ -704,23 +846,10 @@ qDebug() << "[viewer] UPSCALE"
             }
             auto rf = std::make_shared<canvas::core::RenderFrame>();
             canvas::core::VideoFramePtr carry = std::move(rgba);
-            if (frame_->grade && frame_->grade->valid()) {
-                if (canvas::core::VideoFramePtr g = canvas::core::grade_graph::apply_grade_lut(*carry, *frame_->grade)) {
-                    // CPU fallback grade trace: the small-preview (scrub) path
-                    // re-grades on the CPU, so a grade that only ever shows in
-                    // the preview still has a line here proving it ran.
-                    // Gated like the sibling NV12->RGBA line — per-frame at
-                    // scrub rate would wash the log out.
-                    static int64_t cpugrade_log_ = 0;
-                    if ((cpugrade_log_++ % 16) == 0) {
-                        qDebug().nospace()
-                            << "[grade] viewer CPU-grade apply size=" << frame_->grade->size
-                            << " frame=" << (frame_->a ? frame_->a->frame_number : -1);
-                    }
-                    carry = std::move(g);
-                }
-            }
+
             rf->a = std::move(carry);
+            rf->grade = frame_->grade;
+            rf->grade_b = frame_->grade_b;
             rf->b = frame_->b;
             rf->mode = frame_->mode;
             rf->progress = frame_->progress;
@@ -736,6 +865,7 @@ qDebug() << "[viewer] UPSCALE"
                 int bh = 0;
                 upload(texture_b_, frame_->b, bw, bh, texture_second_valid_);
             }
+            upload_grades(frame_.get());
             ++up_cvt_cnt;
             texture_dirty_ = false;
             up_mark("r");
@@ -832,124 +962,9 @@ qDebug() << "[viewer] UPSCALE"
             }
             nv12_b_valid_ = true;
         }
-        // Upload the clip's grade LUT(s) as RGB32F 3D textures (unit 4/5 in the
-        // shader). Only when the LUT pointer changed: rebaking is decode-side and
-        // cached, and identical lookups across successive frames skip the upload.
-        //
-        // QOpenGLTexture forbids setSize/setFormat/allocateStorage once storage
-        // is allocated, and re-allocating anyway is driver-dependent garbage
-        // (can visibly corrupt the sampled LUT). So the immutable parts run only
-        // on a fresh texture; later re-uploads are setData-only overwrites. The
-        // grid is size-33 by default and cached decode-side, so grids rarely
-        // change; a different size still rebuilds the texture object.
-        {   // A-side LUT → grade_tex_a_
-            const canvas::core::grade_graph::GradeLut3D* lut = frame_->grade.get();
-            if (lut && lut->valid() && lut != grade_a_uploaded_) {
-                const int n = lut->size;
-                if (grade_tex_a_ &&
-                    grade_tex_a_->isStorageAllocated() &&
-                    grade_tex_a_->width() != n) {
-                    grade_tex_a_.reset();
-                }
-                const bool fresh = !grade_tex_a_ || !grade_tex_a_->isStorageAllocated();
-                if (!grade_tex_a_) {
-                    grade_tex_a_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target3D);
-                    grade_tex_a_->setMinificationFilter(QOpenGLTexture::Linear);
-                    grade_tex_a_->setMagnificationFilter(QOpenGLTexture::Linear);
-                    grade_tex_a_->setWrapMode(QOpenGLTexture::ClampToEdge);
-                }
-                if (fresh) {
-                    grade_tex_a_->setSize(n, n, n);
-                    grade_tex_a_->setFormat(QOpenGLTexture::RGB32F);
-                    grade_tex_a_->allocateStorage();
-                }
-                const auto up0 = std::chrono::steady_clock::now();
-                grade_tex_a_->setData(0, 0, 0, n, n, n, QOpenGLTexture::RGB,
-                                      QOpenGLTexture::Float32, lut->data.data());
-                const double up_ms = std::chrono::duration<double, std::milli>(
-                                         std::chrono::steady_clock::now() - up0)
-                                         .count();
-                const auto digest = canvas::core::grade_graph::grade_lut_digest(*lut);
-                qDebug().nospace()
-                    << "[grade] viewer LUT-A upload seq=" << lut->change_seq
-                    << " t=" << canvas::core::log::epoch_ms()
-                    << " size=" << n << " up_ms=" << QString::number(up_ms, 'f', 3)
-                    << " frame=" << (frame_->a ? frame_->a->frame_number : -1)
-                    << " realloc=" << (fresh ? 1 : 0)
-                    << " tex=" << static_cast<const void*>(grade_tex_a_.get())
-                    << " hash=" << QString::number(digest.hash, 16)
-                    << " mid=(" << QString::number(digest.mid[0], 'f', 3) << ","
-                    << QString::number(digest.mid[1], 'f', 3) << ","
-                    << QString::number(digest.mid[2], 'f', 3) << ")"
-                    << " black=(" << QString::number(digest.black[0], 'f', 3) << ","
-                    << QString::number(digest.black[1], 'f', 3) << ","
-                    << QString::number(digest.black[2], 'f', 3) << ")"
-                    << " skin=(" << QString::number(digest.skin[0], 'f', 3) << ","
-                    << QString::number(digest.skin[1], 'f', 3) << ","
-                    << QString::number(digest.skin[2], 'f', 3) << ")"
-                    << " maxdev=" << QString::number(digest.max_dev, 'f', 3);
-                CANVAS_COLOR_LOG(
-                    "[viewer] upload A seq=%llu size=%d hash=%016llx "
-                    "mid=(%.3f,%.3f,%.3f) skin=(%.3f,%.3f,%.3f) maxdev=%.3f",
-                    static_cast<unsigned long long>(lut->change_seq), n,
-                    static_cast<unsigned long long>(digest.hash), digest.mid[0],
-                    digest.mid[1], digest.mid[2], digest.skin[0], digest.skin[1],
-                    digest.skin[2], digest.max_dev);
-                grade_a_uploaded_ = lut;
-            } else if (!lut) {
-                grade_tex_a_.reset();
-                grade_a_uploaded_ = nullptr;
-            }
-        }
-        {   // B-side LUT → grade_tex_b_
-            const canvas::core::grade_graph::GradeLut3D* lut = frame_->grade_b.get();
-            if (lut && lut->valid() && lut != grade_b_uploaded_) {
-                const int n = lut->size;
-                if (grade_tex_b_ &&
-                    grade_tex_b_->isStorageAllocated() &&
-                    grade_tex_b_->width() != n) {
-                    grade_tex_b_.reset();
-                }
-                const bool fresh = !grade_tex_b_ || !grade_tex_b_->isStorageAllocated();
-                if (!grade_tex_b_) {
-                    grade_tex_b_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target3D);
-                    grade_tex_b_->setMinificationFilter(QOpenGLTexture::Linear);
-                    grade_tex_b_->setMagnificationFilter(QOpenGLTexture::Linear);
-                    grade_tex_b_->setWrapMode(QOpenGLTexture::ClampToEdge);
-                }
-                if (fresh) {
-                    grade_tex_b_->setSize(n, n, n);
-                    grade_tex_b_->setFormat(QOpenGLTexture::RGB32F);
-                    grade_tex_b_->allocateStorage();
-                }
-                const auto up0 = std::chrono::steady_clock::now();
-                grade_tex_b_->setData(0, 0, 0, n, n, n, QOpenGLTexture::RGB,
-                                      QOpenGLTexture::Float32, lut->data.data());
-                const double up_ms = std::chrono::duration<double, std::milli>(
-                                         std::chrono::steady_clock::now() - up0)
-                                         .count();
-                const auto digest = canvas::core::grade_graph::grade_lut_digest(*lut);
-                qDebug().nospace()
-                    << "[grade] viewer LUT-B upload seq=" << lut->change_seq
-                    << " t=" << canvas::core::log::epoch_ms()
-                    << " size=" << n << " up_ms=" << QString::number(up_ms, 'f', 3)
-                    << " frame=" << (frame_->b ? frame_->b->frame_number : -1)
-                    << " realloc=" << (fresh ? 1 : 0)
-                    << " tex=" << static_cast<const void*>(grade_tex_b_.get())
-                    << " hash=" << QString::number(digest.hash, 16)
-                    << " mid=(" << QString::number(digest.mid[0], 'f', 3) << ","
-                    << QString::number(digest.mid[1], 'f', 3) << ","
-                    << QString::number(digest.mid[2], 'f', 3) << ")"
-                    << " skin=(" << QString::number(digest.skin[0], 'f', 3) << ","
-                    << QString::number(digest.skin[1], 'f', 3) << ","
-                    << QString::number(digest.skin[2], 'f', 3) << ")"
-                    << " maxdev=" << QString::number(digest.max_dev, 'f', 3);
-                grade_b_uploaded_ = lut;
-            } else if (!lut) {
-                grade_tex_b_.reset();
-                grade_b_uploaded_ = nullptr;
-            }
-        }
+        // Upload the clip's grade LUT(s) (shared with the RGBA/small-preview
+        // paths via upload_grades) so the NV12 shader grades A and B.
+        upload_grades(frame_.get());
         texture_valid_ = false;
         texture_second_valid_ = false;
         nv12_valid_ = true;
@@ -979,6 +994,10 @@ qDebug() << "[viewer] UPSCALE"
         upload(texture_b_, frame_->b, bw, bh, texture_second_valid_);
         // Keep second texture size so letterboxing matches texture A's aspect.
     }
+
+    // The clip's grade rides the RGBA textures as a sampled 3D LUT (same as the
+    // NV12 path), so a CPU-RGBA decode still renders fully graded display.
+    upload_grades(frame_.get());
 
     texture_dirty_ = false;
     up_mark("r");
@@ -1261,6 +1280,26 @@ void ViewerGL::paintGL() {
             program_->setUniformValue("u_mode", trans ? static_cast<int>(frame_->mode) : 0);
             program_->setUniformValue("u_progress", trans ? frame_->progress : 0.0f);
         }
+        // A/B grade LUTs (units 4/5): the same sample-graded 3D-LUT path as the
+        // NV12 shaders, so a CPU-RGBA decode still renders fully graded display.
+        const bool grade_a_attached = frame_ && frame_->grade && frame_->grade->valid() &&
+                                      grade_tex_a_ && grade_a_uploaded_ == frame_->grade.get();
+        const bool grade_b_attached = frame_ && frame_->grade_b && frame_->grade_b->valid() &&
+                                      grade_tex_b_ && grade_b_uploaded_ == frame_->grade_b.get();
+        if (grade_a_attached) {
+            grade_tex_a_->bind(4);
+            program_->setUniformValue("u_grade", 4);
+            program_->setUniformValue("u_grade_size", frame_->grade->size);
+        } else {
+            program_->setUniformValue("u_grade_size", 0);
+        }
+        if (grade_b_attached) {
+            grade_tex_b_->bind(5);
+            program_->setUniformValue("u_grade_b", 5);
+            program_->setUniformValue("u_grade_b_size", frame_->grade_b->size);
+        } else {
+            program_->setUniformValue("u_grade_b_size", 0);
+        }
         program_->setUniformValue("u_aspect", aspect);
     }
 
@@ -1348,6 +1387,8 @@ void ViewerGL::paintGL() {
         } else if (texture_second_valid_ && frame_ && frame_->has_transition()) {
             texture_b_->release();
         }
+        if (grade_a_uploaded_ && frame_ && frame_->grade) grade_tex_a_->release();
+        if (grade_b_uploaded_ && frame_ && frame_->grade_b) grade_tex_b_->release();
         texture_->release();
         program_->release();
     }

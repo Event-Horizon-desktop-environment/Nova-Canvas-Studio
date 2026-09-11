@@ -333,6 +333,23 @@ void SequenceController::worker_loop() {
 
 void SequenceController::handle_set_project(std::shared_ptr<const canvas::core::Project> project,
                                             const int64_t initial_frame) {
+    // Set-project cadence (debug): edit snapshots tear the whole decode stack
+    // down and reopen it, so a burst mid-playback is the classic ~1Hz stall
+    // source. The cadence line + the [dec] close census + the [hw] owner tags
+    // attribute a stall to "another commit landed" vs a decoder-side hiccup.
+    static unsigned set_proj_n_ = 0;
+    static auto set_proj_t0_ = Clock::now();
+    const double since_ms = std::chrono::duration<double, std::milli>(
+                                Clock::now() - set_proj_t0_)
+                                .count();
+    set_proj_t0_ = Clock::now();
+    ++set_proj_n_;
+    if (debug_enabled())
+        qDebug().nospace()
+            << "[playback] SET-PROJECT #" << set_proj_n_
+            << " since_last_ms=" << QString::number(since_ms, 'f', 0)
+            << " initial_frame=" << initial_frame
+            << " playing=" << playing_.load();
     playing_.store(false);
     play_pause_intent_.store(false);  // new project => not playing; keep button in sync
     audio_.reset();

@@ -10,7 +10,8 @@
 //
 //   {"nodes":[{"id":I,"kind":"corrector","label":"..","bypass":B,"opacity":F,
 //              "partner":P,"shared_source":S,"correct_mode":"lgg",
-//              "lgg":{...},"cdl":{...},"key_mode":"add","blend":"normal"}],
+//              "lgg":{...},"cdl":{...},"key_mode":"add","blend":"normal",
+//              "composite_op":"over","additive":0.0}],
 //    "edges":[{"from":{"node",I,"type":"rgb","port":P},"to":{...}}]}
 //
 // The `grade` clip field is omitted entirely when a clip has no grade (see
