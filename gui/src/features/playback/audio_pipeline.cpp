@@ -100,12 +100,13 @@ void mix_source_samples(std::vector<float>& out, const int out_channels,
                         const canvas::core::Clip& clip, const float track_gain_db,
                         const float volume_db, const float* samples, const int src_ch,
                         const int frames, const int64_t from_sample, const int out_rate,
-                        const double src_fps, const double seq_fps, const double speed = 1.0) {
+                        const double src_fps, const double seq_fps, const double speed = 1.0,
+                        const float pan = 0.0f) {
     if (frames <= 0 || !samples) return;
     std::vector<float> gains;
     compute_fade_gains(clip, from_sample, out_rate, src_fps, seq_fps, speed, frames, &gains);
     float gl = 1.0f, gr = 1.0f;
-    canvas::core::audio_mix::pan_gains(clip.pan, gl, gr);
+    canvas::core::audio_mix::pan_gains(pan, gl, gr);
     const float vol = canvas::core::audio_mix::db_to_gain(volume_db) *
                       canvas::core::audio_mix::db_to_gain(track_gain_db);
     canvas::core::audio_mix::mix_chunk(out, out_channels, samples, src_ch, frames,
@@ -116,12 +117,13 @@ void mix_source_chunk(std::vector<float>& out, const int out_channels,
                       const canvas::core::Clip& clip, const float track_gain_db,
                       const float volume_db, const canvas::core::AudioChunkPtr& chunk,
                       const int64_t from_sample, const int out_rate, const double src_fps,
-                      const double seq_fps, const double speed = 1.0) {
+                      const double seq_fps, const double speed = 1.0,
+                      const float pan = 0.0f) {
     const int src_ch = chunk->channels > 0 ? chunk->channels : 1;
     const int frames = static_cast<int>(chunk->samples.size()) / src_ch;
     mix_source_samples(out, out_channels, clip, track_gain_db, volume_db,
                        chunk->samples.data(), src_ch, frames, from_sample, out_rate,
-                       src_fps, seq_fps, speed);
+                       src_fps, seq_fps, speed, pan);
 }
 }  // namespace
 
@@ -445,7 +447,8 @@ void AudioPipeline::play_scrub_grain(int64_t seq_frame) {
     if (f <= 0) return;
     std::vector<float> grain(static_cast<std::size_t>(f) * channels_, 0.0f);
     mix_source_chunk(grain, channels_, *clip, sources[0].gain_db,
-                     effective_clip_volume_db(*clip), s, base_sample, rate_, fps_v, seq_fps);
+                     effective_clip_volume_db(*clip), s, base_sample, rate_, fps_v, seq_fps,
+                     1.0, clip->pan);
     if (!sink_.write_float(grain.data(), f))
         ::canvas::core::log::log_warning("[scrub] GRAIN dropped (overflow) at frame=%lld frames=%d",
                                      static_cast<long long>(seq_frame), f);
@@ -599,9 +602,11 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
                 static_cast<long long>(feed_watermarks_[clip.id]),
                 static_cast<long long>(src_out_sample));
 
-        // Per-clip Speed Change (pitch-preserving WSOLA): stretch the decoded
-        // media to output frames sized by the realtime clock (want_frames).
-        // The engine streams per clip and returns fewer frames than requested
+        // Per-clip Speed Change + Pitch shift + Pan (WSOLA + windowed-sinc
+        // retime engine): stretch the decoded media to output frames sized by
+        // the realtime clock (want_frames), with the pitch-shifted resample
+        // and the pan balance baked into the engine output. The engine
+        // streams per clip and returns fewer frames than requested
         // only while it primes its first ~40 ms window; those gaps even out
         // over the next feed (RNNoise behaves the same), and the mix path
         // writes exactly what it gets.
@@ -609,17 +614,22 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
         const float* pcm = chunk->samples.data();
         int den_ch = src_ch;
         int den_frames = frames;
-        if (spd != 1.0) {
+        const double pitch = canvas::core::cliprate::pitch_factor(clip);
+        const bool need_dsp = spd != 1.0 || pitch != 1.0 || clip.pan != 0.0f;
+        if (need_dsp) {
             const int want = static_cast<int>(std::max<int64_t>(
                 1, std::min<int64_t>(
                        canvas::core::cliprate::output_frames_from_media(
                            clip, static_cast<int64_t>(frames)),
                        want_frames)));
-            const int written = stretch_bank_.tick(clip.id, spd, rate_, src_ch,
-                                                   chunk->samples.data(), frames, want, sped);
+            int out_ch = den_ch;
+            const int written = stretch_bank_.tick(clip.id, spd, pitch, clip.pan, rate_,
+                                                   src_ch, chunk->samples.data(), frames,
+                                                   want, sped, &out_ch);
             if (written <= 0) continue;  // stretch priming: nothing to mix this step
             pcm = sped.data();
             den_frames = written;
+            den_ch = out_ch;
         }
 
         // Per-clip AI voice isolation (RNNoise): denoise this source's PCM
@@ -629,7 +639,7 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
         std::vector<float> denoised;
         if (clip.voice_isolation != canvas::core::VoiceIsolationMode::None) {
             denoised.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
-            const int written = iso_bank_.tick(clip.id, clip.voice_isolation, rate_, src_ch,
+            const int written = iso_bank_.tick(clip.id, clip.voice_isolation, rate_, den_ch,
                                                denoised.data(), den_frames);
             if (written > 0) {
                 pcm = denoised.data();
@@ -640,9 +650,11 @@ int64_t AudioPipeline::write_mixed(int64_t seq_frame, int64_t want_frames) {
             }
         }
         if (pcm && den_frames > 0) {
+            // Pan is baked by the retime engine for the DSP path, so the mix
+            // applies center (the boundary grain/feed paths pass clip.pan).
             mix_source_samples(mix, channels_, clip, src.gain_db,
                                effective_clip_volume_db(clip), pcm, den_ch, den_frames, from,
-                               rate_, src.fps, seq_fps, spd);
+                               rate_, src.fps, seq_fps, spd, 0.0f);
         }
         out_frames = std::max(out_frames, static_cast<int64_t>(den_frames));
     }
@@ -1143,7 +1155,8 @@ void AudioPipeline::feed_scrub_audio(int64_t target) {
     if (sink_.is_open()) {
         std::vector<float> chunk_mix(static_cast<std::size_t>(frames) * channels_, 0.0f);
         mix_source_chunk(chunk_mix, channels_, *clip, sources[0].gain_db,
-                         effective_clip_volume_db(*clip), s, base_sample, rate_, fps_v, seq_fps);
+                         effective_clip_volume_db(*clip), s, base_sample, rate_, fps_v,
+                         seq_fps, 1.0, clip->pan);
         ok = sink_.reposition_enqueue(chunk_mix.data(), frames);
     }
     const std::size_t pending_after = sink_.pending_frames();

@@ -1,9 +1,11 @@
 #pragma once
 
-// Shared Speed Change law for a clip (Qt-free). `speed_factor`/`speed_enabled`
-// retime the WHOLE clip: video and audio consume the source at factor× the
-// timeline rate in lockstep, so A/V stays in sync by construction. The
-// per-clip position laws in playback (timeline_decoder, audio_pipeline) and
+// Shared Speed Change + Pitch shift laws for a clip (Qt-free).
+// `speed_factor`/`speed_enabled` retime the WHOLE clip: video and audio consume
+// the source at factor× the timeline rate in lockstep, so A/V stays in sync by
+// construction. `pitch_semitones`/`pitch_cents` shift the audio pitch by the
+// standard equal-temperament factor, independent of tempo (no video effect).
+// The per-clip position laws in playback (timeline_decoder, audio_pipeline) and
 // export (renderer) all route through the helpers here so they can never
 // drift from each other.
 //
@@ -17,7 +19,9 @@
 // identical (the clip sounds like the same recording at a different tempo) —
 // the decoded media is WSOLA time-stretched by TimeStretch (time_stretch.hpp)
 // before gains/mix, consuming exactly `effective_rate` source frames per
-// output frame.
+// output frame. The engine's resampling front-end then applies the `pitch_factor`
+// law (see below) so a pitch-shifted clip plays at the right TEMPO and the
+// shifted PITCH simultaneously.
 
 #include <algorithm>
 #include <cmath>
@@ -55,6 +59,27 @@ inline int64_t output_frames_from_media(const Clip& clip, int64_t in_frames) {
     const double r = effective_rate(clip);
     return r <= 0.0 ? 0 : static_cast<int64_t>(std::llround(
                               static_cast<double>(in_frames) / r));
+}
+
+// Per-clip PITCH law: semitones + fractional cents to the pitch-shift factor
+// consumed by the TimeStretch resampling front-end. Factory values (0 st,
+// 0 ct) -> exactly 1.0 (no shift); +12 st -> 2.0 (up an octave), -12 st ->
+// 0.5 (down an octave); each ±100 ct is one semitone. Clamped to the shared
+// Inspector ranges so the GUI band can never push the DSP outside what the
+// controls can express.
+inline double pitch_factor(float semitones, float cents) {
+    const double st = std::clamp(static_cast<double>(semitones),
+                                 static_cast<double>(audio_processing::kPitchSemitonesMin),
+                                 static_cast<double>(audio_processing::kPitchSemitonesMax));
+    const double ct = std::clamp(static_cast<double>(cents),
+                                 static_cast<double>(audio_processing::kPitchCentsMin),
+                                 static_cast<double>(audio_processing::kPitchCentsMax));
+    return std::pow(2.0, (st + ct / 100.0) / 12.0);
+}
+
+// Convenience over a clip's stored audio-processing fields.
+inline double pitch_factor(const Clip& clip) {
+    return pitch_factor(clip.pitch_semitones, clip.pitch_cents);
 }
 
 }  // namespace canvas::core::cliprate

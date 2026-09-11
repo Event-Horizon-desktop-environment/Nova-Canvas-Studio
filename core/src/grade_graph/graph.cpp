@@ -21,32 +21,37 @@ const Node& GradeGraph::node(int id) const {
     return nodes_.at(static_cast<std::size_t>(id));
 }
 
-int GradeGraph::add_rgb_edge(int from, int to) {
-    return would_create_cycle({from, PipeType::kRgb, 0}, {to, PipeType::kRgb, 0})
+int GradeGraph::add_edge(PipeId from, PipeId to) {
+    return would_create_cycle(from, to)
                ? -1
                : [&] {
-                     edges_.push_back({{from, PipeType::kRgb, 0}, {to, PipeType::kRgb, 0}});
+                     edges_.push_back({from, to});
                      return static_cast<int>(edges_.size()) - 1;
                  }();
+}
+
+int GradeGraph::add_rgb_edge(int from, int to) {
+    return add_edge({from, PipeType::kRgb, 0}, {to, PipeType::kRgb, 0});
 }
 
 int GradeGraph::add_key_edge(int from, int to) {
-    return would_create_cycle({from, PipeType::kKey, 0}, {to, PipeType::kKey, 0})
-               ? -1
-               : [&] {
-                     edges_.push_back({{from, PipeType::kKey, 0}, {to, PipeType::kKey, 0}});
-                     return static_cast<int>(edges_.size()) - 1;
-                 }();
+    return add_edge({from, PipeType::kKey, 0}, {to, PipeType::kKey, 0});
 }
 
 int GradeGraph::add_channel_edge(int from, int port, int to, int port2) {
-    return would_create_cycle({from, PipeType::kChannel, port}, {to, PipeType::kChannel, port2})
-               ? -1
-               : [&] {
-                     edges_.push_back({{from, PipeType::kChannel, port},
-                                       {to, PipeType::kChannel, port2}});
-                     return static_cast<int>(edges_.size()) - 1;
-                 }();
+    return add_edge({from, PipeType::kChannel, port}, {to, PipeType::kChannel, port2});
+}
+
+bool GradeGraph::remove_edge(PipeId from, PipeId to) {
+    for (std::size_t i = 0; i < edges_.size(); ++i) {
+        const Edge& e = edges_[i];
+        if (e.from.node == from.node && e.from.type == from.type && e.from.port == from.port &&
+            e.to.node == to.node && e.to.type == to.type && e.to.port == to.port) {
+            edges_.erase(edges_.begin() + static_cast<std::ptrdiff_t>(i));
+            return true;
+        }
+    }
+    return false;
 }
 
 bool GradeGraph::would_create_cycle(PipeId from, PipeId to) const {

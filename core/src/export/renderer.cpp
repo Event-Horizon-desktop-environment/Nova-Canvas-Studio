@@ -925,6 +925,7 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
         // scaled by the factor so the media cursor advances speed× per output
         // frame, in lockstep with clip_src_frame's video law.
         const double spd = cliprate::effective_rate(*clip);
+        const double pitch = cliprate::pitch_factor(*clip);
         const int64_t src_frame = clip_src_frame(*project_, *clip, start_tl_frame);
         // Media position from CONTINUOUS timeline time: (tl_sec - tl_in/seq_fps)
         // seconds into the clip, advanced at the clip's speed. When export fps
@@ -941,13 +942,14 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
                 : 0;
 
         // num_frames OUTPUT frames need num_frames * speed media samples. A
-        // retimed clip additionally pre-feeds one WSOLA lookahead window so
-        // the stretch can complete every grain inside this call and return
-        // exactly num_frames (the exporter must not produce a short audio
-        // chunk for a video frame).
+        // retimed/pitched clip additionally pre-feeds the engine's retime
+        // lookahead (WSOLA window, scaled by the pitch factor, plus the
+        // resampler's edge margin) so the engine can complete every grain
+        // inside this call and return exactly num_frames (the exporter must
+        // not produce a short audio chunk for a video frame).
         int media_req = static_cast<int>(std::max<int64_t>(
             1, cliprate::media_span_for_output(*clip, num_frames)));
-        if (spd != 1.0) media_req += TimeStretch::lookahead_frames(out_sample_rate);
+        media_req += TimeStretch::retime_lookahead(out_sample_rate, spd, pitch);
         auto chunk = atd.dec->decode(start_media_sample, media_req, out_sample_rate);
         if (!chunk || chunk->samples.empty()) {
             CANVAS_LOG("RenderSession::audio_chunk decode EMPTY media=%d src=%lld sample=%lld",
@@ -981,27 +983,32 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
         ++_d_call;
 
         const int src_ch = chunk->channels;
-        // Per-clip Speed Change (pitch-preserving WSOLA): stretch the decoded
-        // media to the export clock's num_frames-sized output window (mirrors
-        // playback's write_mixed stage). The media cursor stays in the
-        // source's domain; only the mixed stream is stretched. The extra
-        // lookahead feed above lets the engine return a full chunk every
-        // call; near clip EOF it may legitimately return less.
+        // Per-clip Speed Change + Pitch shift + Pan (WSOLA + windowed-sinc
+        // retime engine): stretch + resample the decoded media to the export
+        // clock's num_frames-sized output window (mirrors playback's
+        // write_mixed stage). The media cursor stays in the source's domain;
+        // only the mixed stream is retimed. The extra lookahead feed above
+        // lets the engine return a full chunk every call; near clip EOF it
+        // may legitimately return less. The pan balance is baked into the
+        // engine output, so the mix below applies center.
         const float* pcm = chunk->samples.data();
         int den_ch = src_ch;
         int den_frames = static_cast<int>(chunk->samples.size()) / src_ch;
         std::vector<float> sped;
-        if (spd != 1.0) {
+        const bool need_dsp = spd != 1.0 || pitch != 1.0 || clip->pan != 0.0f;
+        if (need_dsp) {
             const int want = static_cast<int>(std::max<int64_t>(
                 1, std::min<int64_t>(
                        cliprate::output_frames_from_media(*clip, den_frames),
                        num_frames)));
+            int out_ch = den_ch;
             const int written = stretch_bank_.tick(
-                clip->id, spd, out_sample_rate, src_ch, chunk->samples.data(),
-                static_cast<int>(chunk->samples.size()) / src_ch, want, sped);
+                clip->id, spd, pitch, clip->pan, out_sample_rate, src_ch,
+                chunk->samples.data(), den_frames, want, sped, &out_ch);
             if (written > 0) {
                 pcm = sped.data();
                 den_frames = written;
+                den_ch = out_ch;
             } else {
                 pcm = nullptr;
                 den_frames = 0;
@@ -1027,9 +1034,9 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
                     warned = true;
                 }
             } else if (den_frames > 0) {
-                denoised.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * src_ch);
+                denoised.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
                 const int written = iso_bank_.tick(clip->id, clip->voice_isolation,
-                                                   out_sample_rate, src_ch,
+                                                   out_sample_rate, den_ch,
                                                    denoised.data(), den_frames);
                 if (written > 0) {
                     pcm = denoised.data();
@@ -1051,12 +1058,11 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
             gains[static_cast<std::size_t>(k)] = audio_fade_gain(*clip, frm);
         }
         if (den_frames > 0 && pcm) {
-            float gl = 1.0f;
-            float gr = 1.0f;
-            audio_mix::pan_gains(clip->pan, gl, gr);
-            mix_audio_chunk(out->samples, pcm, src_ch, den_frames, out_channels, gains,
+            // Pan is baked by the retime engine above; the free-function path
+            // (render_audio_chunk) still applies pan_gains here itself.
+            mix_audio_chunk(out->samples, pcm, den_ch, den_frames, out_channels, gains,
                             audio_mix::db_to_gain(clip->volume_db) * audio_mix::db_to_gain(track.gain_db),
-                            gl, gr);
+                            1.0f, 1.0f);
         }
     }
     return out;

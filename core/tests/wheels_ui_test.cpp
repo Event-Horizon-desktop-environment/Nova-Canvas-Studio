@@ -144,6 +144,85 @@ void test_primaries_wheel_apply() {
     check(lgg_near(s.lgg, cs::LGG{}) && near(s.offset.master, 0.0f), "reset_panel is identity");
 }
 
+void test_law_semantics() {
+    // Pin the canon so a future "simplification" can't silently change the
+    // grading math. References: MLT movit.lift_gamma_gain's classic formula
+    //   out = (gain * (x + lift * (1-x)))^(1/gamma)
+    // and the Resolve primary-correctors convention (lift = black-point shift
+    // tapering to no effect at white; gamma = midtone reshape anchored on the
+    // endpoints; gain = scale; offset = uniform whole-image shift of black AND
+    // white), plus the ASC CDL `out = (slope*in + offset)^power` (Resolve
+    // manual "Output = (Input * Slope + Offset)Power").
+
+    // Identity: zero offset + untouched LGG is a no-op on any input.
+    check(rgb_near(cs::apply_offset({0.2f, 0.5f, 0.9f}, cs::Offset{}), {0.2f, 0.5f, 0.9f}),
+          "zero offset is a no-op");
+    check(rgb_near(cs::apply_lgg({0.2f, 0.5f, 0.9f}, cs::LGG{}), {0.2f, 0.5f, 0.9f}),
+          "identity LGG is a no-op");
+
+    // Lift: black becomes the lift value, white is preserved exactly (the
+    // (1-x) taper), negative lift clamps the base < 0 to 0.
+    cs::LGG lift;
+    lift.lift_master = 0.4f;
+    check(rgb_near(cs::apply_lgg({0.0f, 0.0f, 0.0f}, lift), {0.4f, 0.4f, 0.4f}),
+          "lift shifts the black point");
+    check(rgb_near(cs::apply_lgg({1.0f, 1.0f, 1.0f}, lift), {1.0f, 1.0f, 1.0f}),
+          "lift tapers to no effect at white");
+    check(near(cs::apply_lgg({0.5f, 0.5f, 0.5f}, lift).r, 0.7f),
+          "lift mid follows gain*(x + lift*(1-x))");
+    cs::LGG neg_lift = lift;
+    neg_lift.lift_master = -0.4f;
+    check(near(cs::apply_lgg({0.0f, 0.0f, 0.0f}, neg_lift).r, 0.0f) &&
+              near(cs::apply_lgg({0.5f, 0.5f, 0.5f}, neg_lift).r, 0.3f),
+          "negative lift clamps the base below 0, mid follows the law");
+
+    // Gamma: endpoints are fixed; gamma > 1 brightens midtones (exponent
+    // 1/gamma < 1), gamma < 1 darkens.
+    cs::LGG up_gamma;    up_gamma.gamma_master = 2.0f;    // exponent 0.5
+    cs::LGG down_gamma;  down_gamma.gamma_master = 0.5f;  // exponent 2.0
+    check(rgb_near(cs::apply_lgg({0.0f, 0.0f, 0.0f}, up_gamma), {0.0f, 0.0f, 0.0f}) &&
+              rgb_near(cs::apply_lgg({1.0f, 1.0f, 1.0f}, up_gamma), {1.0f, 1.0f, 1.0f}),
+          "gamma keeps black and white fixed");
+    check(near(cs::apply_lgg({0.25f, 0.25f, 0.25f}, up_gamma).r, 0.5f) &&
+              near(cs::apply_lgg({0.25f, 0.25f, 0.25f}, down_gamma).r, 0.0625f),
+          "gamma rewrites mids by pow(x, 1/gamma)");
+
+    // Gain: black stays black, white and mids scale.
+    cs::LGG gain;
+    gain.gain_master = 2.0f;
+    check(rgb_near(cs::apply_lgg({0.0f, 0.0f, 0.0f}, gain), {0.0f, 0.0f, 0.0f}),
+          "gain leaves black at zero");
+    check(near(cs::apply_lgg({0.5f, 0.5f, 0.5f}, gain).r, 1.0f) &&
+              near(cs::apply_lgg({1.0f, 1.0f, 1.0f}, gain).r, 2.0f),
+          "gain scales mids and white linearly");
+
+    // Offset: unlike lift it moves black AND white together (uniform shift,
+    // no taper near 1) — the whole-signal behavior that distinguishes it.
+    cs::Offset off;
+    off.master = 0.1f;
+    check(near(cs::apply_offset({0.0f, 0.0f, 0.0f}, off).r, 0.1f) &&
+              near(cs::apply_offset({1.0f, 1.0f, 1.0f}, off).r, 1.1f),
+          "offset moves black and white together (no taper)");
+
+    // Order: the corrector applies offset BEFORE the LGG stage (eval.cpp
+    // kLgg branch), so the offset feeds the power. Pin the composed value.
+    check(near(cs::apply_lgg(cs::apply_offset({0.25f, 0.25f, 0.25f}, off), cs::LGG{}).r, 0.35f),
+          "offset feeds the LGG stage (offset then LGG)");
+
+    // CDL: (slope*in + offset)^power, base clamped >= 0 before the power.
+    cs::Cdl c;
+    c.slope_r = 1.2f;
+    c.offset_r = 0.1f;
+    c.power_r = 2.0f;
+    c.sat = 1.0f;
+    check(near(cs::cdl_channel(0.5f, c.slope_r, c.offset_r, c.power_r),
+               std::pow(1.2f * 0.5f + 0.1f, 2.0f)),
+          "cdl matches (slope*in + offset)^power");
+    check(near(cs::cdl_channel(0.1f, 1.0f, -0.5f, 1.0f), 0.0f),
+          "cdl clamps a negative base to 0 before the power");
+    check(cs::apply_cdl({0.5f, 0.5f, 0.5f}, cs::Cdl{}).r > 0.0f, "identity CDL is a pass-through");
+}
+
 void test_log_bands() {
     std::array<cs::WheelRange, 4> bands;
     bands[0] = {0.4f, 0.6f};  // shadow
@@ -296,6 +375,7 @@ int main() {
     test_master_law();
     test_scaled_wheel_offset();
     test_primaries_wheel_apply();
+    test_law_semantics();
     test_restore_primaries_wheel();
     test_log_bands();
     test_hdr_zones();

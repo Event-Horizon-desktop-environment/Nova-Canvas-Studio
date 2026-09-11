@@ -114,9 +114,14 @@ public:
 
     // Wires. Returns the new edge index, or -1 when the wire would create a
     // cycle (verified at connect time, per the spec — never at render time).
+    // The generic add_edge accepts any typed pipe/port; the typed wrappers
+    // below delegate to it. remove_edge deletes the exact wire (used by the
+    // Phase 6 graph-edit laws to rewire branch insertion / layer reorder).
+    [[nodiscard]] int add_edge(PipeId from, PipeId to);
     int add_rgb_edge(int from, int to);
     int add_key_edge(int from, int to);
     int add_channel_edge(int from, int port, int to, int port2);
+    [[nodiscard]] bool remove_edge(PipeId from, PipeId to);
     [[nodiscard]] bool would_create_cycle(PipeId from, PipeId to) const;
 
     // The terminal node (kind kOutput), or -1 when the tree is inactive.
