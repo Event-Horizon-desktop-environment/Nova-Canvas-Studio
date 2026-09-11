@@ -350,9 +350,50 @@ void RenderQueue::worker() {
             ExportSettings es = to_export_settings(local.settings);
             es.output_path = local.output_path;
             es.duration_frames = local.total_frames;
+<<<<<<< Updated upstream
             ok = run_job(project, es, resolver, &ctrl, &cancelled, &error);
         } else {
             error = "Cancelled before start.";
+=======
+            // Match the exporter's internal total_video so progress/fps counters
+            // stay in sync when export fps != sequence fps.
+            const double seq_fps = project ? project->sequence.fps : 0.0;
+            const double export_fps = (es.fps > 0.0) ? es.fps
+                                        : (seq_fps > 0.0 ? seq_fps : 30.0);
+            const int64_t total = (seq_fps > 0.0)
+                ? (int64_t)std::llround((double)local.total_frames / seq_fps * export_fps)
+                : local.total_frames;
+            ExportControl ctrl;
+            std::atomic<double> fps{0.0};
+            // Polled abort: cancel()/cancel_all()/remove()/~RenderQueue trip
+            // cancel_current_, which export_project's render loop observes between
+            // frames so the worker settles promptly.
+            ctrl.should_cancel = [&] { return cancel_current_.load(); };
+            ctrl.on_progress = [&](double p, const std::string& phase) {
+                (void)phase;
+                auto now = std::chrono::steady_clock::now();
+                double secs = std::chrono::duration<double>(now - started).count();
+                double f = p * total;
+                if (secs > 0) fps.store(f / secs);
+                {
+                    std::lock_guard<std::mutex> lk(mutex_);
+                    for (auto& j : jobs_) {
+                        if (j.id != id) continue;
+                        j.progress = p;
+                        j.render_fps = fps.load();
+                        j.frames_rendered = (int64_t)std::llround(f);
+                        j.elapsed_seconds = secs;
+                    }
+                }
+                if (on_changed) on_changed();
+            };
+            // Route the exporter's throttled live-preview frames up to whoever
+            // bound on_preview_frame (the GUI marshals onto the main thread).
+            ctrl.on_frame = [&](VideoFramePtr frame) {
+                if (on_preview_frame) on_preview_frame(std::move(frame));
+            };
+            ok = run_job(project, es, resolver, &ctrl, &cancel_current_, &error);
+>>>>>>> Stashed changes
         }
 
         auto now = std::chrono::steady_clock::now();

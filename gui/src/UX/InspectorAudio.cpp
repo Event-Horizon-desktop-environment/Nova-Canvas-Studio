@@ -1,5 +1,6 @@
 #include "UX/InspectorAudio.hpp"
 
+#include "UX/InspectorAudioEq.hpp"
 #include "UX/InspectorShared.hpp"
 #include "UX/MainWindow.hpp"
 
@@ -11,9 +12,14 @@
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QLabel>
+<<<<<<< Updated upstream
 #include <QPainter>
 #include <QPainterPath>
 #include <QSlider>
+=======
+#include <QSlider>
+#include <QStandardItemModel>
+>>>>>>> Stashed changes
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -29,6 +35,7 @@ namespace canvas::gui {
 
 namespace {
 
+<<<<<<< Updated upstream
 // ── EQ response graph ─────────────────────────────────────────────────────
 // A hand-painted frequency-response plot: x = Hz (log), y = dB (-24..+24).
 // Only a visual reference — spin boxes drive the band values, the curve is a
@@ -111,6 +118,8 @@ private:
     std::array<canvas::core::Clip::EqBand, 6> bands_{};
 };
 
+=======
+>>>>>>> Stashed changes
 // ── Slider + numeric spin composite row ───────────────────────────────────
 QWidget* make_slider_spin(double min, double max, int decimals, QWidget* parent,
                           QSlider** out_slider, QDoubleSpinBox** out_spin) {
@@ -203,6 +212,12 @@ struct AudioControls {
 
     InspectorCategory* eq_cat = nullptr;
     EqGraphWidget* eq_graph = nullptr;
+<<<<<<< Updated upstream
+=======
+    QButtonGroup* eq_view_group = nullptr;  // Curve / Faders view switch
+    QToolButton* eq_view_curve = nullptr;
+    QToolButton* eq_view_bands = nullptr;
+>>>>>>> Stashed changes
     std::vector<QDoubleSpinBox*> eq_freq;
     std::vector<QDoubleSpinBox*> eq_gain;
     std::vector<QDoubleSpinBox*> eq_q;
@@ -357,6 +372,66 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     // The EQ section sits at the bottom of the audio tab and gets generous
     // spacing so every value/suffix stays fully visible at any dock width.
     ac.eq_cat->body_layout()->setSpacing(12);
+<<<<<<< Updated upstream
+=======
+
+    // View toggle: Curve (node graph) vs Faders (band gain columns). A
+    // lightweight segmented pair, identical to the page-bar pills in style.
+    {
+        auto* view_row = new QWidget(host);
+        auto* view_lay = new QHBoxLayout(view_row);
+        view_lay->setContentsMargins(0, 0, 0, 0);
+        view_lay->setSpacing(4);
+        auto* seg = new QWidget(view_row);
+        auto* seg_lay = new QHBoxLayout(seg);
+        seg_lay->setContentsMargins(0, 0, 0, 0);
+        seg_lay->setSpacing(0);
+        auto* curve_btn = new QToolButton(seg);
+        curve_btn->setCheckable(true);
+        curve_btn->setChecked(true);
+        curve_btn->setText(tr("Curve"));
+        auto* bands_btn = new QToolButton(seg);
+        bands_btn->setCheckable(true);
+        bands_btn->setText(tr("Faders"));
+        ac.eq_view_group = new QButtonGroup(seg);
+        ac.eq_view_group->setExclusive(true);
+        ac.eq_view_group->addButton(curve_btn, 0);
+        ac.eq_view_group->addButton(bands_btn, 1);
+        ac.eq_view_curve = curve_btn;
+        ac.eq_view_bands = bands_btn;
+        curve_btn->setFixedHeight(20);
+        bands_btn->setFixedHeight(20);
+        const auto seg_style = [] {
+            const ThemeTokens& t = tokens();
+            return QStringLiteral(
+                       "QToolButton { background: %1; color: %2; border: none;"
+                       "  padding: 1px 10px; font-size: 10px;"
+                       "  border-right: 1px solid %3; }"
+                       "QToolButton:first { border-top-left-radius: 8px;"
+                       "  border-bottom-left-radius: 8px; }"
+                       "QToolButton:last { border-right: none;"
+                       "  border-top-right-radius: 8px;"
+                       "  border-bottom-right-radius: 8px; }"
+                       "QToolButton:checked { background: %4; color: %5; }")
+                .arg(css(t.surface_raised), css(t.ink_muted), css(t.border_soft),
+                     css(t.surface_highest), css(t.ink));
+        };
+        apply_theme_style(curve_btn, seg_style);
+        apply_theme_style(bands_btn, seg_style);
+        seg_lay->addWidget(curve_btn);
+        seg_lay->addWidget(bands_btn);
+        auto* view_lbl = new QLabel(tr("View"), view_row);
+        apply_theme_style(view_lbl, [] {
+            return QStringLiteral("color: %1; font-size: 10px;")
+                .arg(css(tokens().ink_muted));
+        });
+        view_lay->addWidget(view_lbl);
+        view_lay->addWidget(seg);
+        view_lay->addStretch(1);
+        ac.eq_cat->body_layout()->addWidget(view_row);
+    }
+
+>>>>>>> Stashed changes
     ac.eq_graph = new EqGraphWidget(host);
     ac.eq_cat->body_layout()->addWidget(ac.eq_graph);
 
@@ -484,6 +559,62 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         QObject::connect(spin, &QDoubleSpinBox::valueChanged, &mw, refresh_graph);
     for (QComboBox* combo : ac.eq_type)
         QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw, refresh_graph);
+<<<<<<< Updated upstream
+=======
+    // View toggle: Curve ↔ Faders gain columns. The graph paints from
+    // whatever mode is selected; selection is shared across both views.
+    if (ac.eq_view_group) {
+        QObject::connect(
+            ac.eq_view_group, qOverload<int>(&QButtonGroup::idClicked), &mw,
+            [&ac](int id) {
+                if (!ac.eq_graph) return;
+                ac.eq_graph->set_view(id == 1 ? EqGraphWidget::View::Bands
+                                              : EqGraphWidget::View::Curve);
+            });
+    }
+    // LP/HP bands carry no gain: grey the row spin as the graph disables its
+    // vertical drag, and keep it in lock-step with a type change.
+    const auto refresh_band_gain_editable = [&ac]() {
+        for (std::size_t i = 0; i < ac.eq_type.size() && i < ac.eq_gain.size(); ++i) {
+            if (!ac.eq_type[i] || !ac.eq_gain[i]) continue;
+            const auto ty = static_cast<canvas::core::Clip::EqBand::Type>(
+                ac.eq_type[i]->currentIndex());
+            ac.eq_gain[i]->setEnabled(ty != canvas::core::Clip::EqBand::Type::LowPass &&
+                                      ty != canvas::core::Clip::EqBand::Type::HighPass);
+        }
+    };
+    for (QComboBox* combo : ac.eq_type)
+        QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw, refresh_band_gain_editable);
+
+    // Graph gestures → live row echo + one settled commit.
+    ac.eq_graph->on_edit = [&ac](int idx) {
+        if (idx < 0 || idx >= static_cast<int>(ac.eq_freq.size())) return;
+        const auto& b = ac.eq_graph->bands()[idx];
+        ac.eq_freq[idx]->setValue(b.frequency);
+        ac.eq_gain[idx]->setValue(b.gain);
+        ac.eq_q[idx]->setValue(b.q);
+        ac.eq_enable[idx]->setChecked(b.enabled);
+    };
+    ac.eq_graph->on_commit = [&mw]() { apply_inspector_audio_processing(mw); };
+    ac.eq_graph->on_selection_changed = [&ac](int idx) {
+        // The numeric row echoes the selected node: the B-label takes the band's
+        // hue + weight, the others fall back to muted ink.
+        for (std::size_t i = 0; i < ac.eq_labels.size(); ++i) {
+            const bool sel = static_cast<int>(i) == idx;
+            apply_theme_style(ac.eq_labels[i], [sel, i] {
+                if (sel) {
+                    return QStringLiteral("color: %1; font-size: 10px; font-weight: 600;")
+                        .arg(css(EqGraphWidget::band_hue(i)));
+                }
+                return QStringLiteral("color: %1; font-size: 10px;")
+                    .arg(css(tokens().ink_muted));
+            });
+        }
+    };
+    // A cell click (or Escape) on the row widgets re-syncs the graph; the
+    // selection ring itself is drawn by the graph and echoed here above.
+    ac.eq_graph->set_selected(-1);  // harmless no-op initial state
+>>>>>>> Stashed changes
 }
 
 void attach_inspector_audio(MainWindow& mw, TimelineWidget* timeline) {

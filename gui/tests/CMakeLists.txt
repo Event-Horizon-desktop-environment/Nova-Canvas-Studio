@@ -94,3 +94,162 @@ canvas_add_headless_test(transition_handle_editor_test
     transition_handle_editor_test.cpp
     ../src/Widgets/transition_handle_editor.cpp
 )
+<<<<<<< Updated upstream
+=======
+
+# audio_targets_test: mixer-target resolution for multi-clip Volume/Pan edits
+# (audio clip direct, linked video->audio mate, no-audio skip, linked-pair
+# de-dup, selection-order + duplicate collapse). Compiles audio_targets.cpp
+# directly (Qt-free seam enforced by the build).
+canvas_add_headless_test(audio_targets_test
+    audio_targets_test.cpp
+    ../src/features/timeline/audio_targets.cpp
+)
+
+# timeline_volume_line_test: audio volume-line math (db<->y law, band clamping,
+# monotonicity, degenerate boxes). Compiles timeline_volume_line.cpp directly
+# (Qt-free seam enforced by the build).
+canvas_add_headless_test(timeline_volume_line_test
+    timeline_volume_line_test.cpp
+    ../src/Widgets/timeline_volume_line.cpp
+)
+
+# deliver_settings_model_test: Deliver-panel policy model (container<->codec
+# restriction lists, encoder/preset lists, bitrate-field visibility law).
+# Compiles deliver_settings_model.cpp directly (Qt-free seam enforced by the
+# build).
+canvas_add_headless_test(deliver_settings_model_test
+    deliver_settings_model_test.cpp
+    ../src/features/deliver/deliver_settings_model.cpp
+)
+
+# source_preview_model_test: Dual-Viewer / media-pool-scrub model (synthetic
+# single-clip preview project + scrub fraction<->source frame law). Compiles
+# source_preview_model.cpp directly (Qt-free seam enforced by the build).
+canvas_add_headless_test(source_preview_model_test
+    source_preview_model_test.cpp
+    ../src/features/source_preview/source_preview_model.cpp
+)
+
+# volume_line_drag_qt_test: full-widget (Qt) regression test that drives the
+# audio volume-line drag through the real press/move/release handlers and checks
+# the emitted preview/commit dB values stay inside the audio law band and point
+# the RIGHT way (up = louder, down = quieter). Qt-linked on purpose.
+qt_add_executable(volume_line_drag_qt_test
+    qt/volume_line_drag_qt_test.cpp
+    ../resources.qrc
+    ../src/Widgets/timeline_widget.cpp
+    ../src/Widgets/timeline_view.cpp
+    ../src/Widgets/timeline_interaction.cpp
+    ../src/Widgets/timeline_thumbnails.cpp
+    ../src/Widgets/timeline_snap.cpp
+    ../src/Widgets/timeline_selection.cpp
+    ../src/Widgets/timeline_drag.cpp
+    ../src/Widgets/transition_handle_editor.cpp
+    ../src/Widgets/timeline_volume_line.cpp
+    ../src/features/timeline/audio_targets.cpp
+    ../src/UX/theme_clip_colors.cpp
+    ../src/UX/theme_icons.cpp
+    ../src/UX/theme_menu.cpp
+    ../src/UX/theme_state.cpp
+    ../src/UX/theme_styles.cpp
+    ../src/UX/theme_tokens.cpp
+    ../src/UX/horizon_style.cpp
+    ../src/features/thumbnails/thumbnail_service.cpp
+)
+target_include_directories(volume_line_drag_qt_test PRIVATE
+    ${CANVAS_GUI_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../core/include
+)
+target_link_libraries(volume_line_drag_qt_test PRIVATE
+    Qt6::Widgets
+    Qt6::Svg
+    Qt6::Test
+    canvas_core
+)
+set_target_properties(volume_line_drag_qt_test PROPERTIES AUTOMOC ON AUTORCC ON AUTOUIC OFF)
+add_test(NAME volume_line_drag_qt_test COMMAND volume_line_drag_qt_test)
+set_tests_properties(volume_line_drag_qt_test PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# waveform_placement_qt_test: Qt regression test for the wrong-cut bug. Feeds a
+# synthetic waveform through the real on_waveform_ready placement path and pins
+# the drawn pixmap to the SAME geometry law frame_at_x() (and the razor) cut on:
+# left scene-x == kSceneMargin + kTrackHeaderWidth + tl_in/fpp and pixmap width
+# == clip body width. Guards the cx+2 inset AND the width-4 rescale regressions.
+qt_add_executable(waveform_placement_qt_test
+    qt/waveform_placement_qt_test.cpp
+    ../resources.qrc
+    ../src/Widgets/timeline_widget.cpp
+    ../src/Widgets/timeline_view.cpp
+    ../src/Widgets/timeline_interaction.cpp
+    ../src/Widgets/timeline_thumbnails.cpp
+    ../src/Widgets/timeline_snap.cpp
+    ../src/Widgets/timeline_selection.cpp
+    ../src/Widgets/timeline_drag.cpp
+    ../src/Widgets/transition_handle_editor.cpp
+    ../src/Widgets/timeline_volume_line.cpp
+    ../src/features/timeline/audio_targets.cpp
+    ../src/UX/theme_clip_colors.cpp
+    ../src/UX/theme_icons.cpp
+    ../src/UX/theme_menu.cpp
+    ../src/UX/theme_state.cpp
+    ../src/UX/theme_styles.cpp
+    ../src/UX/theme_tokens.cpp
+    ../src/UX/horizon_style.cpp
+    ../src/features/thumbnails/thumbnail_service.cpp
+)
+target_include_directories(waveform_placement_qt_test PRIVATE
+    ${CANVAS_GUI_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../core/include
+)
+target_link_libraries(waveform_placement_qt_test PRIVATE
+    Qt6::Widgets
+    Qt6::Svg
+    Qt6::Test
+    canvas_core
+)
+set_target_properties(waveform_placement_qt_test PROPERTIES AUTOMOC ON AUTORCC ON AUTOUIC OFF)
+add_test(NAME waveform_placement_qt_test COMMAND waveform_placement_qt_test)
+set_tests_properties(waveform_placement_qt_test PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# wheel_panel_roundtrip_qt_test: Qt regression test for the color wheel panel
+# (color-grading-phases.md Phase 4). Drives the REAL ColorWheelsPanel handlers
+# offscreen (Lift-wheel press/move/release + tone-row spin boxes) and proves the
+# emitted WheelPanelState lands in the clip's grade through the same
+# one-corrector set_clip_grade seam the Color page uses, survives undo/redo and
+# JSON, and round-trips into a fresh panel. Qt-linked on purpose.
+qt_add_executable(wheel_panel_roundtrip_qt_test
+    qt/wheel_panel_roundtrip_qt_test.cpp
+    ../resources.qrc
+    ../src/features/color/color_widgets.cpp
+    ../src/features/color/scopes/common/scope_common.cpp
+    ../src/features/color/scopes/parade/parade_scope.cpp
+    ../src/features/color/scopes/waveform/waveform_scope.cpp
+    ../src/features/color/scopes/vectorscope/vectorscope_scope.cpp
+    ../src/features/color/scopes/histogram/histogram_scope.cpp
+    ../src/features/color/scopes/chromaticity/chromaticity_widget.cpp
+    ../src/UX/theme_clip_colors.cpp
+    ../src/UX/theme_icons.cpp
+    ../src/UX/theme_menu.cpp
+    ../src/UX/theme_state.cpp
+    ../src/UX/theme_styles.cpp
+    ../src/UX/theme_tokens.cpp
+    ../src/UX/horizon_style.cpp
+)
+target_include_directories(wheel_panel_roundtrip_qt_test PRIVATE
+    ${CANVAS_GUI_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../core/include
+)
+target_link_libraries(wheel_panel_roundtrip_qt_test PRIVATE
+    Qt6::Widgets
+    Qt6::Svg
+    Qt6::Test
+    canvas_core
+)
+set_target_properties(wheel_panel_roundtrip_qt_test PROPERTIES AUTOMOC ON AUTORCC ON AUTOUIC OFF)
+add_test(NAME wheel_panel_roundtrip_qt_test COMMAND wheel_panel_roundtrip_qt_test)
+set_tests_properties(wheel_panel_roundtrip_qt_test PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+>>>>>>> Stashed changes

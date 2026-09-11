@@ -11,6 +11,27 @@ namespace canvas::gui {
 
 using Clock = std::chrono::steady_clock;
 
+// Two projects carry the same media set iff every entry matches on the decode-
+// relevant fields. The decode stack (TimelineDecoder slots + preview/grade
+// caches, AudioPipeline decoders) is keyed by MediaId and does not care about
+// clip structure, so an edit that only rearranges the timeline can reuse all of
+// it warm; only an added/removed/re-pointed media entry needs a teardown.
+static bool media_set_identical(const canvas::core::Project& a, const canvas::core::Project& b) {
+    const auto& ma = a.media;
+    const auto& mb = b.media;
+    if (ma.size() != mb.size()) return false;
+    for (std::size_t i = 0; i < ma.size(); ++i) {
+        const auto& x = ma[i];
+        const auto& y = mb[i];
+        if (x.id != y.id || x.path != y.path || x.fps != y.fps ||
+            x.width != y.width || x.height != y.height ||
+            x.total_frames != y.total_frames || x.has_audio != y.has_audio) {
+            return false;
+        }
+    }
+    return true;
+}
+
 SequenceController::SequenceController(QObject* parent) : QObject(parent), audio_(audio_out_) {
     qRegisterMetaType<std::shared_ptr<const canvas::core::VideoFrame>>();
     qRegisterMetaType<canvas::core::RenderFramePtr>();
@@ -306,8 +327,31 @@ void SequenceController::handle_set_project(std::shared_ptr<const canvas::core::
                                             const int64_t initial_frame) {
     playing_.store(false);
     play_pause_intent_.store(false);  // new project => not playing; keep button in sync
-    audio_.reset();
     emit playback_changed(false);
+
+    // WARM EDIT-COMMIT PATH: when the new snapshot carries the SAME media set,
+    // the decode stack stays valid — slots_ (and preview/grade caches) are keyed
+    // by MediaId and decoders read by src_frame, so a timeline/clip-structure
+    // edit (blade, trim, move, transition, disable) cannot invalidate them.
+    // Tearing them down re-opens every media at next_frame_=0, and the next
+    // decode is a full-GOP far-jump walk at full res (~1s on 2K60 — the
+    // 03:53 SLOW-PRESENT cluster: two [dec] open storms + `hw far-jump
+    // target=21456/21458 next=0`, both cold slots of a same-media dissolve).
+    // Mirror handle_swap_project's warm swap instead: repoint audio + project,
+    // re-anchor the playhead, and let handle_seek's decode ride the warm
+    // sequential walk. Media-set changes still pay the full teardown below.
+    if (project_ && media_set_identical(*project_, *project)) {
+        audio_.update_project(project.get());
+        project_ = std::move(project);
+        fps_.store(project_->sequence.fps);
+        total_frames_.store(project_->sequence.duration_frames());
+        const int64_t cur = current_frame_.load();
+        const int64_t anchor = initial_frame >= 0 ? initial_frame : (cur >= 0 ? cur : 0);
+        handle_seek(anchor);
+        return;
+    }
+
+    audio_.reset();
     reset_ready();
     project_ = std::move(project);
     decoder_.close();

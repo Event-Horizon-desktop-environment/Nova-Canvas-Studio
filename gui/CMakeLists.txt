@@ -22,10 +22,15 @@ qt_add_executable(canvas
     src/UX/MainWindowShell.cpp
     src/UX/ShellMenus.cpp
     src/UX/ShellTopBar.cpp
-    src/UX/ShellDocks.cpp
+    src/UX/ShellPageBar.cpp
+    src/UX/ShellTransportBar.cpp
+    src/UX/ShellMediaDock.cpp
+    src/UX/ShellInspectorDock.cpp
+    src/UX/ShellDeliverPage.cpp
     src/UX/ShellCenter.cpp
     src/UX/InspectorVisual.cpp
     src/UX/InspectorAudio.cpp
+    src/UX/InspectorAudioEq.cpp
     src/UX/InspectorTransition.cpp
     src/UX/InspectorFile.cpp
     src/UX/InspectorShared.hpp
@@ -37,7 +42,17 @@ qt_add_executable(canvas
     src/Widgets/timeline_selection.cpp
     src/Widgets/timeline_drag.cpp
     src/Widgets/transition_handle_editor.cpp
+<<<<<<< Updated upstream
     src/UX/theme.cpp
+=======
+    src/Widgets/timeline_volume_line.cpp
+    src/UX/theme_clip_colors.cpp
+    src/UX/theme_icons.cpp
+    src/UX/theme_menu.cpp
+    src/UX/theme_state.cpp
+    src/UX/theme_styles.cpp
+    src/UX/theme_tokens.cpp
+>>>>>>> Stashed changes
     src/UX/horizon_style.cpp
     ui/MainWindow.ui
 
@@ -55,6 +70,7 @@ qt_add_executable(canvas
 
     src/features/deliver/deliver_settings_panel.cpp
     src/features/deliver/render_queue_panel.cpp
+    src/features/deliver/DeliverActions.cpp
 
     src/Widgets/viewer_gl.cpp
     src/Widgets/media_pool_widget.cpp

@@ -698,6 +698,7 @@ const AVFrame* VideoDecoder::decode_to_hw_indexed(const int64_t target, const in
     // traverses one Group of Pictures. Uses the built keyframe index; without
     // one, a plain container seek to the target's presentation time lands on
     // the keyframe at-or-before, which also anchors backward scrubs.
+<<<<<<< Updated upstream
     const IframeEntry* entry = iframe_at_or_before(t);
     if (entry) {
         container_seek_seconds(entry->pts_seconds);
@@ -706,6 +707,31 @@ const AVFrame* VideoDecoder::decode_to_hw_indexed(const int64_t target, const in
             (long long)t, (long long)entry->frame, entry->pts_seconds, max_over);
     } else if (frame_rate_ > 0.0) {
         container_seek_seconds(static_cast<double>(t) / frame_rate_);
+=======
+    //
+    // Sequential lookback: a near-forward target (at-or-ahead of the in-flight
+    // walk, within the same window decode_to_hw treats as "sequential") keeps
+    // riding that walk instead of re-anchoring — the unconditional pre-seek
+    // used to reset next_frame_=0 and re-walk the whole GOP for a +1 step,
+    // pinning every small forward scrub move at ~full-GOP cost. Rules:
+    //   delta < 0  -> behind the walk: must re-anchor (a forward walk cannot go
+    //                backward), keep the seek.
+    //   delta >= 64 -> same stride decode_to_hw considers far: re-anchor on the
+    //                owning I-frame so the walk stays bounded.
+    //   else -> serve from / continue the in-flight walk; decode_to_hw's own
+    //           window checks cannot disagree (identical 64 threshold).
+    const int64_t delta = t - next_frame_;
+    if (delta < 0 || delta >= 64) {
+        const IframeEntry* entry = iframe_at_or_before(t);
+        if (entry) {
+            container_seek_seconds(entry->pts_seconds);
+            CANVAS_LOG(
+                "vdecode hw-indexed target=%lld iframe=%lld gop_secs=%.3f max=%d",
+                (long long)t, (long long)entry->frame, entry->pts_seconds, max_over);
+        } else if (frame_rate_ > 0.0) {
+            container_seek_seconds(static_cast<double>(t) / frame_rate_);
+        }
+>>>>>>> Stashed changes
     }
     const AVFrame* hw = decode_to_hw(t, max_over == 0 ? kFullResMaxOver : max_over);  // sets next_frame_ internally
     return hw;

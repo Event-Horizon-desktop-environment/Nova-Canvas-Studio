@@ -43,15 +43,17 @@ namespace canvas::gui {
 class MainWindow;
 void build_app_menus(MainWindow& main_window);
 
-// Top status bar + page-mode foundation bar + transport bar construction live
-// in ShellTopBar.cpp (splitplan refactor). Declared here and friended so they
-// can touch the chrome members they populate without widening the public API.
+// Top status strip, page-mode foundation bar, and transport bar construction
+// live in ShellTopBar.cpp / ShellPageBar.cpp / ShellTransportBar.cpp (splitplan
+// refactor). Declared here and friended so they can touch the chrome members
+// they populate without widening the public API.
 QWidget* build_top_bar(MainWindow& main_window);
 void build_page_bar(MainWindow& main_window);
 QWidget* build_transport_bar(MainWindow& main_window);
 
-// Left (bin tree + media pool) and right (inspector) dock population live in
-// ShellDocks.cpp (splitplan refactor). Declared here and friended so they can
+// Left (bin tree + media pool) dock population lives in ShellMediaDock.cpp and
+// the Inspector dock shell in ShellInspectorDock.cpp (split of the old
+// ShellDocks.cpp, splitplan refactor). Declared here and friended so they can
 // touch the chrome members they populate with private-API access.
 void build_left_dock(MainWindow& main_window);
 void build_inspector_dock(MainWindow& main_window);
@@ -84,11 +86,14 @@ void attach_inspector_file(MainWindow& main_window, TimelineWidget* timeline);
 void update_inspector_file(MainWindow& main_window);
 void apply_inspector_file(MainWindow& main_window);
 
-// The center workspace (viewer column + contextual/toolbar chrome), the
-// timeline dock, and the Deliver page docks live in ShellCenter.cpp (splitplan
-// refactor). Declared here and friended so it can touch the chrome members it
-// populates with private-API access.
+// The center workspace (viewer column + contextual/toolbar chrome + the
+// timeline dock) lives in ShellCenter.cpp; the Deliver page docks (settings +
+// render queue, with all their render-queue signal plumbing) live in
+// ShellDeliverPage.cpp (split of ShellCenter.cpp, splitplan refactor).
+// Declared here and friended so they can touch the chrome members they
+// populate with private-API access.
 void build_center_workspace(MainWindow& main_window);
+void build_deliver_docks(MainWindow& main_window);
 
 class MainWindow final : public QMainWindow {
     Q_OBJECT
@@ -212,6 +217,7 @@ private:
     friend QWidget* build_transport_bar(MainWindow& main_window);
     friend void build_left_dock(MainWindow& main_window);
     friend void build_inspector_dock(MainWindow& main_window);
+    friend void build_deliver_docks(MainWindow& main_window);
     friend void build_inspector_visual(MainWindow& main_window, QVBoxLayout* video_layout);
     friend void attach_inspector_visual(MainWindow& main_window, TimelineWidget* timeline);
     friend void update_inspector_visual(MainWindow& main_window);

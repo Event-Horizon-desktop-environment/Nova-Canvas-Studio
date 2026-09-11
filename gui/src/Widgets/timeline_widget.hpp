@@ -36,6 +36,7 @@ class QGraphicsPixmapItem;
 class QGraphicsItemGroup;
 class QDragEnterEvent;
 class QDragMoveEvent;
+class QDragLeaveEvent;
 class QDropEvent;
 class QMenu;
 
@@ -136,6 +137,7 @@ public:
     static constexpr double kClipLabelHeight = 18.0;
     static constexpr double kClipOutlineW = 1.5;   // clip-bound stroke; inset by pen/2 so it never overhangs
     static constexpr double kClipSelectedOutlineW = 2.2;
+    static constexpr double kClipShadowOffset = 2.0;  // baseline drop under a clip body
 
     explicit TimelineWidget(QWidget* parent = nullptr);
 
@@ -259,8 +261,18 @@ protected:
     void keyReleaseEvent(QKeyEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void scrollContentsBy(int dx, int dy) override;
+<<<<<<< Updated upstream
+=======
+    // Watches the scrollbars directly (QGraphicsView does not forward their
+    // events to the view), so thumb-dragging / pressing / wheeling a scrollbar
+    // disables playhead-follow; wheelEvent() covers viewport wheel scrolling.
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
+    void leaveEvent(QEvent* event) override;
+>>>>>>> Stashed changes
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
+    void dragLeaveEvent(QDragLeaveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 
 private slots:
@@ -435,6 +447,25 @@ private:
     // Appends each given id's linked mate so selecting/deleting one half of a
     // linked A/V pair selects both halves.
     std::vector<canvas::core::ClipId> expand_with_mates(const std::vector<canvas::core::ClipId>& ids);
+
+    // Lane-feedback chrome: the row under the idle pointer gets a subtle
+    // full-width highlight (header column included), and a Media Pool drag
+    // lights up the drop target lane with an accent ring. Both are pure scene
+    // rects recreated with the scene; the flat index lives here so a rebuild
+    // (which nulls the item) still lets the next move restore the highlight.
+    int flat_row_at_scene_y(double scene_y) const;
+    QGraphicsRectItem* highlight_scene_item(QGraphicsRectItem*& slot);
+    void set_rect_highlight(QGraphicsRectItem*& slot, const QRectF& rect,
+                            const QBrush& fill, const QPen& pen);
+    void set_row_highlight(QGraphicsRectItem*& slot, int flat,
+                           const QBrush& fill, const QPen& pen);
+    void clear_row_highlight(QGraphicsRectItem*& slot, int& flat);
+    void update_hover_row(const QPointF& scene_pos);
+    void update_drop_lane(const QPointF& scene_pos);
+    QGraphicsRectItem* hover_highlight_ = nullptr;
+    int hover_flat_ = -1;
+    QGraphicsRectItem* drop_lane_highlight_ = nullptr;
+    int drop_lane_flat_ = -1;
 
     struct TrackHeader {
         QGraphicsRectItem* background = nullptr;

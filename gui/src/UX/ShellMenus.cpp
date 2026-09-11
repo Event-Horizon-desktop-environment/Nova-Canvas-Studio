@@ -6,16 +6,98 @@
 #include <QKeySequence>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMessageBox>
 #include <QObject>
 #include <QSettings>
 
 namespace canvas::gui {
 
 void build_app_menus(MainWindow& mw) {
-    // 1. MENU BAR — the full editor-standard row (File/Edit/Trim/Timeline/Clip/
-    //    Mark/View/Playback/Fusion/Color/Fairlight/Workspace/Help). Only
-    //    File/Edit/Playback/View/Timeline/Mark are wired for v1; the rest
-    //    are present with stub items so the chrome matches the reference.
+    // 1. MENU BAR — the full editor-standard row. A leading "Nova Canvas" app
+    //    menu carries app-level commands (About / Appearance / Preferences /
+    //    Quit, per HIG's app-menu anatomy), then the workflow menus in the
+    //    Resolve order: File/Edit/Trim/Timeline/Clip/Mark/View/Playback/
+    //    Fusion/Color/Fairlight/Workspace/Help. Only File/Edit/Playback/View/
+    //    Timeline/Mark are wired for v1; the rest are present with stub items
+    //    so the chrome matches the reference.
+    auto* canvas_menu = mw.ui->menubar->addMenu(MainWindow::tr("Nova Canvas"));
+    canvas_menu->addAction(MainWindow::tr("&About Nova Canvas Studio"), &mw, [&mw] {
+        QMessageBox::about(
+            &mw, MainWindow::tr("About Nova Canvas Studio"),
+            MainWindow::tr("Nova Canvas Studio\n\n"
+                           "C++20 / Qt %1 / FFmpeg nonlinear video editor — "
+                           "dark, editor-grade UI.\n\n"
+                           "Ships an auto-detected \u201cHyprDark\u201d palette that "
+                           "pre-compensates for Hyprland's native-Wayland "
+                           "colour-management pass.")
+                .arg(QString::fromUtf8(qVersion())));
+    });
+    canvas_menu->addSeparator();
+
+    // Appearance: the three theme states as exclusive choices. On Hyprland's
+    // Wayland backend "Dark (Hyprland)" is the auto default so the palette
+    // lands as designed through the compositor's FP16 re-quantization; plain
+    // "Dark" exists for people who want the uncompensated set. Choices are
+    // remembered (appearance/hypr_dark) and override the auto rule next launch.
+    auto* appearance = canvas_menu->addMenu(MainWindow::tr("A&ppearance"));
+    apply_rounded_menu(appearance);
+    auto* appearance_group = new QActionGroup(appearance);
+    appearance_group->setExclusive(true);
+    const bool light_now = is_light();
+    const bool hypr_now = is_hypr_dark();
+    auto* dark_action = appearance->addAction(MainWindow::tr("&Dark"));
+    dark_action->setCheckable(true);
+    dark_action->setChecked(!light_now && !hypr_now);
+    auto* hypr_action = appearance->addAction(MainWindow::tr("Dark (&Hyprland)"));
+    hypr_action->setCheckable(true);
+    hypr_action->setChecked(!light_now && hypr_now);
+    hypr_action->setToolTip(MainWindow::tr(
+        "Compensated for Hyprland's native-Wayland colour-management pass."));
+    auto* light_action = appearance->addAction(MainWindow::tr("&Light"));
+    light_action->setCheckable(true);
+    light_action->setChecked(light_now);
+    appearance_group->addAction(dark_action);
+    appearance_group->addAction(hypr_action);
+    appearance_group->addAction(light_action);
+    const auto select_theme = [](bool light, bool hypr) {
+        set_light(light);
+        set_hypr_dark(hypr);
+        QSettings settings;
+        settings.setValue(QStringLiteral("appearance/theme"),
+                          light ? QStringLiteral("light") : QStringLiteral("dark"));
+        settings.setValue(QStringLiteral("appearance/hypr_dark"), hypr);
+    };
+    QObject::connect(dark_action, &QAction::triggered, &mw,
+                     [select_theme] { select_theme(false, false); });
+    QObject::connect(hypr_action, &QAction::triggered, &mw,
+                     [select_theme] { select_theme(false, true); });
+    QObject::connect(light_action, &QAction::triggered, &mw,
+                     [select_theme] { select_theme(true, false); });
+
+    // App-level settings belong in the app menu, not the Edit menu (HIG: the
+    // app menu lists items that apply to the app as a whole).
+    const auto show_preferences = [&mw]() {
+        // Audible-scrubbing preference. A small popup menu keeps the option
+        // discoverable without a dedicated settings dialog.
+        QMenu menu;
+        apply_rounded_menu(&menu);
+        const bool saved = QSettings().value(QStringLiteral("scrubAudioEnabled"), true).toBool();
+        mw.controller_.set_scrub_audio_enabled(saved);
+        auto* scrub_audio = menu.addAction(MainWindow::tr("Audible Scrubbing"));
+        scrub_audio->setCheckable(true);
+        scrub_audio->setChecked(saved);
+        QObject::connect(scrub_audio, &QAction::toggled, &mw, [&mw](bool on) {
+            mw.controller_.set_scrub_audio_enabled(on);
+            QSettings().setValue(QStringLiteral("scrubAudioEnabled"), on);
+        });
+        menu.exec(mw.mapToGlobal(QPoint(0, 0)));
+    };
+    canvas_menu->addAction(MainWindow::tr("&Preferences..."), QKeySequence::Preferences,
+                           &mw, show_preferences);
+    canvas_menu->addSeparator();
+    canvas_menu->addAction(MainWindow::tr("&Quit Nova Canvas Studio"), QKeySequence::Quit,
+                           qApp, &QApplication::quit);
+
     auto* file = mw.ui->menubar->addMenu(MainWindow::tr("&File"));
     file->addAction(MainWindow::tr("&New Project"), QKeySequence::New, &mw, &MainWindow::on_new_project);
     file->addAction(MainWindow::tr("&Open Project..."), QKeySequence::Open, &mw, &MainWindow::on_open_project);
@@ -27,12 +109,11 @@ void build_app_menus(MainWindow& mw) {
     file->addSeparator();
     file->addAction(MainWindow::tr("&Import Media..."), QKeySequence(Qt::CTRL | Qt::Key_I), &mw,
                     &MainWindow::on_import_media);
-    file->addSeparator();
-    file->addAction(MainWindow::tr("E&xit"), QKeySequence::Quit, qApp, &QApplication::quit);
 
     auto* edit = mw.ui->menubar->addMenu(MainWindow::tr("&Edit"));
     edit->addAction(MainWindow::tr("&Undo"), QKeySequence::Undo, &mw, &MainWindow::on_undo);
     edit->addAction(MainWindow::tr("&Redo"), QKeySequence::Redo, &mw, &MainWindow::on_redo);
+<<<<<<< Updated upstream
     edit->addSeparator();
     edit->addAction(MainWindow::tr("&Preferences..."), QKeySequence::Preferences, &mw, [&mw] {
                     // Audible-scrubbing preference. A small popup menu keeps the
@@ -50,6 +131,8 @@ void build_app_menus(MainWindow& mw) {
                     menu.exec(mw.mapToGlobal(QPoint(0, 0)));
                 });
 
+=======
+>>>>>>> Stashed changes
     auto* trim = mw.ui->menubar->addMenu(MainWindow::tr("&Trim"));
     trim->addAction(MainWindow::tr("Ripple Delete"), QKeySequence(Qt::Key_Delete), &mw,
                     [&mw] { mw.delete_selected_clip(/*ripple=*/true); });
@@ -99,7 +182,8 @@ void build_app_menus(MainWindow& mw) {
     for (const char* name : {"Fusion", "Color", "Fairlight", "Workspace", "Help"}) {
         auto* m = mw.ui->menubar->addMenu(MainWindow::tr(name));
         if (qstrcmp(name, "Help") == 0) {
-            m->addAction(MainWindow::tr("About Nova Canvas Studio"));
+            QAction* help_item = m->addAction(MainWindow::tr("Nova Canvas Studio Help"));
+            help_item->setEnabled(false);  // stub until real docs exist
         } else if (qstrcmp(name, "Workspace") == 0) {
             m->addAction(MainWindow::tr("Reset UI Layout"));
         } else {

@@ -876,6 +876,98 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
         ++_d_call;
 
         const int src_ch = chunk->channels;
+<<<<<<< Updated upstream
+=======
+        // Per-clip Speed Change + Pitch shift + Pan (WSOLA + windowed-sinc
+        // retime engine): stretch + resample the decoded media to the export
+        // clock's num_frames-sized output window (mirrors playback's
+        // write_mixed stage). The media cursor stays in the source's domain;
+        // only the mixed stream is retimed. The extra lookahead feed above
+        // lets the engine return a full chunk every call; near clip EOF it
+        // may legitimately return less. The pan balance is baked into the
+        // engine output, so the mix below applies center.
+        const float* pcm = chunk->samples.data();
+        int den_ch = src_ch;
+        int den_frames = static_cast<int>(chunk->samples.size()) / src_ch;
+        std::vector<float> sped;
+        const bool need_dsp = spd != 1.0 || pitch != 1.0 || clip->pan != 0.0f;
+        if (need_dsp) {
+            const int want = static_cast<int>(std::max<int64_t>(
+                1, std::min<int64_t>(
+                       cliprate::output_frames_from_media(*clip, den_frames),
+                       num_frames)));
+            int out_ch = den_ch;
+            const int written = stretch_bank_.tick(
+                clip->id, spd, pitch, clip->pan, out_sample_rate, src_ch,
+                chunk->samples.data(), den_frames, want, sped, &out_ch);
+            if (written > 0) {
+                pcm = sped.data();
+                den_frames = written;
+                den_ch = out_ch;
+            } else {
+                pcm = nullptr;
+                den_frames = 0;
+            }
+        }
+
+        // Per-clip AI voice isolation (RNNoise) applied BEFORE gains/mix, so the
+        // denoised PCM feeds the same fade/volume/pan law as decoding would.
+        // The network is fixed at 48 kHz; at any other export rate the stage is
+        // skipped (with a one-time warning) and the clip goes out raw — the
+        // Inspector hints at this too. The stage streams across chunk calls
+        // within one clip (the persistent decoder keeps GRU state continuous)
+        // and is dropped on clip re-open (above).
+        std::vector<float> denoised;
+        if (clip->voice_isolation != VoiceIsolationMode::None) {
+            if (out_sample_rate != VoiceIsolation::kSampleRate) {
+                static bool warned = false;
+                if (!warned) {
+                    log::log_warning(
+                        "RenderSession::audio_chunk: voice isolation needs 48 kHz, "
+                        "bypassing at %d Hz export rate",
+                        out_sample_rate);
+                    warned = true;
+                }
+            } else if (den_frames > 0) {
+                denoised.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
+                const int written = iso_bank_.tick(clip->id, clip->voice_isolation,
+                                                   out_sample_rate, den_ch,
+                                                   denoised.data(), den_frames);
+                if (written > 0) {
+                    pcm = denoised.data();
+                    den_frames = written;
+                } else {
+                    pcm = nullptr;
+                    den_frames = 0;
+                }
+            }
+        }
+        // Per-clip parametric EQ: the 6-band biquad cascade (RBJ Cookbook)
+        // applied after voice isolation and before the gains/fade mix — the
+        // same stage order as playback. The EQ is pure stream-in-place
+        // filtering at ANY export rate (no fixed-48 kHz bypass like the RNNoise
+        // stage above) and writes exactly the frame count it was given, so the
+        // per-output-frame gain law below stays in sync. Disabled clips pass
+        // through bit-exact (the settle-to-dry is crossfaded over kGlideFrames
+        // by the bank; export never toggles mid-clip, so its disabled path is
+        // always already settled). An enabled clip's FIRST tick glides dry->wet
+        // over kGlideFrames so a fresh curve fades in click-free.
+        std::vector<float> eqd;
+        if (den_frames > 0 && pcm) {
+            if (clip->eq_enabled || eq_bank_.wants_samples(clip->id, false)) {
+                eqd.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
+                // The EQ is stream-in-place and rate-preserving, so it writes
+                // exactly the frames it was given (the returned count is the
+                // no-lookahead contract, asserted here).
+                den_frames = eq_bank_.tick(clip->id, clip->eq_bands, clip->eq_enabled,
+                                           out_sample_rate, den_ch, eqd.data(), den_frames);
+                pcm = eqd.data();
+            } else {
+                (void)eq_bank_.tick(clip->id, clip->eq_bands, false, out_sample_rate, den_ch,
+                                    nullptr, 0);
+            }
+        }
+>>>>>>> Stashed changes
         // Per-output-frame gain from the clip's audio IN/OUT transitions
         // (audio_fade_gain returns 1.0 when no audio fade touches the frame).
         std::vector<float> gains(static_cast<std::size_t>(num_frames));

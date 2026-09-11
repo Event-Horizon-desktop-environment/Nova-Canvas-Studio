@@ -1,20 +1,22 @@
-#include "UX/MainWindow.hpp"
+// Top status strip: format/edited/fps readouts, the big timecode, and the
+// Quick Export / Full Screen / Mixer / Metadata / Inspector cluster. The
+// page-switcher toolbar and the playback transport bar moved to their own
+// files (ShellPageBar.cpp / ShellTransportBar.cpp, splitplan refactor).
 
+<<<<<<< Updated upstream
+=======
+#include "UX/MainWindow.hpp"
+#include "UX/theme.hpp"
+
+#include "core/timecode.hpp"
+
+>>>>>>> Stashed changes
 #include <QAction>
 #include <QDockWidget>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QPushButton>
-#include <QSize>
-#include <QSizePolicy>
-#include <QSlider>
-#include <QToolBar>
 #include <QToolButton>
 #include <QWidget>
-
-#include "Widgets/viewport_selector.hpp"
-#include "core/timecode.hpp"
-#include "UX/theme.hpp"
 
 namespace canvas::gui {
 
@@ -23,10 +25,11 @@ QWidget* build_top_bar(MainWindow& mw) {
     top_bar->setObjectName(QStringLiteral("topStatusBar"));
     top_bar->setStyleSheet(top_status_bar_style());
     auto* top_bar_layout = new QHBoxLayout(top_bar);
-    top_bar_layout->setContentsMargins(10, 4, 10, 4);
-    top_bar_layout->setSpacing(10);
+    top_bar_layout->setContentsMargins(12, 6, 12, 6);
+    top_bar_layout->setSpacing(12);
 
     auto* format_label = new QLabel(MainWindow::tr("1440p"), top_bar);
+<<<<<<< Updated upstream
     format_label->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
     auto* edited_label = new QLabel(QStringLiteral("\u00B7 ") + MainWindow::tr("Edited"), top_bar);
     edited_label->setStyleSheet(QStringLiteral("color: #5F6577; font-size: 11px;"));
@@ -36,6 +39,17 @@ QWidget* build_top_bar(MainWindow& mw) {
     top_bar_layout->addWidget(edited_label);
     auto* fps_sep = new QLabel(QStringLiteral("\u00B7"), top_bar);
     fps_sep->setStyleSheet(QStringLiteral("color: #5F6577; font-size: 11px;"));
+=======
+    apply_theme_style(format_label, [] { return QStringLiteral("color: %1; font-size: 12px;").arg(css(tokens().ink_muted)); });
+    auto* edited_label = new QLabel(QStringLiteral("\u00B7 ") + MainWindow::tr("Edited"), top_bar);
+    apply_theme_style(edited_label, [] { return QStringLiteral("color: %1; font-size: 12px;").arg(css(tokens().ink_faint)); });
+    mw.fps_label_ = new QLabel(MainWindow::tr("0 fps"), top_bar);
+    apply_theme_style(mw.fps_label_, [] { return QStringLiteral("color: %1; font-size: 12px;").arg(css(tokens().ink_faint)); });
+    top_bar_layout->addWidget(format_label);
+    top_bar_layout->addWidget(edited_label);
+    auto* fps_sep = new QLabel(QStringLiteral("\u00B7"), top_bar);
+    apply_theme_style(fps_sep, [] { return QStringLiteral("color: %1; font-size: 12px;").arg(css(tokens().ink_faint)); });
+>>>>>>> Stashed changes
     top_bar_layout->addWidget(fps_sep);
     top_bar_layout->addWidget(mw.fps_label_);
     top_bar_layout->addStretch(1);
@@ -86,6 +100,7 @@ QWidget* build_top_bar(MainWindow& mw) {
     return top_bar;
 }
 
+<<<<<<< Updated upstream
 void build_page_bar(MainWindow& mw) {
     auto* page_bar = new QToolBar(MainWindow::tr("Pages"), &mw);
     page_bar->setMovable(false);
@@ -246,4 +261,6 @@ QWidget* build_transport_bar(MainWindow& mw) {
     return transport;
 }
 
+=======
+>>>>>>> Stashed changes
 }  // namespace canvas::gui

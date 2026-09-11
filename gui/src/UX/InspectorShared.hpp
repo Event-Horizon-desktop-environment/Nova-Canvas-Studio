@@ -128,7 +128,14 @@ inline void add_property_row(QVBoxLayout* body, const QString& label, QWidget* f
     row->setSpacing(6);
     auto* lbl = new QLabel(label);
     lbl->setMinimumWidth(78);
+<<<<<<< Updated upstream
     lbl->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 11px;"));
+=======
+    apply_theme_style(lbl, [] {
+        return QStringLiteral("color: %1; font-size: 12px;")
+            .arg(css(tokens().ink_muted));
+    });
+>>>>>>> Stashed changes
     row->addWidget(lbl);
     row->addWidget(field, 1);
     if (with_reset) {

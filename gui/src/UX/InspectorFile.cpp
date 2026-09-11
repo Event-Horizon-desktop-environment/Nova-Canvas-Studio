@@ -56,8 +56,89 @@ uint8_t color_index_for(uint8_t color) {
     return color > 0 && color <= 12 ? color : 0;
 }
 
+<<<<<<< Updated upstream
 QColor color_for(uint8_t color) {
     return color == 0 ? QColor() : kClipColors[color - 1];
+=======
+QString faint_label_style() {
+    return QStringLiteral("color: %1; font-size: 11px;").arg(css(tokens().ink_faint));
+}
+
+QString readonly_line_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QLineEdit { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 3px 6px; }")
+        .arg(css(t.surface_low), css(t.ink_muted), css(t.border_soft));
+}
+
+QString editable_line_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QLineEdit { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 3px 6px; }"
+               "QLineEdit:focus { border-color: %4; }")
+        .arg(css(t.surface_higher), css(t.ink), css(t.border), css(t.accent));
+}
+
+QString notes_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QPlainTextEdit { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 4px 6px; }"
+               "QPlainTextEdit:focus { border-color: %4; }")
+        .arg(css(t.surface_higher), css(t.ink), css(t.border), css(t.accent));
+}
+
+QString combo_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QComboBox { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 3px 8px; }"
+               "QComboBox::drop-down { border: none; width: 18px; }"
+               "QComboBox QAbstractItemView { background-color: %4; color: %2;"
+               " selection-background-color: %5; border: 1px solid %3;"
+               " border-radius: 8px; padding: 2px; }")
+        .arg(css(t.surface_higher), css(t.ink), css(t.border), css(t.surface_low),
+             css(t.accent));
+}
+
+QString preview_name_style() {
+    return QStringLiteral("color: %1; font-size: 12px; font-weight: 600;")
+        .arg(css(tokens().ink));
+}
+
+QString preview_card_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral("QWidget#inspectorPreviewCard { background-color: %1;"
+                          " border: 1px solid %2; border-radius: 8px; }")
+        .arg(css(t.surface_raised), css(t.border_soft));
+}
+
+QString no_color_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QToolButton { background: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 4px; font-size: 9px; }"
+               "QToolButton:hover { color: %4; }")
+        .arg(css(t.surface_raised), css(t.ink_faint), css(t.border_soft), css(t.ink));
+}
+
+QString progress_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QProgressBar { border: none; background: %1; border-radius: 3px; }"
+               "QProgressBar::chunk { background: %2; border-radius: 3px; }")
+        .arg(css(t.surface_low), css(t.accent));
+}
+
+QString channel_name_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QLineEdit { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 3px 6px; }")
+        .arg(css(t.surface_low), css(t.ink_muted), css(t.border_soft));
+>>>>>>> Stashed changes
 }
 
 QString short_media_name(const Clip& clip, const MediaEntry* media) {

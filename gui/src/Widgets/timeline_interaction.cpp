@@ -86,6 +86,117 @@ TimelineWidget::DropLane TimelineWidget::resolve_drop_lane(double scene_y,
     return {media_kind, 0};
 }
 
+int TimelineWidget::flat_row_at_scene_y(double scene_y) const {
+    if (!sequence_ || !has_timeline_content()) return -1;
+    const int v_count = static_cast<int>(sequence_->video_tracks.size());
+    const int a_count = static_cast<int>(sequence_->audio_tracks.size());
+    if (in_section_divider_band(scene_y, v_count, a_count)) return -1;
+    for (int f = 0; f < v_count + a_count; ++f) {
+        const double t = track_top(f, v_count);
+        if (scene_y >= t && scene_y < t + track_height(f, v_count)) return f;
+    }
+    return -1;
+}
+
+QGraphicsRectItem* TimelineWidget::highlight_scene_item(QGraphicsRectItem*& slot) {
+    if (!slot) {
+        // A dedicated high-z lane rect: painted above the clips/filmstrip so the
+        // lit lane never disappears under clip content, below the playhead and
+        // snap indicator so playback feedback still reads on top.
+        slot = scene_.addRect(QRectF(), QPen(Qt::NoPen), QBrush(Qt::NoBrush));
+        slot->setAcceptedMouseButtons(Qt::NoButton);
+        slot->setZValue(35);
+    }
+    return slot;
+}
+
+void TimelineWidget::set_rect_highlight(QGraphicsRectItem*& slot, const QRectF& rect,
+                                        const QBrush& fill, const QPen& pen) {
+    QGraphicsRectItem* it = highlight_scene_item(slot);
+    it->setRect(rect);
+    it->setBrush(fill);
+    it->setPen(pen);
+}
+
+void TimelineWidget::set_row_highlight(QGraphicsRectItem*& slot, int flat,
+                                       const QBrush& fill, const QPen& pen) {
+    if (flat < 0 || !has_timeline_content()) return;
+    const int v_count = static_cast<int>(sequence_->video_tracks.size());
+    set_rect_highlight(slot, QRectF(kSceneMargin, track_top(flat, v_count),
+                                    scene_.sceneRect().right() - kSceneMargin,
+                                    track_height(flat, v_count)),
+                       fill, pen);
+}
+
+void TimelineWidget::clear_row_highlight(QGraphicsRectItem*& slot, int& flat) {
+    if (slot) {
+        scene_.removeItem(slot);
+        delete slot;
+        slot = nullptr;
+    }
+    flat = -1;
+}
+
+void TimelineWidget::update_hover_row(const QPointF& scene_pos) {
+    if (!hover_highlight_) hover_flat_ = -1;  // scene rebuild wiped the item
+    if (!has_timeline_content()) {
+        if (hover_flat_ != -1) clear_row_highlight(hover_highlight_, hover_flat_);
+        return;
+    }
+    const int flat = flat_row_at_scene_y(scene_pos.y());
+    if (flat == hover_flat_) return;
+    hover_flat_ = flat;
+    if (flat >= 0) {
+        const ThemeTokens& t = tokens();
+        QColor fill = t.state_hover;
+        fill.setAlpha(90);
+        set_row_highlight(hover_highlight_, flat, fill, QPen(Qt::NoPen));
+    } else {
+        clear_row_highlight(hover_highlight_, hover_flat_);
+    }
+}
+
+void TimelineWidget::update_drop_lane(const QPointF& scene_pos) {
+    if (!sequence_) return;
+    if (!drop_lane_highlight_) drop_lane_flat_ = -1;  // scene rebuild wiped the item
+    const bool has_content = has_timeline_content();
+    // An empty timeline lights up the whole placeholder panel as the target; a
+    // populated one lights the exact lane under the cursor.
+    const int flat = has_content ? flat_row_at_scene_y(scene_pos.y()) : -1;
+    const int target = has_content ? flat : -2;
+    if (target == drop_lane_flat_) return;
+    drop_lane_flat_ = target;
+    if (target == -2) {
+        const ThemeTokens& t = tokens();
+        QColor fill = t.accent;
+        fill.setAlpha(40);
+        set_rect_highlight(drop_lane_highlight_,
+                           QRectF(kSceneMargin, tracks_stack_top(),
+                                  scene_.sceneRect().right() - kSceneMargin, kEmptyStateHeight),
+                           fill, QPen(t.accent, 2.0));
+        return;
+    }
+    if (flat >= 0) {
+        const ThemeTokens& t = tokens();
+        QColor fill = t.accent;
+        fill.setAlpha(26);
+        set_row_highlight(drop_lane_highlight_, flat, fill, QPen(t.accent, 2.0));
+    } else {
+        clear_row_highlight(drop_lane_highlight_, drop_lane_flat_);
+    }
+}
+
+void TimelineWidget::leaveEvent(QEvent* event) {
+    if (hover_flat_ != -1) clear_row_highlight(hover_highlight_, hover_flat_);
+    if (drop_lane_flat_ != -1) clear_row_highlight(drop_lane_highlight_, drop_lane_flat_);
+    QGraphicsView::leaveEvent(event);
+}
+
+void TimelineWidget::dragLeaveEvent(QDragLeaveEvent* event) {
+    if (drop_lane_flat_ != -1) clear_row_highlight(drop_lane_highlight_, drop_lane_flat_);
+    QGraphicsView::dragLeaveEvent(event);
+}
+
 int64_t TimelineWidget::snap_frame(int64_t frame) const {
     if (!snap_enabled_ || fps_ <= 0.0) return frame;
     return timeline_snap::snap_to_grid(frame, frames_per_pixel_);
@@ -705,8 +816,22 @@ void TimelineWidget::apply_selection_highlight() {
         if (!item.outline) continue;
         const bool sel = item.clip && selection_.contains(item.clip->id);
         const double w = sel ? kClipSelectedOutlineW : kClipOutlineW;
+<<<<<<< Updated upstream
         item.outline->setPen(sel ? QPen(QColor(0xD1, 0x5A, 0x3A), w)
                                  : QPen(QColor(0x4C, 0x92, 0xFF), w));
+=======
+        // Selected outline is blue on video clips, amber on audio clips; the
+        // unselected idle outline is the per-kind resting line (cool video,
+        // green-cast audio).
+        const QColor color = sel
+            ? (item.track_kind == canvas::core::Track::Kind::Audio
+                   ? tokens().accent_text
+                   : QColor(0x3B, 0x82, 0xF6))
+            : (item.track_kind == canvas::core::Track::Kind::Audio
+                   ? tokens().clip_border_audio
+                   : tokens().clip_border_video);
+        item.outline->setPen(QPen(color, w));
+>>>>>>> Stashed changes
         // Keep the stroke's outer edge exactly on the clip's own boundary by
         // re-insetting the path as the pen width changes; a centred pen would
         // otherwise overhang into an abutting neighbour.
@@ -1322,6 +1447,18 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
 
+    // Idle-pointer lane hover: the row under the cursor gets a subtle
+    // full-width highlight (header column included) so the track area reads as
+    // discrete placement targets before any drag starts. Feedback only — never
+    // interactive, and suppressed while any session owns the pointer.
+    if (!is_selecting_range_ && !is_dragging_ && !dragged_clip_ && !trimming_ &&
+        !pan_dragging_ && !resizing_track_ && !is_scrubbing_ && !volume_drag_armed_ &&
+        !transition_press_armed_ && !transition_editor_.dragging()) {
+        update_hover_row(mapToScene(event->pos()));
+    } else if (hover_flat_ != -1) {
+        clear_row_highlight(hover_highlight_, hover_flat_);
+    }
+
     QGraphicsView::mouseMoveEvent(event);
 }
 
@@ -1459,6 +1596,9 @@ void TimelineWidget::dragEnterEvent(QDragEnterEvent* event) {
 void TimelineWidget::dragMoveEvent(QDragMoveEvent* event) {
     if (event->mimeData()->hasFormat("application/x-eh-media-id") ||
         event->mimeData()->hasUrls()) {
+        // Highlight the lane the drop would land on (the resolved target for
+        // Media-Pool placements; URL drops land the same way via media_files_dropped).
+        update_drop_lane(mapToScene(event->position().toPoint()));
         event->acceptProposedAction();
     } else {
         event->ignore();
@@ -1466,6 +1606,8 @@ void TimelineWidget::dragMoveEvent(QDragMoveEvent* event) {
 }
 
 void TimelineWidget::dropEvent(QDropEvent* event) {
+    // Any landing — accepted or not — clears the drop-lane highlight.
+    if (drop_lane_flat_ != -1) clear_row_highlight(drop_lane_highlight_, drop_lane_flat_);
     if (event->mimeData()->hasFormat("application/x-eh-media-id")) {
         const int media_id = event->mimeData()->data("application/x-eh-media-id").toInt();
         const int64_t frame = frame_at_x(event->position().toPoint().x());

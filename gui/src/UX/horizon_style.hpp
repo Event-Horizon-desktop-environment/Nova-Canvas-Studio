@@ -7,11 +7,11 @@ class QStyleOption;
 
 namespace canvas::gui {
 
-// A Horizon-style QStyle built on Fusion that paints the signature "glassy"
-// panels and buttons via QPainter (dark outer separation stroke + inset white
-// gradient rim, scaled by control height), matching the Event-Horizon apps.
-// The base Fusion style handles everything the glassy treatment does not
-// (menus, scrollbars, views, text layout, etc.).
+// Horizon-style QStyle built on Fusion that paints flat studio-console panels
+// and buttons via QPainter — a plain fill with a single hairline rim, modest
+// fixed radii, and command buttons as accent fills rather than capsules. The
+// base Fusion style handles everything this treatment does not (menus,
+// scrollbars, views, text layout, etc.).
 class HorizonStyle final : public QProxyStyle {
 public:
     explicit HorizonStyle(QStyle* base);

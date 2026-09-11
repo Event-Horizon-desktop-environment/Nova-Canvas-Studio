@@ -1,6 +1,7 @@
 #pragma once
 
 #include "canvas/core/export/deliver_preset.hpp"
+#include "canvas/core/media/frame.hpp"
 #include "canvas/core/project/project.hpp"
 
 #include <atomic>
@@ -92,6 +93,10 @@ public:
     std::function<void()> on_changed;
     std::function<void(uint64_t)> on_job_started;
     std::function<void(uint64_t)> on_job_finished;
+    // Live-preview frames from the active render: the fully-composited export
+    // RGBA frame pushed at a throttled cadence (~30 fps wall clock). Raised on
+    // the render worker thread; marshal onto the GUI thread when presenting.
+    std::function<void(VideoFramePtr)> on_preview_frame;
 
 private:
     void worker();

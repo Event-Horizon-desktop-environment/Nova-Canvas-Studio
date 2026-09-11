@@ -38,6 +38,69 @@ using canvas::core::Clip;
 using canvas::core::ClipId;
 using canvas::core::Track;
 
+<<<<<<< Updated upstream
+=======
+QString muted_label_style() {
+    return QStringLiteral("color: %1; font-size: 11px;").arg(css(tokens().ink_muted));
+}
+
+QString trans_combo_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QComboBox { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 3px 8px; }"
+               "QComboBox::drop-down { border: none; width: 18px; }"
+               "QComboBox QAbstractItemView { background-color: %1; color: %2;"
+               " selection-background-color: %4; border: 1px solid %3;"
+               " border-radius: 8px; padding: 2px; }")
+        .arg(css(t.surface_low), css(t.ink_muted), css(t.border_soft), css(t.accent));
+}
+
+QString pill_button_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QToolButton { background-color: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; padding: 6px 18px; font-weight: 500; }"
+               "QToolButton:hover { color: %4; border-color: %5; }"
+               "QToolButton:checked { background-color: %6; border-color: %6;"
+               " color: %7; font-weight: 600; }")
+        .arg(css(t.surface_low), css(t.ink_muted), css(t.border_soft), css(t.ink),
+             css(t.border), css(t.accent), css(t.on_accent));
+}
+
+QString ratio_slider_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QSlider::groove:horizontal { height: 4px; background: %1; border-radius: 2px; }"
+               "QSlider::handle:horizontal { width: 10px; background: %2; margin: -4px 0;"
+               " border-radius: 5px; }")
+        .arg(css(t.border_soft), css(t.accent));
+}
+
+QString ghost_button_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QToolButton { color: %1; border: 1px solid %2; border-radius: 8px;"
+               " padding: 3px 8px; background: %3; }"
+               "QToolButton:hover { color: %4; border-color: %5; }"
+               "QToolButton:disabled { color: %6; }")
+        .arg(css(t.ink_faint), css(t.border_soft), css(t.surface_low), css(t.ink_muted),
+             css(t.border), css(t.ink_muted));
+}
+
+QString align_button_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QToolButton { background: %1; color: %2; border: 1px solid %3;"
+               " border-radius: 8px; min-width: 26px; padding: 3px 0; }"
+               "QToolButton:hover { border-color: %4; color: %5; }"
+               "QToolButton:checked { color: %6; border-color: %7;"
+               " background: %8; }")
+        .arg(css(t.surface_low), css(t.ink_muted), css(t.border_soft), css(t.border),
+             css(t.ink_muted), css(t.on_accent), css(t.accent), css(t.surface_higher));
+}
+
+>>>>>>> Stashed changes
 // One half of the selected transition (Start = OUT edge, End = IN edge).
 struct SideControls {
     InspectorCategory* video_cat = nullptr;

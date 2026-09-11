@@ -98,7 +98,48 @@ int main(int argc, char* argv[]) {
         << " cpus=" << av_cpu_count()
         << " probe_ms=" << QString::number(env_probe_ms, 'f', 0);
 
+<<<<<<< Updated upstream
     canvas::gui::apply_theme(app);
+=======
+    // Register the bundled Geist variable fonts; the app falls back to the
+    // platform default family if either fails to load (missing/corrupt asset).
+    if (QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/Geist-Variable.ttf")) == -1)
+        qWarning() << "[font] Geist-Variable.ttf failed to load";
+    if (QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/GeistMono-Variable.ttf")) == -1)
+        qWarning() << "[font] GeistMono-Variable.ttf failed to load";
+    QFont ui_font = app.font();
+    ui_font.setFamily(QStringLiteral("Geist"));
+    app.setFont(ui_font);
+
+    const bool light_theme = QSettings()
+        .value(QStringLiteral("appearance/theme"), QStringLiteral("dark"))
+        .toString() == QStringLiteral("light");
+    // "HyprDark" auto-trigger: on Hyprland's native Wayland backend only,
+    // Hyprland re-quantizes surfaces through its FP16 sRGB color-management
+    // pipeline (XWayland is blitted raw), so the dark palette reads darker with
+    // flattened blue there. The hypr_dark token set pre-lifts the base palette
+    // by the measured shift so the on-screen result matches the design.
+    // Detected via Hyprland's per-client env var; inert on xcb (byte-accurate
+    // already) and under any other compositor. An explicit user choice in the
+    // Nova Canvas > Appearance menu (appearance/hypr_dark) overrides the rule.
+    const bool on_hyprland =
+        !qEnvironmentVariableIsEmpty("HYPRLAND_INSTANCE_SIGNATURE");
+    QSettings appearance_settings;
+    const bool hypr_dark =
+        appearance_settings.contains(QStringLiteral("appearance/hypr_dark"))
+            ? appearance_settings.value(QStringLiteral("appearance/hypr_dark")).toBool()
+            : (!light_theme && on_hyprland
+               && app.platformName() == QLatin1String("wayland"));
+    canvas::gui::apply_theme(app, light_theme, hypr_dark);
+
+    qWarning().nospace()
+        << "[theme] mode=" << (hypr_dark ? "hypr-dark"
+                                         : (light_theme ? "light" : "dark"))
+        << " platform=" << app.platformName()
+        << " qpa_env=" << qEnvironmentVariable("QT_QPA_PLATFORM")
+        << " hyprland=" << (on_hyprland ? "yes" : "no");
+    canvas::gui::log_theme_tokens();
+>>>>>>> Stashed changes
 
     canvas::gui::MainWindow window;
     QApplication::setWindowIcon(canvas::gui::raw_icon("app_icon"));

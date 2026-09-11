@@ -90,15 +90,23 @@ roadmap.md / ux.md / "plan .md" / n.md   pre-rename design docs — historical, 
 ## gui/ — Qt6 app
 
 - `src/main.cpp` — logging → `QApplication` → theme → `MainWindow` → `window.open_file(argv[1])`.
-- `src/UX/MainWindow.hpp/.cpp` — view-controller root class. Owns `SequenceController`, `ThumbnailService`, `ViewerGL`, `TimelineWidget`, docks, `RenderQueue`, `UndoStack`, `Project`.
+- `src/UX/MainWindow.hpp/.cpp` — view-controller root class. Owns `SequenceController`, `ThumbnailService`, `ViewerGL`, `TimelineWidget`, docks, `RenderQueue`, `UndoStack`, `Project`. Deliver-page actions (enter/exit + render-queue ops) now live in `features/deliver/DeliverActions.cpp`.
 - `src/UX/MainWindowShell.cpp` — now just a **~40-line ordered coordinator** (`build_ui()`) that calls into the split builders below; it used to hold ~1200 lines of chrome directly (splitplan Phases 23–26 moved it out — don't be surprised this file is tiny now):
   - `ShellMenus.cpp` — `build_app_menus`: File/Edit/Trim/Timeline/Clip/Mark/View/Playback + stub menus.
-  - `ShellTopBar.cpp` — `build_top_bar`, `build_page_bar`, `build_transport_bar`; pulls in `Widgets/viewport_selector.hpp` for the transport bar's hand-painted timebase selector.
-  - `ShellDocks.cpp` — `build_left_dock` (bins + media pool), `build_inspector_dock` (mode pills + `InspectorCategory` scaffold, now including the real Video/Audio Transform+Composite categories via `InspectorVisual`/`InspectorShared`).
-  - `ShellCenter.cpp` — `build_center_workspace`: viewer column, timeline dock, Deliver-page docks.
-- `src/UX/InspectorShared.hpp` — the shared `InspectorCategory` collapsible-group widget + `add_property_row`/`make_numeric` helpers, extracted out of `ShellDocks.cpp` so `InspectorVisual` doesn't duplicate them.
+  - `ShellTopBar.cpp` / `ShellPageBar.cpp` / `ShellTransportBar.cpp` — the top status strip (`build_top_bar`), the page-switcher toolbar (`build_page_bar`), and the playback transport bar (`build_transport_bar`, which pulls in `Widgets/viewport_selector.hpp` for the hand-painted timebase selector).
+  - `ShellMediaDock.cpp` — `build_left_dock` (bins tree + media pool + placeholder tabs + Resolve-style collapse sliver).
+  - `ShellInspectorDock.cpp` — `build_inspector_dock` (mode pills + the `InspectorCategory` scroll + page stack; the pages themselves build in `InspectorVisual`/`InspectorAudio`/`InspectorTransition`/`InspectorFile`).
+  - `ShellCenter.cpp` — `build_center_workspace`: viewer column, timeline dock.
+  - `ShellDeliverPage.cpp` — `build_deliver_docks`: Deliver-settings + render-queue docks, their signal plumbing, and the job-failure dialogs.
+- `src/UX/InspectorShared.hpp` — the shared `InspectorCategory` collapsible-group widget + `add_property_row`/`make_numeric` helpers, extracted out of the old `ShellDocks.cpp` so `InspectorVisual` doesn't duplicate them.
 - `src/UX/InspectorVisual.hpp/.cpp` — builds and wires the Inspector's Video-tab Transform/Composite categories against the selected clip's model fields (`build_inspector_visual`, `attach_inspector_visual`, `update_inspector_visual`, `apply_inspector_visual`). Each edit commits as one undoable command via the normal `edit_ops` path.
+<<<<<<< Updated upstream
 - `src/UX/theme.hpp/.cpp` — dark QSS + palette token set + `SvgIconEngine`. `src/UX/horizon_style.hpp/.cpp` — `HorizonStyle : QProxyStyle` glassy button/toolbar paint.
+=======
+- `src/UX/InspectorAudioEq.hpp/.cpp` — the interactive EQ response-graph widget (`EqGraphWidget`), extracted out of `InspectorAudio.cpp`. Hand-painted log-frequency plot of the true 6-band cascade magnitude (the shared `canvas::core::equalizer_response` law); `Curve` mode is a draggable-node graph engine, `Bands` mode a row of gain faders. Live edits stream via `on_edit`, settled gestures commit once via `on_commit`.
+- `src/UX/InspectorAudio.cpp` — the Inspector's Audio tab (Volume/Pan, Pitch, Speed Change, **interactive EQ** via `InspectorAudioEq`'s `EqGraphWidget`, AI Voice Isolation). Callbacks are `std::function` (no signals/moc).
+- `src/UX/theme.hpp` — umbrella header over the split theme modules: `theme_tokens.hpp/.cpp` (design tokens + `tokens()`/`css()`), `theme_state.hpp/.cpp` (dark/light mode, `apply_theme`, re-apply callbacks, panel shadows), `theme_clip_colors.hpp/.cpp` (Resolve-style clip swatches), `theme_icons.hpp/.cpp` (SVG tinting via `SvgIconEngine`), `theme_menu.hpp/.cpp` (rounded popup cards), `theme_styles.hpp/.cpp` (per-widget chrome QSS). `src/UX/horizon_style.hpp/.cpp` — `HorizonStyle : QProxyStyle` glassy button/toolbar paint.
+>>>>>>> Stashed changes
 - `src/features/`:
   - `app/AppActions.cpp` — keyboard, close-event unsaved prompt, clip enable/transition toggles, media placement.
   - `project/ProjectActions.cpp` — import/new/open/save (`*.ehproj`, legacy extension name kept), recent files (QSettings `"recentProjects"`, cap 10).
@@ -110,8 +118,19 @@ roadmap.md / ux.md / "plan .md" / n.md   pre-rename design docs — historical, 
   - `playback/sonicsync.hpp/.cpp` — **headless.** A/V sync drop-to-realtime cap policy (`reconcile`), unchanged in spirit from before the split, now living alongside its siblings. FROZEN API.
   - `playback/sync_constants.hpp` — **headless.** `kLookahead`, `kScrubPrecache`, `kPreviewMaxDim`, `kCommitSeqMaxDelta`, `kAudioLeadMs`.
   - `playback/audio_output.hpp/.cpp` — ALSA w/ PipeWire fallback, float PCM, two writer threads, stat counters. `flush()` must join the ALSA thread before dropping (documented stale-audio bug/workaround).
+<<<<<<< Updated upstream
   - `thumbnails/thumbnail_service.hpp/.cpp` — 4 worker threads, in-memory LRU + disk cache, waveform PNG + raw `.ehwf`.
   - `deliver/deliver_settings_panel.*` + `render_queue_panel.*` — Deliver page UI bound to core `RenderQueue`. Splitting the codec/container list builders out into a Qt-free `DeliverSettingsModel` is splitplan Phase 31 — **not done yet**.
+=======
+  - `thumbnails/thumbnail_service.hpp/.cpp` — 4 worker threads, in-memory LRU + disk cache, waveform PNG + raw `.ehwf`. Decodes thumbnail frames at the `kPreviewMaxDim` (640) preview cap so zoom-out filmstrip rebuilds (hundreds of cells) stream in at ms cost instead of full-res decodes.
+  - `deliver/deliver_settings_panel.*` — Deliver page UI wiring only: combo population, signal
+    plumbing, `settings()`/`set_settings()` round-trip against the model. Its codec/container
+    lists now live in the **headless** `deliver_settings_model.*` (splitplan Phase 31, done):
+    `preset_names()`, `encoder_backends()`, `video_codecs_for_format()`/`audio_codecs_for_format()`,
+    `bitrate_visibility()`. `render_queue_panel.*` — render-queue UI bound to core `RenderQueue`.
+    `DeliverActions.cpp` — `enter_deliver_page()`/`enter_edit_page()`, queue reflection, and the
+    add-to-queue / render-all actions extracted out of `MainWindow.cpp` (splitplan refactor).
+>>>>>>> Stashed changes
 - `src/Widgets/`:
   - `timeline_widget.hpp/.cpp` — `QGraphicsView` facade + geometry constants + signals. Still ~530 lines (Phase 32's "drop dead members, get under ~150 lines" cleanup hasn't run yet — don't assume it's a thin facade until that phase lands).
   - `timeline_view.cpp` — scene: minimap, ruler, tracks, filmstrip thumbnails, waveform pixmaps, playhead.

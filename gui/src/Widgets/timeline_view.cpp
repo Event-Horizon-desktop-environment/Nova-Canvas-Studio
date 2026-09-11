@@ -58,6 +58,10 @@ void TimelineWidget::rebuild_timeline() {
     top_pinned_ = nullptr;
     blade_preview_item_ = nullptr;
     snap_indicator_item_ = nullptr;
+    hover_highlight_ = nullptr;
+    hover_flat_ = -1;
+    drop_lane_highlight_ = nullptr;
+    drop_lane_flat_ = -1;
 
     // scene_.clear() above already deleted live transition-cut-handle items.
     // Drop the dangling pointers WITHOUT deleting again, and reset the editor
@@ -347,11 +351,13 @@ struct TrackBadge {
     QGraphicsSimpleTextItem* text = nullptr;
 };
 
-// Builds the track-type badge: a semi-rounded pill filled with the type color
-    // carrying a bold label dead-centered via tight font metrics so padding can
-    // never shift it off-center.
+// Builds the track-type badge: a quiet raised pill carrying a colored bold
+    // label dead-centered via tight font metrics so padding can never shift it
+    // off-center. The label color (not the fill) is the track-type identity:
+    // gold=video, cyan=dialogue audio, amber=music audio — same code as the
+    // far-left accent bar, so the header reads as one coherent system.
     TrackBadge add_badge(QGraphicsScene& scene, const QString& text, const QPointF& top_left,
-                     const QColor& fill) {
+                     const QColor& fill, const QColor& text_color) {
     QFont bf;
     bf.setPointSizeF(8);
     bf.setBold(true);
@@ -368,7 +374,7 @@ struct TrackBadge {
     pill_item->setAcceptedMouseButtons(Qt::NoButton);
 
     auto* text_item = scene.addSimpleText(text);
-    text_item->setBrush(Qt::white);
+    text_item->setBrush(text_color);
     text_item->setFont(bf);
     text_item->setAcceptedMouseButtons(Qt::NoButton);
     // Dead-center on the pill using the simple-text item's tight glyph box, so
@@ -419,17 +425,27 @@ void TimelineWidget::draw_tracks() {
         // collapse the icons onto one centered row and drop the label/count.
         const bool full = th >= 52.0;
 
-        // Colored track-type badge (top-left of the header).
-        // Semi-rounded pill, auto-sized to the bold label and text-centered.
+        // Colored track-type badge (top-left of the header): quiet raised pill
+        // with a gold label (video identity lives in the label color, not the pill).
         const QString badge_text = tname.isEmpty() ? QStringLiteral("V%1").arg(i + 1) : tname;
         const double badge_top = full ? y + 8.0 : y + (th - 15.0) / 2.0;
+<<<<<<< Updated upstream
         TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 8, badge_top), QColor(0x3B, 0x82, 0xF6));
+=======
+        TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 8, badge_top),
+                                  t.surface_highest, t.accent);
+>>>>>>> Stashed changes
         auto* badge_pill = tb.pill;
         auto* badge = tb.text;
 
         // Thin full-height accent bar on the far-left edge (per-track-type code).
+<<<<<<< Updated upstream
         scene_.addRect(QRectF(left, y + 1, 3, th - 2), QPen(Qt::NoPen),
                        QBrush(QColor(0x3B, 0x82, 0xF6)))->setZValue(1);
+=======
+        scene_.addRect(QRectF(left, y + 1, 4, th - 2), QPen(Qt::NoPen),
+                       QBrush(t.accent))->setZValue(1);
+>>>>>>> Stashed changes
 
         // Reorder / lock / view-mode icon row, right-aligned in the header.
         QGraphicsPixmapItem* lock_icon = nullptr;
@@ -496,8 +512,8 @@ void TimelineWidget::draw_tracks() {
             const double label_h = std::min(kClipLabelHeight, ch * 0.35);
             const double body_h = ch - label_h;
 
-            // Semi-rounded flat clip block; blue outline when unselected, warm outline
-            // applied on top by apply_selection_highlight when selected.
+            // Semi-rounded flat clip block; neutral cool outline when unselected,
+            // blue (selection) applied on top by apply_selection_highlight.
             auto* rect = scene_.addRect(
                 QRectF(0, 0, cw, ch), QPen(Qt::NoPen), QBrush(Qt::transparent));
             rect->setPos(QPointF(cx, cy));
@@ -505,6 +521,25 @@ void TimelineWidget::draw_tracks() {
             // Flat fill exactly abutting neighbours (a centred pen on the bounding
             // rect would overhang into the adjacent clip at a cut). The outline
             // stroke is inset by pen/2 so its outer edge lands on the clip's edge.
+<<<<<<< Updated upstream
+=======
+            // Clip colour recolours the shell itself (Resolve-style): the whole
+            // body takes the swatch as its real fill — the filmstrip cells ride
+            // ABOVE it (z 1) so thumbnails are never covered by the colour.
+            const QColor cc_v = clip_color_for(clip.clip_color);
+            // Shell gets the swatch blended 65% onto the normal dark body fill so
+            // a coloured clip reads as a bold tint, not a flat neon slab.
+            const QColor shell_v =
+                cc_v.isValid() ? blend_colors(cc_v, t.clip_video, 0.65) : t.clip_video;
+            // 1px baseline shadow: a rounded copy offset down by kClipShadowOffset
+            // so the clip casts a soft drop onto the track. The ClipClipGroup clips
+            // it to this clip's own rect, so only a hairline under the body shows.
+            auto* shadow = scene_.addPath(
+                rounded_rect_path(QRectF(0, kClipShadowOffset, cw, ch), 6),
+                QPen(Qt::NoPen), QBrush(t.clip_shadow));
+            shadow->setPos(QPointF(cx, cy));
+            shadow->setAcceptedMouseButtons(Qt::NoButton);
+>>>>>>> Stashed changes
             auto* shell = scene_.addPath(
                 rounded_rect_path(QRectF(0, 0, cw, ch), 6),
                 QPen(Qt::NoPen), QBrush(QColor(0x2A, 0x35, 0x40)));
@@ -513,7 +548,11 @@ void TimelineWidget::draw_tracks() {
             auto* outline = scene_.addPath(
                 rounded_rect_path(QRectF(kClipOutlineW / 2.0, kClipOutlineW / 2.0,
                                          cw - kClipOutlineW, ch - kClipOutlineW), 6),
+<<<<<<< Updated upstream
                 QPen(QColor(0x4C, 0x92, 0xFF), kClipOutlineW), QBrush(Qt::NoBrush));
+=======
+                QPen(t.clip_border_video, kClipOutlineW), QBrush(Qt::NoBrush));
+>>>>>>> Stashed changes
             outline->setPos(QPointF(cx, cy));
             outline->setZValue(2.0);
             outline->setAcceptedMouseButtons(Qt::NoButton);
@@ -554,7 +593,7 @@ void TimelineWidget::draw_tracks() {
             // content (filmstrip, outline) can never overlap its neighbour.
             auto* clip_group = new ClipClipGroup(QRectF(cx, cy, cw, ch));
             scene_.addItem(clip_group);
-            for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{rect, shell, outline, label_bar, text})
+            for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{shadow, rect, shell, outline, label_bar, text})
                 if (child) child->setParentItem(clip_group);
 
             // OUT-transition badge: a small SVG mark near the clip's trailing edge for
@@ -600,20 +639,25 @@ void TimelineWidget::draw_tracks() {
         const double th = track_height(v_count + i, v_count);
         const QString tname = QString::fromStdString(sequence_->audio_tracks[i].name);
         const QString badge_text = tname.isEmpty() ? QStringLiteral("A%1").arg(i + 1) : tname;
-        // Audio badges are always RED; only the far-left accent bar below keeps
-        // the role tint (orange for music-role tracks A3/A4, cyan for dialogue).
+        // Audio badge labels carry the role tint (amber for music-role tracks
+        // A3/A4, cyan for dialogue); the pill itself stays the quiet raised
+        // surface so the label color is the identity signal.
         const bool is_music_role = i >= 2;
         const QColor role_color = is_music_role ? QColor(0xC9, 0x86, 0x3A) : QColor(0x2E, 0x8F, 0xC0);
         const bool full = th >= 52.0;
 
         const double badge_top = full ? y + 8.0 : y + (th - 15.0) / 2.0;
-        TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 8, badge_top), QColor(0xEF, 0x44, 0x44));
+        // Quiet raised pill; the label carries the role identity (cyan=dialogue,
+        // amber=music) so the header reads as one system with the accent bar.
+        TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 8, badge_top),
+                                  t.surface_highest,
+                                  is_music_role ? t.accent_text : t.playhead);
         auto* badge_pill = tb.pill;
         auto* badge = tb.text;
 
         // Thin full-height accent bar on the far-left edge. Music-role tracks
         // (A3/A4) get the warm orange mark; dialogue tracks get the audio cyan.
-        scene_.addRect(QRectF(left, y + 1, 3, th - 2), QPen(Qt::NoPen),
+        scene_.addRect(QRectF(left, y + 1, 4, th - 2), QPen(Qt::NoPen),
                        QBrush(role_color))->setZValue(1);
 
         QGraphicsPixmapItem* lock_icon = nullptr;
@@ -702,14 +746,27 @@ void TimelineWidget::draw_tracks() {
             const double label_h = std::min(kClipLabelHeight, ch * 0.35);
             const double body_h = ch - label_h;
 
-            // Semi-rounded flat clip block; blue outline when unselected, warm
-            // outline applied on top by apply_selection_highlight when selected; sage fill.
+            // Semi-rounded flat clip block; neutral green-cast outline when unselected,
+            // amber (selection) applied on top by apply_selection_highlight; sage fill.
             auto* rect = scene_.addRect(
                 QRectF(0, 0, cw, ch), QPen(Qt::NoPen), QBrush(Qt::transparent));
             rect->setPos(QPointF(cx, cy));
             rect->setAcceptedMouseButtons(Qt::NoButton);
             // Flat sage fill abutting neighbours exactly; the outline stroke is
             // inset by pen/2 so it never overhangs into an abutting clip.
+<<<<<<< Updated upstream
+=======
+            // Clip colour recolours the shell itself (see video branch): the
+            // waveform rides ABOVE it (z 1) and is never covered.
+            const QColor cc_a = clip_color_for(clip.clip_color);
+            const QColor shell_a =
+                cc_a.isValid() ? blend_colors(cc_a, t.clip_audio, 0.65) : t.clip_audio;
+            auto* shadow = scene_.addPath(
+                rounded_rect_path(QRectF(0, kClipShadowOffset, cw, ch), 6),
+                QPen(Qt::NoPen), QBrush(t.clip_shadow));
+            shadow->setPos(QPointF(cx, cy));
+            shadow->setAcceptedMouseButtons(Qt::NoButton);
+>>>>>>> Stashed changes
             auto* shell = scene_.addPath(
                 rounded_rect_path(QRectF(0, 0, cw, ch), 6),
                 QPen(Qt::NoPen), QBrush(QColor(0x5A, 0x6B, 0x4A)));
@@ -718,7 +775,11 @@ void TimelineWidget::draw_tracks() {
             auto* outline = scene_.addPath(
                 rounded_rect_path(QRectF(kClipOutlineW / 2.0, kClipOutlineW / 2.0,
                                          cw - kClipOutlineW, ch - kClipOutlineW), 6),
+<<<<<<< Updated upstream
                 QPen(QColor(0x4C, 0x92, 0xFF), kClipOutlineW), QBrush(Qt::NoBrush));
+=======
+                QPen(t.clip_border_audio, kClipOutlineW), QBrush(Qt::NoBrush));
+>>>>>>> Stashed changes
             outline->setPos(QPointF(cx, cy));
             outline->setZValue(2.0);
             outline->setAcceptedMouseButtons(Qt::NoButton);
@@ -766,7 +827,11 @@ void TimelineWidget::draw_tracks() {
             // Clip every child to the clip's own rect (see video branch).
             auto* clip_group = new ClipClipGroup(QRectF(cx, cy, cw, ch));
             scene_.addItem(clip_group);
+<<<<<<< Updated upstream
             for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{rect, shell, outline, text})
+=======
+            for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{shadow, rect, shell, outline, text, vol})
+>>>>>>> Stashed changes
                 if (child) child->setParentItem(clip_group);
             for (const auto& cell : item.cells)
                 if (cell.item) cell.item->setParentItem(clip_group);
@@ -828,22 +893,32 @@ void TimelineWidget::draw_empty_state() {
     scene_.addRect(QRectF(x, top, w, kEmptyStateHeight),
                    QPen(QColor(0x2A, 0x2F, 0x3C)), QBrush(QColor(0x12, 0x15, 0x1C)));
 
+    // Branded empty state: a Nova-gold film-strip mark above the copy, painted
+    // once per empty rebuild (no scene-wide tile loop), sized to the token grid.
+    QColor mark = t.accent;
+    mark.setAlpha(190);
+    add_icon(scene_, QStringLiteral("film-strip"), x + 20, top + 22, mark, 22);
+
     auto* title = scene_.addText(tr("Drag video or audio clips here to start"));
+<<<<<<< Updated upstream
     title->setDefaultTextColor(QColor(0x6B, 0x72, 0x85));
+=======
+    title->setDefaultTextColor(t.ink);
+>>>>>>> Stashed changes
     QFont tf = title->font();
-    tf.setPointSizeF(10);
+    tf.setPointSizeF(11.5);
     tf.setBold(true);
     title->setFont(tf);
-    title->setPos(QPointF(x + 24, top + 34));
+    title->setPos(QPointF(x + 56, top + 22));
     title->setZValue(1);
 
     auto* hint = scene_.addText(
         tr("Drop clips from the Media Pool into the timeline, or import a file"));
     hint->setDefaultTextColor(QColor(0x4A, 0x50, 0x60));
     QFont sf = hint->font();
-    sf.setPointSizeF(8);
+    sf.setPointSizeF(9);
     hint->setFont(sf);
-    hint->setPos(QPointF(x + 24, top + 62));
+    hint->setPos(QPointF(x + 56, top + 48));
     hint->setZValue(1);
 }
 
