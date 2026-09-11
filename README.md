@@ -10,11 +10,7 @@ compiles from your system packages.
 
 ## Status
 
-Alpha, very much in motion. As of 2026-09-05 the app builds warning-free, 10
-of 11 tests pass, the timeline top strip + divider-band pan were just
-reworked, and the project was renamed (from Event Horizon Studio) to **Nova
-Canvas Studio** — binary `canvas`, project files still read the legacy
-format. Details, honesty included, live in [Current State](docs/CURRENT-STATE.md).
+Alpha, very much in motion. 
 
 ## Quick start
 
