@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <optional>
+#include <vector>
 
 #include "canvas/core/media/video_decoder.hpp"
 #include "canvas/core/project/project.hpp"
@@ -17,6 +18,8 @@
 #include "features/deliver/deliver_settings_panel.hpp"
 #include "features/deliver/render_queue_panel.hpp"
 #include "features/playback/sequence_controller.hpp"
+#include "features/source_preview/source_preview_controller.hpp"
+#include "features/source_preview/source_viewer_panel.hpp"
 #include "features/thumbnails/thumbnail_service.hpp"
 #include "Widgets/timeline_widget.hpp"
 #include "Widgets/viewer_gl.hpp"
@@ -36,6 +39,10 @@ class MainWindow;
 }
 
 namespace canvas::gui {
+
+// Color-page chrome module (features/color/color_page.cpp) is a new-file
+// builder; the strip type is only pointer-held here, so a forward decl suffices.
+class MiniTimelineStrip;
 
 // Menu construction lives in ShellMenus.cpp (splitplan refactor) rather than the
 // wall-of-layout builder. Declared here and friended so it can touch the chrome
@@ -76,6 +83,7 @@ void build_inspector_audio(MainWindow& main_window, QVBoxLayout* audio_layout,
 void attach_inspector_audio(MainWindow& main_window, TimelineWidget* timeline);
 void update_inspector_audio_full(MainWindow& main_window);
 void apply_inspector_audio_processing(MainWindow& main_window);
+void apply_inspector_voice_isolation(MainWindow& main_window);
 void build_inspector_transition(MainWindow& main_window, QVBoxLayout* transition_layout,
                                 QToolButton* transition_mode_btn);
 void attach_inspector_transition(MainWindow& main_window, TimelineWidget* timeline);
@@ -95,6 +103,14 @@ void apply_inspector_file(MainWindow& main_window);
 void build_center_workspace(MainWindow& main_window);
 void build_deliver_docks(MainWindow& main_window);
 
+// The Color page workspace + panels live in features/color/ (splitplan-style
+// builder, new module): build_color_page() creates the docks once the center
+// workspace exists; enter/leave_color_page() are the page-bar handoffs.
+// Declared here and friended so the module can own the Color chrome members.
+void build_color_page(MainWindow& main_window);
+void enter_color_page(MainWindow& main_window);
+void leave_color_page(MainWindow& main_window);
+
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 
@@ -113,11 +129,22 @@ public:
     void render_all_from_queue();
     void reflect_render_queue();
 
+    // Dual-Viewer source preview: opens a pooled media entry in the source
+    // controller (set_project + first frame) and closes it again.
+    void open_source_preview(const canvas::core::MediaEntry& media);
+    void clear_source_preview();
+
 protected:
     void keyPressEvent(QKeyEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
-private slots:
+private:
+    // NOTE: no `slots` on these. setupUi() calls QMetaObject::connectSlotsByName,
+    // which scans every moc-registered `on_*` slot against the .ui's designer
+    // widget names and warns per-launch for the ones that never match. All of
+    // them are wired via explicit function-pointer connects, so they're plain
+    // member functions.
     void on_import_media();
     void on_new_project();
     void on_open_project();
@@ -142,6 +169,10 @@ private:
     // stopping playback or tearing down decoders, so volume/pan/pitch/EQ edits
     // land in the next mixed buffer as video keeps playing.
     void push_audio_mix_snapshot();
+    // Grade-only snapshot (Color page): pushes the project via swap_project so
+    // wheel/curve previews re-present the current frame with the new 3D-LUT grade
+    // instead of paying set_project()'s decode-stack teardown each tick.
+    void push_grade_snapshot();
     void delete_selected_clip(bool ripple);
     void delete_selected_media();
     void delete_selected_media_and_clips();
@@ -149,6 +180,9 @@ private:
     void toggle_transition_on_selected();
     void remove_all_transitions();
     void toggle_bookmark_at_playhead();
+    // Applies a clip colour (1-12) — or 0 for no colour — to the selected clip
+    // as one undoable edit, mirroring the Inspector's metadata commit path.
+    void apply_clip_color(uint8_t color);
     // Grows the sequence's track list of the given kind until it covers
     // `index` (inclusive), naming new channels Vn/An by their 1-based order.
     void ensure_tracks_at(canvas::core::Track::Kind kind, std::size_t index);
@@ -170,9 +204,17 @@ private:
     // edit (set_clip_audio), then refreshes the timeline.
     void update_inspector_audio();
     void apply_inspector_audio();
+    // Live-only waveform feedback for the volume knob: re-renders the selected
+    // clip's timeline spectrum at `vol_db` without committing an edit; the
+    // actual volume command still lands from apply_inspector_audio() on release.
+    void preview_inspector_volume(float vol_db);
     // Locates the selected clip in the sequence; returns its kind/index.
     bool find_selected_clip(canvas::core::Track::Kind& out_kind, std::size_t& out_index,
                             canvas::core::Clip& out_clip) const;
+    // Selects a clip by id (the color-page mini-strip activation seam). Mirrors
+    // the timeline selection setters so the grading panels can target a clip
+    // that lives outside the main timeline's current selection.
+    void activate_color_clip(canvas::core::ClipId id);
     // Locates the audio clip an audio edit should target: the selected audio
     // clip itself, or the linked audio mate of a selected video clip. False when
     // the selection has no audio to edit.
@@ -184,8 +226,10 @@ private:
     QAction* inspector_toggle_action_ = nullptr;
     QToolButton* inspector_top_btn_ = nullptr;
     SequenceController controller_;
+    source_preview::SourcePreviewController src_preview_;
     ThumbnailService thumbnails_;
     ViewerGL* viewer_ = nullptr;
+    source_preview::SourceViewerPanel* source_panel_ = nullptr;
     TimelineWidget* timeline_ = nullptr;
     QSlider* scrub_ = nullptr;
     QToolButton* play_button_ = nullptr;
@@ -211,6 +255,15 @@ private:
     QDockWidget* deliver_queue_dock_ = nullptr;
     bool deliver_active_ = false;
 
+    // Color page (features/color/*, M0 UX scaffold).
+    bool color_active_ = false;
+    MiniTimelineStrip* color_mini_strip_ = nullptr;
+    QDockWidget* color_dock_ = nullptr;
+    QDockWidget* color_left_dock_ = nullptr;
+    QDockWidget* color_nodes_dock_ = nullptr;
+    QDockWidget* color_effects_dock_ = nullptr;
+    QDockWidget* color_lightbox_dock_ = nullptr;
+
     friend void build_app_menus(MainWindow& main_window);
     friend QWidget* build_top_bar(MainWindow& main_window);
     friend void build_page_bar(MainWindow& main_window);
@@ -228,6 +281,7 @@ private:
     friend void attach_inspector_audio(MainWindow& main_window, TimelineWidget* timeline);
     friend void update_inspector_audio_full(MainWindow& main_window);
     friend void apply_inspector_audio_processing(MainWindow& main_window);
+    friend void apply_inspector_voice_isolation(MainWindow& main_window);
     friend void build_inspector_transition(MainWindow& main_window, QVBoxLayout* transition_layout,
                                            QToolButton* transition_mode_btn);
     friend void attach_inspector_transition(MainWindow& main_window, TimelineWidget* timeline);
@@ -238,6 +292,9 @@ private:
     friend void update_inspector_file(MainWindow& main_window);
     friend void apply_inspector_file(MainWindow& main_window);
     friend void build_center_workspace(MainWindow& main_window);
+    friend void build_color_page(MainWindow& main_window);
+    friend void enter_color_page(MainWindow& main_window);
+    friend void leave_color_page(MainWindow& main_window);
 
     std::unique_ptr<canvas::core::Project> project_;
     canvas::core::UndoStack undo_;
@@ -247,7 +304,14 @@ private:
     int64_t total_frames_ = -1;
     int64_t current_frame_ = 0;
     bool has_unsaved_changes_ = false;
+    // Audible media-pool hover session is active (between clipScrubbed and
+    // clipScrubEnded). Drives the source player's begin/end_hover_scrub pair.
+    bool source_hovering_ = false;
     canvas::core::ClipId selected_clip_ = 0;
+    // The full visible selection (ids, incl. linked mates) from the timeline —
+    // PRIMARY clip drives the Visual inspector, the whole set drives mixer
+    // edits (Phase 4): Volume/Pan apply to every resolved audio target.
+    std::vector<canvas::core::ClipId> selected_clip_ids_;
     QDoubleSpinBox* inspector_audio_volume_ = nullptr;
     QDoubleSpinBox* inspector_audio_pan_ = nullptr;
 };

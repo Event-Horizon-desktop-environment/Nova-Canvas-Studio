@@ -21,7 +21,11 @@
 // stay a direct include: unordered_map<unique_ptr<Incomplete>> cannot be
 // default-constructed in the header, and audio_decoder.hpp is Qt-free anyway.
 #include "canvas/core/media/audio_decoder.hpp"
+#include "canvas/core/media/equalizer.hpp"
+#include "canvas/core/media/voice_isolation.hpp"
 #include "canvas/core/project/project.hpp"
+#include "canvas/core/timeline/audio_mix.hpp"
+#include "canvas/core/timeline/time_stretch.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -68,6 +72,15 @@ public:
         if (!active_) channels_ = channels > 0 ? channels : 2;
     }
     [[nodiscard]] int channels() const { return channels_; }
+
+    // Realtime audible preview (additive, FROZEN-safe): override a clip's
+    // volume during an Inspector drag WITHOUT touching the model or emitting an
+    // edit command. Consulted at mix time (play + scrub grains); clear with
+    // clear_live_clip_gain()/clear_live_clip_gains() (the committed edit lands
+    // via apply_inspector_audio() and clears the override). reset() drops all.
+    void set_live_clip_gain(canvas::core::ClipId id, float volume_db);
+    void clear_live_clip_gain(canvas::core::ClipId id);
+    void clear_live_clip_gains();
 
     // Re-arm the output at `seq_frame` for a fresh play run: bump the run id,
     // anchor the audible-position bookkeeping, reset the per-media feed
@@ -147,9 +160,21 @@ private:
     // power) and the audio-transition fade envelopes are applied before summing.
     // Returns the frames actually written (0 = nothing audible / no decode).
     int64_t write_mixed(int64_t seq_frame, int64_t want_frames);
+    // Repair corrupt decoder-output samples (non-finite or beyond the always-on
+    // audit's kAuditLoud bound) in a freshly decoded chunk by holding the
+    // previous valid per-channel value, so garbage PCM (file corruption / raw
+    // float PCM in Matroska mis-segment) can never poison a DSP bank's carried
+    // state or reach the mix. A clean chunk leaves `out` empty (zero copy);
+    // a corrupt chunk copies into `out` repaired and returns the number of
+    // repaired samples.
+    std::size_t repair_corrupt_chunk(const std::vector<float>& in, int ch,
+                                     canvas::core::MediaId media, std::vector<float>& out);
 
     const canvas::core::Project* project_ = nullptr;
     const canvas::core::Clip* clip_at_any_track(int64_t seq_frame) const;
+    // Clip's mix volume_db honoring a live-drag override (set_live_clip_gain).
+    // Callers must hold mutex_ (all mix paths do).
+    float effective_clip_volume_db(const canvas::core::Clip& clip) const;
     int64_t playhead_to_audio_sample(int64_t seq_frame) const;
     int64_t audio_sample_to_seq_frame(int64_t media_sample) const;
     // Debug: log video position vs audible audio position for A/V sync.
@@ -171,6 +196,42 @@ private:
     int channels_ = 2;
     bool active_ = false;
 
+    // Live clip-gain override map (set_live_clip_gain): clip id -> effective
+    // volume_db used at mix time. Consulted (under mutex_) by the mix paths;
+    // cleared by reset()/clear_live_clip_gains().
+    std::unordered_map<canvas::core::ClipId, float> live_gain_db_;
+
+    // Per-clip AI voice-isolation state (RNNoise GRU bank) applied in
+    // write_mixed() before gains/mix. Dropped on every re-anchor (seek/rewind)
+    // because the tab state must not span a discontinuity, and cleared on full
+    // reset().
+    canvas::core::VoiceIsolationBank iso_bank_;
+
+    // Per-clip parametric EQ state (6-band RBJ biquad bank) applied in
+    // write_mixed() after voice isolation and before gains/mix. Pure
+    // stream-in-place filtering — no lookahead, so `want_frames` accounting is
+    // untouched — and rate-independent (unlike RNNoise's fixed 48 kHz), so it
+    // runs at any pipeline rate. Dropped on every re-anchor (seek/rewind) and
+    // cleared on full reset(), mirroring iso_bank_/stretch_bank_.
+    canvas::core::EqualizerBank eq_bank_;
+
+    // EQ-context dedupe for the [eq] ctx log: last (rate, ch, enabled) the
+    // pipeline logged for each clip. The [eq] ctx line (media path, tl span,
+    // seq position, spd/pitch, rate/ch, enabled) is emitted once per
+    // (clip, rate, ch, enabled) change instead of every tick, so a
+    // garbled-audio report names exactly which file/geometry the bank was
+    // filtering when the report's other [eq]/[audio] lines fired. Cleared on
+    // reset()/reanchor_locked() with the DSP banks.
+    std::unordered_map<canvas::core::ClipId, std::uint64_t> eq_ctx_logged_;
+
+    // Per-clip pitch-preserving Speed Change state (WSOLA time-stretch bank)
+    // applied in write_mixed() before voice isolation. The stretch consumes
+    // `effective_rate` source frames per output frame (the same timeline law
+    // the video path uses), so retimed audio never drifts from retimed video.
+    // Dropped on every re-anchor (seek/rewind) — a seek is a brand-new
+    // contiguous stream — and cleared on full reset(), mirroring iso_bank_.
+    canvas::core::TimeStretchBank stretch_bank_;
+
     // A/V sync diagnostic anchors (protected by mutex_). Each time audio is
     // re-armed we record the media sample the run starts at and the device's
     // written-frame counter at that moment, so the *audible* position within the
@@ -189,6 +250,17 @@ private:
     // first present is never written twice — per media so each mixed source
     // keeps its own lead-in.
     std::unordered_map<canvas::core::ClipId, int64_t> feed_watermarks_;
+
+    // Last valid sample per channel (per media) after repair_corrupt_chunk, so
+    // a corrupt chunk HEAD can be held-to-valid from the previous chunk instead
+    // of popping. Cleared on reset()/reanchor_locked() with the DSP banks.
+    std::unordered_map<canvas::core::MediaId, std::vector<float>> clean_tail_;
+
+    // Master-bus peak limiter (audio_mix::MasterLimiter law shared with export):
+    // instant-attack/slow-release ceiling so an EQ-inflated mix can never exceed
+    // kMasterCeiling peak into the DAC (the recorded ±1.0 square-burst clip
+    // artifact). reset() clears its held gain so a seek/rewind starts loud-clean.
+    canvas::core::audio_mix::MasterLimiter limiter_;
 
     // Last timeline frame fed to the mix within the current play run, for
     // play_step()'s self-healing re-anchor: a playhead that moves before the

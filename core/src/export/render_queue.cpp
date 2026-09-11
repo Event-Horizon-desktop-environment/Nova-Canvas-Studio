@@ -78,6 +78,10 @@ RenderQueue::~RenderQueue() {
         std::lock_guard<std::mutex> lk(mutex_);
         stop_ = true;
     }
+    // Abort any in-flight render so worker_() can settle promptly instead of
+    // join()ing until the export completes (this was the kill-and-hang bug:
+    // ~RenderQueue blocked on join() for the whole render).
+    cancel_current_.store(true);
     cv_.notify_all();
     if (worker_.joinable()) worker_.join();
 }
@@ -162,8 +166,12 @@ void RenderQueue::cancel(uint64_t id) {
         std::lock_guard<std::mutex> lk(mutex_);
         for (auto& j : jobs_)
             if (j.id == id) {
-                j.status = RenderJob::Status::Cancelled;
                 prog = j.progress;
+                const bool was_rendering = j.status == RenderJob::Status::Rendering;
+                j.status = RenderJob::Status::Cancelled;
+                // Only an in-flight render needs the polled abort; flipping a
+                // queued job's status is enough for it (it will be skipped).
+                if (was_rendering && prog < 1.0) cancel_current_.store(true);
             }
     }
     log::log_warning("[render:q] CANCEL id=%llu progress=%.0f%%", (unsigned long long)id,
@@ -175,10 +183,12 @@ void RenderQueue::remove(uint64_t id) {
     std::lock_guard<std::mutex> lk(mutex_);
     for (auto it = jobs_.begin(); it != jobs_.end(); ++it) {
         if (it->id != id) continue;
-        if (it->status == RenderJob::Status::Rendering)
+        if (it->status == RenderJob::Status::Rendering) {
             it->status = RenderJob::Status::Cancelled;
-        else
+            cancel_current_.store(true);
+        } else {
             jobs_.erase(it);
+        }
         break;
     }
     if (on_changed) on_changed();
@@ -189,6 +199,8 @@ void RenderQueue::cancel_all() {
     for (auto& j : jobs_)
         if (j.status == RenderJob::Status::Queued)
             j.status = RenderJob::Status::Cancelled;
+        else if (j.status == RenderJob::Status::Rendering)
+            cancel_current_.store(true);
     if (on_changed) on_changed();
 }
 
@@ -319,42 +331,17 @@ void RenderQueue::worker() {
         }
 
         auto started = std::chrono::steady_clock::now();
-        const int64_t total = local.total_frames;
 
-        ExportControl ctrl;
-        std::atomic<bool> cancelled{false};
-        std::atomic<double> fps{0.0};
-        ctrl.should_cancel = [&] { return cancelled.load(); };
-        ctrl.on_progress = [&](double p, const std::string& phase) {
-            (void)phase;
-            auto now = std::chrono::steady_clock::now();
-            double secs = std::chrono::duration<double>(now - started).count();
-            double f = p * total;
-            if (secs > 0) fps.store(f / secs);
-            {
-                std::lock_guard<std::mutex> lk(mutex_);
-                for (auto& j : jobs_) {
-                    if (j.id != id) continue;
-                    j.progress = p;
-                    j.render_fps = fps.load();
-                    j.frames_rendered = (int64_t)std::llround(f);
-                    j.elapsed_seconds = secs;
-                }
-            }
-            if (on_changed) on_changed();
-        };
+        // Fresh poll state per job: a cancel request targeting a PREVIOUS job
+        // must not abort this one.
+        cancel_current_.store(false);
 
         std::string error;
         bool ok = false;
-        if (!cancelled.load()) {
+        {
             ExportSettings es = to_export_settings(local.settings);
             es.output_path = local.output_path;
             es.duration_frames = local.total_frames;
-<<<<<<< Updated upstream
-            ok = run_job(project, es, resolver, &ctrl, &cancelled, &error);
-        } else {
-            error = "Cancelled before start.";
-=======
             // Match the exporter's internal total_video so progress/fps counters
             // stay in sync when export fps != sequence fps.
             const double seq_fps = project ? project->sequence.fps : 0.0;
@@ -393,7 +380,6 @@ void RenderQueue::worker() {
                 if (on_preview_frame) on_preview_frame(std::move(frame));
             };
             ok = run_job(project, es, resolver, &ctrl, &cancel_current_, &error);
->>>>>>> Stashed changes
         }
 
         auto now = std::chrono::steady_clock::now();
@@ -403,7 +389,7 @@ void RenderQueue::worker() {
             for (auto& j : jobs_) {
                 if (j.id != id) continue;
                 j.elapsed_seconds = secs;
-                if (cancelled.load() || error.find("Cancelled") != std::string::npos)
+                if (cancel_current_.load() || error.find("Cancelled") != std::string::npos)
                     j.status = RenderJob::Status::Cancelled;
                 else if (ok) {
                     j.status = RenderJob::Status::Completed;

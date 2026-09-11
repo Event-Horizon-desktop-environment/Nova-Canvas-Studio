@@ -1,4 +1,9 @@
 <RCC>
+    <qresource prefix="/fonts">
+        <file alias="Geist-Variable.ttf">resources/fonts/Geist-Variable.ttf</file>
+        <file alias="GeistMono-Variable.ttf">resources/fonts/GeistMono-Variable.ttf</file>
+        <file alias="OFL.txt">resources/fonts/OFL.txt</file>
+    </qresource>
     <qresource prefix="/icons">
         <file alias="app_icon.svg">resources/icons/app_icon.svg</file>
         <file alias="add_marker.svg">resources/icons/add_marker.svg</file>
@@ -10,6 +15,8 @@
         <file alias="chevron_left.svg">resources/icons/chevron_left.svg</file>
         <file alias="chevron_right.svg">resources/icons/chevron_right.svg</file>
         <file alias="color_tag.svg">resources/icons/color_tag.svg</file>
+        <file alias="Collapse.svg">resources/icons/Collapse.svg</file>
+        <file alias="Expand.svg">resources/icons/Expand.svg</file>
         <file alias="edge_jump.svg">resources/icons/edge_jump.svg</file>
         <file alias="edit.svg">resources/icons/edit.svg</file>
         <file alias="fit.svg">resources/icons/fit.svg</file>
@@ -29,6 +36,8 @@
         <file alias="mode.svg">resources/icons/mode.svg</file>
         <file alias="mute.svg">resources/icons/mute.svg</file>
         <file alias="next_edit.svg">resources/icons/next_edit.svg</file>
+        <file alias="folder.svg">resources/icons/folder.svg</file>
+        <file alias="search.svg">resources/icons/search.svg</file>
         <file alias="play.svg">resources/icons/play.svg</file>
         <file alias="pause.svg">resources/icons/pause.svg</file>
         <file alias="reorder.svg">resources/icons/reorder.svg</file>
@@ -52,8 +61,20 @@
         <file alias="unlock.svg">resources/icons/unlock.svg</file>
         <file alias="vhs.svg">resources/icons/vhs.svg</file>
         <file alias="viewport.svg">resources/icons/viewport.svg</file>
+        <file alias="Dual-View.svg">resources/icons/Dual-View.svg</file>
         <file alias="volume.svg">resources/icons/volume.svg</file>
         <file alias="zoom_in.svg">resources/icons/zoom_in.svg</file>
         <file alias="zoom_out.svg">resources/icons/zoom_out.svg</file>
+        <file alias="gallery.svg">resources/icons/gallery.svg</file>
+        <file alias="lut.svg">resources/icons/lut.svg</file>
+        <file alias="nodes.svg">resources/icons/nodes.svg</file>
+        <file alias="effects.svg">resources/icons/effects.svg</file>
+        <file alias="lightbox.svg">resources/icons/lightbox.svg</file>
+        <file alias="eyedropper.svg">resources/icons/eyedropper.svg</file>
+        <file alias="waveform.svg">resources/icons/waveform.svg</file>
+        <file alias="vectorscope.svg">resources/icons/vectorscope.svg</file>
+        <file alias="grid.svg">resources/icons/grid.svg</file>
+        <file alias="hdr.svg">resources/icons/hdr.svg</file>
+        <file alias="proxy.svg">resources/icons/proxy.svg</file>
     </qresource>
 </RCC>

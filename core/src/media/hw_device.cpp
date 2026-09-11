@@ -17,14 +17,16 @@ const char* kProbeOrder[] = {"cuda", "vaapi", "qsv", "vulkan"};
 
 }  // namespace
 
-HwDeviceManager::HwDeviceManager() = default;
+HwDeviceManager::HwDeviceManager(const char* owner) : owner_(owner ? owner : "") {}
 HwDeviceManager::~HwDeviceManager() {
     if (device_ctx_) av_buffer_unref(&device_ctx_);
     // Always-on device teardown note: the HW device is refcounted across every
     // decoder, so this only fires on the last owner (TimelineDecoder/RenderSession
     // close). Right after a project switch both teardown and the next probe show.
     if (tried_)
-        log::log_warning("[hw] device closed last=%s", device_name_.empty() ? "none" : device_name_.c_str());
+        log::log_warning("[hw] device closed last=%s owner=%s",
+                         device_name_.empty() ? "none" : device_name_.c_str(),
+                         owner_.empty() ? "?" : owner_.c_str());
 }
 
 const AVBufferRef* HwDeviceManager::device_ctx() const {
@@ -39,8 +41,11 @@ void HwDeviceManager::init() const {
     // Always-on probe trace: which device types were attempted, in order, and how
     // long each took. A slow one (e.g. CUDA runtime spin-up on an NVA-less box)
     // explains startup stalls; which one actually won explains hw=yes/no in the
-    // [dec] lines. Posted once per process (the first device_ctx() call).
-    log::log_warning("[hw] probing accelerators in order: cuda vaapi qsv vulkan");
+    // [dec] lines. Posted once per manager (the first device_ctx() call); the
+    // owner tags which subsystem created the context, so a burst of fresh ~300ms
+    // probes mid-session is attributable.
+    log::log_warning("[hw] probing accelerators in order: cuda vaapi qsv vulkan (owner=%s)",
+                     owner_.empty() ? "?" : owner_.c_str());
     for (const char* name : kProbeOrder) {
         const AVHWDeviceType type = av_hwdevice_find_type_by_name(name);
         if (type == AV_HWDEVICE_TYPE_NONE) {

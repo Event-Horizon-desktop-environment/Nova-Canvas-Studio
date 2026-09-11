@@ -45,11 +45,17 @@ private:
 
 enum class Placement { Overwrite, Insert, AppendAtEnd, PlaceOnTop };
 
+// `media_fps` is the source media's own frame rate. Placement derives the clip's
+// timeline duration from the source window *time-based* (`tl = src * seq.fps /
+// media.fps`), matching the renderer/playback source stride — so 60fps footage on
+// a 30fps timeline spans its real duration, not twice it. Defaults to seq.fps
+// (the historical frame-for-frame law) for callers without media context; fps==seq
+// placements are identical either way.
 std::unique_ptr<ICommand> place_clip(Sequence& seq, Track::Kind kind, std::size_t track_index,
-                                     Clip clip, Placement mode);
+                                     Clip clip, Placement mode, double media_fps = 0.0);
 std::unique_ptr<ICommand> place_linked_clip(Sequence& seq, std::size_t video_track,
                                             std::size_t audio_track, Clip video, Clip audio,
-                                            Placement mode);
+                                            Placement mode, double media_fps = 0.0);
 std::unique_ptr<ICommand> unlink_clip(Sequence& seq, Track::Kind kind, std::size_t track_index,
                                       ClipId id);
 // Links an unlinked clip to an unlinked clip of the opposite kind whose time
@@ -78,6 +84,41 @@ std::unique_ptr<ICommand> ripple_delete_clip(Sequence& seq, Track::Kind kind,
 std::unique_ptr<ICommand> move_clip(Sequence& seq, Track::Kind src_kind, std::size_t src_track,
                                     ClipId id, Track::Kind dst_kind, std::size_t dst_track,
                                     int64_t new_tl_in);
+// A single clip destination for a batch move: the clip `id` ends on the track
+// `kind`/`track_index` at `new_tl_in`. Track indices are PER-KIND (audio entries
+// index into audio_tracks).
+struct BatchMove {
+    ClipId id = 0;
+    Track::Kind kind = Track::Kind::Video;
+    std::size_t track_index = 0;
+    int64_t new_tl_in = 0;
+};
+// Atomically moves several clips at once (one undo command). All moved clips are
+// extracted from their source tracks FIRST, then each is placed at its target, so
+// the group never clips or consumes its own members the way sequential move_clip
+// calls would; only stationary (non-dragged) clips get trimmed by a final
+// overlap. Linked clips missing from `moves` follow their rep by the same tl_in
+// delta, matching move_clip's mate semantics. Returns nullptr if `moves` is
+// empty; entries whose source/destination track is locked or whose clip cannot
+// be found are skipped.
+std::unique_ptr<ICommand> move_clips_batch(Sequence& seq, const std::vector<BatchMove>& moves);
+// Trims a clip's HEAD (left edge) to `new_tl_in`. `src_in` follows in lockstep
+// so the pictured content moves with the edge; the edge can be dragged back to
+// extend the clip but is clamped so it never goes below 0 or overlaps the track's
+// left neighbor, and never pushes src_in below the source start. If the clip is
+// linked, the mate's head trims by the same frame delta (clamped to its own
+// limits so the pair stays mated). `media_frames` is the clip's media duration
+// (total_frames) used to bound source-based clamps; pass 0 to allow no source
+// extension. Returns nullptr if the clip is not found, the track is locked, or
+// the requested position is already at the current edge.
+std::unique_ptr<ICommand> trim_clip_head(Sequence& seq, Track::Kind kind, std::size_t track_index,
+                                         ClipId id, int64_t new_tl_in, int64_t media_frames);
+// Same as trim_clip_head but for the clip's TAIL (right edge) at `new_tl_out`;
+// `src_out` follows in lockstep and can never exceed `media_frames` or overlap
+// the track's right neighbor. This enables "regrow" after a blade+delete: the
+// source window extends back into the deleted region.
+std::unique_ptr<ICommand> trim_clip_tail(Sequence& seq, Track::Kind kind, std::size_t track_index,
+                                         ClipId id, int64_t new_tl_out, int64_t media_frames);
 // Auto-creates a new topmost video track (index 0) and a new topmost audio track
 // (index 0), then moves the clip `id` onto the new video track at `new_tl_in`.
 // If the clip is linked, its linked mate moves to the new audio track, keeping
@@ -137,6 +178,12 @@ std::unique_ptr<ICommand> set_clip_audio_processing(Sequence& seq, Track::Kind k
                                                     float speed_factor, bool speed_enabled,
                                                     bool eq_enabled,
                                                     const std::array<Clip::EqBand, 6>& eq_bands);
+// Sets the AI voice-isolation engine on a clip's audio. If the clip is linked,
+// the mate inherits the same mode (both halves of an A/V pair share one audio
+// treatment). Returns nullptr if the clip is not found.
+std::unique_ptr<ICommand> set_clip_voice_isolation(Sequence& seq, Track::Kind kind,
+                                                   std::size_t track_index, ClipId id,
+                                                   VoiceIsolationMode mode);
 // Sets a video clip's visual transform (Zoom scale_x/scale_y, pixel Position
 // pos_x/pos_y, Rotation in degrees, Anchor offsets in pixels, and the flips).
 // If the clip is linked, its mate inherits the same values (an A/V pair shares
@@ -155,6 +202,13 @@ std::unique_ptr<ICommand> set_clip_transform(Sequence& seq, Track::Kind kind,
 std::unique_ptr<ICommand> set_clip_composite(Sequence& seq, Track::Kind kind,
                                              std::size_t track_index, ClipId id,
                                              float opacity, BlendMode blend_mode);
+// Replaces a clip's color grade (the node tree applied before the composite
+// blit). If the clip is linked, the mate inherits the same graph (an A/V pair
+// shares one grade; the audio half is a visual no-op). Passing an empty graph
+// clears the grade. Returns nullptr if the clip is not found.
+std::unique_ptr<ICommand> set_clip_grade(Sequence& seq, Track::Kind kind,
+                                         std::size_t track_index, ClipId id,
+                                         const grade_graph::GradeGraph& grade);
 // Sets transition shaping on a clip's IN or OUT edge: ease amount, curve value,
 // and the start/end ratio profile (all per-edge). If the clip is linked, the
 // mate's corresponding edge inherits the values. Returns nullptr if the clip is

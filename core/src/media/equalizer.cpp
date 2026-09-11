@@ -133,9 +133,20 @@ std::vector<ParametricEqualizer::Coeff> build_cascade(
     out.reserve(bands.size());
     if (sample_rate <= 0) return out;
     for (const Clip::EqBand& b : bands) {
-        if (!band_filters(b)) continue;
-        out.push_back(build_one(b.type, clamp_band_f0(b.frequency, sample_rate), b.gain, b.q,
-                                sample_rate));
+        if (band_filters(b)) {
+            out.push_back(build_one(b.type, clamp_band_f0(b.frequency, sample_rate), b.gain, b.q,
+                                    sample_rate));
+        } else {
+            // A non-filtering band still OCCUPIES its cascade slot as an exact
+            // identity biquad (b0=1, rest 0) rather than being dropped, so the
+            // cascade is always six stages and slot i always holds band i. This
+            // keeps the stage count (and therefore the DF2T state layout)
+            // stable across a mid-stream band edit: a band gliding to/from
+            // identity morphs its own slot in place (its state drains into the
+            // identity curve or fades in from it) instead of snapping the
+            // cascade length and misaligning every carried state after it.
+            out.push_back({1.0, 0.0, 0.0, 0.0, 0.0});
+        }
     }
     return out;
 }
@@ -174,10 +185,15 @@ bool ParametricEqualizer::configure(const int sample_rate, const int channels,
     z2_ = std::move(z2_new);
     // Coefficient glide: coeffs_ keeps the cascade currently in effect (the
     // "from" end, so the boundary sample is continuous), glide_to_ the target
-    // curve. process() interpolates stage-for-stage over kGlideFrames. Fresh
-    // configure (no prior cascade, or a stage-count change that can't slide) /
-    // geometry change snap straight to the target.
-    if (!coeffs_.empty() && target.size() == coeffs_.size()) {
+    // curve. process() interpolates stage-for-stage over kGlideFrames. With
+    // identity-filled slots the stage count is constant (six), so every
+    // reconfigure after the first glides — including into/out of a fully-flat
+    // curve: a band dragged through the ~0 dB identity threshold fades in or
+    // drains in place instead of dropping its slot, which would both snap the
+    // coefficients AND shift every carried DF2T state after it into a
+    // misaligned stage. Only a fresh configure (no prior cascade) / geometry
+    // change snaps.
+    if (!coeffs_.empty()) {
         glide_from_ = coeffs_;
         glide_to_ = target;
         glide_left_ = kGlideFrames;
@@ -187,10 +203,19 @@ bool ParametricEqualizer::configure(const int sample_rate, const int channels,
         glide_to_.clear();
         glide_left_ = 0;
     }
-    return !target.empty();
+    // The cascade is never empty now (identity fills non-filtering slots), so
+    // "active" means "at least one band actually shapes the signal" — not "has
+    // coefficients". A fully-flat EQ configures to false: the bit-exact
+    // pass-through path that keeps a disabled/zeroed EQ byte-identical.
+    any_active_ = std::any_of(bands.begin(), bands.end(),
+                              [](const Clip::EqBand& b) { return band_filters(b); });
+    // A glide still draining toward identity must keep active() true so the
+    // bank keeps feeding process(); once it finishes the EQ can settle to the
+    // byte-exact pass-through fast path.
+    return any_active_;
 }
 
-bool ParametricEqualizer::active() const { return !coeffs_.empty(); }
+bool ParametricEqualizer::active() const { return any_active_ && !coeffs_.empty(); }
 
 void ParametricEqualizer::process(float* const samples, const int num_frames) {
     if (coeffs_.empty() || samples == nullptr || num_frames <= 0 || channels_ <= 0) return;

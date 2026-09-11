@@ -114,6 +114,11 @@ private:
     bool running_ = false;
     bool stop_ = false;
     bool start_requested_ = false;  // worker drains queued jobs only while set
+    // In-flight render cancellation: set by cancel()/cancel_all()/remove() (and
+    // the destructor) so the running export's should_cancel() poll sees it and
+    // the worker can settle instead of join()ing a runaway render. Reset at each
+    // dispatch so a stale cancel doesn't abort the next job.
+    std::atomic<bool> cancel_current_{false};
     std::shared_ptr<const canvas::core::Project> active_project_;
     std::function<bool(const ExportSettings&, std::shared_ptr<const canvas::core::Project>&)>
         project_resolver_;

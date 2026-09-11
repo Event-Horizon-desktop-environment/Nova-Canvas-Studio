@@ -1,0 +1,49 @@
+# Nova Canvas Studio — clang-format
+#
+# Qt-derived layout (4-space indent, bound-left pointers, 100-col cap), matching
+# the project's hand-written style. Enforcement is opt-in at configure time:
+#
+#   cmake -DCANVAS_CLANG_FORMAT=ON -B build            # expose the targets
+#   cmake --build build --target clang-format          # reformat in place
+#   cmake --build build --target clang-format-check    # dry-run; fails on drift
+#
+# See AGENTS.md ("Formatting") for the workflow. Targeted at clang-format 17+.
+
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+Standard: c++20
+
+# Bound-left pointers/references (`char* p`, `T& r`), never derived from the code.
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# Namespace bodies sit at column 0 (no namespace indentation).
+NamespaceIndentation: None
+
+# Access modifiers line up with the class body; no forced blank lines around
+# public:/private:/protected:.
+AccessModifierOffset: -4
+EmptyLineBeforeAccessModifier: Never
+
+# Short control statements live on one line (`if (x) return y;`).
+AllowShortIfStatementsOnASingleLine: Always
+AllowShortLoopsOnASingleLine: true
+
+# One-line member functions in class bodies (`void end() { active_ = false; }`)
+# stay inline; longer bodies never get fused.
+AllowShortFunctionsOnASingleLine: Inline
+
+# Include order is left to the author: clang-format's case-sensitive sort would
+# flip the local convention (canvas/core/... before .../Widgets/...), so we only
+# preserve what is written. No regrouping across the blank line.
+SortIncludes: false
+IncludeBlocks: Preserve
+
+# Trailing // comments may be column-aligned in runs.
+AlignTrailingComments: true
+
+# Don't touch the existing `}  // namespace x` markers.
+FixNamespaceComments: false

@@ -32,6 +32,7 @@
 
 #include <chrono>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -45,6 +46,16 @@
 #endif
 
 namespace canvas::core::log {
+
+// Monotonic milliseconds since first call — a stable "epoch" for correlating
+// the always-on [grade]/[viewer] chains (commit → bake → upload → draw) across
+// the GUI and core threads in one log. Process-local; NOT wall-clock.
+inline std::uint64_t epoch_ms() {
+    static const auto t0 = std::chrono::steady_clock::now();
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - t0)
+                                          .count());
+}
 
 inline bool enabled() {
     static const bool on = [] {
@@ -77,18 +88,16 @@ inline const char* default_log_path() {
     return path;
 }
 
-inline FILE* file() {
-    static FILE* f = [] {
+inline FILE*& file() {
+    static FILE* f = nullptr;
+    if (!f) {
         const char* path = std::getenv("CANVAS_LOG_FILE");
         if (!path || !*path) path = default_log_path();
-        FILE* h = std::fopen(path, "a");
-        return h;
-    }();
+        f = std::fopen(path, "a");
+    }
     return f;
 }
 
-<<<<<<< Updated upstream
-=======
 // Message category used to choose the destination log file. Lines routed to a
 // category are written ONLY to that category's file (and stderr); Default keeps
 // every line that doesn't match any category.
@@ -338,7 +347,6 @@ inline void reset_route_files() {
     }
 }
 
->>>>>>> Stashed changes
 inline std::mutex& mutex() {
     static std::mutex m;
     return m;
@@ -433,8 +441,6 @@ inline void log_error(const char* fmt, ...) {
     }
 }
 
-<<<<<<< Updated upstream
-=======
 // Unconditional (always-on) informational line. Same sink/flush discipline as
 // log_warning, but for periodic PERFORMANCE TELEMETRY and state transitions
 // rather than anomalies: e.g. the `[grade]` apply-time snapshots and `[dec]`
@@ -512,5 +518,4 @@ inline void log_audio_info(const char* fmt, ...) {
     va_end(ap);
 }
 
->>>>>>> Stashed changes
 }  // namespace canvas::core::log

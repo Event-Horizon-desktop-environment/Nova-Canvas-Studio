@@ -1,0 +1,1598 @@
+<!doctype html>
+<!--
+  Nova Canvas Studio — full-UX HTML mockup · ALT GLASS VARIANT
+  Same layout, content and interactions as nova-canvas-html-mockup.html.
+  Changed ONLY the visual treatment: floating glass panels (backdrop blur,
+  translucent surfaces, ambient glow orbs) instead of solid docks. Dark-first,
+  tokenized light mode. Single file, no dependencies. Open in a browser.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nova Canvas Studio — design mockup (glass alt)</title>
+<style>
+  /* ------------------------------------------------------------------ */
+  /* 0. Fonts (relative to this file: docs/ → reference/openscreen/src)  */
+  /* ------------------------------------------------------------------ */
+  @font-face{
+    font-family:'Geist';
+    src:url('../reference/openscreen/src/assets/fonts/Geist-Variable.woff2') format('woff2');
+    font-weight:100 900; font-display:swap;
+  }
+  @font-face{
+    font-family:'Geist Mono';
+    src:url('../reference/openscreen/src/assets/fonts/GeistMono-Variable.woff2') format('woff2');
+    font-weight:100 900; font-display:swap;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 1. Tokens (mirrors design-tokens.css; dark is root)                */
+  /* ------------------------------------------------------------------ */
+  :root{
+    /* surfaces */
+    --bg:#0a0d12; --surface:#14181f; --surface-2:#1c2029; --surface-3:#252a35;
+    --surface-hi:#2b313b; --border:#252a35; --border-hi:#3a4150;
+    /* text */
+    --fg:#e6e9ef; --fg-2:#f3f5f8; --muted:#8b95a3; --meta:#5b6470;
+    /* brand */
+    --brand:#10b981; --brand-lo:#34d399; --brand-hi:#0a8f63;
+    --warn:#fbbf24; --danger:#f87171; --sweet:#6c55ff; /* playhead / marks */
+    --focus-ring:rgba(16,185,129,.35);
+    /* type / geometry */
+    --fs-xs:10.5px; --fs-sm:12px; --fs-md:13px; --fs-lg:15px; --fs-xl:17px;
+    --tt:0.045em;
+    --r-sm:6px; --r-md:8px; --r-lg:12px; --r-xl:16px; --r-pill:999px;
+    --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px;
+    --ease:cubic-bezier(.2,0,0,1);
+    --t-fast:120ms; --t-base:180ms;
+    --shadow-card:0 1px 2px rgba(0,0,0,.4),0 6px 24px rgba(0,0,0,.18);
+    --shadow-pop:0 2px 4px rgba(0,0,0,.5),0 16px 48px rgba(0,0,0,.32);
+    --font-ui:'Geist',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+    --font-mono:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --grad-workspace:radial-gradient(1200px 500px at 70% -10%,rgba(16,185,129,.07),transparent 60%);
+  }
+  [data-theme="light"]{
+    --bg:#f4f6f9; --surface:#ffffff; --surface-2:#eef1f5; --surface-3:#e2e8f0;
+    --surface-hi:#d8dee7; --border:#e2e8f0; --border-hi:#cbd5e1;
+    --fg:#0f172a; --fg-2:#05070b; --muted:#64748b; --meta:#94a3b8;
+    --shadow-card:0 1px 2px rgba(15,23,42,.06),0 6px 24px rgba(15,23,42,.08);
+    --shadow-pop:0 2px 4px rgba(15,23,42,.10),0 16px 48px rgba(15,23,42,.14);
+    --grad-workspace:radial-gradient(1200px 500px at 70% -10%,rgba(16,185,129,.08),transparent 60%);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 2. Base                                                             */
+  /* ------------------------------------------------------------------ */
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:var(--font-ui);font-size:var(--fs-md);line-height:1.35;
+    color:var(--fg);background:var(--bg);overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:rgba(16,185,129,.28);color:var(--fg-2)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:var(--surface-3);border:3px solid transparent;background-clip:content-box;border-radius:6px}
+  ::-webkit-scrollbar-thumb:hover{background:var(--border-hi);border:3px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-track{background:transparent}
+  button{font-family:inherit;font-size:inherit;color:inherit;background:none;border:none;cursor:pointer}
+  input,select{font-family:inherit;font-size:inherit;color:inherit}
+  .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+  svg.l{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+  svg.l.f{fill:currentColor;stroke:none}
+
+  :focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px;border-radius:3px}
+  .app{display:flex;flex-direction:column;height:100vh}
+  .app.transitioning>*{pointer-events:none}
+
+  /* ------------------------------------------------------------------ */
+  /* 3. Title bar + menus                                                */
+  /* ------------------------------------------------------------------ */
+  .titlebar{
+    height:34px;flex:none;display:flex;align-items:center;gap:var(--sp-2);
+    padding:0 var(--sp-2) 0 var(--sp-3);background:var(--surface);border-bottom:1px solid var(--border);
+    user-select:none;
+  }
+  .win-dots{display:flex;gap:7px;margin-right:var(--sp-2)}
+  .win-dots i{width:11px;height:11px;border-radius:50%;display:block}
+  .win-dots i:nth-child(1){background:#f87171}
+  .win-dots i:nth-child(2){background:#fbbf24}
+  .win-dots i:nth-child(3){background:#34d399}
+  .wordmark{display:flex;align-items:center;gap:8px;font-weight:650;font-size:var(--fs-lg);letter-spacing:-.01em;color:var(--fg-2);padding-right:var(--sp-4)}
+  .wordmark .dot{width:9px;height:9px;border-radius:2.5px;background:linear-gradient(135deg,var(--brand-lo),var(--brand));box-shadow:0 0 10px rgba(16,185,129,.55)}
+  .menu{display:flex;gap:2px;height:100%;align-items:center}
+  .menu button{padding:3px 9px;border-radius:var(--r-sm);font-size:var(--fs-sm);color:var(--muted);height:24px;transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease)}
+  .menu button:hover{background:var(--surface-2);color:var(--fg)}
+  .menu button:active{transform:translateY(1px)}
+  .title-right{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2)}
+  .proj-chip{display:flex;align-items:center;gap:7px;font-size:var(--fs-sm);color:var(--muted);padding:4px 10px;border-radius:var(--r-pill);background:var(--surface-2);border:1px solid var(--border)}
+  .proj-chip .save{color:var(--brand);display:inline-flex}
+  .proj-chip .save.dirty{color:var(--warn)}
+
+  /* ------------------------------------------------------------------ */
+  /* 4. Page bar                                                         */
+  /* ------------------------------------------------------------------ */
+  .pagebar{
+    height:40px;flex:none;display:flex;align-items:center;gap:var(--sp-3);
+    padding:0 var(--sp-3);background:var(--surface);border-bottom:1px solid var(--border);
+  }
+  .mini-brand{display:flex;align-items:center;gap:7px;font-weight:600;font-size:var(--fs-sm);color:var(--muted);letter-spacing:var(--tt)}
+  .mini-brand .dot{width:7px;height:7px;border-radius:2px;background:var(--brand)}
+  .seg{display:inline-flex;padding:3px;gap:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-md)}
+  .seg button{display:flex;align-items:center;gap:7px;padding:5px 14px;border-radius:var(--r-sm);font-size:var(--fs-sm);font-weight:500;color:var(--muted);transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease),box-shadow var(--t-fast) var(--ease)}
+  .seg button:hover{color:var(--fg)}
+  .seg button.active{background:var(--surface);color:var(--fg);box-shadow:var(--shadow-card),inset 0 0 0 1px var(--border)}
+  .seg button.active .g{color:var(--brand)}
+  .pagebar .right{margin-left:auto;display:flex;gap:var(--sp-2);align-items:center}
+
+  /* ------------------------------------------------------------------ */
+  /* 5. Transport bar                                                    */
+  /* ------------------------------------------------------------------ */
+  .transport{
+    height:54px;flex:none;display:flex;align-items:center;gap:var(--sp-4);
+    padding:0 var(--sp-3);background:var(--bg);border-bottom:1px solid var(--border);position:relative;z-index:3;
+  }
+  /* viewport selector (hand-painted, like ViewportSelector.cpp) */
+  .vp-select{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface);cursor:pointer;transition:border-color var(--t-fast) var(--ease),background var(--t-fast) var(--ease)}
+  .vp-select:hover{background:var(--surface-2);border-color:var(--border-hi)}
+  .vp-select .meta{display:grid;line-height:1.1;text-align:left}
+  .vp-select .t{font-size:var(--fs-sm);font-weight:600;color:var(--fg)}
+  .vp-select .s{font-size:10px;color:var(--meta);letter-spacing:var(--tt)}
+  .group{display:flex;align-items:center;gap:2px}
+  .divider{width:1px;height:22px;background:var(--border);margin:0 var(--sp-1)}
+  .icon-btn{
+    position:relative;display:inline-flex;align-items:center;justify-content:center;
+    width:30px;height:30px;border-radius:var(--r-md);color:var(--muted);
+    transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease),transform var(--t-fast) var(--ease);
+  }
+  .icon-btn:hover{background:var(--surface-2);color:var(--fg)}
+  .icon-btn.on{color:var(--brand);background:rgba(16,185,129,.12)}
+  .icon-btn.danger:hover{color:var(--danger)}
+  .icon-btn .kbd{
+    position:absolute;right:1px;top:1px;font-size:8.5px;font-family:var(--font-mono);
+    color:var(--meta);background:var(--surface);border:1px solid var(--border);border-radius:3px;padding:0 2px;
+  }
+  .icon-btn.play{width:34px;height:34px;background:var(--brand);color:#04150e;border-radius:50%;box-shadow:0 2px 10px rgba(16,185,129,.35)}
+  .icon-btn.play:hover{background:var(--brand-lo);transform:scale(1.04)}
+  .icon-btn.play:active{transform:scale(.96)}
+  .icon-btn.stop{color:var(--danger)}
+  .timecode{
+    font-family:var(--font-mono);font-size:var(--fs-lg);font-weight:500;color:var(--fg-2);
+    padding:4px 12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);
+    display:flex;align-items:baseline;gap:2px;letter-spacing:-.02em;
+  }
+  .timecode .f{counter:0}
+  .timecode b.fps{font-size:10px;color:var(--meta);font-weight:500;margin-left:2px}
+  .transport .tl{margin-left:auto}
+  .transport .scrub-wrap{position:absolute;left:var(--sp-3);right:var(--sp-3);bottom:-1px;height:16px;display:flex;align-items:flex-end}
+  .transport .scrub-wrap input{width:100%;height:14px}
+
+  /* ------------------------------------------------------------------ */
+  /* 6. Workspace grid                                                   */
+  /* ------------------------------------------------------------------ */
+  .workspace{
+    flex:1;min-height:0;display:grid;grid-template-columns:296px minmax(0,1fr) 320px;
+    background:
+      var(--grad-workspace),
+      linear-gradient(180deg,var(--bg),var(--bg));
+    position:relative;
+  }
+  .workspace.deliver{grid-template-columns:1fr;background:var(--grad-workspace),var(--bg)}
+  .workspace.deliver aside,.workspace.deliver .center-col{display:none}
+  .workspace.deliver .deliver-wrap{display:grid}
+  .workspace.editor .deliver-wrap{display:none}
+
+  /* -------- panels (shared surface) -------- */
+  .panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;display:flex;flex-direction:column;box-shadow:var(--shadow-card)}
+  .panel-head{flex:none;display:flex;align-items:center;gap:var(--sp-2);padding:7px var(--sp-3);border-bottom:1px solid var(--border);min-height:38px}
+  .panel-head h3{font-size:11.5px;font-weight:600;letter-spacing:var(--tt);text-transform:uppercase;color:var(--muted)}
+  .panel-head .tools{margin-left:auto;display:flex;gap:2px}
+
+  /* ---- media dock (left) ---- */
+  .media-dock{padding:var(--sp-3);display:flex;flex-direction:column;gap:var(--sp-3);min-height:0}
+  .media-top{display:flex;gap:var(--sp-2)}
+  .search{flex:1;display:flex;align-items:center;gap:8px;height:32px;padding:0 10px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-md);color:var(--meta);transition:border-color var(--t-fast) var(--ease)}
+  .search:focus-within{border-color:var(--brand);box-shadow:0 0 0 3px var(--focus-ring)}
+  .search input{flex:1;background:none;border:none;outline:none;color:var(--fg);font-size:var(--fs-sm)}
+  .search input::placeholder{color:var(--meta)}
+  .btn{
+    display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 13px;border-radius:var(--r-md);
+    font-size:var(--fs-sm);font-weight:550;transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease),box-shadow var(--t-fast) var(--ease),border-color var(--t-fast) var(--ease);
+  }
+  .btn.primary{background:var(--brand);color:#04150e}
+  .btn.primary:hover{background:var(--brand-lo);box-shadow:0 2px 12px rgba(16,185,129,.3)}
+  .btn.ghost{background:var(--surface);border:1px solid var(--border);color:var(--muted)}
+  .btn.ghost:hover{color:var(--fg);border-color:var(--border-hi);background:var(--surface-2)}
+  .btn.danger-ghost{color:var(--danger);border:1px solid transparent}
+  .btn.danger-ghost:hover{background:rgba(248,113,113,.1)}
+  .btn:active{transform:translateY(1px)}
+  .btn.small{height:26px;padding:0 10px;font-size:var(--fs-sm)}
+  .btn.small.primary{height:26px;background:rgba(16,185,129,.14);color:var(--brand-lo)}
+  .btn.small.primary:hover{background:rgba(16,185,129,.24);box-shadow:none}
+  .btn[data-ap]::after{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--brand);box-shadow:0 0 6px rgba(16,185,129,.7)}
+  .media-body{flex:1;display:grid;grid-template-columns:104px minmax(0,1fr);gap:var(--sp-3);min-height:0}
+  .bins{display:flex;flex-direction:column;gap:2px;overflow:auto}
+  .bin{display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:var(--r-sm);font-size:var(--fs-sm);color:var(--muted);cursor:pointer;transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease)}
+  .bin:hover{color:var(--fg)}
+  .bin.active{background:rgba(16,185,129,.12);color:var(--brand-lo)}
+  .bin .cnt{margin-left:auto;font-size:10px;color:var(--meta);font-family:var(--font-mono)}
+  .bin-label{font-size:10px;letter-spacing:var(--tt);text-transform:uppercase;color:var(--meta);padding:6px 9px 2px}
+  .pool{overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:var(--sp-2);align-content:start}
+  .tile{position:relative;border-radius:var(--r-md);border:1px solid transparent;overflow:hidden;background:var(--surface-2);cursor:grab;transition:transform var(--t-fast) var(--ease),border-color var(--t-fast) var(--ease),box-shadow var(--t-fast) var(--ease)}
+  .tile:hover{border-color:var(--border-hi);transform:translateY(-1px);box-shadow:var(--shadow-card)}
+  .tile:active{cursor:grabbing}
+  .tile .th{aspect-ratio:16/9;position:relative;background:var(--surface-3);display:flex;align-items:center;justify-content:center;color:var(--meta)}
+  .tile .th svg{width:18px;height:18px;opacity:.7}
+  .tile .dur{position:absolute;left:4px;top:4px;z-index:2;font-family:var(--font-mono);font-size:9.5px;color:#dfe5ee;background:rgba(4,8,14,.72);padding:1.5px 5px;border-radius:4px}
+  .tile .type{position:absolute;right:4px;top:4px;z-index:2;width:16px;height:16px;display:flex;align-items:center;justify-content:center;background:rgba(4,8,14,.72);border-radius:4px;color:#dfe5ee}
+  .tile .type svg{width:10px;height:10px;stroke:#dfe5ee}
+  .tile .cap{display:flex;flex-direction:column;padding:5px 7px 6px;gap:1px}
+  .tile .nm{font-size:10.5px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tile .res{font-size:9.5px;color:var(--meta);font-family:var(--font-mono)}
+  .tile.sel{border-color:var(--brand);box-shadow:0 0 0 3px var(--focus-ring)}
+
+  /* ---- viewer (center) ---- */
+  .center-col{padding:var(--sp-3);display:flex;flex-direction:column;gap:var(--sp-3);min-height:0}
+  .viewer-wrap{flex:1;min-height:0;display:flex;flex-direction:column}
+  .viewer-stage{
+    flex:1;min-height:0;border-radius:var(--r-lg);border:1px solid var(--border);
+    background:#06080c;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;
+  }
+  [data-theme="light"] .viewer-stage{background:#0b0e13;border-color:#cbd5e1}
+  .screen{
+    aspect-ratio:16/9;width:92%;max-height:96%;
+    border-radius:4px;overflow:hidden;position:relative;
+    background:#11141a;box-shadow:0 10px 40px rgba(0,0,0,.5);
+  }
+  .screen .scene{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:#3a4150}
+  .scene .studio{display:flex;flex-direction:column;align-items:center;gap:var(--sp-4)}
+  .scene .glow{position:absolute;inset:auto;width:520px;height:520px;left:50%;top:15%;transform:translate(-50%,0);background:radial-gradient(circle,rgba(16,185,129,.16),transparent 62%);border-radius:50%}
+  .scene .monitor{width:200px;height:116px;border-radius:6px;background:linear-gradient(160deg,#232936,#151a22);border:1px solid #2c3340;box-shadow:0 6px 20px rgba(0,0,0,.4);position:relative}
+  .scene .monitor::before{content:'';position:absolute;inset:10px;border-radius:3px;background:linear-gradient(140deg,#2f3a4b,#1b212b 70%);opacity:.9}
+  .scene .monitor::after{content:'';position:absolute;left:50%;bottom:-14px;width:34px;height:8px;background:#1b2027;border-radius:0 0 4px 4px;transform:translateX(-50%)}
+  .scene .stand{position:absolute;top:190px}
+  .scene .desk{position:absolute;left:50%;bottom:26px;transform:translateX(-50%);width:340px;height:7px;border-radius:4px;background:#232a34;box-shadow:0 1px 0 rgba(255,255,255,.045)}
+  .scene .kw{font-size:11px;letter-spacing:.32em;color:#3a4150;text-transform:uppercase;margin-top:80px}
+  .scene .fps-c{font-family:var(--font-mono);font-size:10px;color:#33404f}
+  /* guides overlay */
+  .guides{position:absolute;inset:0;pointer-events:none}
+  .guides .safe{position:absolute;inset:6%;border:1px dashed rgba(230,233,239,.22);border-radius:2px}
+  .guides .center-x{position:absolute;left:0;right:0;top:50%;height:1px;background:rgba(230,233,239,.12)}
+  .guides .center-y{position:absolute;top:0;bottom:0;left:50%;width:1px;background:rgba(230,233,239,.12)}
+  /* viewer chrome */
+  .v-chip{position:absolute;z-index:3;display:flex;align-items:center;gap:6px;font-size:10px;letter-spacing:var(--tt);color:#cdd4de;background:rgba(6,10,16,.72);border:1px solid rgba(255,255,255,.06);padding:3px 8px;border-radius:5px;backdrop-filter:blur(3px)}
+  .v-chip .m{color:var(--brand-lo);display:inline-flex}
+  .v-chip.vr{top:10px;left:10px}
+  .v-chip.vt{top:10px;right:10px;font-family:var(--font-mono)}
+  .v-chip.vb{bottom:10px;right:10px;font-family:var(--font-mono);letter-spacing:.05em}
+  .v-chip.vb b{color:var(--fg-2)}
+  .v-chip.vb.rec b{color:var(--danger);animation:pulse 1.2s infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  .viewer-foot{
+    flex:none;display:flex;align-items:center;gap:var(--sp-2);margin-top:var(--sp-2);
+    padding:6px 8px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);
+  }
+  .viewer-foot .prog{flex:1;display:flex;align-items:center;gap:var(--sp-2);color:var(--meta);font-size:var(--fs-sm)}
+  .viewer-foot .zone{font-size:10px;letter-spacing:var(--tt);color:var(--warn)}
+  .zoom-label{font-family:var(--font-mono);font-size:11px;color:var(--muted);min-width:38px;text-align:center}
+
+  /* ---- inspector dock (right) ---- */
+  .inspector-dock{padding:var(--sp-3);display:flex;flex-direction:column;gap:var(--sp-3);min-height:0}
+  .pills{display:flex;padding:3px;gap:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-md)}
+  .pills button{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:6px 4px;border-radius:var(--r-sm);font-size:var(--fs-sm);font-weight:500;color:var(--muted);transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease)}
+  .pills button:hover{color:var(--fg)}
+  .pills button.active{background:var(--surface);color:var(--brand-lo);box-shadow:var(--shadow-card),inset 0 0 0 1px var(--border)}
+  .pills button .v{opacity:.7}
+  .insp-body{flex:1;overflow:auto;display:flex;flex-direction:column;gap:var(--sp-3)}
+  .clip-id{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-2) var(--sp-3)}
+  .thumb-id{width:56px;height:32px;border-radius:var(--r-sm);background:linear-gradient(120deg,#2a3140,#1d242f);flex:none;position:relative}
+  .thumb-id::after{content:'';position:absolute;inset:4px;border-radius:2px;background:linear-gradient(140deg,#3a4356,#242c38 68%);background-size:100% 100%}
+  .clip-id .ci{display:flex;flex-direction:column;gap:1px;min-width:0}
+  .clip-id .ci b{font-size:var(--fs-sm);color:var(--fg-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .clip-id .ci span{font-size:10.5px;color:var(--meta);font-family:var(--font-mono)}
+  .clip-id .del{margin-left:auto;opacity:0;transition:opacity var(--t-fast) var(--ease)}
+  .clip-id:hover .del{opacity:1}
+  .cat{border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface);overflow:hidden}
+  .cat-head{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;user-select:none;transition:background var(--t-fast) var(--ease)}
+  .cat-head:hover{background:var(--surface-2)}
+  .cat-head+.cat-head{border-top:1px solid var(--border)}
+  .cat-head h4{font-size:11px;font-weight:600;letter-spacing:var(--tt);text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:7px}
+  .cat-head h4 svg{width:13px;height:13px}
+  .cat-head .chev{margin-left:auto;transition:transform var(--t-base) var(--ease);color:var(--meta)}
+  .cat.open .chev{transform:rotate(90deg)}
+  .cat-body{display:none;padding:var(--sp-2) var(--sp-3) var(--sp-3);flex-direction:column;gap:var(--sp-2)}
+  .cat.open .cat-body{display:flex}
+  .row{display:flex;align-items:center;gap:var(--sp-2);min-height:30px}
+  .row .lab{flex:none;width:74px;font-size:var(--fs-sm);color:var(--muted)}
+  .row .val{flex:none;width:46px;text-align:right;font-family:var(--font-mono);font-size:11px;color:var(--fg)}
+  .row .control{flex:1;min-width:0}
+  input[type=range]{-webkit-appearance:none;width:100%;height:18px;background:transparent;cursor:pointer}
+  input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--surface-3)}
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;width:13px;height:13px;border-radius:50%;margin-top:-4.5px;
+    background:var(--brand);border:2px solid var(--surface);box-shadow:0 0 0 1px var(--brand),0 2px 6px rgba(0,0,0,.4);
+    transition:transform var(--t-fast) var(--ease);
+  }
+  input[type=range]:hover::-webkit-slider-thumb{transform:scale(1.15)}
+  input[type=range]::-moz-range-track{height:4px;border-radius:2px;background:var(--surface-3)}
+  input[type=range]::-moz-range-thumb{width:11px;height:11px;border-radius:50%;background:var(--brand);border:2px solid var(--surface)}
+  .select{
+    position:relative;height:30px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2);
+    padding:0 10px;display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);color:var(--fg);cursor:pointer;
+    transition:border-color var(--t-fast) var(--ease),background var(--t-fast) var(--ease);
+  }
+  .select:hover{border-color:var(--border-hi);background:var(--surface-3)}
+  .select .v{margin-left:auto;color:var(--muted)}
+  .col2{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-2)}
+  .seg-sm{display:inline-flex;padding:2px;gap:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-md)}
+  .seg-sm button{padding:3px 8px;border-radius:4px;font-size:var(--fs-sm);color:var(--muted)}
+  .seg-sm button:hover{color:var(--fg)}
+  .seg-sm button.active{background:var(--surface-3);color:var(--fg)}
+  .switch{position:relative;width:32px;height:18px;border-radius:10px;background:var(--surface-3);cursor:pointer;transition:background var(--t-fast) var(--ease);flex:none;border:1px solid var(--border-hi)}
+  .switch::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#8b95a3;transition:transform var(--t-fast) var(--ease),background var(--t-fast) var(--ease)}
+  .switch.on{background:rgba(16,185,129,.25);border-color:var(--brand)}
+  .switch.on::after{transform:translateX(14px);background:var(--brand-lo)}
+  .switch-row{display:flex;align-items:center;gap:10px;font-size:var(--fs-sm);color:var(--muted);padding:2px 0}
+  .switch-row b{margin-left:auto;font-weight:500;color:var(--fg);font-size:11px;font-family:var(--font-mono)}
+  /* transition pill */
+  .t-pill{display:flex;flex-direction:column;gap:var(--sp-2);border:1px solid var(--border);border-radius:var(--r-md);padding:var(--sp-2) var(--sp-3);background:var(--surface)}
+  .chips{display:flex;gap:5px}
+  .chip{padding:3px 9px;border-radius:var(--r-pill);font-size:var(--fs-sm);font-family:var(--font-mono);border:1px solid var(--border);background:var(--surface-2);color:var(--muted);transition:all var(--t-fast) var(--ease)}
+  .chip:hover{color:var(--fg);border-color:var(--border-hi)}
+  .chip.active{background:rgba(16,185,129,.16);border-color:var(--brand);color:var(--brand-lo)}
+  .empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--meta);text-align:center;padding:var(--sp-6)}
+  .empty-state svg{width:30px;height:30px;color:var(--border-hi)}
+  .empty-state b{font-size:var(--fs-md);color:var(--muted)}
+  .empty-state span{font-size:var(--fs-sm);max-width:220px;line-height:1.5}
+
+  /* ------------------------------------------------------------------ */
+  /* 7. Timeline dock                                                    */
+  /* ------------------------------------------------------------------ */
+  .timeline-dock{
+    flex:none;height:252px;background:var(--surface);border-top:1px solid var(--border);
+    display:flex;flex-direction:column;position:relative;
+  }
+  .tl-tools{flex:none;display:flex;align-items:center;gap:2px;padding:4px var(--sp-3);border-bottom:1px solid var(--border);height:34px}
+  .tl-tools .name{display:flex;align-items:center;gap:7px;font-size:var(--fs-sm);font-weight:600;color:var(--fg);margin-right:var(--sp-2)}
+  .tl-tools .name svg{color:var(--brand)}
+  .tl-tools .side{margin-left:auto;display:flex;align-items:center;gap:6px}
+  .minimap{
+    flex:none;height:26px;position:relative;margin:0 var(--sp-3) var(--sp-1);
+    background:var(--surface-2);border:1px solid var(--border);border-radius:6px;overflow:hidden;
+  }
+  .lane-dots{position:absolute;left:0;right:0;height:100%;display:grid;grid-template-rows:repeat(3,1fr);gap:3px;padding:4px 6px}
+  .lane-dots i{display:block;background:var(--surface-3);border-radius:2px}
+  .lane-dots i.on{background:rgba(16,185,129,.5)}
+  .lane-dots i.aud{background:rgba(108,85,255,.38)}
+  .lane-dots.auds i.on{background:rgba(139,149,163,.55)}
+  .lane-dots.auds i.aud{background:rgba(108,85,255,.55)}
+  .minimap .mm-playhead{position:absolute;top:0;bottom:0;width:2px;background:var(--sweet);left:240px;box-shadow:0 0 4px rgba(108,85,255,.6)}
+  .tl-scroll{flex:1;overflow:auto;position:relative}
+  .tl-inner{width:960px;position:relative}
+  .ruler{height:24px;position:relative;border-bottom:1px solid var(--border);background:var(--surface-2);cursor:pointer}
+  .ruler .tick{position:absolute;bottom:0;width:1px;background:var(--border-hi)}
+  .ruler .tick.s{height:5px}
+  .ruler .tick.m{height:8px;background:#3a4150}
+  .ruler .tickL{position:absolute;bottom:1px;font-family:var(--font-mono);font-size:8.5px;color:var(--meta);letter-spacing:.02em}
+  .lanes{position:relative}
+  .lane{display:flex;border-bottom:1px solid var(--border);background:var(--surface)}
+  .lane-head{
+    flex:none;width:148px;position:sticky;left:0;z-index:4;background:var(--surface-2);
+    border-right:1px solid var(--border);display:flex;flex-direction:column;justify-content:center;align-items:center;padding:0 6px;gap:2px;
+  }
+  .lane-head .lh1{display:flex;align-items:center;gap:6px;width:100%}
+  .lane-head .lh1 svg{width:13px;height:13px;color:var(--muted)}
+  .lane-head .lh1 svg.on{color:var(--brand)}
+  .lane-head .lh1 .nm{font-size:11px;font-weight:600;color:var(--fg);letter-spacing:.02em}
+  .lane-head .lh2{font-size:9px;color:var(--meta);letter-spacing:.08em}
+  .lane.v .lane-head{height:56px;background:
+      linear-gradient(rgba(16,185,129,.05),rgba(16,185,129,.05)),var(--surface-2)}
+  .lane.a .lane-head{height:48px;background:
+      linear-gradient(rgba(108,85,255,.06),rgba(108,85,255,.06)),var(--surface-2)}
+  .lane.ghost-cell .lane-head{height:34px}
+  .lane-body{flex:1;position:relative;height:100%}
+  .ghost-cell .lane-body{height:34px;display:flex;align-items:center;justify-content:center;color:var(--meta);font-size:10px;letter-spacing:.06em;text-transform:uppercase;background:var(--surface);border:1px dashed var(--border-hi);margin:3px 4px;border-radius:6px}
+  .clip{
+    position:absolute;height:40px;top:50%;transform:translateY(-50%);border-radius:6px;
+    border:1px solid rgba(16,185,129,.35);background:#1c232d;
+    box-shadow:0 1px 4px rgba(0,0,0,.35);overflow:hidden;cursor:pointer;user-select:none;
+    transition:box-shadow var(--t-fast) var(--ease),border-color var(--t-fast) var(--ease);
+  }
+  .clip:hover{box-shadow:0 3px 10px rgba(0,0,0,.45)}
+  .clip.sel{border-color:var(--brand);box-shadow:0 0 0 2px var(--focus-ring),0 3px 10px rgba(0,0,0,.45);z-index:2}
+  .clip.sel .handles::before,.clip.sel .handles::after{content:'';position:absolute;top:0;bottom:0;width:4px;background:rgba(16,185,129,.4)}
+  .clip.sel .handles::before{left:0;border-radius:6px 0 0 6px}
+  .clip.sel .handles::after{right:0;border-radius:0 6px 6px 0}
+  .clip .thumbs{position:absolute;inset:0;display:flex}
+  .clip .thumbs i{flex:1;background:linear-gradient(140deg,#262e3b,#1a212c 68%);border-right:1px solid rgba(255,255,255,.03)}
+  .clip .thumbs i:nth-child(even){background:linear-gradient(140deg,#2b3443,#1c242f 68%)}
+  .clip .clipseg{position:absolute;left:6px;top:4px;display:flex;align-items:center;gap:5px;z-index:2;pointer-events:none}
+  .clip .clipseg .nm{font-size:10px;color:#cdd4de;text-shadow:0 1px 2px rgba(0,0,0,.7);letter-spacing:.01em}
+  .clip .clipdur{position:absolute;right:6px;bottom:3px;font-family:var(--font-mono);font-size:8.5px;color:#9aa6b5;z-index:2;text-shadow:0 1px 2px rgba(0,0,0,.7)}
+  .clip .spd-tag{position:absolute;right:6px;top:4px;font-family:var(--font-mono);font-size:8.5px;color:var(--sweet);z-index:2;text-shadow:0 1px 2px rgba(0,0,0,.7)}
+  .clip.audio{
+    border-color:rgba(108,85,255,.35);background:#1a1f2b;height:34px;
+  }
+  .clip.audio .wave{position:absolute;inset:0;display:flex;align-items:center;padding:0 8px;gap:1.5px;justify-content:flex-start}
+  .clip.audio .wave i{width:2px;background:rgba(139,149,163,.5);flex:none;transition:background .3s}
+  .clip.audio .wave i.hot{background:rgba(108,85,255,.75)}
+  .clip.audio .vol-line{position:absolute;left:0;right:0;height:1px;background:var(--brand);opacity:.85;box-shadow:0 0 3px rgba(16,185,129,.5)}
+  .clip.audio .fade{position:absolute;top:0;bottom:0;background:repeating-linear-gradient(90deg,rgba(16,185,129,.16) 0 3px,transparent 3px 8px)}
+  .transition-mark{
+    position:absolute;top:50%;transform:translate(-50%,-50%);z-index:3;height:16px;border-radius:4px;
+    background:rgba(16,185,129,.18);border:1px solid var(--brand);display:flex;align-items:center;
+    cursor:pointer;transition:background var(--t-fast) var(--ease);
+  }
+  .transition-mark:hover{background:rgba(16,185,129,.32)}
+  .transition-mark .d{position:absolute;width:1px;height:12px;background:var(--brand);left:50%;top:50%;transform:translate(-50%,-50%)}
+  .transition-mark .lbl{position:absolute;top:-14px;left:50%;transform:translateX(-50%);font-size:8px;color:var(--brand-lo);font-family:var(--font-mono);white-space:nowrap}
+  .mark-in,.mark-out{position:absolute;top:0;bottom:0;width:2px;background:var(--warn);opacity:.8}
+  .mark-in{left:90px}
+  .mark-out{left:760px}
+  .playhead{position:absolute;top:0;bottom:0;width:2px;background:var(--sweet);z-index:6;box-shadow:0 0 5px rgba(108,85,255,.7)}
+  .playhead .knob{position:absolute;top:-1px;left:-6px;width:14px;height:14px;background:var(--sweet);border-radius:3px 3px 6px 6px;transform:rotate(45deg);display:flex;align-items:center;justify-content:center}
+  .playhead .knob::after{content:'';position:relative;transform:rotate(-45deg);width:4px;height:4px;background:#fff;border-radius:50%}
+  .playhead .frame-tag{position:absolute;top:-20px;left:6px;font-family:var(--font-mono);font-size:9px;color:#eef;background:var(--sweet);padding:1px 5px;border-radius:4px;white-space:nowrap;opacity:0;transition:opacity var(--t-fast) var(--ease)}
+  .playhead:hover .frame-tag{opacity:1}
+  .lane.lanesel{outline:1px solid rgba(16,185,129,.4);outline-offset:-1px}
+  .tl-foot{flex:none;height:22px;display:flex;align-items:center;gap:var(--sp-3);padding:0 var(--sp-3);border-top:1px solid var(--border);font-size:10px;color:var(--meta)}
+  .tl-foot .inner-name{font-family:var(--font-mono)}
+  .tl-foot .hk{margin-left:auto;display:flex;gap:var(--sp-2)}
+  .tl-foot .hk b{color:var(--muted);font-weight:500;border:1px solid var(--border);background:var(--surface-2);border-radius:3px;padding:0 4px;font-family:var(--font-mono);font-size:9px}
+
+  /* ------------------------------------------------------------------ */
+  /* 8. Deliver page                                                     */
+  /* ------------------------------------------------------------------ */
+  .deliver-wrap{display:none;grid-template-columns:minmax(0,1fr) 380px;gap:var(--sp-4);padding:var(--sp-4);min-height:0}
+  .deliver-wrap>*{min-height:0}
+  .d-flow{display:flex;flex-direction:column;gap:var(--sp-4);overflow:auto;padding-right:2px}
+  .d-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-4)}
+  .frow{display:flex;align-items:center;gap:var(--sp-3)}
+  .frow .lab{flex:none;width:148px;font-size:var(--fs-sm);color:var(--muted)}
+  .frow .val-wide{flex:1}
+  .frow .val-field{height:30px;flex:1;display:flex;align-items:center;padding:0 10px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2);font-family:var(--font-mono);font-size:var(--fs-sm);color:var(--muted);gap:8px}
+  .frow .val-field .fold{color:var(--fg);display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .rail-progress{flex:1;height:8px;border-radius:4px;background:var(--surface-3);overflow:hidden}
+  .rail-progress .fill{height:100%;background:linear-gradient(90deg,var(--brand),var(--brand-lo));border-radius:4px;transition:width .3s var(--ease)}
+  .rail-progress .fill.indet{background:linear-gradient(90deg,var(--brand),var(--brand-lo),var(--brand));background-size:200% 100%;animation:shimmer 1.4s linear infinite}
+  @keyframes shimmer{to{background-position:-200% 0}}
+  .queue{display:flex;flex-direction:column}
+  .q-item{display:flex;flex-direction:column;gap:9px;padding:11px 13px;border-bottom:1px solid var(--border);transition:background var(--t-fast) var(--ease)}
+  .q-item:last-child{border-bottom:none}
+  .q-item:hover{background:var(--surface-2)}
+  .q-item:hover .rm{opacity:1}
+  .q-line{display:flex;align-items:center;gap:9px}
+  .q-line .i{width:34px;height:22px;border-radius:4px;background:linear-gradient(140deg,#2a3140,#1d242f);flex:none}
+  .q-line .t{min-width:0;flex:1;display:grid;line-height:1.25}
+  .q-line .t b{font-size:11px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:550}
+  .q-line .t span{font-size:9.5px;color:var(--meta);font-family:var(--font-mono)}
+  .q-line .rm{margin-left:auto;opacity:0;transition:opacity var(--t-fast) var(--ease)}
+  .chip-status{display:inline-flex;align-items:center;gap:5px;font-size:9.5px;font-weight:600;letter-spacing:.04em;padding:2px 8px;border-radius:var(--r-pill)}
+  .chip-status.done{color:var(--brand-lo);background:rgba(16,185,129,.13)}
+  .chip-status.work{color:var(--warn);background:rgba(251,191,36,.12)}
+  .chip-status.work i{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1.2s infinite}
+  .chip-status.idle{color:var(--muted);background:var(--surface-3)}
+  .chip-status.err{color:var(--danger);background:rgba(248,113,113,.12)}
+
+  /* ------------------------------------------------------------------ */
+  /* 9. Status bar                                                       */
+  /* ------------------------------------------------------------------ */
+  .statusbar{
+    flex:none;height:24px;display:flex;align-items:center;gap:var(--sp-4);
+    padding:0 var(--sp-3);font-size:10.5px;color:var(--meta);background:var(--surface);
+    border-top:1px solid var(--border);user-select:none;
+  }
+  .statusbar .msg{display:flex;align-items:center;gap:7px;color:var(--muted)}
+  .statusbar .msg b{color:var(--fg);font-weight:550}
+  .statusbar .right{margin-left:auto;display:flex;align-items:center;gap:var(--sp-3)}
+  .statusbar .pill{display:inline-flex;align-items:center;gap:5px;color:var(--muted)}
+  .statusbar .pill .dot{width:6px;height:6px;border-radius:50%;background:var(--brand);box-shadow:0 0 6px rgba(16,185,129,.6)}
+  .statusbar .mk{color:var(--warn)}
+
+  /* ------------------------------------------------------------------ */
+  /* 10. Motion / transitions                                           */
+  /* ------------------------------------------------------------------ */
+  .panel,.cat,.tile,.clip{animation:none}
+  .panel,.dock,.tl-dock,aside,.center-col{animation:fadein var(--t-base) var(--ease)}
+  @keyframes fadein{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:none}}
+  .tooltip-hover{position:relative}
+  .tooltip-hover::after{
+    content:attr(data-tip);position:absolute;left:50%;bottom:calc(100% + 7px);transform:translate(-50%,2px);
+    background:var(--surface-hi);color:var(--fg);font-size:10px;padding:4px 8px;border-radius:5px;
+    white-space:nowrap;opacity:0;pointer-events:none;transition:opacity var(--t-fast) var(--ease),transform var(--t-fast) var(--ease);
+    box-shadow:var(--shadow-pop);border:1px solid var(--border);z-index:99;
+  }
+  .tooltip-hover:hover::after{opacity:1;transform:translate(-50%,0)}
+  @media (max-width:1180px){ .workspace{grid-template-columns:240px minmax(0,1fr) 280px} .lane-head{width:110px} }
+
+  /* ====================================================================
+     ALTERNATE VARIANT — FLOATING GLASS PANELS
+     Same layout + interactions; only the surface treatment differs.
+     Ambient gradient background + translucent blurred panels.
+     ==================================================================== */
+  body{
+    background:
+      radial-gradient(900px 560px at 12% -8%,rgba(16,185,129,.12),transparent 62%),
+      radial-gradient(760px 520px at 106% 4%,rgba(108,85,255,.11),transparent 58%),
+      radial-gradient(1200px 800px at 50% 115%,rgba(16,185,129,.06),transparent 60%),
+      linear-gradient(180deg,#0a0e15,#060a10);
+    background-attachment:fixed;
+  }
+  [data-theme="light"] body{
+    background:
+      radial-gradient(900px 560px at 12% -8%,rgba(16,185,129,.13),transparent 62%),
+      radial-gradient(760px 520px at 106% 4%,rgba(108,85,255,.12),transparent 58%),
+      radial-gradient(1200px 800px at 50% 115%,rgba(16,185,129,.07),transparent 60%),
+      linear-gradient(180deg,#f6f8fb,#eef2f7);
+  }
+
+  /* floating chrome strips: translucent blur instead of solid bars */
+  .titlebar,.pagebar,.transport,.statusbar{
+    background:rgba(9,12,18,.72);
+    -webkit-backdrop-filter:blur(16px) saturate(1.2);
+    backdrop-filter:blur(16px) saturate(1.2);
+    border-color:rgba(255,255,255,.06);
+  }
+  [data-theme="light"] .titlebar,[data-theme="light"] .pagebar,
+  [data-theme="light"] .transport,[data-theme="light"] .statusbar{
+    background:rgba(255,255,255,.72);
+    border-color:rgba(15,23,42,.08);
+  }
+  .app .pagebar{border-bottom:1px solid rgba(255,255,255,.06)}
+
+  /* workspace: let the ambient body show through; docks separated by air */
+  .workspace{
+    background:transparent;
+    gap:var(--sp-3);
+    padding:var(--sp-3);
+    grid-template-columns:296px minmax(0,1fr) 320px;
+  }
+  .workspace.deliver{grid-template-columns:1fr;background:transparent;padding:var(--sp-3)}
+  .workspace.deliver .deliver-wrap{padding:0}
+
+  /* media / center / inspector docks sit transparent over the ambient bg */
+  .media-dock,.center-col,.inspector-dock{
+    background:transparent;gap:var(--sp-3);padding:0;
+  }
+  .inspector-dock{padding:var(--sp-3)}
+
+  /* THE glass recipe */
+  .panel{
+    background:linear-gradient(168deg,rgba(33,40,53,.80),rgba(14,18,27,.66));
+    -webkit-backdrop-filter:blur(18px) saturate(1.25);
+    backdrop-filter:blur(18px) saturate(1.25);
+    border:1px solid rgba(255,255,255,.10);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.06),
+      0 2px 6px rgba(0,0,0,.28),
+      0 20px 48px rgba(0,0,0,.42);
+  }
+  .panel-head{border-bottom:1px solid rgba(255,255,255,.07)}
+  [data-theme="light"] .panel{
+    background:linear-gradient(168deg,rgba(255,255,255,.88),rgba(244,247,251,.74));
+    border:1px solid rgba(15,23,42,.10);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.9),
+      0 2px 6px rgba(15,23,42,.06),
+      0 18px 40px rgba(15,23,42,.12);
+  }
+  [data-theme="light"] .panel-head{border-bottom-color:rgba(15,23,42,.08)}
+
+  .media-dock .panel,.center-col .panel{margin:0}
+  .inspector-dock{margin:0}
+  .media-dock{display:flex;flex-direction:column}
+
+  /* the media card + viewer card fill their floating cell */
+  .media-dock .panel{height:100%}
+  .viewer-wrap.panel{flex:1;display:flex;flex-direction:column}
+  .deliver-wrap .panel,.deliver-wrap .queue{height:100%}
+
+  /* inspector dock is itself the floating glass card */
+  .inspector-dock{
+    background:linear-gradient(168deg,rgba(33,40,53,.80),rgba(14,18,27,.66));
+    -webkit-backdrop-filter:blur(18px) saturate(1.25);
+    backdrop-filter:blur(18px) saturate(1.25);
+    border:1px solid rgba(255,255,255,.10);
+    border-radius:var(--r-xl);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.06),
+      0 2px 6px rgba(0,0,0,.28),
+      0 20px 48px rgba(0,0,0,.42);
+  }
+  [data-theme="light"] .inspector-dock{
+    background:linear-gradient(168deg,rgba(255,255,255,.88),rgba(244,247,251,.74));
+    border:1px solid rgba(15,23,42,.10);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 2px 6px rgba(15,23,42,.06),0 18px 40px rgba(15,23,42,.12);
+  }
+  .inspector-dock .pills{border-radius:var(--r-md)}
+
+  /* timeline dock floats as its own glass card with breathing room */
+  .timeline-dock{
+    margin:0 var(--sp-3) var(--sp-3);
+    height:256px;
+    border:1px solid rgba(255,255,255,.10);
+    border-radius:var(--r-xl);
+    background:linear-gradient(168deg,rgba(33,40,53,.82),rgba(14,18,27,.70));
+    -webkit-backdrop-filter:blur(18px) saturate(1.25);
+    backdrop-filter:blur(18px) saturate(1.25);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.06),
+      0 2px 6px rgba(0,0,0,.28),
+      0 20px 48px rgba(0,0,0,.42);
+  }
+  [data-theme="light"] .timeline-dock{
+    background:linear-gradient(168deg,rgba(255,255,255,.90),rgba(244,247,251,.76));
+    border:1px solid rgba(15,23,42,.10);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 2px 6px rgba(15,23,42,.06),0 18px 40px rgba(15,23,42,.12);
+  }
+  .tl-tools{border-bottom:1px solid rgba(255,255,255,.07)}
+  .tl-foot{border-top:1px solid rgba(255,255,255,.07)}
+  [data-theme="light"] .tl-tools,[data-theme="light"] .tl-foot{border-color:rgba(15,23,42,.08)}
+
+  /* recessed wells inside the glass: translucent so the blur reads */
+  .minimap{background:rgba(10,13,20,.42);border-color:rgba(255,255,255,.07)}
+  .ruler{background:rgba(12,16,24,.34);border-color:rgba(255,255,255,.06)}
+  .lane{background:transparent}
+  .lane-head{background:rgba(22,27,38,.42);border-color:rgba(255,255,255,.06)}
+  .lane.v .lane-head{
+    background:linear-gradient(rgba(16,185,129,.06),rgba(16,185,129,.06)),rgba(22,27,38,.42);
+  }
+  .lane.a .lane-head{
+    background:linear-gradient(rgba(108,85,255,.07),rgba(108,85,255,.07)),rgba(22,27,38,.42);
+  }
+  [data-theme="light"] .minimap{background:rgba(15,23,42,.05);border-color:rgba(15,23,42,.08)}
+  [data-theme="light"] .ruler{background:rgba(15,23,42,.05)}
+  [data-theme="light"] .lane-head{background:rgba(15,23,42,.05)}
+
+  /* nested cards & controls lean translucent too */
+  .cat{background:rgba(8,11,17,.40);border-color:rgba(255,255,255,.07)}
+  .cat.open>.cat-body{border-color:rgba(255,255,255,.06)}
+  .t-pill{background:rgba(8,11,17,.40);border-color:rgba(255,255,255,.07)}
+  [data-theme="light"] .cat,[data-theme="light"] .t-pill{background:rgba(255,255,255,.42);border-color:rgba(15,23,42,.08)}
+  .viewer-foot{background:rgba(8,11,17,.40);border-color:rgba(255,255,255,.07)}
+  [data-theme="light"] .viewer-foot{background:rgba(255,255,255,.46);border-color:rgba(15,23,42,.08)}
+  .tile{background:rgba(28,33,43,.52)}
+  [data-theme="light"] .tile{background:rgba(255,255,255,.55)}
+  .search{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.08)}
+  [data-theme="light"] .search{background:rgba(15,23,42,.05);border-color:rgba(15,23,42,.10)}
+  .timecode{background:rgba(10,13,20,.5);border-color:rgba(255,255,255,.08)}
+  [data-theme="light"] .timecode{background:rgba(255,255,255,.6);border-color:rgba(15,23,42,.10)}
+  .proj-chip{background:rgba(10,13,20,.4);border-color:rgba(255,255,255,.08)}
+  [data-theme="light"] .proj-chip{background:rgba(255,255,255,.5);border-color:rgba(15,23,42,.10)}
+
+  /* panel-head h3 uppercase labels sit brighter against glass */
+  .panel-head h3{letter-spacing:.06em}
+  /* keep the program screen itself deep and solid (it's a screen) */
+  .viewer-stage{background:#070a10;border-color:rgba(255,255,255,.08)}
+  [data-theme="light"] .viewer-stage{border-color:rgba(15,23,42,.12)}
+</style>
+</head>
+<body data-theme="dark">
+
+<!-- ════════════ ICON SPRITE ════════════ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-play" viewBox="0 0 16 16"><path class="f" d="M4.5 3.2a.8.8 0 0 1 1.22-.66l8.1 4.8a.8.8 0 0 1 0 1.34l-8.1 4.8a.8.8 0 0 1-1.22-.66z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 16 16"><rect class="f" x="3.6" y="3" width="3" height="10" rx="1"/><rect class="f" x="9.4" y="3" width="3" height="10" rx="1"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 16 16"><rect class="f" x="3.4" y="3.4" width="9.2" height="9.2" rx="1.6"/></symbol>
+    <symbol id="i-tostart" viewBox="0 0 16 16"><path d="M3.2 3.6v8.8"/><path d="M5 8l7-4.4v8.8z"/></symbol>
+    <symbol id="i-stepback" viewBox="0 0 16 16"><path d="M3.2 3.6v8.8"/><path d="M13 3.6v8.8L6 8z"/></symbol>
+    <symbol id="i-stepfwd" viewBox="0 0 16 16"><path d="M12.8 3.6v8.8"/><path d="M3 3.6v8.8L10 8z"/></symbol>
+    <symbol id="i-toend" viewBox="0 0 16 16"><path d="M12.8 3.6v8.8"/><path d="M11 8L4 3.6v8.8z"/></symbol>
+    <symbol id="i-loop" viewBox="0 0 16 16"><path d="M3.5 6.5A4.5 4.5 0 0 1 8 2.5h2.5V1l3 2.5-3 2.5V4.5H8a2.8 2.8 0 0 0-2.8 2c0 .4-.1.8-.3 1.2"/><path d="M12.5 9.5A4.5 4.5 0 0 1 8 13.5H5.5V15l-3-2.5 3-2.5v2h2.5a2.8 2.8 0 0 0 2.8-2c0-.4.1-.8.3-1.2"/></symbol>
+    <symbol id="i-markin" viewBox="0 0 16 16"><path d="M3.5 3.5v9"/><path d="M5.5 4l6 4-6 4z"/></symbol>
+    <symbol id="i-markout" viewBox="0 0 16 16"><path d="M12.5 3.5v9"/><path d="M10.5 12l-6-4 6-4z"/></symbol>
+    <symbol id="i-nedit" viewBox="0 0 16 16"><path d="M6.5 3.5l-3.5 4.5 3.5 4.5"/><path d="M9.5 3.5l3.5 4.5-3.5 4.5"/></symbol>
+    <symbol id="i-edge" viewBox="0 0 16 16"><path d="M3 3.5v9"/><path d="M6.5 5.5L9.5 8l-3 2.5V5.5z"/><path d="M10 3.5v9" opacity=".5"/></symbol>
+    <symbol id="i-snap" viewBox="0 0 16 16"><path d="M4 2.5a1.5 1.5 0 0 1 1.5 1.5v5h5a1.5 1.5 0 0 1 1.5 1.5V12" opacity=".55"/><path d="M4 4.5v1.5"/><path d="M11.5 4.5v1.5" opacity=".55"/><path d="M8.5 13.5h5v-2a1.5 1.5 0 0 0-1.5-1.5h-1v1.5"/></symbol>
+    <symbol id="i-select" viewBox="0 0 16 16"><path d="M4.5 2.5l8 3.8-3.6 1.2-1.4 3.9"/><path d="M12.5 13.5l-2.4-2.4"/></symbol>
+    <symbol id="i-blade" viewBox="0 0 16 16"><path d="M3 2.5l10.5 10.5" stroke-width="1.8"/><path d="M12.5 13.5h.1" stroke-width="2.6"/><path d="M10 11h.3"/><path d="M13.6 6.6l-4.2-4.2" opacity=".6"/><path d="M3.4 13.2A1.3 1.3 0 1 1 4.4 15l1.4-1.4" stroke-width="1.2"/></symbol>
+    <symbol id="i-hand" viewBox="0 0 16 16"><path d="M7.5 5V3.2a1 1 0 0 1 2 0V5"/><path d="M9.5 5V3a1 1 0 0 1 2 0v2.2"/><path d="M11.5 5.4V3.8a1 1 0 0 1 2 0V8a5.5 5.5 0 0 1-5.2 5.5H8a3.2 3.2 0 0 1-2.4-1.1L3 9.2a.8.8 0 0 1 1.2-1.1L6 9.8"/></symbol>
+    <symbol id="i-zoom" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2L13.5 13.5"/></symbol>
+    <symbol id="i-import" viewBox="0 0 16 16"><path d="M8 2.5v7"/><path d="M5.5 7.5L8 10l2.5-2.5"/><path d="M2.5 11.5v1.4a.6.6 0 0 0 .6.6h9.8a.6.6 0 0 0 .6-.6v-1.4"/></symbol>
+    <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2L13.5 13.5"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4"/><path d="M8 2.8v1.6M8 11.6v1.6M13.2 8h-1.6M4.4 8H2.8M11.7 4.3l-1.1 1.1M5.4 10.6l-1.1 1.1M11.7 11.7l-1.1-1.1M5.4 5.4L4.3 4.3"/></symbol>
+    <symbol id="i-film" viewBox="0 0 16 16"><rect x="2.6" y="3" width="10.8" height="10" rx="1.6"/><path d="M5.4 3v10M10.6 3v10"/><path d="M2.6 6h2.8M2.6 10.4h2.8M10.6 6h2.8M10.6 10.4h2.8"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 16 16"><path d="M2.2 4.5a1 1 0 0 1 1-1h3l1.4 1.7h5.2a1 1 0 0 1 1 1v6.2a1.2 1.2 0 0 1-1.2 1.2H3.4a1.2 1.2 0 0 1-1.2-1.2z"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 16 16"><rect x="3.4" y="7" width="9.2" height="6.4" rx="1.6"/><path d="M5.2 7V5a2.8 2.8 0 0 1 5.6 0v2"/></symbol>
+    <symbol id="i-unlock" viewBox="0 0 16 16"><rect x="3.4" y="7" width="9.2" height="6.4" rx="1.6"/><path d="M5.2 7V5a2.8 2.8 0 0 1 5.5-.8"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 16 16"><path d="M1.8 8s2.5-4.4 6.2-4.4S14.2 8 14.2 8s-2.5 4.4-6.2 4.4S1.8 8 1.8 8z"/><circle cx="8" cy="8" r="2"/></symbol>
+    <symbol id="i-ear" viewBox="0 0 16 16"><path d="M3 6.5a5 5 0 0 1 10 0v1.6a3.4 3.4 0 0 1-5.4 2.8"/><path d="M7.6 10.9a2.2 2.2 0 1 0 0 4.4h.8"/><path d="M10 3.4a3 3 0 0 1 1 3.6" opacity=".7"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 16 16"><path d="M3.2 4.5h9.6M6 4.5V3.2h4v1.3"/><path d="M4.4 4.5l.5 8.3a1.2 1.2 0 0 0 1.2 1.1h3.8a1.2 1.2 0 0 0 1.2-1.1l.5-8.3"/></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><path d="M3 8.5l3.2 3.2L13 4.8"/></symbol>
+    <symbol id="i-x" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+    <symbol id="i-chevdn" viewBox="0 0 16 16"><path d="M3.5 6L8 10.5 12.5 6"/></symbol>
+    <symbol id="i-chevR" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 16 16"><path d="M6.5 3.5L3 8l3.5 4.5"/><path d="M3.5 8H9a3.5 3.5 0 0 1 3.5 3.5v1" opacity=".8"/></symbol>
+    <symbol id="i-redo" viewBox="0 0 16 16"><path d="M9.5 3.5L13 8l-3.5 4.5"/><path d="M12.5 8H7a3.5 3.5 0 0 0-3.5 3.5v1" opacity=".8"/></symbol>
+    <symbol id="i-download" viewBox="0 0 16 16"><path d="M8 2.5v7"/><path d="M5.5 7L8 9.5 10.5 7"/><path d="M2.5 11.5v1.4a.6.6 0 0 0 .6.6h9.8a.6.6 0 0 0 .6-.6v-1.4" opacity=".8"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.2"/><path d="M8 5.2V8l2 1.4"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3"/><path d="M8 1.8v1.4M8 12.8v1.4M1.8 8h1.4M12.8 8h1.4M3.7 3.7l1 1M11.3 11.3l1 1M12.3 3.7l-1 1M4.7 11.3l-1 1"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 16 16"><path d="M12.6 10A5.2 5.2 0 0 1 6 3.4 5.2 5.2 0 1 0 12.6 10z"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 16 16"><path d="M2.5 5h5M9.5 5h4M9.5 3.4v3.2M2.5 11h2M6.5 11h7M6.5 9.4v3.2"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 16 16"><path d="M8 2l1.6 4.4L14 8l-4.4 1.6L8 14l-1.6-4.4L2 8l4.4-1.6z"/></symbol>
+    <symbol id="i-audio" viewBox="0 0 16 16"><path d="M8.5 2.5L4.5 5.5h-2v5h2l4 3z" opacity=".9"/><path d="M11 6.2a3 3 0 0 1 0 3.6" opacity=".8"/><path d="M12.7 4.6a5.4 5.4 0 0 1 0 6.8" opacity=".6"/></symbol>
+    <symbol id="i-video" viewBox="0 0 16 16"><rect x="2.2" y="4" width="8.4" height="8" rx="1.4"/><path d="M10.6 7.2l3.2-2.4v6.4l-3.2-2.4z"/></symbol>
+    <symbol id="i-image" viewBox="0 0 16 16"><rect x="2.6" y="3.4" width="10.8" height="9.2" rx="1.6"/><circle cx="6" cy="6.6" r="1.1"/><path d="M2.8 11.6l3.4-3.2 2.6 2.4 2-1.8 2.4 2.2" opacity=".8"/></symbol>
+    <symbol id="i-trans" viewBox="0 0 16 16"><path d="M4 4l6 8H4z"/><path d="M12 4l-6 8 6-8z" opacity=".85"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3.2v9.6M3.2 8h9.6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 16 16"><path d="M8 2.6l6 10.4H2z"/><path d="M8 6.8v2.8"/><path d="M8 11.4h.01"/></symbol>
+    <symbol id="i-updownMute" viewBox="0 0 16 16"><path d="M8 2.5v6"/><path d="M5.6 5.2l2.4-2.7 2.4 2.7"/><path d="M8 13.5v-6"/><path d="M5.6 10.8l2.4 2.7 2.4-2.7"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.2 6.5A5 5 0 0 0 4 4.8M13.2 6.5V3M13.2 6.5h-3.4M2.8 9.5a5 5 0 0 0 9.2 1.7M2.8 9.5v3.4M2.8 9.5h3.4"/></symbol>
+  </defs>
+</svg>
+
+<div class="app" id="app">
+
+  <!-- ─────────────────── Title bar ─────────────────── -->
+  <header class="titlebar">
+    <div class="win-dots"><i></i><i></i><i></i></div>
+    <div class="wordmark"><span class="dot"></span>Nova Canvas</div>
+    <nav class="menu">
+      <button>File</button><button>Edit</button><button>Trim</button>
+      <button>Timeline</button><button>Clip</button><button>Mark</button>
+      <button>View</button><button>Playback</button>
+    </nav>
+    <div class="title-right">
+      <div class="proj-chip">
+        <span>Untitled_Sequence.ehproj</span>
+        <span class="save" data-tip="Saved"><svg class="l" style="width:13px;height:13px"><use href="#i-check"/></svg></span>
+      </div>
+      <button class="icon-btn tooltip-hover" data-tip="Undo (Ctrl+Z)"><svg class="l"><use href="#i-undo"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Redo (Ctrl+Shift+Z)"><svg class="l"><use href="#i-redo"/></svg></button>
+      <span class="divider"></span>
+      <button class="icon-btn tooltip-hover" id="themeBtn" data-tip="Toggle light / dark">
+        <svg class="l"><use href="#i-sun"/></svg>
+      </button>
+      <span class="divider"></span>
+      <button class="icon-btn tooltip-hover" data-tip="Minimize"><svg class="l" style="width:12px;height:12px"><path d="M3 8.5h10"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Maximize"><svg class="l" style="width:12px;height:12px"><rect x="3" y="3.5" width="10" height="9" rx="1"/></svg></button>
+      <button class="icon-btn danger" data-tip="Close"><svg class="l" style="width:12px;height:12px"><use href="#i-x"/></svg></button>
+    </div>
+  </header>
+
+  <!-- ─────────────────── Page bar ─────────────────── -->
+  <div class="pagebar">
+    <div class="mini-brand"><span class="dot"></span>STUDIO</div>
+    <div class="seg" id="pageSeg">
+      <button class="active g" data-page="editor"><svg class="l g" style="width:14px;height:14px"><use href="#i-film"/></svg>Edit</button>
+      <button class="g" data-page="deliver"><svg class="l g" style="width:14px;height:14px"><use href="#i-download"/></svg>Deliver</button>
+    </div>
+    <div class="right">
+      <button class="icon-btn tooltip-hover" data-tip="Auto-save on · every 2 min"><svg class="l"><use href="#i-clock"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Preferences"><svg class="l"><use href="#i-settings"/></svg></button>
+    </div>
+  </div>
+
+  <!-- ─────────────────── Transport bar ─────────────────── -->
+  <div class="transport">
+    <!-- viewport selector -->
+    <button class="vp-select tooltip-hover" id="vpSel" data-tip="Viewport size — click to cycle">
+      <svg class="l" style="color:var(--meta)"><use href="#i-film"/></svg>
+      <span class="meta"><span class="t" id="vpT">1920 × 1080</span><span class="s" id="vpS">PROGRAM · 30 FPS</span></span>
+      <svg class="l" style="width:12px;height:12px"><use href="#i-chevdn"/></svg>
+    </button>
+
+    <!-- marks + navigation -->
+    <div class="group">
+      <button class="icon-btn tooltip-hover" data-tip="Mark In (I)" id="btnMarkIn"><svg class="l"><use href="#i-markin"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Mark Out (O)" id="btnMarkOut"><svg class="l"><use href="#i-markout"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Go to Mark In (Shift+I)"><svg class="l"><use href="#i-tostart"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Go to Mark Out (Shift+O)"><svg class="l"><use href="#i-toend"/></svg></button>
+      <span class="divider"></span>
+      <button class="icon-btn tooltip-hover" data-tip="Previous Edit Point (↑)"><svg class="l"><use href="#i-nedit"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Next Edit Point (↓)"><svg class="l"><use href="#i-nedit" style="transform:rotate(180deg)"/></svg></button>
+    </div>
+
+    <!-- transport cluster -->
+    <div class="group">
+      <button class="icon-btn tooltip-hover" data-tip="Go to Start (Home)"><svg class="l"><use href="#i-tostart"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Step Back (←)"><svg class="l"><use href="#i-stepback"/></svg></button>
+      <button class="icon-btn stop tooltip-hover" data-tip="Stop (K)"><svg class="l"><use href="#i-stop"/></svg></button>
+      <button class="icon-btn play tooltip-hover" id="btnPlay" data-tip="Play / Pause (Space)"><svg class="l"><use href="#i-play"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Step Forward (→)"><svg class="l"><use href="#i-stepfwd"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Go to End (End)"><svg class="l"><use href="#i-toend"/></svg></button>
+      <button class="icon-btn tooltip-hover" id="btnLoop" data-tip="Loop Playback"><svg class="l"><use href="#i-loop"/></svg></button>
+    </div>
+
+    <div class="tl" style="margin-left:auto;margin-right:8px">
+      <div class="group">
+        <button class="icon-btn tooltip-hover" data-tip="Snap to Ruler"><svg class="l"><use href="#i-snap"/></svg></button>
+        <button class="icon-btn tooltip-hover" data-tip="Previous Edge (…)"><svg class="l"><use href="#i-edge"/></svg></button>
+        <button class="icon-btn tooltip-hover" data-tip="Next Edge (…)"><svg class="l" style="transform:rotate(180deg)"><use href="#i-edge"/></svg></button>
+        <span class="divider"></span>
+        <div class="mono timecode"><span id="tcNow">00:00:00:00</span><b class="fps" id="tcFrame">F 0</b></div>
+      </div>
+    </div>
+    <!-- scrub slider -->
+    <div class="scrub-wrap">
+      <input type="range" id="scrub" min="0" max="900" value="0" step="1" title="Scrub">
+    </div>
+  </div>
+
+  <!-- ─────────────────── Workspace ─────────────────── -->
+  <div class="workspace" id="workspace">
+
+    <!-- ░░░░░ left: media pool ░░░░░ -->
+    <aside class="media-dock">
+      <div class="panel" style="flex:1;min-height:0;display:flex;flex-direction:column">
+        <div class="panel-head">
+          <h3>Media</h3>
+          <div class="tools">
+            <button class="icon-btn tooltip-hover" data-tip="New bin"><svg class="l"><use href="#i-folder"/></svg></button>
+            <button class="icon-btn tooltip-hover" data-tip="Sort & filter"><svg class="l"><use href="#i-sliders"/></svg></button>
+          </div>
+        </div>
+        <div style="padding:var(--sp-2) var(--sp-3);display:flex;gap:var(--sp-2)">
+          <label class="search"><svg class="l" style="width:14px;height:14px"><use href="#i-search"/></svg>
+            <input placeholder="Search media…" value="">
+          </label>
+          <button class="btn small primary" data-ap id="btnImport">Import</button>
+        </div>
+        <div class="media-body">
+          <div class="bins">
+            <span class="bin-label">Bins</span>
+            <div class="bin active"><svg class="l" style="width:13px;height:13px"><use href="#i-folder"/></svg>All clips<span class="cnt">6</span></div>
+            <div class="bin"><svg class="l" style="width:13px;height:13px"><use href="#i-folder"/></svg>A-Roll<span class="cnt">3</span></div>
+            <div class="bin"><svg class="l" style="width:13px;height:13px"><use href="#i-folder"/></svg>B-Roll<span class="cnt">2</span></div>
+            <div class="bin"><svg class="l" style="width:13px;height:13px"><use href="#i-folder"/></svg>Music<span class="cnt">1</span></div>
+          </div>
+          <div class="pool" id="pool">
+            <div class="tile sel" data-name="city_aerial.mp4">
+              <div class="th" style="background:linear-gradient(160deg,#33424f,#1c2a36);color:#5f7a8a"><svg class="l"><use href="#i-video"/></svg></div>
+              <span class="dur">00:12:00</span><span class="type"><svg><use href="#i-video"/></svg></span>
+              <div class="cap"><span class="nm">city_aerial.mp4</span><span class="res">1920×1080 · 29.97</span></div>
+            </div>
+            <div class="tile" data-name="interview_clip1.mp4">
+              <div class="th" style="background:linear-gradient(160deg,#474a57,#232836);color:#7b8291"><svg class="l"><use href="#i-video"/></svg></div>
+              <span class="dur">00:04:12</span><span class="type"><svg><use href="#i-video"/></svg></span>
+              <div class="cap"><span class="nm">interview_clip1.mp4</span><span class="res">1920×1080 · 29.97</span></div>
+            </div>
+            <div class="tile" data-name="interview_clip2.mp4">
+              <div class="th" style="background:linear-gradient(160deg,#3a4a44,#20312b);color:#69978a"><svg class="l"><use href="#i-video"/></svg></div>
+              <span class="dur">00:05:38</span><span class="type"><svg><use href="#i-video"/></svg></span>
+              <div class="cap"><span class="nm">interview_clip2.mp4</span><span class="res">1920×1080 · 29.97</span></div>
+            </div>
+            <div class="tile" data-name="desk_gimbal.mp4">
+              <div class="th" style="background:linear-gradient(160deg,#2e3a52,#1b2436);color:#6d85b8"><svg class="l"><use href="#i-video"/></svg></div>
+              <span class="dur">00:08:04</span><span class="type"><svg><use href="#i-video"/></svg></span>
+              <div class="cap"><span class="nm">desk_gimbal.mp4</span><span class="res">4K · 23.98</span></div>
+            </div>
+            <div class="tile" data-name="beach_sunset.jpg">
+              <div class="th" style="background:linear-gradient(160deg,#4a3f35,#312a24);color:#c09a6a"><svg class="l"><use href="#i-image"/></svg></div>
+              <span class="dur">—</span><span class="type"><svg><use href="#i-image"/></svg></span>
+              <div class="cap"><span class="nm">beach_sunset.jpg</span><span class="res">3840×2160 · still</span></div>
+            </div>
+            <div class="tile" data-name="music_beds.wav">
+              <div class="th" style="background:linear-gradient(160deg,#2b2140,#1c1630);color:#9d86d8;display:flex;flex-direction:column;gap:3px">
+                <div style="display:flex;gap:3px;height:14px;align-items:flex-end">7 bars</div>
+                <svg class="l" style="width:16px;height:16px"><use href="#i-audio"/></svg>
+              </div>
+              <span class="dur">00:30:00</span><span class="type"><svg><use href="#i-audio"/></svg></span>
+              <div class="cap"><span class="nm">music_beds.wav</span><span class="res">48kHz · stereo</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ░░░░░ center: viewer ░░░░░ -->
+    <main class="center-col">
+      <div class="viewer-wrap panel" >
+        <div class="panel-head">
+          <h3>Program</h3>
+          <div class="tools">
+            <span class="chip active">Fit</span><span class="chip">100%</span><span class="chip">50%</span>
+            <button class="icon-btn tooltip-hover" data-tip="Safe margins"><svg class="l"><use href="#i-sliders"/></svg></button>
+          </div>
+        </div>
+        <div class="viewer-stage">
+          <div class="screen">
+            <div class="scene">
+              <div class="glow"></div>
+              <div class="studio">
+                <div class="monitor"></div>
+                <span class="kw">Frame 240 — clip 2 · Desk Gimbal</span>
+              </div>
+            </div>
+            <div class="guides"><div class="safe"></div><div class="center-x"></div><div class="center-y"></div></div>
+          </div>
+          <span class="v-chip vr"><svg class="l" style="width:11px;height:11px"><use href="#i-video"/></svg>PROGRAM</span>
+          <span class="v-chip vt mono">1920×1080 · 29.97</span>
+          <span class="v-chip vb mono"><b id="vcTc">00:00:03:00</b>&nbsp;·&nbsp;FRAME 90</span>
+        </div>
+        <div class="viewer-foot">
+          <button class="icon-btn tooltip-hover" data-tip="Go to Start"><svg class="l"><use href="#i-tostart"/></svg></button>
+          <button class="icon-btn tooltip-hover" data-tip="Prev frame"><svg class="l"><use href="#i-stepback"/></svg></button>
+          <button class="icon-btn play tooltip-hover" data-tip="Play (Space)" style="width:28px;height:28px"><svg class="l"><use href="#i-play"/></svg></button>
+          <button class="icon-btn tooltip-hover" data-tip="Next frame"><svg class="l"><use href="#i-stepfwd"/></svg></button>
+          <div class="prog"><svg class="l" style="width:13px;height:13px"><use href="#i-trans"/></svg>Transition: <b class="mono">Dissolve · 30f</b><span class="zone">— apply at both edges</span></div>
+          <button class="icon-btn tooltip-hover" data-tip="Zoom out"><svg class="l"><use href="#i-zoom"/></svg></button>
+          <span class="zoom-label">Fit</span>
+        </div>
+      </div>
+    </main>
+
+    <!-- ░░░░░ right: inspector ░░░░░ -->
+    <aside class="inspector-dock">
+      <div class="pills" id="pills">
+        <button class="active" data-pill="file"><svg class="l" style="width:14px;height:14px"><use href="#i-film"/></svg>File</button>
+        <button data-pill="video"><svg class="l" style="width:14px;height:14px"><use href="#i-sliders"/></svg>Video</button>
+        <button data-pill="audio"><svg class="l" style="width:14px;height:14px"><use href="#i-audio"/></svg>Audio</button>
+        <button data-pill="transition"><svg class="l" style="width:14px;height:14px"><use href="#i-trans"/></svg>Transition</button>
+      </div>
+
+      <div class="insp-body" id="inspBody">
+        <!-- clip identity -->
+        <div class="clip-id">
+          <div class="thumb-id"></div>
+          <div class="ci">
+            <b id="clipName">city_aerial.mp4</b>
+            <span id="clipMeta">V2 · 00:00:00:20 → 00:00:12:00</span>
+          </div>
+          <button class="icon-btn del tooltip-hover" data-tip="Delete clip"><svg class="l"><use href="#i-trash"/></svg></button>
+        </div>
+
+        <!-- ─── FILE tab ─── -->
+        <div class="insp-pane" data-pane="file">
+          <div class="cat open">
+            <div class="cat-head"><h4><svg class="l"><use href="#i-film"/></svg>Source file</h4><svg class="l chev" style="width:13px;height:13px"><use href="#i-chevR"/></svg></div>
+            <div class="cat-body">
+              <div class="row"><span class="lab">Name</span><span class="mono" style="flex:1;font-size:11px;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">city_aerial.mp4</span></div>
+              <div class="row"><span class="lab">Codec</span><span class="mono" style="flex:1;font-size:11px;color:var(--muted)">H.264 · High @L4.0</span></div>
+              <div class="row"><span class="lab">Audio</span><span class="mono" style="flex:1;font-size:11px;color:var(--muted)">AAC LC · 48kHz · 2ch</span></div>
+              <div class="row"><span class="lab">Frames</span><span class="mono" style="flex:1;font-size:11px;color:var(--muted)">21553 · 29.97 fps</span></div>
+              <div class="row"><span class="lab">Path</span><span class="mono" style="flex:1;font-size:10px;color:var(--meta);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">~/footage/city_aerial.mp4</span></div>
+            </div>
+          </div>
+          <div class="cat open">
+            <div class="cat-head"><h4><svg class="l"><use href="#i-clock"/></svg>Timeline</h4><svg class="l chev" style="width:13px;height:13px"><use href="#i-chevR"/></svg></div>
+            <div class="cat-body">
+              <div class="row"><span class="lab">In</span><span class="mono" style="flex:1;font-size:11px;color:var(--fg)">00:00:00:20</span></div>
+              <div class="row"><span class="lab">Out</span><span class="mono" style="flex:1;font-size:11px;color:var(--fg)">00:00:12:00</span></div>
+              <div class="row"><span class="lab">Duration</span><span class="mono" style="flex:1;font-size:11px;color:var(--brand-lo)">00:00:11:10</span></div>
+              <div class="row"><span class="lab">Enable</span><span class="switch on" data-sw></span><b class="mono" style="margin-left:6px">on</b></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ─── VIDEO tab ─── -->
+        <div class="insp-pane" data-pane="video" style="display:none">
+          <div class="cat open">
+            <div class="cat-head"><h4><svg class="l"><use href="#i-sliders"/></svg>Transform</h4><svg class="l chev" style="width:13px;height:13px"><use href="#i-chevR"/></svg></div>
+            <div class="cat-body">
+              <div class="col2">
+                <div class="row"><span class="lab">Pos X</span><span class="val" id="vPosX">0</span><div class="control"><input type="range" class="live" data-out="#vPosX" data-fmt="v" min="-4096" max="4096" value="0" data-bind="posX"></div></div>
+                <div class="row"><span class="lab">Pos Y</span><span class="val" id="vPosY">0</span><div class="control"><input type="range" class="live" data-out="#vPosY" data-fmt="v" min="-4096" max="4096" value="0" data-bind="posY"></div></div>
+                <div class="row"><span class="lab">Scale</span><span class="val" id="vScale">100.0</span><div class="control"><input type="range" class="live" data-out="#vScale" data-fmt="s" min="0" max="1000" value="100" data-bind="scale"></div></div>
+                <div class="row"><span class="lab">Rotation</span><span class="val" id="vRot">0.0°</span><div class="control"><input type="range" class="live" data-out="#vRot" data-fmt="r" min="-360" max="360" value="0" data-bind="rot"></div></div>
+                <div class="row"><span class="lab">Anchor X</span><span class="val" id="vAnX">0</span><div class="control"><input type="range" class="live" data-out="#vAnX" data-fmt="v" min="-4096" max="4096" value="0"></div></div>
+                <div class="row"><span class="lab">Anchor Y</span><span class="val" id="vAnY">0</span><div class="control"><input type="range" class="live" data-out="#vAnY" data-fmt="v" min="-4096" max="4096" value="0"></div></div>
+              </div>
+            </div>
+          </div>
+          <div class="cat open">
+            <div class="cat-head"><h4><svg class="l"><use href="#i-layers"/></svg>Composite</h4><svg class="l chev" style="width:13px;height:13px"><use href="#i-chevR"/></svg></div>
+            <div class="cat-body">
+              <div class="row"><span class="lab">Opacity</span><span class="val" id="vOp">100%</span><div class="control"><input type="range" class="live" data-out="#vOp" data-fmt="o" min="0" max="100" value="100"></div></div>
+              <div class="row"><span class="lab">Blend</span>
+                <div style="flex:1"><div class="select"><svg class="l" style="width:14px;height:14px;color:var(--brand)"><use href="#i-spark"/></svg>Normal<span class="v"><svg class="l" style="width:11px;height:11px"><use href="#i-chevdn"/></svg></span></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ─── AUDIO tab ─── -->
+        <div class="insp-pane" data-pane="audio" style="display:none">
+          <div class="cat open">
+            <div class="cat-head"><h4><svg class="l"><use href="#i-audio"/></svg>Mix</h4><svg class="l chev" style="width:13px;height:13px"><use href="#i-chevR"/></svg></div>
+            <div class="cat-body">
+              <div class="row"><span class="lab">Volume</span><span class="val" id="vVol">0.0 dB</span><div class="control"><input type="range" class="live" data-out="#vVol" data-fmt="db" min="-60" max="24" value="0"></div></div>
+              <div class="row"><span class="lab">Pan</span><span class="val" id="vPan">C</span><div class="control"><input type="range" class="live" data-out="#vPan" data-fmt="pan" min="-100" max="100" value="0"></div></div>
+              <div class="switch-row">Enable audio <span class="switch on" data-sw></span><b>on</b></div>
+            </div>
+          </div>
+          <div class="cat open">
+            <div class="cat-head"><h4><svg class="l"><use href="#i-sliders"/></svg>Fade</h4><svg class="l chev" style="width:13px;height:13px"><use href="#i-chevR"/></svg></div>
+            <div class="cat-body">
+              <div class="row"><span class="lab">In fade</span>
+                <div style="flex:1"><div class="select">Exponential<span class="v">—</span></div></div><span class="mono" style="font-size:11px;width:38px;text-align:right">1.0s</span>
+              </div>
+              <div class="row"><span class="lab">Out fade</span>
+                <div style="flex:1"><div class="select">Constant Power<span class="v">—</span></div></div><span class="mono" style="font-size:11px;width:38px;text-align:right">2.0s</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ─── TRANSITION tab ─── -->
+        <div class="insp-pane" data-pane="transition" style="display:none">
+          <div class="t-pill">
+            <div class="switch-row">Dissolve across edit point<b style="color:var(--brand-lo)">30f</b></div>
+          </div>
+          <div class="cat open">
+            <div class="cat-head"><h4><svg class="l"><use href="#i-trans"/></svg>Clip A → B</h4><svg class="l chev" style="width:13px;height:13px"><use href="#i-chevR"/></svg></div>
+            <div class="cat-body">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:3px">Type</div>
+              <div class="select"><svg class="l" style="width:14px;height:14px;color:var(--brand)"><use href="#i-trans"/></svg>Dissolve<span class="v"><svg class="l" style="width:11px;height:11px"><use href="#i-chevdn"/></svg></span></div>
+              <div style="font-size:11px;color:var(--muted);margin:10px 0 3px">Duration (frames)</div>
+              <div class="chips" id="tChips">
+                <button class="chip">6</button><button class="chip">14</button><button class="chip active">30</button>
+                <button class="chip">60</button><button class="chip">120</button>
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+                <span class="switch-row" style="flex:1">Favourites only</span><span class="mono" style="font-size:11px;color:var(--meta)">2 saved</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="empty-state" id="noSel" style="display:none">
+          <svg class="l"><use href="#i-select"/></svg>
+          <b>No clip selected</b>
+          <span>Select a clip on the timeline to edit its Transform, Composite, Audio mix and Transitions.</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ░░░░░ DELIVER view (hidden unless Deliver page) ░░░░░ -->
+    <div class="deliver-wrap" id="deliverWrap">
+      <div class="d-flow">
+        <div class="panel">
+          <div class="panel-head"><h3>Render settings</h3><span class="chip-status idle" style="margin-left:auto">MP4 · PREVIEW MATCH</span></div>
+          <div style="display:flex;flex-direction:column;gap:var(--sp-3);padding:var(--sp-4)">
+            <div class="frow"><span class="lab">Format</span>
+              <div style="flex:1"><div class="seg-sm" style="width:100%">
+                <button class="active">MP4</button><button>MOV</button><button>MKV</button><button>WebM</button>
+              </div></div>
+            </div>
+            <div class="frow"><span class="lab">Video codec</span>
+              <div class="val-wide select">H.264 · NVENC<span class="v"><svg class="l" style="width:11px;height:11px"><use href="#i-chevdn"/></svg></span></div>
+            </div>
+            <div class="frow"><span class="lab">Audio codec</span>
+              <div class="val-wide select">AAC-LC · 320 kbps<span class="v"><svg class="l" style="width:11px;height:11px"><use href="#i-chevdn"/></svg></span></div>
+            </div>
+            <div class="frow" style="display:grid;grid-template-columns:148px 1fr 148px 1fr;gap:var(--sp-3)">
+              <span class="lab" style="grid-column:1">Resolution</span>
+              <div class="select" style="grid-column:2">1920 × 1080<span class="v"><svg class="l" style="width:11px;height:11px"><use href="#i-chevdn"/></svg></span></div>
+              <span class="lab" style="grid-column:3">Frame rate</span>
+              <div class="select" style="grid-column:4">29.97 fps<span class="v"><svg class="l" style="width:11px;height:11px"><use href="#i-chevdn"/></svg></span></div>
+            </div>
+            <div class="frow"><span class="lab">Quality</span>
+              <div style="flex:1;display:flex;align-items:center;gap:12px">
+                <input type="range" class="live" data-out="#dQ" data-fmt="q" min="0" max="100" value="78" style="flex:1">
+                <span class="mono" id="dQ" style="width:30px;text-align:right;font-size:11px">78</span>
+              </div>
+            </div>
+            <div class="frow" style="display:flex;flex-wrap:wrap;gap:14px 22px">
+              <div class="switch-row">Match preview<b>on</b></div>
+              <div class="switch-row">Include audio<span class="switch on" data-sw></span><b>on</b></div>
+              <div class="switch-row">Fast start (moov)<span class="switch on" data-sw></span><b>on</b></div>
+            </div>
+            <div class="frow"><span class="lab">Destination</span>
+              <div class="val-field"><span class="fold">~/Nova/Exports/Untitled_Sequence.mp4</span><span class="v" style="margin-left:auto"><svg class="l" style="width:11px;height:11px"><use href="#i-chevdn"/></svg></span></div>
+              <button class="btn ghost small">Browse…</button>
+            </div>
+            <div style="display:flex;gap:var(--sp-2);margin-top:4px">
+              <button class="btn primary" id="btnAddQue"><svg class="l" style="width:14px;height:14px"><use href="#i-plus"/></svg>Add to render queue</button>
+              <button class="btn ghost">Save preset…</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="panel queue">
+        <div class="panel-head">
+          <h3>Render queue</h3>
+          <div class="tools">
+            <button class="btn small primary" id="btnExportAll">Export all</button>
+            <button class="icon-btn tooltip-hover" data-tip="Clear completed"><svg class="l"><use href="#i-x"/></svg></button>
+          </div>
+        </div>
+        <div id="queueList" style="flex:1;overflow:auto">
+          <div class="q-item" data-done="1">
+            <div class="q-line">
+              <div class="i" style="background:linear-gradient(140deg,#33424f,#1c2a36)"></div>
+              <div class="t"><b>city_aerial.mp4</b><span>1920×1080 · H.264 · AAC · 00:30:00</span></div>
+              <span class="chip-status done"><svg class="l" style="width:10px;height:10px"><use href="#i-check"/></svg>Done</span>
+              <button class="icon-btn rm" style="width:24px;height:24px"><svg class="l"><use href="#i-x"/></svg></button>
+            </div>
+            <div class="q-line" style="padding-left:43px">
+              <div class="rail-progress"><div class="fill" style="width:100%"></div></div>
+            </div>
+          </div>
+          <div class="q-item" data-done="0">
+            <div class="q-line">
+              <div class="i" style="background:linear-gradient(140deg,#474a57,#232836)"></div>
+              <div class="t"><b>interview_cut.mp4</b><span>1920×1080 · H.265 · AAC · 00:12:38</span></div>
+              <span class="chip-status work"><i></i>Rendering 62%</span>
+              <button class="icon-btn rm" style="width:24px;height:24px;color:var(--danger)"><svg class="l"><use href="#i-x"/></svg></button>
+            </div>
+            <div class="q-line" style="padding-left:43px">
+              <div class="rail-progress"><div class="fill indet" style="width:62%"></div></div>
+            </div>
+          </div>
+        </div>
+        <div style="padding:9px 13px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+          <span class="mono" style="font-size:10px;color:var(--meta)">NVIDIA NVENC · CUDA 12 · 4.2 GB frame budget</span>
+          <span class="chip-status idle">2 jobs</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─────────────────── Timeline dock ─────────────────── -->
+  <section class="timeline-dock" id="timelineDock">
+    <div class="tl-tools">
+      <span class="name"><svg class="l" style="width:14px;height:14px"><use href="#i-sliders"/></svg>Timeline 1</span>
+      <button class="icon-btn on tooltip-hover" data-tip="Select (V)"><svg class="l"><use href="#i-select"/></svg></button>
+      <button class="icon-btn tooltip-hover" id="bladeBtn" data-tip="Blade (B)"><svg class="l"><use href="#i-blade"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Hand (H)"><svg class="l"><use href="#i-hand"/></svg></button>
+      <button class="icon-btn tooltip-hover" data-tip="Zoom (Z)"><svg class="l"><use href="#i-zoom"/></svg></button>
+      <span class="divider"></span>
+      <button class="icon-btn tooltip-hover" data-tip="Ripple delete (Shift+Backspace)"><svg class="l" style="color:var(--danger)"><use href="#i-trash"/></svg></button>
+      <div class="side">
+        <button class="icon-btn tooltip-hover on" data-tip="Snap (N)"><svg class="l"><use href="#i-snap"/></svg></button>
+        <button class="icon-btn tooltip-hover" data-tip="Mute all"><svg class="l"><use href="#i-ear"/></svg></button>
+        <span class="divider"></span>
+        <button class="icon-btn tooltip-hover" data-tip="Zoom in"><svg class="l"><use href="#i-plus"/></svg><span class="kbd">+</span></button>
+        <button class="icon-btn tooltip-hover" data-tip="Zoom out"><svg class="l" style="width:12px;height:12px"><path d="M3 8.5h10"/></svg></button>
+      </div>
+    </div>
+
+    <!-- minimap -->
+    <div class="minimap" style="margin:2px var(--sp-3) 2px">
+      <div class="lane-dots auds" id="mmLanes" style="display:none"></div>
+      <div class="lane-dots" id="mmVid"><i class="on" style="width:17%"></i><i style="width:14%"></i><i style="width:8%"></i><i style="width:11%"></i><i class="aud" style="width:18%"></i></div>
+      <div class="lane-dots auds"><i style="width:20%"></i><i class="aud" style="width:24%"></i><i class="aud" style="width:30%"></i></div>
+      <div class="mm-playhead" id="mmPh"></div>
+    </div>
+
+    <div class="tl-scroll" id="tlScroll">
+      <div class="tl-inner" id="tlInner">
+        <div class="ruler" id="ruler"></div>
+        <div class="lanes" id="lanes">
+          <!-- V2 -->
+          <div class="lane v" data-track="v2">
+            <div class="lane-head">
+              <div class="lh1">
+                <svg class="l on" style="width:13px;height:13px"><use href="#i-eye"/></svg>
+                <svg class="l" style="width:13px;height:13px"><use href="#i-lock"/></svg>
+                <span class="nm">V2</span>
+                <span class="icon-btn" style="width:18px;height:18px;margin-left:auto"><svg class="l" style="width:11px;height:11px"><use href="#i-chevdn"/></svg></span>
+              </div>
+              <div class="lh2">video</div>
+            </div>
+            <div class="lane-body" style="height:56px" data-drop="v2">
+              <div class="clip sel" style="left:20px;width:340px" data-name="city_aerial.mp4" data-clip="A">
+                <div class="thumbs"></div><div class="clipseg"><svg class="l" style="width:11px;height:11px;color:#9fb4c0"><use href="#i-video"/></svg><span class="nm">city_aerial</span></div>
+                <span class="clipdur mono">00:11:20</span><div class="handles"></div>
+                <span class="spd-tag mono">1.00×</span>
+              </div>
+              <div class="clip" style="left:360px;width:280px" data-name="desk_gimbal.mp4" data-clip="B">
+                <div class="thumbs"></div><div class="clipseg"><svg class="l" style="width:11px;height:11px;color:#8fa8bd"><use href="#i-video"/></svg><span class="nm">desk_gimbal</span></div>
+                <span class="clipdur mono">00:09:20</span><div class="handles"></div>
+                <span class="spd-tag mono">1.00×</span>
+              </div>
+              <div class="transition-mark" style="left:360px;width:30px"><span class="lbl mono">30f</span><span class="d"></span></div>
+            </div>
+          </div>
+          <!-- V1 -->
+          <div class="lane v" data-track="v1">
+            <div class="lane-head">
+              <div class="lh1">
+                <svg class="l on" style="width:13px;height:13px"><use href="#i-eye"/></svg>
+                <svg class="l" style="width:13px;height:13px"><use href="#i-lock"/></svg>
+                <span class="nm">V1</span>
+                <span class="icon-btn" style="width:18px;height:18px;margin-left:auto"><svg class="l" style="width:11px;height:11px"><use href="#i-chevdn"/></svg></span>
+              </div>
+              <div class="lh2">video</div>
+            </div>
+            <div class="lane-body" style="height:56px" data-drop="v1">
+              <div class="clip" style="left:6px;width:300px" data-name="interview_clip1.mp4" data-clip="C">
+                <div class="thumbs"></div><div class="clipseg"><svg class="l" style="width:11px;height:11px;color:#c9b8a4"><use href="#i-video"/></svg><span class="nm">interview_clip1</span></div>
+                <span class="clipdur mono">00:10:00</span><div class="handles"></div>
+              </div>
+              <div class="clip" style="left:426px;width:440px" data-name="interview_clip2.mp4" data-clip="D">
+                <div class="thumbs"></div><div class="clipseg"><svg class="l" style="width:11px;height:11px;color:#a9c0a7"><use href="#i-video"/></svg><span class="nm">interview_clip2</span></div>
+                <span class="clipdur mono">00:14:40</span><div class="handles"></div>
+              </div>
+            </div>
+          </div>
+          <!-- A2 -->
+          <div class="lane a" data-track="a2">
+            <div class="lane-head">
+              <div class="lh1">
+                <svg class="l" style="width:13px;height:13px"><use href="#i-ear"/></svg>
+                <svg class="l" style="width:13px;height:13px"><use href="#i-lock"/></svg>
+                <span class="nm">A2</span>
+                <span class="icon-btn" style="width:18px;height:18px;margin-left:auto"><svg class="l" style="width:11px;height:11px"><use href="#i-chevdn"/></svg></span>
+              </div>
+              <div class="lh2">voiceover</div>
+            </div>
+            <div class="lane-body" style="height:48px" data-drop="a2">
+              <div class="clip audio" style="left:440px;width:400px" data-name="vo_take01.wav" data-clip="E">
+                <div class="wave" data-seed="7"></div>
+                <div class="vol-line" style="top:60%"></div>
+                <div class="clipseg"><svg class="l" style="width:11px;height:11px;color:#a9a1e8"><use href="#i-ear"/></svg><span class="nm">vo_take01</span></div>
+              </div>
+            </div>
+          </div>
+          <!-- A1 -->
+          <div class="lane a" data-track="a1">
+            <div class="lane-head">
+              <div class="lh1">
+                <svg class="l" style="width:13px;height:13px"><use href="#i-ear"/></svg>
+                <svg class="l" style="width:13px;height:13px"><use href="#i-lock"/></svg>
+                <span class="nm">A1</span>
+                <span class="icon-btn" style="width:18px;height:18px;margin-left:auto"><svg class="l" style="width:11px;height:11px"><use href="#i-chevdn"/></svg></span>
+              </div>
+              <div class="lh2">music</div>
+            </div>
+            <div class="lane-body" style="height:48px" data-drop="a1">
+              <div class="clip audio" style="left:0px;width:900px" data-name="music_beds.wav" data-clip="F" id="musicClip">
+                <div class="wave" data-seed="4"></div>
+                <div class="vol-line" style="top:42%"></div>
+                <div class="fade" style="left:820px;width:80px"></div>
+                <div class="clipseg"><svg class="l" style="width:11px;height:11px;color:#a9a1e8"><use href="#i-audio"/></svg><span class="nm">music_beds</span></div>
+                <span class="clipdur mono">00:30:00</span>
+              </div>
+            </div>
+          </div>
+          <!-- empty lane -->
+          <div class="lane v ghost-cell">
+            <div class="lane-head"></div>
+            <div class="lane-body"><span>drop media here</span></div>
+          </div>
+        </div>
+      </div>
+      <!-- playhead (absolute over inner content, spans ruler+lanes) -->
+      <div class="playhead" id="ph" style="position:absolute;top:0;bottom:24px;left:90px">
+        <div class="knob"></div><span class="frame-tag mono" id="phTag">00:00:03:00</span>
+      </div>
+      <!-- marks -->
+      <div class="mark-in" style="position:absolute;top:0;bottom:24px;left:90px"></div>
+      <div class="mark-out" style="position:absolute;top:0;bottom:24px;left:760px"></div>
+    </div>
+
+    <div class="tl-foot">
+      <span class="inner-name mono">Sequence 1</span>
+      <span class="mono">00:00:30:00 · 900f · 29.97 fps</span>
+      <span class="segment" style="display:flex;align-items:center;gap:6px"><span class="mk mono">I</span><span class="mono">00:00:03:00</span><span class="mono" style="color:var(--meta)">/</span><span class="mk mono">O</span><span class="mono">00:00:25:20</span></span>
+      <span class="hk"><b>Space</b> play <b>B</b> blade <b>N</b> snap <b>V</b> select <b>I/O</b> in/out</span>
+    </div>
+  </section>
+
+  <!-- ─────────────────── Status bar ─────────────────── -->
+  <footer class="statusbar">
+    <span class="msg" id="statusMsg"><svg class="l" style="width:12px;height:12px;color:var(--brand)"><use href="#i-check"/></svg>Ready · <b>Undo stack</b> 4 ops</span>
+    <div class="right">
+      <span class="pill"><span class="dot"></span>GPU ready · NVENC</span>
+      <span class="pill mono">29.97 fps</span>
+      <span class="pill">FFmpeg 7.x core</span>
+      <span class="pill mono">4.2 GB / 5.0 GB</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+/* ────────────────────────────────────────────────────────────
+   Nova Canvas mockup – behavior layer
+   ──────────────────────────────────────────────────────────── */
+(function(){
+  'use strict';
+  const D=document, F=900, $=s=>D.querySelector(s), $$=s=>[...D.querySelectorAll(s)];
+  const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
+
+  /* ---- theme ---- */
+  const themeBtn=$('#themeBtn');
+  themeBtn.addEventListener('click',()=>{
+    const b=D.body;
+    const light=b.dataset.theme!=='light';
+    b.dataset.theme=light?'light':'dark';
+    themeBtn.innerHTML=`<svg class="l"><use href="#i-${light?'moon':'sun'}"/></svg>`;
+  });
+
+  /* ---- page switch ---- */
+  const ws=$('#workspace');
+  $$('#pageSeg button').forEach(btn=>btn.addEventListener('click',()=>{
+    $$('#pageSeg button').forEach(b=>b.classList.toggle('active',b===btn));
+    const page=btn.dataset.page;
+    ws.classList.toggle('deliver',page==='deliver');
+    if(page==='deliver') status('Deliver · export pipeline ready');
+    else status('Ready · clips cached');
+  }));
+
+  /* ---- inspector pills ---- */
+  $$('#pills button').forEach(btn=>btn.addEventListener('click',()=>{
+    $$('#pills button').forEach(b=>b.classList.toggle('active',b===btn));
+    const p=btn.dataset.pill;
+    $$('.insp-pane').forEach(pane=>pane.style.display=pane.dataset.pane===p?'':'none');
+  }));
+
+  /* ---- collapsible categories ---- */
+  $$('.cat-head').forEach(h=>h.addEventListener('click',()=>h.parentElement.classList.toggle('open')));
+
+  /* ---- switches ---- */
+  $$('[data-sw]').forEach(sw=>sw.addEventListener('click',()=>{
+    sw.classList.toggle('on');
+    const row=sw.closest('.switch-row, .row');
+    if(row){
+      const b=row.querySelector('b');
+      if(b&&sw.dataset.t) b.textContent=sw.classList.contains('on')?'on':'off';
+    }
+  }));
+
+  /* ---- sliders (formatted value outputs) ---- */
+  const fmt={
+    v:x=>Math.round(x),
+    s:x=>(x/10).toFixed(1),
+    r:x=>Math.round(x)+'°',
+    o:x=>x+'%',
+    db:x=>(x>0?'+':'')+Math.round(x)+' dB',
+    pan:x=>x===0?'C':x<0?'L'+(-x)+'%':'R'+x+'%',
+    q:x=>Math.round(x),
+  };
+  $$('input.live').forEach(inp=>{
+    const upd=()=>{
+      const o=$('#deliverWrap #'+inp.dataset.out.slice(1)) || $(inp.dataset.out);
+      if(o) o.textContent=fmt[inp.dataset.fmt](+inp.value);
+      if(inp.dataset.bind==='scale'){ /* animate scene? keep static */ }
+    };
+    inp.addEventListener('input',upd); upd();
+  });
+
+  /* ---- transition duration chips ---- */
+  let tDur=30;
+  $$('#tChips .chip').forEach(c=>c.addEventListener('click',()=>{
+    $$('#tChips .chip').forEach(x=>x.classList.toggle('active',x===c));
+    tDur=+c.textContent;
+    const tmark=$('.transition-mark');
+    if(tmark){ tmark.style.width=tDur+'px'; tmark.querySelector('.lbl').textContent=tDur+'f'; }
+  }));
+
+  /* ---- viewport selector cycles ---- */
+  const vps=[[3840,2160,'4K UHD'],[1920,1080,'PROGRAM'],[1280,720,'HD'],[960,540,'PREVIEW']];
+  let vpI=1;
+  $('#vpSel').addEventListener('click',()=>{
+    vpI=(vpI+1)%vps.length;
+    const[v,w,l]=vps[vpI];
+    $('#vpT').textContent=v+' × '+w;
+    $('#vpS').textContent=l+' · 30 FPS';
+  });
+
+  /* ---- clip selection ---- */
+  let selEl=$('.clip.sel');
+  const clipMeta={A:['00:00:00:20','00:00:12:00'],B:['00:00:12:00','00:00:21:20'],C:['00:00:00:06','00:00:10:06'],D:['00:00:14:12','00:00:29:09'],E:['00:00:14:16','00:00:26:19'],F:['00:00:00:00','00:00:30:00']};
+  $$('.clip').forEach(c=>c.addEventListener('click',e=>{
+    e.stopPropagation();
+    $$('.clip').forEach(x=>x.classList.toggle('sel',x===c));
+    selEl=c;
+    $('#noSel').style.display='none';
+    $('#inspBody').querySelector('.clip-id').style.display='';
+    $('#clipName').textContent=c.dataset.name||'clip';
+    const m=clipMeta[c.dataset.clip];
+    if(m) $('#clipMeta').textContent=c.parentElement.parentElement.dataset.track.toUpperCase()+' · '+m[0]+' → '+m[1];
+    // flip ruler? keep
+  }));
+  $('#inspBody').addEventListener('click',e=>{
+    if(e.target.closest('.clip-id,.cat,.cat-body,.t-pill')) return;
+    $$('.clip').forEach(x=>x.classList.remove('sel'));
+    selEl=null;
+    $('#noSel').style.display='';
+    $('#inspBody').querySelector('.clip-id').style.display='none';
+  });
+
+  /* ---- media tiles select ---- */
+  $$('.tile').forEach(t=>t.addEventListener('click',()=>{
+    $$('.tile').forEach(x=>x.classList.toggle('sel',x===t));
+  }));
+
+  /* ---- waveforms ---- */
+  const mkRand=seed=>{let s=seed*9301+49297;return()=>{s=(s*9301+49297)%233280;return s/233280;}};
+  $$('.clip.audio .wave').forEach(w=>{
+    const rnd=mkRand(+w.dataset.seed||1);const n=210,i=D.createElement('i');
+    for(let k=0;k<n;k++){
+      const bar=i.cloneNode();
+      const v=0.25+Math.random()*0.55;/* smooth */
+      bar.style.height=(v*100)+'%';
+      bar.style.opacity=(0.35+Math.random()*0.5).toFixed(2);
+      if(w.dataset.seed==='7'){ bar.style.background=Math.random()>0.75?'rgba(108,85,255,.85)':''; }
+      w.appendChild(bar);
+    }
+  });
+
+  /* ---- timeline thumbs ---- */
+  $$('.clip .thumbs').forEach(th=>{
+    const n=4+Math.floor(Math.random()*3);
+    for(let k=0;k<n;k++) th.appendChild(D.createElement('i'));
+  });
+
+  /* ---- ruler ticks (1s minor, 5s major) ---- */
+  const ruler=$('#ruler');
+  for(let f=0;f<=900;f+=30){
+    const t=D.createElement('div');
+    const major=f%150===0;
+    t.className='tick'+(major?' m':' s');
+    t.style.left=f+'px';
+    ruler.appendChild(t);
+    if(major){
+      const l=D.createElement('div');
+      l.className='tickL';
+      l.style.left=(f+4)+'px';
+      l.textContent='00:'+String(f/30).padStart(2,'0')+':00';
+      ruler.appendChild(l);
+    }
+  }
+
+  /* ---- playback ---- */
+  let frame=90,playing=false,loop=false;
+  const ph=$('#ph'),markIn=$('.mark-in'),markOut=$('.mark-out'),scrub=$('#scrub'),
+        btnPlay=$('#btnPlay'),btnLoop=$('#btnLoop'),tcNow=$('#tcNow'),tcFrame=$('#tcFrame'),
+        tlScroll=$('#tlScroll'),vcTc=$('#vcTc');
+  const clock=f=>{
+    const secs=Math.floor(f/29.97);
+    const H=String(Math.floor(secs/3600)).padStart(2,'0');
+    const M=String(Math.floor((secs%3600)/60)).padStart(2,'0');
+    const S=String(secs%60).padStart(2,'0');
+    return `${H}:${M}:${S}:${String(Math.round(f%30)).padStart(2,'0')}`;
+  };
+  const anchor=(el,contentFrame)=>{
+    /* viewport-anchored: absolute inside the scroll box, follows content scroll */
+    const cw=tlScroll.clientWidth;
+    el.style.left=clamp(contentFrame - tlScroll.scrollLeft, -4, cw+4)+'px';
+  };
+  const lbl=()=>{
+    const f=Math.round(frame);
+    tcNow.textContent=clock(f);
+    tcFrame.textContent='F '+f;
+    vcTc.textContent=clock(f);
+    scrub.value=f;
+    $('#phTag').textContent=clock(f);
+    $('#mmPh').style.left=(f/900*100)+'%';
+    // auto-scroll so the playhead stays roughly 1/3 in
+    tlScroll.scrollLeft=clamp(f-260,0,960-tlScroll.clientWidth);
+    anchor(ph,f); anchor(markIn,90); anchor(markOut,760);
+    const scene=$('.scene .kw');
+    if(scene) scene.textContent=(f<360)?'Clip 1 · City Aerial · F '+f:'Clip 2 · Desk Gimbal · F '+f;
+  };
+  let raf=null,last=0;
+  const step=ts=>{
+    if(!playing) return;
+    const dt=last?(ts-last):16;last=ts;
+    frame=Math.min(frame+dt/1000*29.97,900);
+    if(frame>=900){ if(loop){frame=0;} else {frame=900;setPlay(false);} }
+    lbl();
+    raf=requestAnimationFrame(step);
+  };
+  const setPlay=on=>{
+    playing=on;last=0;
+    btnPlay.innerHTML=`<svg class="l"><use href="#i-${on?'pause':'play'}"/></svg>`;
+    btnPlay.dataset.tip=on?'Pause (Space)':'Play (Space)';
+    $('#app').classList.toggle('playing',on);
+    if(on) raf=requestAnimationFrame(step); else if(raf) cancelAnimationFrame(raf);
+  };
+  btnPlay.addEventListener('click',()=>setPlay(!playing));
+  btnLoop.addEventListener('click',()=>{loop=!loop;btnLoop.classList.toggle('on',loop);});
+
+  /* scrub */
+  const scrubTo=px=>{
+    const rect=ruler.getBoundingClientRect();
+    const local=clamp(px-rect.left,0,900);
+    frame=Math.round(local); lbl();
+  };
+  scrub.addEventListener('input',()=>{frame=+scrub.value;lbl();});
+  ['pointerdown','pointermove'].forEach(ev=>{
+    ruler.addEventListener(ev,e=>{
+      if(ev==='pointerdown') ruler.setPointerCapture(e.pointerId);
+      scrubTo(e.clientX);
+    });
+  });
+
+  /* step/edge/transport + marks */
+  $('#app').addEventListener('click',e=>{
+    const b=e.target.closest('[data-tip]');
+    if(!b) return;
+    const tip=b.dataset.tip;
+    if(tip==='Step Back (←)'){frame=Math.max(0,Math.round(frame)-1);lbl();}
+    else if(tip==='Step Forward (→)'){frame=Math.min(900,Math.round(frame)+1);lbl();}
+    else if(tip==='Go to Start (Home)'){frame=0;lbl();}
+    else if(tip==='Go to End (End)'){frame=900;lbl();}
+    else if(tip==='Go to Mark In (Shift+I)'){frame=90;lbl();}
+    else if(tip==='Go to Mark Out (Shift+O)'){frame=760;lbl();}
+  });
+
+  /* marks from transport buttons */
+  const mkMark=(btn,ref)=>{
+    btn.addEventListener('click',()=>{
+      const f=Math.round(frame);
+      anchor(ref,f);
+      status('Mark '+(btn.id==='btnMarkIn'?'In':'Out')+' set at '+clock(f));
+    });
+  };
+  mkMark($('#btnMarkIn'),markIn);
+  mkMark($('#btnMarkOut'),markOut);
+
+  /* empty status helper */
+  const statusEl=$('#statusMsg');
+  const status=(msg,kind)=>{
+    statusEl.innerHTML=msg;
+  };
+
+  /* blade tool demo */
+  let tool='select';
+  const bladeBtn=$('#bladeBtn');
+  bladeBtn.addEventListener('click',()=>{
+    tool=tool==='blade'?'select':'blade';
+    bladeBtn.classList.toggle('on',tool==='blade');
+    bladeBtn.classList.toggle('danger',tool==='blade');
+    status(tool==='blade'?'Blade armed — click a clip to cut at the playhead':'Select tool','sys-info');
+  });
+
+  /* keyboard */
+  D.addEventListener('keydown',e=>{
+    if(e.target.tagName==='INPUT') return;
+    switch(e.key){ 
+      case ' ': e.preventDefault(); setPlay(!playing); break;
+      case 'b': case 'B': bladeBtn.click(); break;
+      case 'i': case 'I': mkMarkFire('.mark-in','In'); break;
+      case 'o': case 'O': mkMarkFire('.mark-out','Out'); break;
+      case 'Home': frame=0;lbl(); break;
+      case 'End': frame=900;lbl(); break;
+    }
+  });
+  function mkMarkFire(sel,kind){
+    const f=Math.round(frame); anchor($(sel),f);
+    status('Mark '+kind+' · '+clock(f),'mark');
+  }
+
+  /* ---- deliver queue ---- */
+  let qid=2;
+  const list=$('#queueList');
+  const chips=['MP4 · H.264','MOV · ProRes','MP4 · H.265','WebM · VP9'];
+  $('#btnAddQue').addEventListener('click',()=>{
+    qid++;
+    const job=D.createElement('div');
+    job.className='q-item';job.dataset.done='0';
+    job.innerHTML=`
+      <div class="q-line">
+        <div class="i" style="background:linear-gradient(140deg,#${Math.floor(0x33424f*70/100).toString(16).padStart(6,'0')||'33424f'},#1c2a36)"></div>
+        <div class="t"><b>Nova_export_${qid}.mp4</b><span>1920×1080 · ${chips[qid%4]} · 00:30:00</span></div>
+        <span class="chip-status work"><i></i>Queued</span>
+        <button class="icon-btn rm" style="width:24px;height:24px;color:var(--danger)"><svg class="l"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="q-line" style="padding-left:43px">
+        <div class="rail-progress"><div class="fill" style="width:0%"></div></div>
+      </div>`;
+    list.appendChild(job);
+    let p=0;
+    const fill=job.querySelector('.fill'),st=job.querySelector('.chip-status');
+    const iv=setInterval(()=>{
+      p+=3+Math.random()*7;
+      if(p>=100){
+        p=100;clearInterval(iv);
+        st.className='chip-status done';
+        st.innerHTML='<svg class="l" style="width:10px;height:10px"><use href="#i-check"/></svg>Done';
+        job.dataset.done='1';
+        status('Render complete — '+job.querySelector('.t b').textContent);
+      } else {
+        st.innerHTML='<i></i>Rendering '+Math.floor(p)+'%';
+      }
+      fill.style.width=p+'%';
+    },120);
+    // remove
+    job.querySelector('.rm').addEventListener('click',()=>{clearInterval(iv);job.remove();});
+  });
+  $$('#queueList .rm').forEach(btn=>btn.addEventListener('click',()=>{
+    const item=btn.closest('.q-item');
+    if(item.dataset.done==='1') item.remove();
+  }));
+  $('#btnExportAll').addEventListener('click',()=>status('Exporting all queued jobs…'));
+  $('#btnImport').addEventListener('click',()=>status('Import media dialog (mock)'));
+
+  /* init */
+  lbl();
+})();
+</script>
+</body>
+</html>

@@ -24,6 +24,9 @@
 #include "canvas/core/media/hw_device.hpp"
 #include "canvas/core/media/video_decoder.hpp"
 
+#include "features/playback/sync_constants.hpp"
+#include "UX/theme.hpp"
+
 namespace canvas::gui {
 
 namespace {
@@ -86,7 +89,7 @@ QString ThumbnailService::disk_path_waveform(const std::string& path, int width,
 
 QString ThumbnailService::disk_path_raw_waveform(const std::string& path) const {
     if (cache_dir_.isEmpty()) return QString();
-    const std::string seed = "raw2|" + path;
+    const std::string seed = "raw3|" + path;
     return cache_dir_ + QLatin1Char('/') + cache_file_name(seed, "ehwf");
 }
 
@@ -172,7 +175,9 @@ void ThumbnailService::request(ThumbRequest req) {
 }
 
 void ThumbnailService::request_waveform(uint64_t id, std::string path, int width, int height,
-                                        float src_lo, float src_hi, float gain) {
+                                        float src_lo, float src_hi, float gain, int64_t src_in,
+                                        int64_t src_out, int64_t tl_in, int64_t tl_out,
+                                        double media_fps, int64_t media_total_frames) {
     if (path.empty() || width <= 0 || height <= 0) return;
     if (!(src_lo < src_hi) || src_lo >= 1.0f || src_hi <= 0.0f) { src_lo = 0.0f; src_hi = 1.0f; }
     ThumbRequest req;
@@ -185,17 +190,23 @@ void ThumbnailService::request_waveform(uint64_t id, std::string path, int width
     req.src_lo = src_lo;
     req.src_hi = src_hi;
     req.gain = std::clamp(gain, 0.0f, 1.0f);
+    req.src_in = src_in;
+    req.src_out = src_out;
+    req.tl_in = tl_in;
+    req.tl_out = tl_out;
+    req.media_fps = media_fps;
+    req.media_total_frames = media_total_frames;
     submit(std::move(req));
 }
 
 void ThumbnailService::submit(ThumbRequest req) {
     const bool audio = req.is_audio;
-    // Volume gain quantized to whole percents: bounds the cache/disk space a
-    // handful of volume variants takes while staying visually granular.
-    const int gain_pct = audio
-                             ? std::clamp(static_cast<int>(std::lround(req.gain * 100.0f)), 0, 100)
-                             : 100;
-    req.gain = static_cast<float>(gain_pct) / 100.0f;
+    // Waveforms are content displays: they are NEVER scaled by clip volume (that
+    // used to flatten them into a line at low gain and make disk/cache keys vary
+    // per gain percent), so the quantized key component is a constant 100 and a
+    // clip's spectrum is identical at every volume setting.
+    const int gain_pct = 100;
+    req.gain = 1.0f;
     {
         QMutexLocker lock(&mutex_);
         const CacheKey key{req.path, req.frame, req.target_width, audio, req.src_lo, req.src_hi,
@@ -254,6 +265,11 @@ void ThumbnailService::submit(ThumbRequest req) {
     cv_.notify_all();
 }
 
+void ThumbnailService::set_paused(bool paused) {
+    paused_ = paused;
+    cv_.notify_all();
+}
+
 void ThumbnailService::clear_cache() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -269,13 +285,15 @@ void ThumbnailService::clear_cache() {
 void ThumbnailService::worker_loop() {
     // Each worker owns its own hardware-decode device to avoid racing on the
     // lazy init and sharing a single GPU context across threads.
-    canvas::core::HwDeviceManager hw;
+    canvas::core::HwDeviceManager hw{"thumbs"};
     while (true) {
         ThumbRequest req;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [this] {
-                return stopping_ || (!queue_.empty() && pending_);
+                // Parked while paused_ (an export owns the GPU/disk): requests
+                // keep queueing and flush once the render clears the flag.
+                return stopping_ || (!paused_ && !queue_.empty() && pending_);
             });
             if (stopping_ && queue_.empty()) return;
             if (queue_.empty()) {
@@ -321,7 +339,7 @@ void ThumbnailService::worker_loop() {
                     std::lock_guard<std::mutex> lock(waveform_mutex_);
                     wc = waveform_cache_.size();
                 }
-                qWarning().nospace()
+                qDebug().nospace()
                     << "[thumb] generated=" << agg_n
                     << " avg_ms=" << QString::number(avg_ms, 'f', 0)
                     << " last_ms=" << QString::number(ms, 'f', 0)
@@ -375,7 +393,7 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
                 // Rare (one per unique audio file per session), so always-on: a
                 // raw cached waveform makes first-paint instant; a miss means the
                 // next block incurs the full-file decode.
-                qWarning().nospace() << "thumb: waveform loaded RAW from disk path="
+                qDebug().nospace() << "thumb: waveform loaded RAW from disk path="
                                      << QString::fromStdString(req.path);
             } else {
                 const auto t0 = std::chrono::steady_clock::now();
@@ -385,7 +403,7 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
                 // Always-on: the first waveform for a file is a full-file decode
                 // (can be seconds on a long take); repeated slow ones point at a
                 // painful disk or a format that defeats the cached raw.
-                qWarning().nospace() << "thumb: waveform full-file DECODE took_ms="
+                qDebug().nospace() << "thumb: waveform full-file DECODE took_ms="
                                      << QString::number(ms, 'f', 0)
                                      << " buckets=" << kWaveformRawBuckets
                                      << " path=" << QString::fromStdString(req.path);
@@ -410,16 +428,70 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
         const canvas::core::AudioWaveform wf =
             reduce_waveform(*cached, req.target_width, req.src_lo, req.src_hi);
 
+        // Always-on cross-grid audit: the waveform buckets are placed on the
+        // AUDIO-time grid (t / duration_seconds), but the clip window fractions
+        // were derived from the VIDEO-frame grid (src_in / total_frames). The two
+        // agree only when media_fps * total_frames == duration_seconds. Print the
+        // drift in frames at both edges so a blade aimed at a drawn transient can
+        // be reconciled with the audio actually at that frame. Zero cost (muted
+        // unless a timeout fires), always-on by request (blade-cut debugging).
+        {
+            const double dur = cached->duration_seconds;
+            const double lo = static_cast<double>(req.src_lo);
+            const double hi = static_cast<double>(req.src_hi);
+            // Audio-time window at the clip's source edges.
+            const double audio_t_lo = lo * dur;
+            const double audio_t_hi = hi * dur;
+            // Video-frame window at the same source edges (exact only when the
+            // media is CFR and the container duration matches frames/fps).
+            const bool have_vid = req.media_fps > 0.0 && req.media_total_frames > 0 &&
+                                  req.src_out > req.src_in;
+            double video_t_lo = -1.0, video_t_hi = -1.0;
+            double drift_lo = 0.0, drift_hi = 0.0;  // in frames
+            if (have_vid) {
+                video_t_lo = static_cast<double>(req.src_in) / req.media_fps;
+                video_t_hi = static_cast<double>(req.src_out) / req.media_fps;
+                drift_lo = (audio_t_lo - video_t_lo) * req.media_fps;
+                drift_hi = (audio_t_hi - video_t_hi) * req.media_fps;
+            }
+            // Media-pool previews pass src_in/src_out = 0 (whole file), so the
+            // grid cross-check only fires for real timeline clips.
+            if (have_vid) {
+                qDebug().nospace()
+                    << "[wave] AUDIT id=" << req.id
+                    << " dur=" << QString::number(dur, 'f', 3) << "s"
+                    << " lo=" << QString::number(lo, 'g', 6)
+                    << " hi=" << QString::number(hi, 'g', 6)
+                    << " src=[" << req.src_in << "," << req.src_out << ")"
+                    << " tl=[" << req.tl_in << "," << req.tl_out << ")"
+                    << " fps=" << QString::number(req.media_fps, 'g', 4)
+                    << " vtotal=" << req.media_total_frames
+                    << " vdur=" << QString::number(req.media_total_frames / req.media_fps, 'f', 3) << "s"
+                    << " audioT=[" << QString::number(audio_t_lo, 'f', 3) << ","
+                    << QString::number(audio_t_hi, 'f', 3) << "]s"
+                    << " videoT=[" << QString::number(video_t_lo, 'f', 3) << ","
+                    << QString::number(video_t_hi, 'f', 3) << "]s"
+                    << " drift_lo_f=" << QString::number(drift_lo, 'f', 2)
+                    << " drift_hi_f=" << QString::number(drift_hi, 'f', 2);
+            } else {
+                qDebug().nospace()
+                    << "[wave] AUDIT id=" << req.id << " (whole-file/legacy)"
+                    << " dur=" << QString::number(dur, 'f', 3) << "s"
+                    << " lo=" << QString::number(lo, 'g', 6)
+                    << " hi=" << QString::number(hi, 'g', 6);
+            }
+        }
+
         QImage img(req.target_width, req.max_height, QImage::Format_ARGB32_Premultiplied);
         img.fill(Qt::transparent);
         QPainter p(&img);
         const double cy = img.height() / 2.0;
-        // Height scale = half the row; volume gain (0..1, quantized to percent
-        // in submit) shrinks every bar so the timeline waveform visibly reflects
-        // the clip's volume_dB.
-        const double gain = static_cast<double>(req.gain);
-        const double amp = std::max(1.0, cy - 2.0) * gain;
-        p.setPen(QPen(QColor(240, 244, 238, 220), 1));
+        // Height scale = half the row, full content amplitude. The waveform is a
+        // content readout and deliberately ignores clip volume (which is told by
+        // the volume line) — scaling bars by gain made quiet clips flatten into a
+        // single horizontal line, i.e. the "spectrum stops showing changes" bug.
+        const double amp = std::max(1.0, cy - 2.0);
+        p.setPen(QPen(tokens().ink, 1));
         const std::size_t n = std::min(wf.peak.size(), static_cast<std::size_t>(req.target_width));
         // dB-scale so dynamic range survives the draw: a heavily-limited/loud
         // master (peak ~= 1.0 full-bar every bucket in a linear scale) used to
@@ -433,7 +505,9 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
             const double db = 20.0 * std::log10(static_cast<double>(x));
             return std::clamp((db + 40.0) / 40.0, 0.0, 1.0);
         };
-        p.setPen(QPen(QColor(140, 150, 160, 110), 1));
+        QColor peak_dim = tokens().ink_muted;
+        peak_dim.setAlpha(110);
+        p.setPen(QPen(peak_dim, 1));
         for (std::size_t i = 0; i < n; ++i) {
             const double x = static_cast<double>(i) + 0.5;
             const double top = cy - amp_db(wf.peak[i]) * amp;
@@ -444,7 +518,7 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
             p.drawLine(QPointF(x, top), QPointF(x, top_r));
             p.drawLine(QPointF(x, bot_r), QPointF(x, bot));
         }
-        p.setPen(QPen(QColor(240, 244, 238, 230), 1));
+        p.setPen(QPen(tokens().ink, 1));
         for (std::size_t i = 0; i < n; ++i) {
             const double x = static_cast<double>(i) + 0.5;
             const double top_r = cy - amp_db(wf.rms[i]) * amp;
@@ -476,7 +550,11 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
 
     const int64_t source_frame = std::max<int64_t>(0, req.frame);
     const auto t_dec0 = std::chrono::steady_clock::now();
-    auto frame = decoder.decode_to_frame(source_frame);
+    // Cap to the shared preview dimension: the timeline rescales each cell to a
+    // handful of pixels (<=192 wide), and zoom-out films trip over HUNDREDS of
+    // clip cells at once — a full-res frame per request swamps the 4 workers and
+    // the strip stays blank for ages. 640px max-dim decodes land in ms.
+    auto frame = decoder.decode_to_frame(source_frame, kPreviewMaxDim);
     const auto t_dec1 = std::chrono::steady_clock::now();
     if (!frame || frame->rgba.empty()) {
         if (debug_enabled())

@@ -16,6 +16,7 @@
 
 #include "Widgets/timeline_drag.hpp"
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 
@@ -186,6 +187,104 @@ void test_end_resets() {
     CHECK(r.new_tl_in == 110);
 }
 
+void test_batch_delta_preserved() {
+    // Batch drag math (Phase 3): the whole selection shares ONE delta — primary
+    // 60 -> 320 (snapped), so every other selected clip shifts by +260 on its
+    // own lane; relative spacings hold. min_set_orig is a third clip at 40.
+    CHECK(timeline_drag::batch_target_tl_in(60, 320, 200, 40) == 460);
+    CHECK(timeline_drag::batch_target_tl_in(60, 320, 90, 40) == 350);
+    // Negative delta: the shared delta is floored by the FRONT-MOST selected
+    // clip (40), so the lead pins at 0 instead of the primary running over it.
+    CHECK(timeline_drag::clamp_batch_delta(300, 100, 40) == -40);
+    CHECK(timeline_drag::batch_target_tl_in(300, 100, 40, 40) == 0);
+    // Zero delta (no actual move) maps every clip back to its origin.
+    CHECK(timeline_drag::batch_target_tl_in(120, 120, 40, 40) == 40);
+    // Primary (the set's front-most clip) moved EARLIER: later clips follow
+    // the full negative delta — the floor bound (-min_set_orig) never engages.
+    CHECK(timeline_drag::batch_target_tl_in(600, 300, 720, 600) == 420);
+    // REGRESSION case (bladed two clips, grab the TRAILING half and drag the
+    // selection left): the front-most co-selected clip at 40 clamps at 0, so
+    // the trailing primary stops at 260 and a clip at 720 lands at 680 — the
+    // old per-clip clamp let the trailing clip keep going and slide OVER the
+    // lead (720-200=520).
+    CHECK(timeline_drag::batch_target_tl_in(300, 100, 720, 40) == 680);
+}
+
+// --- Resolve-style magnetic edge snapping (Phase 8) ---------------------------
+
+void test_edge_snap_leading_edge_pulls() {
+    // The widget passes the sorted snap targets (other clips' edges, playhead,
+    // bookmarks) into move/commit; the DragController magnetises the dragged
+    // clip's edges onto them FIRST, keeping the grid as the zoomed-out fallback.
+    timeline_drag::DragController ctrl;
+    // begin(160, tl_in=100, dur=40) -> grab offset 60 frames.
+    ctrl.begin(160, 100, 0, 40);
+    // A neighbour's in-edge at 500. fpp=2.0 -> radius llround(10*2)=20 frames
+    // (the 10px magnet, frames_per_pixel being frames PER pixel). pointer 567
+    // -> raw 507, head 7 frames from 500 (tail 547 is inert, 47 away): the
+    // HEAD snaps to 500 despite being off-grid.
+    const std::array<int64_t, 1> targets{500};
+    const auto r = ctrl.move(567, 0, kVCount, canvas::core::Track::Kind::Video, true,
+                             2.0, targets);
+    CHECK(r.raw_tl_in == 507);
+    CHECK(r.new_tl_in == 500);
+    CHECK(r.snapped);
+}
+
+void test_edge_snap_trailing_edge_pulls() {
+    timeline_drag::DragController ctrl;
+    ctrl.begin(160, 100, 0, 40);  // grab 60
+    // pointer 612 -> raw 552 (tail 592), 8 frames from the 600 magnet; head is
+    // 48 away and inert, so the OUT edge wins and lays the clip at 560.
+    const std::array<int64_t, 1> targets{600};
+    const auto r = ctrl.move(612, 0, kVCount, canvas::core::Track::Kind::Video, true,
+                             2.0, targets);
+    CHECK(r.raw_tl_in == 552);
+    CHECK(r.new_tl_in == 560);
+    CHECK(r.snapped);
+}
+
+void test_edge_snap_grid_fallback() {
+    // No edge target within the radius -> plain grid quantization as before.
+    timeline_drag::DragController ctrl;
+    ctrl.begin(160, 100, 0, 40);
+    // fpp=4 -> 16-frame grid, radius llround(10*4)=40 frames; the 700 target
+    // is far outside the radius on both edges, so 318 quantizes to 320.
+    const std::array<int64_t, 1> targets{700};
+    const auto r = ctrl.move(378, 0, kVCount, canvas::core::Track::Kind::Video, true,
+                             4.0, targets);
+    CHECK(r.raw_tl_in == 318);
+    CHECK(r.new_tl_in == 320);
+    CHECK(r.snapped);
+}
+
+void test_edge_snap_disabled_and_collection() {
+    // Snap off: edge targets are ignored entirely.
+    timeline_drag::DragController ctrl;
+    ctrl.begin(160, 100, 0, 40);
+    const std::array<int64_t, 1> targets{500};
+    const auto r = ctrl.move(567, 0, kVCount, canvas::core::Track::Kind::Video, false,
+                             0.5, targets);
+    CHECK(r.new_tl_in == 507);
+    CHECK(!r.snapped);
+
+    // Empty target span (e.g. single-clip timeline) degrades to grid snapping.
+    const std::array<int64_t, 0> none{};
+    const auto r2 = ctrl.move(358, 0, kVCount, canvas::core::Track::Kind::Video, true,
+                              4.0, none);
+    CHECK(r2.new_tl_in == 304);  // raw 298 -> grid 16 -> 304
+}
+
+void test_edge_snap_commit_resolves() {
+    timeline_drag::DragController ctrl;
+    ctrl.begin(160, 100, 0, 40);
+    const std::array<int64_t, 1> targets{500};
+    // Release pointer 567 -> snapped head 500 != press tl_in 100: real move.
+    const auto r = ctrl.commit(567, 100, true, 2.0, targets);
+    CHECK(r.new_tl_in == 500);
+    CHECK(r.changed);
+}
+
 }  // namespace
 
 int main() {
@@ -199,6 +298,12 @@ int main() {
     test_commit_track_change_only();
     test_commit_snaps_release_position();
     test_end_resets();
+    test_batch_delta_preserved();
+    test_edge_snap_leading_edge_pulls();
+    test_edge_snap_trailing_edge_pulls();
+    test_edge_snap_grid_fallback();
+    test_edge_snap_disabled_and_collection();
+    test_edge_snap_commit_resolves();
 
     if (g_failures == 0) {
         std::printf("timeline_drag_test: ALL PASS\n");

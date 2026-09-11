@@ -35,6 +35,18 @@ struct ThumbRequest {
     // [0,1] (db_to_gain(clip.volume_db) clamped). Baked into the drawn peak
     // heights so the timeline spectrum visibly shrinks/rises with the volume.
     float gain = 1.0f;
+    // Diagnostics for the audio-time vs video-frame grid cross-check (always-on
+    // [wave] logs, not used for rendering): the clip's source/timeline window
+    // plus the media timing the window fractions were derived from. Lets the
+    // generator audit whether the drawn spectrum's audio time matches the
+    // source frames the user aims the razor at, and to what fraction of a frame
+    // they drift apart.
+    int64_t src_in = 0;
+    int64_t src_out = 0;
+    int64_t tl_in = 0;
+    int64_t tl_out = 0;
+    double media_fps = 0.0;
+    int64_t media_total_frames = 0;
 };
 
 class ThumbnailService final : public QObject {
@@ -46,11 +58,18 @@ public:
 
     void request(ThumbRequest req);
     void request_waveform(uint64_t id, std::string path, int width, int height, float src_lo,
-                          float src_hi, float gain = 1.0f);
+                          float src_hi, float gain = 1.0f, int64_t src_in = 0, int64_t src_out = 0,
+                          int64_t tl_in = 0, int64_t tl_out = 0, double media_fps = 0.0,
+                          int64_t media_total_frames = 0);
     void clear_cache();
     // Sets the directory used to persist generated thumbnails and waveforms so
     // they survive across zooms and app restarts. Empty disables disk caching.
     void set_cache_dir(QString dir);
+    // Parks the worker threads so no decode/IO competes with an active export
+    // (the render's NVDEC bandwidth). Requests still queue up; they flush as
+    // soon as the render finishes and this is cleared. Thread-safe — intended
+    // to be driven from the render-queue worker thread.
+    void set_paused(bool paused);
 
 signals:
     void thumbnail_ready(uint64_t id, QImage image);
@@ -124,6 +143,7 @@ private:
     std::unordered_map<std::string, canvas::core::AudioWaveform> waveform_cache_;
 
     std::atomic<bool> stopping_{false};
+    std::atomic<bool> paused_{false};
     bool pending_ = false;
 };
 

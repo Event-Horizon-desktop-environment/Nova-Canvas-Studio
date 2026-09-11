@@ -7,6 +7,29 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libswresample
 )
 
+# Vendored xiph/rnnoise (BSD-3-Clause) — the real-time speech noise-suppression
+# engine behind Clip::voice_isolation = RnNoise. Self-contained: the model
+# weights are compiled in via src/rnn_data.c, so no external .rnnn file ships.
+# `-w` suppresses warnings for this third-party C library (it is exempt from the
+# repo's zero-warning discipline); `-D_GNU_SOURCE` is the feature-test macro the
+# upstream autotools build provides via AC_USE_SYSTEM_EXTENSIONS (exposes M_PI).
+enable_language(C)
+add_library(rnnoise STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/denoise.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/rnn.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/rnn_data.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/kiss_fft.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/pitch.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src/celt_lpc.c
+)
+target_include_directories(rnnoise PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rnnoise/src
+)
+target_compile_options(rnnoise PRIVATE -w)
+target_compile_definitions(rnnoise PRIVATE _GNU_SOURCE=1)
+set_target_properties(rnnoise PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+
 find_package(Threads REQUIRED)
 
 # Optional CUDA acceleration (GPU RGBA->NV12 conversion to feed NVENC directly).
@@ -90,10 +113,24 @@ add_library(canvas_core STATIC
     src/media/audio_decoder.cpp
     src/media/hw_device.cpp
     src/media/audio_waveform.cpp
+    src/media/voice_isolation.cpp
+    src/media/equalizer.cpp
     src/timeline/model.cpp
     src/timeline/edit_ops.cpp
+    src/timeline/time_stretch.cpp
+    src/colorsci/wheels_ui.cpp
+    src/colorsci/curves.cpp
+    src/colorsci/histogram.cpp
+    src/grade_graph/graph.cpp
+    src/grade_graph/eval.cpp
+    src/grade_graph/composite.cpp
+    src/grade_graph/op.cpp
+    src/grade_graph/edit.cpp
+    src/grade_graph/serialize.cpp
+    src/grade_graph/lut.cpp
     src/project/project.cpp
     src/export/renderer.cpp
+    src/export/grade_frame.cpp
     src/export/exporter.cpp
     src/export/deliver_preset.cpp
     src/export/render_queue.cpp
@@ -107,6 +144,7 @@ target_include_directories(canvas_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/includ
 target_link_libraries(canvas_core PUBLIC
     PkgConfig::LIBAV
     Threads::Threads
+    rnnoise
 )
 
 if(CANVAS_CUDA_ENABLED)
@@ -133,7 +171,77 @@ target_link_libraries(canvas_scrub_bench_test PRIVATE canvas_core)
 set_target_properties(canvas_scrub_bench_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME scrub_bench COMMAND canvas_scrub_bench_test)
 
+add_executable(canvas_colorsci_test tests/colorsci_test.cpp)
+target_link_libraries(canvas_colorsci_test PRIVATE canvas_core)
+set_target_properties(canvas_colorsci_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME colorsci COMMAND canvas_colorsci_test)
+
+add_executable(canvas_graph_test tests/graph_test.cpp)
+target_link_libraries(canvas_graph_test PRIVATE canvas_core)
+set_target_properties(canvas_graph_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME graph COMMAND canvas_graph_test)
+
+add_executable(canvas_graph_edit_test tests/graph_edit_test.cpp)
+target_link_libraries(canvas_graph_edit_test PRIVATE canvas_core)
+set_target_properties(canvas_graph_edit_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME graph_edit COMMAND canvas_graph_edit_test)
+
+add_executable(canvas_composite_test tests/composite_test.cpp)
+target_link_libraries(canvas_composite_test PRIVATE canvas_core)
+set_target_properties(canvas_composite_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME composite COMMAND canvas_composite_test)
+
+add_executable(canvas_op_test tests/op_test.cpp)
+target_link_libraries(canvas_op_test PRIVATE canvas_core)
+set_target_properties(canvas_op_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME op COMMAND canvas_op_test)
+
+add_executable(canvas_lut_test tests/lut_test.cpp)
+target_link_libraries(canvas_lut_test PRIVATE canvas_core)
+set_target_properties(canvas_lut_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME lut COMMAND canvas_lut_test)
+
+add_executable(canvas_gpu_grade_test tests/gpu_grade_test.cpp)
+target_link_libraries(canvas_gpu_grade_test PRIVATE canvas_core)
+set_target_properties(canvas_gpu_grade_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME gpu_grade COMMAND canvas_gpu_grade_test)
+
+add_executable(canvas_wheels_ui_test tests/wheels_ui_test.cpp)
+target_link_libraries(canvas_wheels_ui_test PRIVATE canvas_core)
+set_target_properties(canvas_wheels_ui_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME wheels_ui COMMAND canvas_wheels_ui_test)
+
+add_executable(canvas_curves_test tests/curves_test.cpp)
+target_link_libraries(canvas_curves_test PRIVATE canvas_core)
+set_target_properties(canvas_curves_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME curves COMMAND canvas_curves_test)
+
+add_executable(canvas_histogram_test tests/histogram_test.cpp)
+target_link_libraries(canvas_histogram_test PRIVATE canvas_core)
+set_target_properties(canvas_histogram_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME histogram COMMAND canvas_histogram_test)
+
 add_executable(canvas_visual_render_test tests/visual_render_test.cpp)
 target_link_libraries(canvas_visual_render_test PRIVATE canvas_core)
 set_target_properties(canvas_visual_render_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME visual_render COMMAND canvas_visual_render_test)
+
+add_executable(canvas_voice_isolation_test tests/voice_isolation_test.cpp)
+target_link_libraries(canvas_voice_isolation_test PRIVATE canvas_core)
+set_target_properties(canvas_voice_isolation_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME voice_isolation COMMAND canvas_voice_isolation_test)
+
+add_executable(canvas_vram_leak_test tests/vram_leak_test.cpp)
+target_link_libraries(canvas_vram_leak_test PRIVATE canvas_core)
+set_target_properties(canvas_vram_leak_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME vram_leak COMMAND canvas_vram_leak_test)
+
+add_executable(canvas_clip_rate_test tests/clip_rate_test.cpp)
+target_link_libraries(canvas_clip_rate_test PRIVATE canvas_core)
+set_target_properties(canvas_clip_rate_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME clip_rate COMMAND canvas_clip_rate_test)
+
+add_executable(canvas_equalizer_test tests/equalizer_test.cpp)
+target_link_libraries(canvas_equalizer_test PRIVATE canvas_core)
+set_target_properties(canvas_equalizer_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME equalizer COMMAND canvas_equalizer_test)

@@ -60,6 +60,3 @@ ctest --test-dir build     # tests
 - **Zero-warning rule** — every build and test target must compile clean; a
   warning is treated as a defect.
 - **License:** MIT, © 2026 Mattscreative.
-
-Historical design notes for the pre-rename project sit in `roadmap.md`,
-`ux.md`, `plan .md`, and `n.md` — read for intent, not details.

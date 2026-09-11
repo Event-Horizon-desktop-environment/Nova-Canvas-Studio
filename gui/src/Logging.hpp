@@ -63,18 +63,6 @@ inline const char* log_file_path() {
     return path;
 }
 
-<<<<<<< Updated upstream
-// Truncate (start fresh) the destination log file. Called once at app startup
-// so every launch captures a clean log instead of appending to the previous
-// run. Both the GUI message_handler and the core CANVAS_LOG/log_error file handle
-// open in append mode, so clearing here before any logging lets every writer
-// land in a fresh file for this process.
-inline void reset_log_file() {
-    if (FILE* h = std::fopen(log_file_path(), "w")) {
-        std::fflush(h);
-        std::fclose(h);
-    }
-=======
 // Close and delete the destination log files so every writer starts fresh.
 // Both the GUI message_handler and the core CANVAS_LOG/log_error file handles
 // are cached process-wide statics; all must be closed here so they lazily
@@ -96,7 +84,6 @@ inline void reset_log_file() {
                                        canvas::core::log::Route::Thumbs,
                                        canvas::core::log::Route::Audio})
         std::remove(canvas::core::log::route_log_path(r));
->>>>>>> Stashed changes
 }
 
 // Qt message handler: prefixes severity/timestamp/thread and writes to the
@@ -104,15 +91,6 @@ inline void reset_log_file() {
 // The leading [tag] on the message routes it to its category file via the core
 // log routing (same sink as the core writers, one handle set per route).
 inline void message_handler(QtMsgType type, const QMessageLogContext&, const QString& msg) {
-<<<<<<< Updated upstream
-    static FILE* f = [] {
-        FILE* h = std::fopen(log_file_path(), "a");
-        if (h) std::fflush(h);
-        return h;
-    }();
-
-=======
->>>>>>> Stashed changes
     const bool verbose = (type == QtDebugMsg || type == QtInfoMsg);
     if (verbose && !debug_enabled()) return;
 

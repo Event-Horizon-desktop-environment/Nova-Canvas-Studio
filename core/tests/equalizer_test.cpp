@@ -582,6 +582,62 @@ void test_bank() {
               "bank drop() then continue keeps the low-pass law");
     }
 
+    // Mid-stream band edit through the IDENTITY threshold: dragging a MIDDLE
+    // active band's gain to ~0 dB (or toggling a band off) while others stay
+    // active. This used to DROP the band from the cascade (build_cascade
+    // skipped non-filtering slots), changing the stage count: configure()
+    // snapped the coefficients AND the positional state-carry shifted every
+    // carried DF2T state after the dropped slot into a misaligned stage — a
+    // hard pop at the exact reconfigure boundary (~0.31 single-frame step on a
+    // 440 Hz sine whose intrinsic slew is ~0.05). Identity-filled slots keep
+    // the cascade at a constant six stages, so the edit glides the slot in
+    // place and the step stays near the sine's own slew.
+    {
+        EqualizerBank bank;
+        std::array<Clip::EqBand, 6> bands{};
+        for (auto& b : bands) b.type = Clip::EqBand::Type::Bell;
+        bands[0].frequency = 800.0f;  bands[0].gain = 12.0f;  bands[0].q = 1.0f;
+        bands[2].frequency = 2000.0f; bands[2].gain = 12.0f;  bands[2].q = 1.0f;
+        bands[4].frequency = 4000.0f; bands[4].gain = 12.0f;  bands[4].q = 1.0f;
+
+        const int seg = 8000;
+        auto in = sine(440.0, seg, 0.9);
+        std::vector<float> out = in;
+        const int boundary = seg / 2;
+        (void)bank.tick(31, bands, true, kRate, 1, out.data(), boundary);
+
+        // The MIDDLE active band crosses into identity; the outer two stay.
+        std::array<Clip::EqBand, 6> edit = bands;
+        edit[2].gain = 0.0f;
+        (void)bank.tick(31, edit, true, kRate, 1, out.data() + boundary, seg - boundary);
+
+        // The single-frame step across the boundary window must stay under a
+        // =6x-tolerance over the sine's intrinsic slew (2*pi*440/48000 * 0.9 ~
+        // 0.052) — a structural snap lands well above that (measured 0.31).
+        float max_step = 0.0f;
+        const int win = 64;
+        for (int i = boundary - win; i < boundary + win && i < seg; ++i) {
+            const float d = std::fabs(out[static_cast<std::size_t>(i)] -
+                                      out[static_cast<std::size_t>(i - 1)]);
+            max_step = std::max(max_step, d);
+        }
+        check(max_step < 6.0f * static_cast<float>(2.0 * 3.141592653589793 * 440.0 / kRate * 0.9),
+              "identity-threshold band edit glides in place (no structural pop)");
+
+        // Steady state: past the glide the surviving curves match a fresh EQ
+        // configured with the edited bands (the 0 dB slot must read as 0 dB).
+        ParametricEqualizer fresh;
+        (void)fresh.configure(kRate, 1, edit);
+        auto ref = in;
+        fresh.process(ref.data(), seg);
+        float worst = 0.0f;
+        for (int i = seg - 1024; i < seg; ++i)
+            worst = std::max(worst, std::fabs(out[static_cast<std::size_t>(i)] -
+                                              ref[static_cast<std::size_t>(i)]));
+        check(worst < 1e-3f,
+              "identity-threshold band edit converges to the new law (0 dB slot is identity)");
+    }
+
     // Seek+resume on an ALREADY-ENABLED clip must re-glide, not expose the
     // freshly cold-reset filter at full wet. This is the "pop on (random)
     // startup" regression: drop() cold-resets the filter's IIR state (as it

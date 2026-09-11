@@ -36,14 +36,35 @@ public:
     // playhead; pass -1 to preserve the current one (edit snapshots must not
     // reset the playhead — only a fresh open/new passes 0).
     void set_project(std::shared_ptr<const canvas::core::Project> project, int64_t initial_frame = -1);
+    // Grade-only project swap for the Color page's live preview. The grade rides
+    // on the present path (baked to a 3D LUT sampled in the viewer's NV12 shader),
+    // so swapping the snapshot must NOT tear down the decode stack — a plain
+    // set_project() closes every slot + reopens all media (~217ms measured), which
+    // forced the ~4Hz grade-preview throttle. swap_project just points the worker
+    // at the new snapshot and re-presents the current frame with the new LUT while
+    // the decoders stay warm (~2ms). Stale swap requests are coalesced: only the
+    // newest grade matters while dragging.
+    void swap_project(std::shared_ptr<const canvas::core::Project> project);
     // Live mix-parameter refresh: swaps the worker's project WITHOUT stopping
     // playback or tearing down decoders/audio, so audio edits (volume/pan/
     // pitch/speed/EQ) reach the next mixed buffer as the video keeps playing.
     void update_audio_mix(std::shared_ptr<const canvas::core::Project> project);
+    // Realtime audible volume override during an Inspector drag: re-mixes a
+    // clip at `volume_db` WITHOUT touching the model (no undo, no snapshot).
+    // Pairs with apply_inspector_audio()'s committed edit on drag release.
+    void set_live_clip_gain(canvas::core::ClipId id, float volume_db) { audio_.set_live_clip_gain(id, volume_db); }
+    void clear_live_clip_gain(canvas::core::ClipId id) { audio_.clear_live_clip_gain(id); }
+    void clear_live_clip_gains() { audio_.clear_live_clip_gains(); }
     void add_media(const canvas::core::MediaEntry& entry);
     void play();
     void pause();
     void toggle_play_pause();
+    // Claims the audio output device back from a competing controller: pauses
+    // this player and CLOSES its device so another SequenceController (e.g. the
+    // dual-viewer source preview) can open it. Two AudioOutputs can't share one
+    // device, so a paused controller that keeps its handle open blocks the
+    // other's play(). Additive API — the timeline path never calls it.
+    void release_audio();
     void seek(int64_t frame_number);
     // Fast low-resolution scrub preview: decodes the frame at a reduced size for
     // responsive scrubbing and does NOT write it into the full-res frame cache.
@@ -83,7 +104,7 @@ signals:
     void playback_changed(bool playing);
 
 private:
-    enum class Command { SetProject, AddMedia, Play, Pause, Seek, SeekPreview, Step, UpdateAudioMix, Stop };
+    enum class Command { SetProject, SwapProject, AddMedia, Play, Pause, Seek, SeekPreview, Step, UpdateAudioMix, ReleaseAudio, Stop };
     struct Request {
         Command command = Command::Stop;
         int64_t arg = 0;
@@ -94,6 +115,7 @@ private:
     void worker_loop();
     void push(Request request);
     void handle_set_project(std::shared_ptr<const canvas::core::Project> project, int64_t initial_frame);
+    void handle_swap_project(std::shared_ptr<const canvas::core::Project> project);
     void handle_update_audio_mix(std::shared_ptr<const canvas::core::Project> project);
     void handle_add_media(const canvas::core::MediaEntry& entry);
     void handle_play();

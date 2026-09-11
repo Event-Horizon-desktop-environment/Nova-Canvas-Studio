@@ -1,5 +1,6 @@
 #include "features/deliver/deliver_settings_panel.hpp"
 
+#include "features/deliver/deliver_settings_model.hpp"
 #include "UX/theme.hpp"
 
 #include <QCheckBox>
@@ -28,10 +29,20 @@ namespace canvas::gui {
 
 namespace {
 
+QString muted_lbl_style() {
+    return QStringLiteral("color:%1;font-size:11px;").arg(css(tokens().ink_muted));
+}
+
+QString deliver_field_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QComboBox,QSpinBox,QDoubleSpinBox,QLineEdit{background:%1;color:%2;"
+               "border:1px solid %3;border-radius:8px;padding:4px 8px;font-size:11px;}")
+        .arg(css(t.surface_low), css(t.ink), css(t.border_soft));
+}
+
 void style_field(QWidget* w) {
-    w->setStyleSheet(QStringLiteral(
-        "QComboBox,QSpinBox,QDoubleSpinBox,QLineEdit{background:#0C0E14;color:#E8EAF0;"
-        "border:1px solid #232833;border-radius:8px;padding:4px 8px;font-size:11px;}"));
+    apply_theme_style(w, &deliver_field_style);
 }
 
 QWidget* make_row(const QString& label, QWidget* field, QWidget* parent = nullptr) {
@@ -41,15 +52,20 @@ QWidget* make_row(const QString& label, QWidget* field, QWidget* parent = nullpt
     l->setSpacing(6);
     auto* lbl = new QLabel(label, row);
     lbl->setMinimumWidth(120);
-    lbl->setStyleSheet(QStringLiteral("color:#9AA0B0;font-size:11px;"));
+    apply_theme_style(lbl, &muted_lbl_style);
     l->addWidget(lbl);
     l->addWidget(field, 1);
     return row;
 }
 
+QString check_style() {
+    return QStringLiteral("QCheckBox{color:%1;font-size:11px;}")
+        .arg(css(tokens().ink_muted));
+}
+
 QWidget* make_check(const QString& label, QWidget* parent = nullptr) {
     auto* c = new QCheckBox(label, parent);
-    c->setStyleSheet(QStringLiteral("QCheckBox{color:#C6CAD6;font-size:11px;}"));
+    apply_theme_style(c, &check_style);
     return c;
 }
 
@@ -57,7 +73,9 @@ QScrollArea* make_scroll(QWidget* content) {
     auto* sa = new QScrollArea;
     sa->setWidgetResizable(true);
     sa->setFrameShape(QFrame::NoFrame);
-    sa->setStyleSheet(QStringLiteral("QScrollArea{background:#141A21;}"));
+    apply_theme_style(sa, [] {
+        return QStringLiteral("QScrollArea{background:%1;}").arg(css(tokens().surface));
+    });
     sa->setWidget(content);
     return sa;
 }
@@ -67,17 +85,73 @@ QScrollArea* make_scroll(QWidget* content) {
 // for the caller to fill with rows.
 QVBoxLayout* make_section(const QString& title, QVBoxLayout* page) {
     auto* card = new QWidget;
-    card->setStyleSheet(QStringLiteral(
-        "QWidget{background:#0E1117;border:1px solid #232833;border-radius:10px;}"));
+    apply_theme_style(card, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral("QWidget{background-color:%1;"
+                              "border:1px solid %2;"
+                              "border-radius:14px;}")
+            .arg(css(t.surface_low), css(t.border_soft));
+    });
     auto* inner = new QVBoxLayout(card);
     inner->setContentsMargins(10, 8, 10, 10);
     inner->setSpacing(6);
     auto* t = new QLabel(title, card);
-    t->setStyleSheet(QStringLiteral("color:#9AA0B0;font-size:10px;font-weight:600;"
-                                    "padding:0 2px;"));
+    apply_theme_style(t, [] {
+        return QStringLiteral("color:%1;font-size:10px;font-weight:600;padding:0 2px;")
+            .arg(css(tokens().ink_muted));
+    });
     inner->addWidget(t);
     page->addWidget(card);
     return inner;
+}
+
+QString header_band_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral("background:%1;border-bottom:1px solid %2;")
+        .arg(css(t.surface_raised), css(t.border_soft));
+}
+
+QString browse_btn_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QPushButton{background:%1;color:%2;border:1px solid %3;"
+               "border-radius:8px;padding:4px 10px;font-size:11px;}"
+               "QPushButton:hover{background:%4;}")
+        .arg(css(t.surface_raised), css(t.ink_muted), css(t.border_soft),
+             css(t.surface_higher));
+}
+
+QString tabs_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QWidget#qt_tabwidget_stackedwidget{background:%1;}"
+               "QTabWidget::pane{background:%1;border:none;}"
+               "QTabBar::tab{background:transparent;color:%2;padding:6px 14px;"
+               "  border:none;border-radius:8px;font-weight:500;margin:2px 1px;}"
+               "QTabBar::tab:selected{color:%3;background:%4;font-weight:600;}"
+               "QTabBar::tab:hover{color:%5;}"
+               "QTabBar::tab:selected:hover{color:%3;}")
+        .arg(css(t.surface), css(t.ink_muted), css(t.on_accent), css(t.accent),
+             css(t.ink));
+}
+
+QString estimate_style() {
+    return QStringLiteral("color:%1;font-size:11px;").arg(css(tokens().accent_text));
+}
+
+QString accent_btn_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+               "QPushButton{background:%1;color:%2;border-radius:8px;"
+               "padding:7px 14px;font-weight:600;}"
+               "QPushButton:hover{background:%3;}")
+        .arg(css(t.accent), css(t.on_accent), css(t.accent_hover));
+}
+
+QString footer_band_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral("background:%1;border-top:1px solid %2;")
+        .arg(css(t.surface_raised), css(t.border_soft));
 }
 
 }  // namespace
@@ -91,22 +165,25 @@ void DeliverSettingsPanel::build() {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
+    apply_theme_style(this, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral("QWidget{background:%1;}").arg(css(t.surface));
+    });
 
     // Header: preset + scope + file name/location. Raised card band with a
     // hairline, matching the inspector / dock-title surfaces.
     auto* header = new QWidget(this);
-    header->setStyleSheet(QStringLiteral("background:#1A1D27;border-bottom:1px solid #232833;"));
+    apply_theme_style(header, &header_band_style);
     auto* h = new QVBoxLayout(header);
     h->setContentsMargins(10, 8, 10, 8);
     h->setSpacing(6);
 
     auto* preset_row = new QHBoxLayout;
     auto* preset_lbl = new QLabel(tr("Preset"));
-    preset_lbl->setStyleSheet(QStringLiteral("color:#9AA0B0;font-size:11px;"));
+    apply_theme_style(preset_lbl, &muted_lbl_style);
     preset_combo_ = new QComboBox(header);
-    preset_combo_->addItems({tr("Custom Export"), tr("YouTube 2160p"), tr("YouTube 1440p"),
-                             tr("YouTube 1080p"), tr("Vimeo 4K"), tr("H.265 MKV Best"),
-                             tr("H.264 MP4 Web")});
+    for (const std::string& p : deliver_model::preset_names())
+        preset_combo_->addItem(tr(p.c_str()));
     style_field(preset_combo_);
     preset_row->addWidget(preset_lbl);
     preset_row->addWidget(preset_combo_, 1);
@@ -119,7 +196,7 @@ void DeliverSettingsPanel::build() {
 
     auto* fn_row = new QHBoxLayout;
     auto* fn_lbl = new QLabel(tr("File Name"));
-    fn_lbl->setStyleSheet(QStringLiteral("color:#9AA0B0;font-size:11px;"));
+    apply_theme_style(fn_lbl, &muted_lbl_style);
     file_name_ = new QLineEdit(header);
     file_name_->setText(tr("Untitled"));
     style_field(file_name_);
@@ -129,7 +206,7 @@ void DeliverSettingsPanel::build() {
 
     auto* loc_row = new QHBoxLayout;
     auto* loc_lbl = new QLabel(tr("Location"));
-    loc_lbl->setStyleSheet(QStringLiteral("color:#9AA0B0;font-size:11px;"));
+    apply_theme_style(loc_lbl, &muted_lbl_style);
     location_ = new QLineEdit(header);
     {
         // Auto-detect the user's own Movies dir (falls back to the home dir when
@@ -141,24 +218,14 @@ void DeliverSettingsPanel::build() {
     loc_row->addWidget(loc_lbl);
     loc_row->addWidget(location_, 1);
     location_browse_ = new QPushButton(tr("Browse..."), header);
-    location_browse_->setStyleSheet(QStringLiteral(
-        "QPushButton{background:#1A1D27;color:#C6CAD6;border:1px solid #232833;"
-        "border-radius:8px;padding:4px 10px;font-size:11px;}"
-        "QPushButton:hover{background:#20242F;}"));
+    apply_theme_style(location_browse_, &browse_btn_style);
     loc_row->addWidget(location_browse_);
     h->addLayout(loc_row);
 
     root->addWidget(header);
 
     tabs_ = new QTabWidget(this);
-    tabs_->setStyleSheet(QStringLiteral(
-        "QWidget#qt_tabwidget_stackedwidget{background:#141A21;}"
-        "QTabWidget::pane{background:#141A21;border:none;}"
-        "QTabBar::tab{background:transparent;color:#9AA0B0;padding:6px 14px;"
-        "  border:none;border-radius:8px;font-weight:500;margin:2px 1px;}"
-        "QTabBar::tab:selected{color:#FFFFFF;background:#3B82F6;font-weight:600;}"
-        "QTabBar::tab:hover{color:#E8EAF0;}"
-        "QTabBar::tab:selected:hover{color:#FFFFFF;}"));
+    apply_theme_style(tabs_, &tabs_style);
     root->addWidget(tabs_, 1);
 
     // ---------------- VIDEO TAB ----------------
@@ -215,7 +282,7 @@ void DeliverSettingsPanel::build() {
     res_row->addWidget(new QLabel(tr("H")));
     res_row->addWidget(res_h_, 1);
     vertical_res_ = new QCheckBox(tr("Use vertical res"));
-    vertical_res_->setStyleSheet(QStringLiteral("QCheckBox{color:#C6CAD6;font-size:11px;}"));
+    apply_theme_style(vertical_res_, &check_style);
     res_row->addWidget(vertical_res_);
     res_row->setContentsMargins(0, 0, 0, 0);
 
@@ -224,7 +291,7 @@ void DeliverSettingsPanel::build() {
     fr->setContentsMargins(0, 0, 0, 0);
     fr->setSpacing(6);
     custom_fps_chk_ = new QCheckBox(tr("Custom Frame Rate"));
-    custom_fps_chk_->setStyleSheet(QStringLiteral("QCheckBox{color:#C6CAD6;font-size:11px;}"));
+    apply_theme_style(custom_fps_chk_, &check_style);
     custom_fps_chk_->setChecked(false);
     fr->addWidget(custom_fps_chk_);
     fr->addStretch(1);
@@ -303,7 +370,9 @@ void DeliverSettingsPanel::build() {
         auto* row = new QHBoxLayout(bitrate_row_);
         row->setContentsMargins(0, 0, 0, 0);
         bitrate_label_ = new QLabel(tr("Bit Rate"), bitrate_row_);
-        bitrate_label_->setStyleSheet(QStringLiteral("color:#C6CAD6;font-size:12px;"));
+        apply_theme_style(bitrate_label_, [] {
+            return QStringLiteral("color:%1;font-size:12px;").arg(css(tokens().ink_muted));
+        });
         row->addWidget(bitrate_label_);
         bitrate_spin_ = new QSpinBox(bitrate_row_);
         bitrate_spin_->setRange(0, 400000);
@@ -486,19 +555,17 @@ void DeliverSettingsPanel::build() {
 
     auto* buttons = new QHBoxLayout;
     estimate_label_ = new QLabel(tr("Estimated File Size: --"));
-    estimate_label_->setStyleSheet(QStringLiteral("color:#8FCBFF;font-size:11px;"));
+    apply_theme_style(estimate_label_, &estimate_style);
     buttons->addWidget(estimate_label_, 1);
 
     auto* add_btn = new QPushButton(tr("Add to Render Queue"));
     add_btn->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
-    add_btn->setStyleSheet(QStringLiteral("QPushButton{background:#3B82F6;color:white;border-radius:8px;"
-                                          "padding:7px 14px;font-weight:600;}"
-                                          "QPushButton:hover{background:#4C92FF;}"));
+    apply_theme_style(add_btn, &accent_btn_style);
     connect(add_btn, &QPushButton::clicked, this, &DeliverSettingsPanel::add_to_queue_clicked);
     buttons->addWidget(add_btn);
 
     auto* footer = new QWidget(this);
-    footer->setStyleSheet(QStringLiteral("background:#1A1D27;border-top:1px solid #232833;"));
+    apply_theme_style(footer, &footer_band_style);
     auto* fo = new QVBoxLayout(footer);
     fo->setContentsMargins(10, 8, 10, 8);
     fo->setSpacing(4);
@@ -513,52 +580,23 @@ void DeliverSettingsPanel::build() {
 }
 
 void DeliverSettingsPanel::rebuild_encoder_list() {
-    const QString cur = encoder_combo_ ? encoder_combo_->currentText() : QString();
+    if (!encoder_combo_) return;
+    const QString cur = encoder_combo_->currentText();
     encoder_combo_->clear();
-    for (const auto& e : canvas::core::deliver_encoders()) encoder_combo_->addItem(QString::fromStdString(e));
+    for (const std::string& e : deliver_model::encoder_backends())
+        encoder_combo_->addItem(QString::fromStdString(e));
     if (!cur.isEmpty()) encoder_combo_->setCurrentText(cur);
 }
 
 namespace {
 
-// Codecs that can actually go in a given container (validated against FFmpeg).
-// This mirrors what real NLEs expose: the codec list is restricted so users
-// can't pick a combination the muxer rejects (WebM+H.264, MP4+ProRes, ...).
-QStringList video_codecs_for_format(const QString& format) {
-    const QString fmt = format.toLower();
-    if (fmt.contains("mkv"))
-        return {"H.264", "H.265", "AV1", "Apple ProRes", "FFV1", "JPEG 2000", "Uncompressed"};
-    if (fmt.contains("mp4"))
-        return {"H.264", "H.265", "AV1"};
-    if (fmt.contains("quicktime") || fmt == "mov")
-        return {"H.264", "H.265", "Apple ProRes", "FFV1", "Uncompressed"};
-    if (fmt == "webm")
-        return {"AV1"};  // WebM allows VP8/VP9/AV1; we expose AV1 here.
-    if (fmt.contains("avi"))
-        return {"H.264", "H.265", "FFV1", "Uncompressed"};
-    if (fmt.contains("mxf") || fmt.contains("imf"))
-        return {"H.264", "H.265"};
-    if (fmt.contains("mpeg-2") || fmt == "mpeg")
-        return {"H.264"};
-    // Image-sequence formats: codec is irrelevant at the muxer level.
-    if (fmt.contains("png") || fmt.contains("dpx") || fmt.contains("exr") ||
-        fmt.contains("jpeg") || fmt.contains("tiff") || fmt.contains("webp") ||
-        fmt.contains("gif"))
-        return {"Uncompressed"};
-    return {"H.264", "H.265", "AV1"};
-}
-
-QStringList audio_codecs_for_format(const QString& format) {
-    const QString fmt = format.toLower();
-    if (fmt == "webm")
-        return {"Opus", "Vorbis"};
-    if (fmt.contains("mpeg-2") || fmt == "mpeg")
-        return {"MP3"};
-    if (fmt.contains("avi"))
-        return {"PCM", "MP3"};
-    if (fmt.contains("mxf") || fmt.contains("imf"))
-        return {"PCM"};
-    return {"AAC", "MP3", "PCM", "FLAC", "Opus", "Vorbis"};
+// <Q...>-free combo populators over the deliver_model policy lists. Kept local
+// so the panel's Qt types never leak into the Qt-free module.
+template <typename Container>
+QStringList to_string_list(const Container& c) {
+    QStringList out;
+    for (const std::string& s : c) out << QString::fromStdString(s);
+    return out;
 }
 
 }  // namespace
@@ -566,11 +604,11 @@ QStringList audio_codecs_for_format(const QString& format) {
 void DeliverSettingsPanel::rebuild_codec_list() {
     if (!format_combo_ || !codec_combo_) return;
 
-    const QString fmt = format_combo_->currentText();
+    const std::string fmt = format_combo_->currentText().toStdString();
     const QString cur_v = codec_combo_->currentText();
 
     codec_combo_->clear();
-    const QStringList vcs = video_codecs_for_format(fmt);
+    const QStringList vcs = to_string_list(deliver_model::video_codecs_for_format(fmt));
     for (const QString& c : vcs) codec_combo_->addItem(c);
     if (!cur_v.isEmpty() && vcs.contains(cur_v))
         codec_combo_->setCurrentText(cur_v);
@@ -580,7 +618,7 @@ void DeliverSettingsPanel::rebuild_codec_list() {
     if (audio_codec_combo_) {
         const QString cur_a = audio_codec_combo_->currentText();
         audio_codec_combo_->clear();
-        const QStringList acs = audio_codecs_for_format(fmt);
+        const QStringList acs = to_string_list(deliver_model::audio_codecs_for_format(fmt));
         for (const QString& c : acs) audio_codec_combo_->addItem(c);
         if (!cur_a.isEmpty() && acs.contains(cur_a))
             audio_codec_combo_->setCurrentText(cur_a);
@@ -637,20 +675,16 @@ void DeliverSettingsPanel::connect_all() {
 
 void DeliverSettingsPanel::update_bitrate_visibility() {
     if (!bitrate_spin_ || !max_bitrate_spin_) return;
-    const int rc = rate_control_combo_->currentIndex();
-    // RateControl: 0=ConstantQP, 1=VBR(Quality), 2=VBR(Target), 3=ConstantBitrate.
-    const bool show_bitrate = (rc == 2 || rc == 3);
-    const bool show_max = (rc == 2);
-    if (rc == 3) {
-        bitrate_label_->setText(tr("Bit Rate"));
+    const deliver_model::BitrateVisibility v =
+        deliver_model::bitrate_visibility(rate_control_combo_->currentIndex());
+    if (rate_control_combo_->currentIndex() == 3) {
+        // Constant bitrate: keep the single "Bit Rate" field; its value is also
+        // the max (the two never diverge in CBR).
         max_bitrate_spin_->setValue(bitrate_spin_->value());
-    } else if (rc == 2) {
-        bitrate_label_->setText(tr("Target (Kbps)"));
-    } else {
-        bitrate_label_->setText(tr("Bit Rate"));
     }
-    bitrate_row_->setVisible(show_bitrate);
-    max_bitrate_row_->setVisible(show_max);
+    bitrate_label_->setText(tr(v.bitrate_label));
+    bitrate_row_->setVisible(v.show_bitrate);
+    max_bitrate_row_->setVisible(v.show_max);
 }
 
 canvas::core::DeliverSettings DeliverSettingsPanel::settings() const {
@@ -774,10 +808,10 @@ void DeliverSettingsPanel::set_timeline_length(double duration_seconds, double t
 }
 
 void DeliverSettingsPanel::update_estimate() {
-    const auto kColorStyle = QLatin1String("color:#8FCBFF;font-size:11px;");
     if (!estimate_label_ || duration_seconds_ <= 0.0) {
         estimate_label_->setText(tr("Estimated File Size: --"));
-        estimate_label_->setStyleSheet(kColorStyle);
+        estimate_label_->setStyleSheet(
+            QStringLiteral("color:%1;font-size:11px;").arg(css(tokens().accent_text)));
         return;
     }
 
@@ -846,7 +880,8 @@ void DeliverSettingsPanel::update_estimate() {
     else
         size_text = tr("%1 MB").arg(total_mb, 0, 'f', 1);
     estimate_label_->setText(tr("Estimated File Size: %1").arg(size_text));
-    estimate_label_->setStyleSheet(kColorStyle);
+    estimate_label_->setStyleSheet(
+        QStringLiteral("color:%1;font-size:11px;").arg(css(tokens().accent_text)));
 }
 
 }  // namespace canvas::gui

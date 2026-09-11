@@ -13,11 +13,14 @@
 #include <QDoubleSpinBox>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
 #include <QPalette>
 #include <QPoint>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QSize>
 #include <QStackedWidget>
@@ -44,54 +47,109 @@ void build_left_dock(MainWindow& mw) {
     left_tabs->setTabPosition(QTabWidget::North);
     left_tabs->setMinimumWidth(380);
     left_tabs->setDocumentMode(true);
-    left_tabs->setStyleSheet(QStringLiteral(
-        "QTabWidget#leftTabStrip::pane{background:#11131A;border:none;}"
-        "QTabBar::tab{background:transparent;color:#9AA0B0;padding:6px 10px;"
-        "  border:none;border-radius:8px;font-weight:500;margin:2px 1px;}"
-        "QTabBar::tab:selected{color:#FFFFFF;background:#3B82F6;font-weight:600;}"
-        "QTabBar::tab:hover{color:#E8EAF0;}"
-        "QTabBar::tab:selected:hover{color:#FFFFFF;}"
-        "QTabBar QToolButton{background:transparent;border:none;border-radius:8px;}"
-        "QTabBar QToolButton:hover{background:rgba(255,255,255,0.08);}"));
+    apply_theme_style(left_tabs, &left_tab_strip_style);
 
     auto* pool_tab = new QWidget(left_tabs);
-    auto* pool_root_layout = new QHBoxLayout(pool_tab);
-    pool_root_layout->setContentsMargins(0, 0, 0, 0);
-    pool_root_layout->setSpacing(0);
+    auto* pool_root_layout = new QVBoxLayout(pool_tab);
+    pool_root_layout->setContentsMargins(8, 8, 8, 8);
+    pool_root_layout->setSpacing(8);
+
+    // Search row: filter field + Import, matching the reference panel top.
+    auto* search_row = new QWidget(pool_tab);
+    auto* search_layout = new QHBoxLayout(search_row);
+    search_layout->setContentsMargins(0, 0, 0, 0);
+    search_layout->setSpacing(6);
+    auto* search = new QLineEdit(search_row);
+    search->setObjectName(QStringLiteral("mediaSearch"));
+    search->setPlaceholderText(MainWindow::tr("Search media…"));
+    search->setClearButtonEnabled(true);
+    search->addAction(icon("search"), QLineEdit::LeadingPosition);
+    apply_theme_style(search, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral(
+            "QLineEdit#mediaSearch { background-color: %1; border: 1px solid %2;"
+            " border-radius: 8px; padding: 5px 10px; color: %3; font-size: 13px;}"
+            "QLineEdit#mediaSearch:focus { border-color: %4; }"
+            "QLineEdit#mediaSearch::placeholder { color: %5; }")
+            .arg(css(t.surface_raised), css(t.border), css(t.ink), css(t.accent),
+                 css(t.ink_faint));
+    });
+    search_layout->addWidget(search, 1);
+    auto* import_btn = new QPushButton(MainWindow::tr("Import"), search_row);
+    import_btn->setObjectName(QStringLiteral("mediaImport"));
+    import_btn->setCursor(Qt::PointingHandCursor);
+    import_btn->setFixedHeight(32);
+    apply_theme_style(import_btn, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral(
+            "QPushButton#mediaImport { background-color: %1; color: %2; border: none;"
+            " border-radius: 8px; padding: 0 14px; font-size: 13px; font-weight: 550;}"
+            "QPushButton#mediaImport:hover { background-color: %3; }"
+            "QPushButton#mediaImport:pressed { background-color: %4; }"
+            "QPushButton#mediaImport:focus { outline: none; }")
+            .arg(css(t.accent), css(t.on_accent), css(t.accent_hover),
+                 css(t.accent_press));
+    });
+    search_layout->addWidget(import_btn);
+    pool_root_layout->addWidget(search_row);
+
+    // Two-column body: bins | pool.
+    auto* pool_body = new QWidget(pool_tab);
+    auto* pool_body_layout = new QHBoxLayout(pool_body);
+    pool_body_layout->setContentsMargins(0, 0, 0, 0);
+    pool_body_layout->setSpacing(8);
 
     // Bins column.
-    auto* bins_column = new QWidget(pool_tab);
+    auto* bins_column = new QWidget(pool_body);
+    bins_column->setFixedWidth(104);
     auto* bins_layout = new QVBoxLayout(bins_column);
     bins_layout->setContentsMargins(0, 0, 0, 0);
     bins_layout->setSpacing(0);
     auto* bins_label = new QLabel(MainWindow::tr("Bins"), bins_column);
-    bins_label->setStyleSheet(QStringLiteral("color: #9AA0B0; font-size: 10px; padding: 4px 8px; background-color: transparent;"));
+    bins_label->setText(bins_label->text().toUpper());
+    apply_theme_style(bins_label, [] {
+        return QStringLiteral(
+            "color: %1; font-size: 10px; font-weight: 600; letter-spacing: 0.08em;"
+            " text-transform: uppercase; padding: 6px 9px 2px; background-color: transparent;")
+            .arg(css(tokens().ink_muted));
+    });
     auto* bin_tree = new QTreeWidget(bins_column);
     bin_tree->setObjectName(QStringLiteral("binTree"));
     bin_tree->setHeaderHidden(true);
     bin_tree->setRootIsDecorated(false);
-    bin_tree->setIconSize(QSize(28, 28));
-    bin_tree->setStyleSheet(bin_tree_style());
+    bin_tree->setColumnCount(2);
+    bin_tree->setColumnWidth(0, 62);
+    bin_tree->setColumnWidth(1, 26);
+    bin_tree->header()->setStretchLastSection(false);
+    bin_tree->setIconSize(QSize(16, 16));
+    apply_theme_style(bin_tree, &bin_tree_style);
     {
-        QPalette bp = bin_tree->palette();
-        bp.setColor(QPalette::Base, QColor(QStringLiteral("#11131A")));
-        bp.setColor(QPalette::AlternateBase, QColor(QStringLiteral("#11131A")));
-        bp.setColor(QPalette::Window, QColor(QStringLiteral("#11131A")));
-        bp.setColor(QPalette::Text, QColor(QStringLiteral("#E8EAF0")));
-        bp.setColor(QPalette::Highlight, QColor(255, 255, 255, 30));
-        bp.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#E8EAF0")));
-        bin_tree->setPalette(bp);
-        if (auto* vp = bin_tree->viewport()) {
-            vp->setAutoFillBackground(true);
-            QPalette vpp = vp->palette();
-            vpp.setColor(QPalette::Base, QColor(QStringLiteral("#11131A")));
-            vpp.setColor(QPalette::Window, QColor(QStringLiteral("#11131A")));
-            vpp.setColor(QPalette::Text, QColor(QStringLiteral("#E8EAF0")));
-            vpp.setColor(QPalette::Highlight, QColor(255, 255, 255, 30));
-            vpp.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#E8EAF0")));
-            vp->setPalette(vpp);
-            vp->setStyleSheet(QStringLiteral("background-color: #11131A;"));
-        }
+        // Palette-driven surfaces so viewport/text/selection follow tokens
+        // (kept alive across appearance switches via the re-apply hook).
+        const auto retint_bins = [bin_tree] {
+            const ThemeTokens& t = tokens();
+            QPalette bp = bin_tree->palette();
+            bp.setColor(QPalette::Base, t.surface);
+            bp.setColor(QPalette::AlternateBase, t.surface);
+            bp.setColor(QPalette::Window, t.surface);
+            bp.setColor(QPalette::Text, t.ink);
+            bp.setColor(QPalette::Highlight, t.state_selected);
+            bp.setColor(QPalette::HighlightedText, t.ink);
+            bin_tree->setPalette(bp);
+            if (QWidget* vp = bin_tree->viewport()) {
+                vp->setAutoFillBackground(true);
+                QPalette vpp = vp->palette();
+                vpp.setColor(QPalette::Base, t.surface);
+                vpp.setColor(QPalette::Window, t.surface);
+                vpp.setColor(QPalette::Text, t.ink);
+                vpp.setColor(QPalette::Highlight, t.state_selected);
+                vpp.setColor(QPalette::HighlightedText, t.ink);
+                vp->setPalette(vpp);
+                vp->setStyleSheet(QStringLiteral("background-color: %1;").arg(css(t.surface)));
+            }
+        };
+        retint_bins();
+        register_theme_reapply(retint_bins);
     }
     mw.bin_tree_ = bin_tree;
     mw.bin_tree_->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed |
@@ -101,6 +159,7 @@ void build_left_dock(MainWindow& mw) {
     QObject::connect(mw.bin_tree_, &QTreeWidget::customContextMenuRequested, &mw,
             [&mw](const QPoint& pos) {
                 QMenu menu;
+                apply_rounded_menu(&menu);
                 QTreeWidgetItem* item = mw.bin_tree_->itemAt(pos);
                 menu.addAction(MainWindow::tr("New Bin"), &mw, [&mw]() {
                     mw.project_->bins.push_back("New Bin");
@@ -155,10 +214,9 @@ void build_left_dock(MainWindow& mw) {
     });
     bins_layout->addWidget(bins_label);
     bins_layout->addWidget(bin_tree, 1);
-    bins_column->setFixedWidth(120);
 
     // Grid column.
-    auto* grid_column = new QWidget(pool_tab);
+    auto* grid_column = new QWidget(pool_body);
     grid_column->setMinimumWidth(220);
     auto* grid_layout = new QVBoxLayout(grid_column);
     grid_layout->setContentsMargins(0, 0, 0, 0);
@@ -171,7 +229,7 @@ void build_left_dock(MainWindow& mw) {
 
     mw.media_pool_ = new MediaPoolWidget(grid_column);
     mw.media_pool_->setObjectName(QStringLiteral("mediaPool"));
-    mw.media_pool_->setStyleSheet(media_pool_style());
+    apply_theme_style(mw.media_pool_, &media_pool_style);
     mw.media_pool_->setContextMenuPolicy(Qt::CustomContextMenu);
     mw.media_pool_->setSpacing(6);
     QObject::connect(mw.media_pool_, &MediaPoolWidget::importRequested, &mw, &MainWindow::on_import_media);
@@ -184,6 +242,7 @@ void build_left_dock(MainWindow& mw) {
     QObject::connect(mw.media_pool_, &QListWidget::customContextMenuRequested, &mw,
             [&mw](const QPoint& pos) {
                 QMenu menu;
+                apply_rounded_menu(&menu);
                 menu.addAction(MainWindow::tr("Import Media..."), &mw, &MainWindow::on_import_media);
                 menu.addSeparator();
                 menu.addAction(MainWindow::tr("Delete Selected Media"),
@@ -221,65 +280,164 @@ void build_left_dock(MainWindow& mw) {
         }
     });
 
-    pool_root_layout->addWidget(bins_column);
-    pool_root_layout->addWidget(grid_column, 1);
+    pool_body_layout->addWidget(bins_column);
+    pool_body_layout->addWidget(grid_column, 1);
+    pool_root_layout->addWidget(pool_body, 1);
+
+    // Search filters the current bin's pool by clip name.
+    QObject::connect(search, &QLineEdit::textChanged, &mw, [&mw](const QString& needle) {
+        if (!mw.media_pool_) return;
+        for (int i = 0; i < mw.media_pool_->count(); ++i) {
+            QListWidgetItem* it = mw.media_pool_->item(i);
+            it->setHidden(needle.isEmpty() ||
+                          !it->text().contains(needle, Qt::CaseInsensitive));
+        }
+    });
+    QObject::connect(import_btn, &QPushButton::clicked, &mw, &MainWindow::on_import_media);
+
     left_tabs->addTab(pool_tab, MainWindow::tr("Media Pool"));
 
     for (const char* tab_name : {"Sync Bin", "Transitions", "Titles", "Effects", "Index", "Sound Library", "Keyframes"}) {
         auto* placeholder = new QLabel(MainWindow::tr("%1 — placeholder").arg(MainWindow::tr(tab_name)), left_tabs);
         placeholder->setAlignment(Qt::AlignCenter);
-        placeholder->setStyleSheet(QStringLiteral("color: #5F6577;"));
+        apply_theme_style(placeholder, [] {
+            return QStringLiteral("color: %1;").arg(css(tokens().ink_faint));
+        });
         left_tabs->addTab(placeholder, MainWindow::tr(tab_name));
     }
 
     mw.media_dock_ = mw.ui->mediaDock;
     mw.media_dock_->setObjectName(QStringLiteral("mediaDock"));
+    // The dock backdrop paints the flat workspace surface; the glass card below
+    // floats on it (mirror of the viewer column's viewerFrame).
+    apply_theme_style(mw.media_dock_, &dock_glow_style);
     auto* media_title = new QWidget(mw.media_dock_);
     media_title->setObjectName(QStringLiteral("mediaDockTitle"));
-    media_title->setStyleSheet(QStringLiteral(
-        "QWidget#mediaDockTitle { background-color: #1A1D27;"
-        " border-bottom: 1px solid #232833; }"));
+    apply_theme_style(media_title, [] {
+        return QStringLiteral("QWidget#mediaDockTitle { background: transparent;"
+                              " border: none; }");
+    });
     mw.media_dock_->setTitleBarWidget(media_title);
-    mw.media_dock_->setWidget(left_tabs);
+
+    // Floating glass card wrapping the tab strip, so the tab strip + its panes
+    // read as one rounded panel hovering over the workspace surface.
+    auto* media_glass = new QFrame(&mw);
+    media_glass->setObjectName(QStringLiteral("dockGlassCard"));
+    apply_theme_style(media_glass, &dock_panel_style);
+    auto* media_glass_layout = new QVBoxLayout(media_glass);
+    media_glass_layout->setContentsMargins(0, 0, 0, 0);
+    media_glass_layout->setSpacing(0);
+    media_glass_layout->addWidget(left_tabs);
+
+    // Resolve-style collapse: a button column pinned at the dock's OUTER edge.
+    // The pool panel itself stays visible in BOTH states — the toggle only
+    // hands the bottom-left corner to the bottom dock, so the pool's HEIGHT
+    // shrinks to sit above the timeline (same width, same position) while the
+    // timeline spans the full width to the app's far-left edge. Restoring
+    // reclaims the corner and the pool regains its full height.
+    auto* dock_body = new QWidget(mw.media_dock_);
+    auto* dock_body_layout = new QHBoxLayout(dock_body);
+    dock_body_layout->setContentsMargins(0, 0, 0, 0);
+    dock_body_layout->setSpacing(0);
+
+    auto* collapse_col = new QWidget(dock_body);
+    constexpr int kMediaStripWidth = 34;  // thin expand strip (Resolve-style sliver)
+    collapse_col->setFixedWidth(kMediaStripWidth);
+    auto* collapse_layout = new QVBoxLayout(collapse_col);
+    collapse_layout->setContentsMargins(2, 6, 2, 0);
+    collapse_layout->setSpacing(0);
+    collapse_layout->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
+    auto* collapse_btn = new QToolButton(collapse_col);
+    collapse_btn->setObjectName(QStringLiteral("mediaCollapseBtn"));
+    collapse_btn->setIcon(icon("Collapse"));
+    collapse_btn->setIconSize(QSize(16, 16));
+    collapse_btn->setAutoRaise(true);
+    collapse_btn->setFixedSize(30, 30);
+    collapse_btn->setCursor(Qt::PointingHandCursor);
+    collapse_btn->setToolTip(MainWindow::tr("Collapse Media Pool"));
+    apply_theme_style(collapse_btn, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral(
+            "QToolButton#mediaCollapseBtn { background: transparent; border: none;"
+            " border-radius: 6px; padding: 4px; }"
+            "QToolButton#mediaCollapseBtn:hover { background-color: %1; }"
+            "QToolButton#mediaCollapseBtn:pressed { background-color: %2; }")
+            .arg(css(t.state_hover), css(t.border));
+    });
+    QObject::connect(collapse_btn, &QToolButton::clicked, &mw,
+            [collapse_btn, &mw] {
+        const bool collapsing =
+            mw.corner(Qt::BottomLeftCorner) == Qt::LeftDockWidgetArea;
+        if (collapsing)
+            // Pool keeps its width/position; only its height collapses to sit
+            // ABOVE the timeline, which then spans to the app's far-left edge.
+            mw.setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
+        else
+            mw.setCorner(Qt::BottomLeftCorner, Qt::LeftDockWidgetArea);
+        // Re-apply the pool's width so the corner flip never eats it.
+        mw.resizeDocks({mw.media_dock_}, {mw.media_dock_->width()}, Qt::Horizontal);
+        // Kick the main-window layout so the corner change re-flows instantly.
+        const QSize cur = mw.size();
+        mw.resize(cur.width() + 1, cur.height());
+        mw.resize(cur);
+        collapse_btn->setIcon(icon(collapsing ? "Expand" : "Collapse"));
+        collapse_btn->setToolTip(MainWindow::tr(collapsing ? "Expand Media Pool"
+                                                           : "Collapse Media Pool"));
+    });
+    collapse_layout->addWidget(collapse_btn);
+
+    dock_body_layout->addWidget(collapse_col);
+    dock_body_layout->addWidget(media_glass, 1);
+    mw.media_dock_->setWidget(dock_body);
     mw.media_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
 }
 
 void build_inspector_dock(MainWindow& mw) {
     mw.inspector_dock_ = mw.ui->inspectorDock;
     mw.inspector_dock_->setObjectName(QStringLiteral("inspectorDock"));
+    apply_theme_style(mw.inspector_dock_, &dock_glow_style);
     auto* inspector_title = new QWidget(mw.inspector_dock_);
     inspector_title->setObjectName(QStringLiteral("inspectorDockTitle"));
-    inspector_title->setStyleSheet(QStringLiteral(
-        "QWidget#inspectorDockTitle { background-color: #1A1D27;"
-        " border-bottom: 1px solid #232833; }"));
+    apply_theme_style(inspector_title, [] {
+        return QStringLiteral("QWidget#inspectorDockTitle { background: transparent;"
+                              " border: none; }");
+    });
     mw.inspector_dock_->setTitleBarWidget(inspector_title);
     mw.inspector_dock_->setMinimumWidth(320);
     mw.inspector_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
 
     auto* inspector_body = new QWidget(mw.inspector_dock_);
-    inspector_body->setStyleSheet(QStringLiteral("background-color: #141A21;"));
+    inspector_body->setObjectName(QStringLiteral("dockGlassCard"));
+    apply_theme_style(inspector_body, &dock_panel_style);
     auto* inspector_outer = new QVBoxLayout(inspector_body);
     inspector_outer->setContentsMargins(0, 0, 0, 0);
     inspector_outer->setSpacing(0);
 
     auto* mode_row = new QWidget(inspector_body);
-    mode_row->setStyleSheet(inspector_tab_track_style());
+    apply_theme_style(mode_row, &inspector_tab_track_style);
     auto* mode_row_layout = new QHBoxLayout(mode_row);
     mode_row_layout->setContentsMargins(4, 4, 4, 4);
     mode_row_layout->setSpacing(2);
-    const char* modes[] = {"Video", "Audio", "Effects", "Transition", "Image", "File"};
+    struct ModePill { const char* label; const char* icon_name; };
+    const ModePill modes[] = {
+        {"Video", "settings"}, {"Audio", "volume"}, {"Effects", "mode"},
+        {"Transition", "transition"}, {"Image", "viewport"}, {"File", "film-strip"},
+    };
     auto* mode_group = new QButtonGroup(mode_row);
     mode_group->setExclusive(true);
     std::vector<QToolButton*> mode_buttons;
-    for (const char* m : modes) {
+    for (const auto& m : modes) {
         auto* b = new QToolButton(mode_row);
-        const bool is_video = qstrcmp(m, "Video") == 0;
-        b->setText(MainWindow::tr(m));
+        const bool is_video = qstrcmp(m.label, "Video") == 0;
+        b->setText(MainWindow::tr(m.label));
+        b->setIcon(icon(m.icon_name));
+        b->setIconSize(QSize(14, 14));
+        b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         b->setCheckable(true);
         b->setChecked(is_video);
         b->setAutoRaise(true);
-        b->setStyleSheet(inspector_tab_style());
-        b->setToolTip(MainWindow::tr(m));
+        apply_theme_style(b, &inspector_tab_style);
+        b->setToolTip(MainWindow::tr(m.label));
         // Allow the pill to shrink below its text width so six mode buttons
         // fit comfortably at any DPI scale and dock width.  A tooltip makes
         // the truncated label discoverable.
@@ -343,7 +501,9 @@ void build_inspector_dock(MainWindow& mw) {
         auto* hint = new QLabel(MainWindow::tr("Effects properties — not available yet."),
                                 effects_page);
         hint->setContentsMargins(10, 10, 10, 10);
-        hint->setStyleSheet(QStringLiteral("color: #5F6577; font-size: 11px;"));
+        apply_theme_style(hint, [] {
+            return QStringLiteral("color: %1; font-size: 11px;").arg(css(tokens().ink_faint));
+        });
         hint->setWordWrap(true);
         page_layout->addWidget(hint);
         page_layout->addStretch(1);
@@ -368,7 +528,9 @@ void build_inspector_dock(MainWindow& mw) {
         auto* hint = new QLabel(MainWindow::tr("Image properties — not available yet."),
                                 image_page);
         hint->setContentsMargins(10, 10, 10, 10);
-        hint->setStyleSheet(QStringLiteral("color: #5F6577; font-size: 11px;"));
+        apply_theme_style(hint, [] {
+            return QStringLiteral("color: %1; font-size: 11px;").arg(css(tokens().ink_faint));
+        });
         hint->setWordWrap(true);
         page_layout->addWidget(hint);
         page_layout->addStretch(1);

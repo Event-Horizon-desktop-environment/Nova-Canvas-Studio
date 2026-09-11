@@ -452,7 +452,7 @@ bool AudioOutput::open(const int sample_rate, const int channels) {
             open_ = true;
             impl_->q_max = static_cast<std::size_t>(sample_rate) * 3;  // ~64ms
             impl_->alsa_thread_start();
-            qWarning() << "[audio] ALSA OPENED rate=" << sample_rate
+            qDebug() << "[audio] ALSA OPENED rate=" << sample_rate
                        << "channels=" << channels;
             return true;
         }
@@ -519,7 +519,7 @@ bool AudioOutput::open(const int sample_rate, const int channels) {
 
     if (impl_->pw_ok) {
         open_ = true;
-        qWarning() << "[audio] PIPEWIRE OPENED rate=" << sample_rate
+        qDebug() << "[audio] PIPEWIRE OPENED rate=" << sample_rate
                    << "channels=" << channels;
         return true;
     }
@@ -689,7 +689,7 @@ bool AudioOutput::reposition_enqueue(const float* data, const int frames) {
                                               std::memory_order_relaxed);
         // Reposition-critical diagnostic: ALWAYS logged so the scrub-audio
         // audit can see each drop/reprepare and exact queue size.
-        qWarning().nospace()
+        qDebug().nospace()
             << "audio: reposition gen=" << impl_->gen.load(std::memory_order_relaxed)
             << " drop=" << dr << " prepare=" << pr
             << " frames=" << frames
@@ -801,7 +801,7 @@ float AudioOutput::effective_volume() const {
 }
 
 void AudioOutput::log_pipeline_stats(const char* tag) const {
-    qWarning().nospace()
+    qDebug().nospace()
         << "audio[pipeline:" << tag << "] enqueued=" << stat_enqueued_frames()
         << " written=" << stat_written_frames() << " dropped=" << stat_dropped_frames()
         << " write_errors=" << stat_write_errors()

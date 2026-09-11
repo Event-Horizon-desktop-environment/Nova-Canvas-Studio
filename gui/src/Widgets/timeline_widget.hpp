@@ -18,6 +18,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <algorithm>
 
@@ -36,7 +37,6 @@ class QGraphicsPixmapItem;
 class QGraphicsItemGroup;
 class QDragEnterEvent;
 class QDragMoveEvent;
-class QDragLeaveEvent;
 class QDropEvent;
 class QMenu;
 
@@ -57,6 +57,7 @@ inline QPainterPath rounded_rect_path(const QRectF& r, qreal radius) {
 struct MediaMeta {
     std::string path;
     int64_t total_frames = 0;
+    double fps = 0.0;
 };
 
 // Transparent clip container used purely as a paint clip: children (filmstrip
@@ -69,6 +70,9 @@ public:
         setAcceptedMouseButtons(Qt::NoButton);
     }
     [[nodiscard]] QRectF boundingRect() const override { return rect_; }
+    // Re-shapes the paint clip during a live trim preview; children (filmstrip,
+    // shell, outline, label) are re-laid-out by the caller to fit the new rect.
+    void set_shape(const QRectF& scene_rect) { rect_ = scene_rect; prepareGeometryChange(); }
     void paint(QPainter*, const QStyleOptionGraphicsItem*, QWidget*) override {}
 
 private:
@@ -87,6 +91,9 @@ class TimelineWidget final : public QGraphicsView {
 
 public:
     enum class Tool { Select, Trim, Blade };
+    // Which edge of a clip an edge-drag TRIM moves (Head = left/tl_in/src_in,
+    // Tail = right/tl_out/src_out).
+    enum class TrimEdge { Head, Tail };
 
     static constexpr int kTrackHeaderWidth = 96;
     static constexpr int kRulerHeight = 30;
@@ -126,31 +133,53 @@ public:
     // Pinned "current time" readout (HH:MM:SS:FF) glued above the minimap/ruler;
     // the whole pinned strip (bar + minimap + ruler) rides in top_pinned_.
     static constexpr double kTimecodeBarHeight = 24.0;
-    static constexpr double kMinFramesPerPixel = 0.5;
-    static constexpr double kMaxFramesPerPixel = 300.0;
+    static constexpr double kMinFramesPerPixel = 0.04;
+    static constexpr double kMaxFramesPerPixel = 1500.0;
     // Interactive zoom is a percentage of the 100% baseline = one frame per
-    // pixel; zoom_fit() is exempt so long sequences still fit.
+    // pixel; zoom_fit() is exempt so long sequences still fit. The zoom-IN end
+    // is a hard 2500% (0.04 frames per pixel). The zoom-OUT end is dynamic:
+    // with a sequence loaded it runs ~5x past "whole timeline fits the viewport"
+    // (see interactive_floor_percent()); kZoomMinPercent is only the fallback
+    // floor until a sequence exists.
     static constexpr double kDefaultFramesPerPixel = 1.0;
-    static constexpr double kZoomMinPercent = 50.0;
-    static constexpr double kZoomMaxPercent = 200.0;
+    static constexpr double kZoomMinPercent = 4.0;
+    static constexpr double kZoomMaxPercent = 2500.0;
     // Height of the flat label bar (filename strip) at the bottom of each clip.
     static constexpr double kClipLabelHeight = 18.0;
     static constexpr double kClipOutlineW = 1.5;   // clip-bound stroke; inset by pen/2 so it never overhangs
     static constexpr double kClipSelectedOutlineW = 2.2;
-    static constexpr double kClipShadowOffset = 2.0;  // baseline drop under a clip body
 
     explicit TimelineWidget(QWidget* parent = nullptr);
+    ~TimelineWidget() override;
 
     void set_sequence(const canvas::core::Sequence* sequence);
     void set_fps(double fps);
     void set_playhead_position(int64_t frame);
     void set_tool(Tool tool);
     void set_snap_enabled(bool enabled);
+    // Magnetic playhead position for a raw frame: clamps to the nearest clip
+    // edge / bookmark within the pixel radius, then the grid. Public so the
+    // transport-bar overview scrub slider snaps to the same cut points as the
+    // timeline ruler.
+    [[nodiscard]] int64_t snap_frame(int64_t frame) const;
+    // When true the view follows the playhead (scrolls to keep it visible)
+    // during playback and explicit playhead jumps. Manual scroll/zoom navigation
+    // flips this off so the user is never yanked back to the playhead; the
+    // explicit jumps (ruler/minimap click, scrub, transport to-start/to-end,
+    // play) re-enable it.
+    void set_follow_playhead(bool follow) { follow_playhead_ = follow; }
+    [[nodiscard]] bool follow_playhead() const { return follow_playhead_; }
     void zoom_fit();
     void zoom_in();
     void zoom_out();
     void set_frames_per_pixel(double fpp);
     void set_zoom_percent(double percent);
+    // The lowest interactive zoom (as a percent of the 100% baseline), roughly
+    // 5x past the "whole timeline fits the viewport" point. Zooming out to this
+    // floor always brings the tail of the longest clip into view (and well
+    // beyond). Falls back to kZoomMinPercent with no sequence. Also the lower
+    // end of the zoom slider's mapping range.
+    [[nodiscard]] double interactive_floor_percent() const;
     [[nodiscard]] double zoom_percent() const { return kDefaultFramesPerPixel / frames_per_pixel_ * 100.0; }
     void set_thumbnail_service(ThumbnailService* service);
     void set_media_paths(std::unordered_map<canvas::core::MediaId, MediaMeta> paths);
@@ -180,11 +209,36 @@ public:
     [[nodiscard]] canvas::core::ClipId selected_transition_a() const { return selected_transition_.a; }
     // Incoming clip id of a cut bubble; 0 for a single-clip edge bubble.
     [[nodiscard]] canvas::core::ClipId selected_transition_b() const { return selected_transition_.b; }
-    // True when the bubble selects the IN edge, false for the OUT edge.
-    [[nodiscard]] bool selected_transition_in_edge() const { return selected_transition_.in_edge; }
+    // Dock height (px) that shows every channel flush at the parked scroll
+    // position. MainWindow grows the timeline dock to this when the channel
+    // count changes so the timeline height follows its content instead of being
+    // severed inside a fixed 265px dock.
+    [[nodiscard]] int desired_timeline_height() const;
+    // True when the timeline holds at least one clip anywhere; false keeps the
+    // dock at its compact floor (no channels have been populated yet).
+    [[nodiscard]] bool has_clips() const { return has_timeline_content(); }
     // Clears the selected transition by emitting delete_transition_requested.
     // Returns true when a transition was selected (and the signal emitted).
     bool delete_selected_transition();
+
+    // One clip's batched drag result. `new_tl_in` is that clip's snapped target
+    // timeline position; `kind`/`track_index` identify the track (the primary
+    // clip may have crossed tracks; the others keep their own).
+    struct MovedClip {
+        canvas::core::ClipId id = 0;
+        int64_t new_tl_in = 0;
+        canvas::core::Track::Kind kind = canvas::core::Track::Kind::Video;
+        int track_index = 0;  // PER-KIND index (audio = index within audio_tracks)
+    };
+
+    // Resolve-style magnetic snap target set for the CURRENT drag: every OTHER
+    // clip's in/out edge plus the bookmarks (and the playhead when asked),
+    // sorted + deduped, EXCLUDING `exclude` (the dragged clip, its mate and
+    // every co-selected clip move together and must not self-attract). Rebuilt
+    // at drag press / re-acquire; cleared at release.
+    std::vector<int64_t> collect_snap_targets(
+        const std::vector<canvas::core::ClipId>& exclude,
+        bool include_playhead) const;
 
 signals:
     void playhead_moved(int64_t frame);
@@ -194,6 +248,19 @@ signals:
     void clip_selected(const canvas::core::Clip* clip);
     void clip_moved(const canvas::core::Clip* clip, int64_t new_tl_in, canvas::core::Track::Kind dst_kind,
                     int dst_track);
+    // Emitted when a multi-clip drag releases: every selected clip that actually
+    // moved (same snapped delta), with its target tl_in and current track.
+    void clips_moved(std::vector<MovedClip> clips);
+    // Volume-line drag (Phase 5): emitted on every live move with the preview dB
+    // (the phase 4/preview path re-renders the waveform + re-mixes playback), and
+    // once on release with the settled dB (commit applies it to every selected
+    // audio target, mirroring the inspector Volume path).
+    void volume_line_preview(float db);
+    void volume_line_committed(float db);
+    // Emitted when a clip edge-drag trim finishes: `edge` is Head or Tail and
+    // `new_frame` is the trimmed tl edge. The handler runs the core trim edit op
+    // (which needs the media duration, resolved by clip id here).
+    void clip_trimmed(const canvas::core::Clip* clip, TrimEdge edge, int64_t new_frame);
     void blade_requested(const canvas::core::Clip* clip, int64_t frame);
     void range_selected(int64_t in, int64_t out);
     // Emitted when a drag selection covers one or more clips across both track
@@ -229,6 +296,9 @@ signals:
     void clear_transition_requested(const canvas::core::Clip* clip);
     // Emitted when the user clears a clip's IN (leading-edge) transition.
     void clear_transition_in_requested(const canvas::core::Clip* clip);
+    // Emitted when the user picks a clip colour from the context menu's
+    // "Clip Colour" submenu: `color` is the 1-12 swatch index, 0 = no colour.
+    void clip_color_requested(const canvas::core::Clip* clip, uint8_t color);
     // Emitted when the transition handle drag finishes with a new duration;
     // the outgoing clip receives the change.
     void transition_resized(const canvas::core::Clip* clip, int64_t duration);
@@ -250,6 +320,10 @@ signals:
     // Emitted when the selected transition bubble is cleared (click dodge,
     // deletion, timeline rebuild).
     void transition_selection_cleared();
+    // Emitted when the channel count (or the per-track heights) changed enough
+    // that the dock should grow/shrink to keep every channel visible. Carries
+    // the target dock height in px from desired_timeline_height().
+    void content_height_changed(int height_px);
 
 protected:
     void wheelEvent(QWheelEvent* event) override;
@@ -261,18 +335,13 @@ protected:
     void keyReleaseEvent(QKeyEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void scrollContentsBy(int dx, int dy) override;
-<<<<<<< Updated upstream
-=======
     // Watches the scrollbars directly (QGraphicsView does not forward their
     // events to the view), so thumb-dragging / pressing / wheeling a scrollbar
     // disables playhead-follow; wheelEvent() covers viewport wheel scrolling.
     bool eventFilter(QObject* watched, QEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
-    void leaveEvent(QEvent* event) override;
->>>>>>> Stashed changes
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
-    void dragLeaveEvent(QDragLeaveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 
 private slots:
@@ -281,6 +350,14 @@ private slots:
 
 private:
     void rebuild_timeline();
+    // Viewport-only relayout: recomputes the scene rect and re-renders the
+    // view chrome (background, ruler/minimap/timecode strip, gridlines,
+    // divider, playhead) WITHOUT tearing down the clip/track/filmstrip items or
+    // re-requesting thumbnails. Clip geometry is anchored to timeline coords
+    // (frame + track height), never to the viewport, so a resize never needs
+    // the full scene rebuild that made height changes stall on clip-heavy
+    // timelines.
+    void relayout_scene();
     void draw_ruler();
     void draw_timecode_bar();
     void draw_tracks();
@@ -294,6 +371,15 @@ private:
     void update_minimap_viewport();
     void update_playhead_position(int64_t frame);
     void request_clip_thumbnails();
+    // Procedural scene-chrome painters. The ruler ticks+labels and the
+    // full-height gridlines used to be one QGraphicsLineItem/QGraphicsTextItem
+    // PER TICK across the entire scene width (~10k+ items on a wide timeline),
+    // all re-created on every rebuild AND every relayout — the "resizing is
+    // slow" / "wide timeline is heavy" cost. They now repaint only the visible
+    // x-range (option->exposedRect) from a single item each, so scene item
+    // count stays O(viewport chrome) regardless of timeline width.
+    class RulerMarksItem;
+    class GridlinesItem;
     double track_top(int track_index, int v_count) const;
     // Height (px) of the track row with the given flat index.
     double track_height(int track_index, int v_count) const;
@@ -334,8 +420,14 @@ private:
     // Converts a flat track index to a per-kind index (0..kind_count-1).
     int kind_track_index(int flat_track, int v_count) const;
     int64_t frame_at_x(int x) const;
-    int64_t snap_frame(int64_t frame) const;
+    // Blade cut frame for a pointer at viewport x: the NEAREST frame to the
+    // mouse (llround — no floor left-bias). The razor ignores the playhead and
+    // snapping entirely: it cuts exactly where the user points.
+    int64_t blade_cut_frame(int x) const;
     void scrub_to_frame(int64_t frame);
+    // Cached snap targets for the live drag (see collect_snap_targets); empty
+    // between drags.
+    std::vector<int64_t> snap_targets_;
     void update_blade_preview(int64_t frame);
     void hide_blade_preview();
     void update_snap_indicator(bool snapped, int64_t frame);
@@ -397,6 +489,9 @@ private:
     double fps_ = 30.0;
     double frames_per_pixel_ = 1.0;
     int64_t playhead_frame_ = 0;
+    // Follows the playhead (update_playhead_position centerOn) only while true;
+    // see the set_follow_playhead() doc above.
+    bool follow_playhead_ = true;
     Tool current_tool_ = Tool::Select;
     bool snap_enabled_ = true;
     ThumbnailService* thumbnail_service_ = nullptr;
@@ -408,6 +503,19 @@ private:
     QGraphicsRectItem* selection_rect_ = nullptr;
     QGraphicsRectItem* minimap_viewport_ = nullptr;
     QGraphicsRectItem* minimap_background_ = nullptr;
+    // Unpinned view chrome that scales with the scene rect (full-scene
+    // background, ruler gridlines, header divider). Rendered by the draw_*
+    // functions and re-rendered by relayout_scene() on resize; lives at a low
+    // z so clip/track items always paint above it regardless of insertion order.
+    QGraphicsItemGroup* chrome_ = nullptr;
+    // Set when sync_track_heights() sees the channel count change so
+    // rebuild_timeline() can tell MainWindow the dock must grow/shrink.
+    bool track_count_changed_ = false;
+    // Content presence (at least one clip) as of the last rebuild, so the
+    // empty->content transition can also refit the dock without a channel-count
+    // change. A track-height drag is deliberately NOT a refit trigger: the user
+    // is hand-tuning one row and the dock must not yank the layout per pixel.
+    bool last_had_content_ = false;
     // Ruler + minimap rendered as a viewport-pinned overlay: scrollContentsBy()
     // snaps the group back to the current vertical scroll so the timecode strip
     // never slides when the content pans.
@@ -433,39 +541,59 @@ private:
         const canvas::core::Clip* clip = nullptr;
         int track_index = 0;
         canvas::core::Track::Kind track_kind = canvas::core::Track::Kind::Video;
+        // Audio volume line (Phase 5): a persistent gain readout/drag handle drawn
+        // across the waveform box. volume_y0/volume_h define that box (absolute
+        // scene top + height) so the drag math stays in the widget.
+        QGraphicsLineItem* volume_line = nullptr;
+        double volume_y0 = 0.0;
+        double volume_h = 0.0;
     };
     std::vector<ClipItem> clip_items_;
 
     ClipItem* find_linked_mate(ClipItem* item);
+    // Phase 8 trim snapping: the MOVING edge of a trim magnets onto the section
+    // points (every other clip's in/out + bookmarks + the playhead, minus the
+    // trimmed clip and its mate) within the pixel-derived radius. Unlike clip
+    // drags, there is NO grid fallback — the trim stays continuous so a
+    // frame-precise out can be reached between grid multiples.
+    int64_t snap_trim_edge(int64_t raw_edge, ClipItem* clip);
     void position_clip_at(ClipItem& item, int64_t tl_in);
+    // Live-resizes a clip's rect (and its linked mate's) so the head/tail edge
+    // lands at `edge` (timeline frame) during a trim preview, without touching
+    // the model. Both the whole-clip rect and the paint-clip group are adjusted.
+    void preview_trim_clip(ClipItem& item, TrimEdge edge, int64_t tl_frame);
+    // Edge-drag TRIM hit-test: fills `out_clip`/`out_edge` when `scene_pos` sits
+    // within the outer trim band of a clip's head/tail wall (body region only,
+    // not the label strip). Takes PRIORITY over transition bubbles/overlay grabs,
+    // so a clip that carries a fade can still be regrown by grabbing its wall.
+    bool find_trim_edge(const QPointF& scene_pos, ClipItem*& out_clip, TrimEdge& out_edge);
+    // Volume-line hit-test (Phase 5): true when `scene_pos` is inside an audio
+    // clip's block and within the gain line's thin vertical hit band. Fills
+    // `out_clip` on hit.
+    bool find_volume_line_hit(const QPointF& scene_pos, ClipItem*& out_clip);
     // Re-locates `dragged_clip_`/`drag_mate_` after an auto-track create rebuilt
     // the scene mid-drag. Clip ids survive the rebuild, so `id` and `mate_id`
     // (press-time linked mate, 0 if none) find themselves again; `pointer_frame`
     // rebases the drag session at the new position/track.
     bool reacquire_dragged_clip(canvas::core::ClipId id, canvas::core::ClipId mate_id,
                                 int64_t pointer_frame);
+    // Live-drag bubble follow: shifts every transition bubble anchored to a clip
+    // in `clip_deltas` (id -> preview tl_in delta) by that clip's delta. Called
+    // from the drag move path so bubbles ride along while `position_clip_at`
+    // repositions the clip blocks; the commit/rebuild recreates them exactly.
+    void shift_transition_bubbles(const std::unordered_set<canvas::core::ClipId>& dragging);
+    // Volume-line session (Phase 5): re-anchors one audio clip's gain line at
+    // `db` during a drag WITHOUT touching the model (used by the interaction's
+    // volume-drag move path). Rescales the clip's waveform the same way, so the
+    // spectrum updates live with the volume (floored — never a flat line).
+    void set_live_clip_gain(canvas::core::ClipId id, float db);
+    // Re-applies the audio clip's committed volume to its waveform pixmap's
+    // vertical scale (about the box's vertical center). Keeps the spectrum in
+    // sync with the volume after a commit/rebuild re-rendered the waveform.
+    void apply_waveform_volume_scale(ClipItem& item, float db);
     // Appends each given id's linked mate so selecting/deleting one half of a
     // linked A/V pair selects both halves.
     std::vector<canvas::core::ClipId> expand_with_mates(const std::vector<canvas::core::ClipId>& ids);
-
-    // Lane-feedback chrome: the row under the idle pointer gets a subtle
-    // full-width highlight (header column included), and a Media Pool drag
-    // lights up the drop target lane with an accent ring. Both are pure scene
-    // rects recreated with the scene; the flat index lives here so a rebuild
-    // (which nulls the item) still lets the next move restore the highlight.
-    int flat_row_at_scene_y(double scene_y) const;
-    QGraphicsRectItem* highlight_scene_item(QGraphicsRectItem*& slot);
-    void set_rect_highlight(QGraphicsRectItem*& slot, const QRectF& rect,
-                            const QBrush& fill, const QPen& pen);
-    void set_row_highlight(QGraphicsRectItem*& slot, int flat,
-                           const QBrush& fill, const QPen& pen);
-    void clear_row_highlight(QGraphicsRectItem*& slot, int& flat);
-    void update_hover_row(const QPointF& scene_pos);
-    void update_drop_lane(const QPointF& scene_pos);
-    QGraphicsRectItem* hover_highlight_ = nullptr;
-    int hover_flat_ = -1;
-    QGraphicsRectItem* drop_lane_highlight_ = nullptr;
-    int drop_lane_flat_ = -1;
 
     struct TrackHeader {
         QGraphicsRectItem* background = nullptr;
@@ -491,6 +619,42 @@ private:
     ClipItem* dragged_clip_ = nullptr;
     ClipItem* drag_mate_ = nullptr;
     int original_track_index_ = 0;
+
+    // Batch-drag snapshot (Phase 3): every selected clip (incl. linked mates)
+    // plus its press-time tl_in, snapped at multi-selection press and live-written
+    // on each move. On release the moved-set is emitted as clips_moved; the
+    // TimelineActions handler de-dups linked pairs before running move_clip.
+    std::vector<MovedClip> drag_clip_snapshot_;
+    std::vector<int64_t> drag_clip_orig_;
+    canvas::core::ClipId drag_primary_id_ = 0;
+
+    // Returns the ClipItem whose clip->id matches, or nullptr.
+    ClipItem* find_clip_item(canvas::core::ClipId id);
+
+    // Clip edge-drag TRIM session (Phase 2). A press near a clip's head/tail
+    // edge (below any transition bubble) starts a trim; the edge is live-resized
+    // to the pointer and committed (emit clip_trimmed) only on release. The core
+    // op clamps to the media duration and neighbours, so the preview here just
+    // mirrors the pointer position.
+    bool trimming_ = false;
+    ClipItem* trimmed_clip_ = nullptr;
+    TrimEdge trim_edge_ = TrimEdge::Head;
+    int64_t trim_start_edge_ = 0;       // clip edge (tl_in or tl_out) at press
+    double trim_grab_offset_px_ = 0.0;  // pointer offset within the edge in px
+
+    // Audio volume-line drag session (Phase 5). A press within the line's hit
+    // band (Select tool, body region, below the trim-zone) arms a loudness
+    // drag: up = louder. Each move emits volume_line_preview(db); release emits
+    // volume_line_committed(db). The session NEVER arms the clip move-drag.
+    bool volume_drag_armed_ = false;
+    bool volume_dragging_ = false;
+    canvas::core::ClipId volume_drag_clip_ = 0;
+    float volume_drag_db_ = 0.0f;
+    // Audio clips the current volume drag previews/commits onto, resolved from
+    // the selection at press time (multi-selection: every selected audio target,
+    // incl. linked mates). Each move re-anchors ALL of them live; the commit
+    // handler resolves the same set so preview == commit.
+    std::vector<canvas::core::ClipId> volume_drag_targets_;
 
     // Per-track row heights (flat: video 0..v-1, then audio v..total-1).
     std::vector<double> video_track_heights_;
@@ -556,6 +720,7 @@ private:
         canvas::core::ClipId clip_id = 0;   // a-side clip (edge owner for non-cut bubbles)
         canvas::core::ClipId b_clip_id = 0; // b-side clip; nonzero for a cut bubble
         int64_t frame = 0;              // boundary/cut frame (tl_in or tl_out)
+        int64_t dur = 0;                // transition duration (frames) — width source for refresh
         bool in_edge = false;           // true -> transition_in (edge bubbles only)
         bool cut = false;               // true -> one bubble centered across two clips
         double y = 0.0;                 // bubble top in scene coords (clip top)

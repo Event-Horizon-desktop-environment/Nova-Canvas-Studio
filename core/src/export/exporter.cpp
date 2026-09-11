@@ -1,6 +1,7 @@
 #include "canvas/core/export/exporter.hpp"
 
 #include "canvas/core/export/renderer.hpp"
+#include "canvas/core/gpu/colorspace.hpp"
 #include "canvas/core/gpu/cuda_convert.hpp"
 #include "canvas/core/util/log.hpp"
 
@@ -108,6 +109,49 @@ bool is_hw_pix_fmt(AVPixelFormat f) {
     return f == AV_PIX_FMT_CUDA || f == AV_PIX_FMT_VAAPI || f == AV_PIX_FMT_QSV ||
            f == AV_PIX_FMT_DRM_PRIME || f == AV_PIX_FMT_D3D11;
 }
+
+// Per-export device-side grade-LUT cache. The bake pointer (RenderSession caches
+// one baked LUT per active clip via TrackDecoder::lut_for) identifies the grid,
+// so a graded clip uploads once per export, not once per frame.
+struct GpuGradeLut {
+    const grade_graph::GradeLut3D* baked = nullptr;
+    void* dev = nullptr;
+
+    bool ensure(const RenderSession::GpuFrameInfo& gfi) {
+        if (!gfi.grade || !gfi.grade->valid()) return false;
+        if (baked == gfi.grade.get()) return dev != nullptr;
+        release();
+        dev = canvas::core::gpu::grade_lut_upload(gfi.grade->data.data(), gfi.grade->size);
+        baked = dev ? gfi.grade.get() : nullptr;
+        if (dev) {
+            CANVAS_LOG("render: grade LUT uploaded to device size=%d seq=%llu",
+                   gfi.grade->size, (unsigned long long)gfi.grade->change_seq);
+        }
+        return dev != nullptr;
+    }
+
+    gpu::GradeKernelParams params(const RenderSession::GpuFrameInfo& gfi) const {
+        gpu::GradeKernelParams p;
+        p.lut = static_cast<const float*>(dev);
+        p.lut_size = gfi.grade ? gfi.grade->size : 0;
+        const gpu::MatrixCoeffs k = gpu::matrix_coeffs(static_cast<gpu::ColorMatrix>(gfi.matrix),
+                                                       static_cast<gpu::ColorRange>(gfi.range));
+        p.r_cr = k.r_cr;
+        p.g_cb = k.g_cb;
+        p.g_cr = k.g_cr;
+        p.b_cb = k.b_cb;
+        p.range = gfi.range;
+        return p;
+    }
+
+    void release() {
+        if (dev) {
+            canvas::core::gpu::grade_lut_free(dev);
+            dev = nullptr;
+        }
+        baked = nullptr;
+    }
+};
 
 }  // namespace
 
@@ -535,6 +579,36 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     SwsContext* sws = sws_getContext(s.width, s.height, AV_PIX_FMT_RGBA,
                                      s.width, s.height, enc_sw_fmt,
                                      SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (!sws) {
+        avcodec_free_context(&actx); avcodec_free_context(&vctx);
+        if (oc->pb) avio_closep(&oc->pb);
+        avformat_free_context(oc);
+        return fail("Failed to create RGB->YUV conversion context.");
+    }
+    // Pin the conversion matrix so the encoded pixels match the stamped tags
+    // (issue #1): previously this passed NO SWS_CS_* flag, so libswscale applied
+    // its SWS_CS_DEFAULT (== ITU601 / BT.601) matrix to every RGB->YUV export no
+    // matter what the output stream was tagged. Output is conceived full-range
+    // RGB in, limited-range BT.709 YUV out (matches the tagged range:mpeg).
+    const bool tagged_bt709 = (vctx->colorspace == AVCOL_SPC_BT709);
+    const int conv_matrix = tagged_bt709 ? SWS_CS_ITU709 : SWS_CS_ITU601;
+    const int* conv_coefs = sws_getCoefficients(conv_matrix);
+    sws_setColorspaceDetails(sws, conv_coefs, 1, conv_coefs, 0,
+                             0, 1 << 16, 1 << 16);
+    // Tag-vs-conversion audit: output is stamped BT.709 limited (see configure
+    // above); this swscale now uses the SAME matrix (sws_setColorspaceDetails
+    // above), so a BT.709-tagged file is encoded with BT.709 coefficients.
+    ::canvas::core::log::log_warning(
+        "[export] color audit: out_tags=range:%s/matrix:%s/trc:%s ; rgba->%s "
+        "sws_setColorspaceDetails matrix=%s srcRange=JPEG dstRange=MPEG — %s",
+        vctx->color_range == AVCOL_RANGE_MPEG ? "mpeg" : "jpeg",
+        vctx->colorspace == AVCOL_SPC_BT709 ? "bt709"
+            : vctx->colorspace == AVCOL_SPC_BT470BG ? "bt601" : "other",
+        vctx->color_trc == AVCOL_TRC_BT709 ? "bt709" : "other",
+        av_get_pix_fmt_name(enc_sw_fmt),
+        conv_matrix == SWS_CS_ITU709 ? "BT.709" : "BT.601",
+        conv_matrix == SWS_CS_ITU709 ? "conversion matches stamped matrix"
+                                    : "conversion matrix follows tagged colorspace");
 
     AVFrame* rgb = av_frame_alloc();
     rgb->format = AV_PIX_FMT_RGBA;
@@ -553,9 +627,20 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         av_frame_get_buffer(a_src, 0);
     }
 
-    const int64_t total_video = s.duration_frames;
+    // Natural-speed frame budget: the export fps may differ from the timeline
+    // fps (Auto resolves to the highest source fps). Both the frame count and
+    // every output-frame -> timeline-frame mapping below scale by seq_fps/fps;
+    // when they coincide everything reduces to the legacy identity mapping
+    // (f -> tl frame f, total_video = s.duration_frames), so existing renders
+    // are byte-identical.
+    const double seq_fps = project.sequence.fps;
+    const double export_fps = s.fps > 0.0 ? s.fps : (seq_fps > 0.0 ? seq_fps : 30.0);
+    const double tl_per_frame = seq_fps > 0.0 ? seq_fps / export_fps : 1.0;
+    const int64_t total_video = seq_fps > 0.0
+        ? (int64_t)std::llround((double)s.duration_frames / seq_fps * export_fps)
+        : s.duration_frames;
     const int64_t total_audio = total_video > 0
-        ? (int64_t)std::llround((double)total_video / s.fps * s.audio_sample_rate)
+        ? (int64_t)std::llround((double)total_video / export_fps * s.audio_sample_rate)
         : 0;
 
     // ---- encode loop ----
@@ -649,6 +734,10 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     RenderSession session;
     bool session_ok = session.begin(project, s.width, s.height, dec_dev);
 
+    // Device-side grade-LUT cache for the fused GPU grade kernel (one upload per
+    // graded clip per export). Released before avformat teardown below.
+    GpuGradeLut s_gpu_grade;
+
     // Pipelined render: a producer thread decodes + composites ahead of the
     // main thread, which sends + drains. GPU work overlaps NVENC; a 3-thread
     // split measured no faster — the device serializes decode->kernel->encode.
@@ -665,26 +754,31 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     std::deque<ProducerSlot> ready_frames;
     bool producer_done = false;
     auto render_one_frame = [&](const int64_t f) -> std::tuple<AVFrame*, void*, AVFrame*> {
+        // Output frame f lands at timeline time f/export_fps; map to the timeline
+        // frame shown at that moment (identity when fps == seq fps).
+        const int64_t tl = (int64_t)std::llround((double)f * tl_per_frame);
         // GPU fast path: composite a single clip straight into the encoder's
         // CUDA hw frame, skipping the CPU RGBA blit + upload.
         if (v_use_hw && hw_frames && session_ok &&
             canvas::core::gpu::cuda_available()) {
             RenderSession::GpuFrameInfo gfi;
             auto _tf0 = std::chrono::steady_clock::now();
-            const bool _gk = session.frame_gpu(f, &gfi) && gfi.valid;
+            const bool _gk = session.frame_gpu(tl, &gfi) && gfi.valid;
             auto _tf1 = std::chrono::steady_clock::now();
             static double _st_fg = 0, _st_rz = 0; static long _cnt = 0;
             if (_gk) {
                 ++render_fast;
                 _st_fg += std::chrono::duration<double, std::milli>(_tf1 - _tf0).count();
                 // Sanity: output frames must map to strictly advancing source frames;
-                // a non-+1 delta means dropped/duplicated frames (judder).
+                // a non-+1 delta means dropped/duplicated frames (judder). Only
+                // meaningful at fps == seq fps; otherwise the tl mapping itself
+                // duplicates/rounds and the +1 check would false-trip.
                 static int64_t s_prev_src = INT64_MIN;
-                if (gfi.src_frame >= 0) {
+                if (gfi.src_frame >= 0 && tl_per_frame == 1.0) {
                     if (s_prev_src != INT64_MIN && gfi.src_frame != s_prev_src + 1) {
                         ++render_stalls;
                         fprintf(stderr, "[FRAME-DIAG] tl_frame=%lld src=+%lld (prev src=%lld) delta=%lld\n",
-                                (long long)f, (long long)gfi.src_frame,
+                                (long long)tl, (long long)gfi.src_frame,
                                 (long long)s_prev_src, (long long)(gfi.src_frame - s_prev_src));
                     }
                     s_prev_src = gfi.src_frame;
@@ -705,17 +799,37 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                         }
                     }
                     // Async resize on a non-blocking stream; the consumer waits on the event
-                    // before sending the frame.
-                    if (src_ref && canvas::core::gpu::convert_nv12_resize_async(
-                            reinterpret_cast<const uint8_t*>(gfi.srcY),
-                            reinterpret_cast<const uint8_t*>(gfi.srcUV),
-                            gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
-                            reinterpret_cast<uint8_t*>(yc),
-                            static_cast<std::size_t>(hw->linesize[0]),
-                            reinterpret_cast<uint8_t*>(uvc),
-                            static_cast<std::size_t>(hw->linesize[1]),
-                            gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
-                            gfi.dx, gfi.dy)) {
+                    // before sending the frame. Graded clips run the fused grade+resize
+                    // kernel (device LUT cached per clip) so they stay on this path.
+                    // `src_ref` guards the whole launch: the async kernel must read the
+                    // borrowed device planes, which only the av_frame_ref keeps alive.
+                    bool resized = src_ref != nullptr;
+                    if (resized) {
+                        if (gfi.grade && gfi.grade->valid() && s_gpu_grade.ensure(gfi)) {
+                            resized = canvas::core::gpu::convert_nv12_grade_resize_async(
+                                reinterpret_cast<const uint8_t*>(gfi.srcY),
+                                reinterpret_cast<const uint8_t*>(gfi.srcUV),
+                                gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
+                                reinterpret_cast<uint8_t*>(yc),
+                                static_cast<std::size_t>(hw->linesize[0]),
+                                reinterpret_cast<uint8_t*>(uvc),
+                                static_cast<std::size_t>(hw->linesize[1]),
+                                gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
+                                gfi.dx, gfi.dy, gfi.fade, s_gpu_grade.params(gfi));
+                        } else {
+                            resized = canvas::core::gpu::convert_nv12_resize_async(
+                                reinterpret_cast<const uint8_t*>(gfi.srcY),
+                                reinterpret_cast<const uint8_t*>(gfi.srcUV),
+                                gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
+                                reinterpret_cast<uint8_t*>(yc),
+                                static_cast<std::size_t>(hw->linesize[0]),
+                                reinterpret_cast<uint8_t*>(uvc),
+                                static_cast<std::size_t>(hw->linesize[1]),
+                                gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
+                                gfi.dx, gfi.dy, gfi.fade);
+                        }
+                    }
+                    if (resized) {
                         void* ev = nullptr;
                         canvas::core::gpu::convert_nv12_record_event(&ev);
                         auto _tr1 = std::chrono::steady_clock::now();
@@ -746,8 +860,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         // CPU composite fallback (identical to the legacy loop): render RGBA on
         // the CPU, then convert to NV12 either with a CUDA kernel or swscale.
         const auto comp_t0 = std::chrono::steady_clock::now();
-        auto vf = session_ok ? session.frame(f)
-                             : render_video_frame(project, f, s.width, s.height, 0);
+        auto vf = session_ok ? session.frame(tl)
+                             : render_video_frame(project, tl, s.width, s.height, 0);
         if (!vf) return {nullptr, nullptr, nullptr};
         // Live preview (zero-copy: hand the shared_ptr holding the frame we are
         // about to encode; consumer threads marshal it onto the GUI).
@@ -874,7 +988,6 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     if (session_ok && total_video > 0 &&
         v_use_hw && hw_frames && canvas::core::gpu::cuda_available()) {
         std::thread producer(producer_thread_fn);
-        producer.detach();
 
         while (!ended && !cancelled()) {
             AVFrame* to_send = nullptr;
@@ -1015,6 +1128,11 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             if (total_video > 0)
                 progress((double)std::min(frame, total_video) / total_video, "Encode");
         }
+        // Joined BEFORE the queue/condition-variable/stack teardown below so a
+        // producer mid-render_one_frame cannot touch freed state when the export
+        // returns (cancel or natural end). The producer exits on cancelled() or
+        // after pushing total_video slots, so this join is bounded.
+        if (producer.joinable()) producer.join();
         // Free any frames the producer pushed after the loop consumed the last
         // slot (cancel raced the flush); the encoder flush already ran.
         {
@@ -1031,6 +1149,9 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     } else {
 
     while (!ended && !cancelled()) {
+        // Output frame `frame` lands at timeline time; map to the timeline frame
+        // (identity when fps == seq fps).
+        const int64_t tl = (int64_t)std::llround((double)frame * tl_per_frame);
         if (frame < total_video) {
             // render one frame
             bool gpu_composited = false;
@@ -1041,14 +1162,30 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             if (v_use_hw && hw_frames && session_ok &&
                 canvas::core::gpu::cuda_available()) {
                 RenderSession::GpuFrameInfo gfi;
-                if (session.frame_gpu(frame, &gfi) && gfi.valid) {
+                if (session.frame_gpu(tl, &gfi) && gfi.valid) {
                     ++render_fast;
                     AVFrame* hw = av_frame_alloc();
                     auto tb0 = std::chrono::steady_clock::now();
                     if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
                         const uintptr_t yc = reinterpret_cast<uintptr_t>(hw->data[0]);
                         const uintptr_t uvc = reinterpret_cast<uintptr_t>(hw->data[1]);
-                        if (canvas::core::gpu::convert_nv12_resize(
+                        // Graded clips use the fused grade+resize kernel (device LUT
+                        // cached per clip), then sync; ungraded use the sync resize.
+                        bool got = false;
+                        if (gfi.grade && gfi.grade->valid() && s_gpu_grade.ensure(gfi)) {
+                            got = canvas::core::gpu::convert_nv12_grade_resize_async(
+                                      reinterpret_cast<const uint8_t*>(gfi.srcY),
+                                      reinterpret_cast<const uint8_t*>(gfi.srcUV),
+                                      gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
+                                      reinterpret_cast<uint8_t*>(yc),
+                                      static_cast<std::size_t>(hw->linesize[0]),
+                                      reinterpret_cast<uint8_t*>(uvc),
+                                      static_cast<std::size_t>(hw->linesize[1]),
+                                      gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
+                                      gfi.dx, gfi.dy, gfi.fade, s_gpu_grade.params(gfi)) &&
+                                  canvas::core::gpu::convert_nv12_sync();
+                        } else {
+                            got = canvas::core::gpu::convert_nv12_resize(
                                 reinterpret_cast<const uint8_t*>(gfi.srcY),
                                 reinterpret_cast<const uint8_t*>(gfi.srcUV),
                                 gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
@@ -1057,9 +1194,6 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                                 reinterpret_cast<uint8_t*>(uvc),
                                 static_cast<std::size_t>(hw->linesize[1]),
                                 gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
-<<<<<<< Updated upstream
-                                gfi.dx, gfi.dy)) {
-=======
                                 gfi.dx, gfi.dy, gfi.fade);
                         }
                         if (got) {
@@ -1070,7 +1204,6 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                                                      : render_video_frame(project, tl, s.width, s.height, 0);
                                 push_preview(pv);
                             }
->>>>>>> Stashed changes
                             hw->pts = frame;
                             avcodec_send_frame(vctx, hw);
                             gpu_composited = true;
@@ -1082,13 +1215,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
 
             if (!gpu_composited) {
             const auto comp_t0 = std::chrono::steady_clock::now();
-<<<<<<< Updated upstream
-            auto vf = session_ok ? session.frame(frame)
-                                 : render_video_frame(project, frame, s.width, s.height, 0);
-=======
 auto vf = session_ok ? session.frame(tl)
                              : render_video_frame(project, tl, s.width, s.height, 0);
->>>>>>> Stashed changes
             if (vf) {
                 // Live preview (zero-copy: the shared_ptr already holds the frame).
                 if (preview_throttle.due()) push_preview(vf);
@@ -1292,6 +1420,12 @@ auto vf = session_ok ? session.frame(tl)
 
     CANVAS_LOG("render: complete out='%s' frames=%lld audio_samples=%lld",
            s.output_path.c_str(), (long long)frame, (long long)audio_sample);
+
+    // Free the device-side grade LUT cache. Both encode paths have finished and
+    // synced by now (producer joined + event-waited; else path convert_nv12_sync
+    // called per frame), so no queued kernel can still read the LUT. Safe to
+    // call with a null cache.
+    s_gpu_grade.release();
 
     if (a_src) av_frame_free(&a_src);
     av_frame_free(&rgb);

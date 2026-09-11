@@ -8,9 +8,14 @@
 #include <QOpenGLBuffer>
 #include <QOpenGLVertexArrayObject>
 
+#include <chrono>
 #include <memory>
 
 #include "canvas/core/media/frame.hpp"
+
+namespace canvas::core::grade_graph {
+struct GradeLut3D;
+}  // namespace canvas::core::grade_graph
 
 namespace canvas::gui {
 
@@ -30,6 +35,7 @@ public:
     enum class ScaleMode { Fit, Fill };
 
     explicit ViewerGL(QWidget* parent = nullptr);
+    ~ViewerGL() override;
 
     void set_frame(canvas::core::RenderFramePtr frame);
     void clear();
@@ -90,6 +96,13 @@ private:
     std::unique_ptr<QOpenGLTexture> texture_nv12_b_uv_;
     std::unique_ptr<QOpenGLShaderProgram> program_nv12_;
     std::unique_ptr<QOpenGLShaderProgram> program_nv12_trans_;
+    // Resolve-style 3D grade LUTs: RGB32F textures (N^3 cells) uploaded when a
+    // clip's baked LUT pointer changes (decode-side bake, cached). Unit 4/5
+    // hold A's and B's LUTs for the NV12 shaders; u_grade_*_size = 0 disables.
+    std::unique_ptr<QOpenGLTexture> grade_tex_a_;
+    std::unique_ptr<QOpenGLTexture> grade_tex_b_;
+    const canvas::core::grade_graph::GradeLut3D* grade_a_uploaded_ = nullptr;
+    const canvas::core::grade_graph::GradeLut3D* grade_b_uploaded_ = nullptr;
     QOpenGLBuffer vbo_{QOpenGLBuffer::VertexBuffer};
     QOpenGLVertexArrayObject vao_;
     GLint attr_pos_ = -1;
@@ -106,6 +119,22 @@ private:
     bool texture_dirty_ = false;
     bool nv12_valid_ = false;
     bool nv12_b_valid_ = false;
+    // GUI-thread delivery health (see set_frame): wall time of the previous
+    // set_frame, so the always-on `[viewer]` line can report the receive
+    // interval. A healthy worker→widget handoff tracks the controller cadence;
+    // a receive interval far above it means the GUI thread is busy between
+    // frames (paint/log/other) even though the decode worker kept up.
+    std::chrono::steady_clock::time_point last_frame_arrival_{};
+    bool have_last_arrival_ = false;
+
+    // Last NV12 spec + grade-attachment state drawn, so color.log records a
+    // [viewer] line exactly once per change (not per frame at playback rate).
+    // The grade toggle here is the correlation key for "touch a wheel -> the
+    // preview changes" (commit -> bake -> upload -> draw chain).
+    canvas::core::gpu::ColorMatrix last_spec_matrix_ = canvas::core::gpu::ColorMatrix::BT709;
+    canvas::core::gpu::ColorRange last_spec_range_ = canvas::core::gpu::ColorRange::Limited;
+    int last_grade_attached_ = -1;
+    bool last_spec_set_ = false;
 };
 
 }

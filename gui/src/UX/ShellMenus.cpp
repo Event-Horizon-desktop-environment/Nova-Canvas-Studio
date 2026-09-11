@@ -1,14 +1,23 @@
 #include "UX/MainWindow.hpp"
+#include "UX/theme.hpp"
 #include "ui_MainWindow.h"
 
-#include <QApplication>
 #include <QAction>
+#include <QActionGroup>
+#include <QApplication>
+#include <QBrush>
+#include <QColor>
+#include <QIcon>
 #include <QKeySequence>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QObject>
+#include <QPainter>
+#include <QPixmap>
 #include <QSettings>
+
+#include <functional>
 
 namespace canvas::gui {
 
@@ -119,6 +128,7 @@ void build_app_menus(MainWindow& mw) {
                     // Audible-scrubbing preference. A small popup menu keeps the
                     // option discoverable without a dedicated settings dialog.
                     QMenu menu;
+            apply_rounded_menu(&menu);
                     const bool saved = QSettings().value(QStringLiteral("scrubAudioEnabled"), true).toBool();
                     mw.controller_.set_scrub_audio_enabled(saved);
                     auto* scrub_audio = menu.addAction(MainWindow::tr("Audible Scrubbing"));
@@ -153,6 +163,41 @@ void build_app_menus(MainWindow& mw) {
     clip_menu->addAction(MainWindow::tr("Add Transition"), QKeySequence(Qt::CTRL | Qt::Key_T));
     clip_menu->addAction(MainWindow::tr("Link/Unlink"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_L));
 
+    // "Clip Colour >" submenu: the full Resolve-style pinch wheel applied to the
+    // currently selected clip. Each entry carries its 1-12 swatch index (0 = no
+    // colour) and funnels into the SAME edit op the Inspector + context menu use.
+    auto* clip_color_menu = clip_menu->addMenu(MainWindow::tr("Clip Colour") + QStringLiteral(" >"));
+    apply_rounded_menu(clip_color_menu);
+    const auto swatch_action = [&mw](uint8_t color) {
+        QAction* act = new QAction(&mw);
+        act->setData(color);
+        QObject::connect(act, &QAction::triggered, &mw,
+                         [&mw, color]() { mw.apply_clip_color(color); });
+        return act;
+    };
+    const QColor* swatches = clip_color_swatches();
+    for (int i = 0; i < 12; ++i) {
+        QAction* act = swatch_action(static_cast<uint8_t>(i + 1));
+        act->setText(QStringLiteral("#%1").arg(swatches[i].name()));
+        QPixmap pm(16, 16);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setBrush(QBrush(swatches[i]));
+        p.setPen(QPen(QColor(0x55, 0x55, 0x55), 1));
+        p.drawRoundedRect(QRectF(0.5, 0.5, 15, 15), 3, 3);
+        act->setIcon(QIcon(pm));
+        clip_color_menu->addAction(act);
+    }
+    clip_color_menu->addSeparator();
+    QAction* no_color = swatch_action(0);
+    no_color->setText(MainWindow::tr("&No Colour"));
+    clip_color_menu->addAction(no_color);
+    // Only meaningful when a clip is selected; the whole submenu enables with it.
+    QObject::connect(clip_menu, &QMenu::aboutToShow, &mw, [clip_color_menu, &mw]() {
+        clip_color_menu->setEnabled(mw.selected_clip_ != 0);
+    });
+
     auto* mark_menu = mw.ui->menubar->addMenu(MainWindow::tr("&Mark"));
     mark_menu->addAction(MainWindow::tr("Mark In"), QKeySequence(Qt::Key_I));
     mark_menu->addAction(MainWindow::tr("Mark Out"), QKeySequence(Qt::Key_O));
@@ -179,6 +224,28 @@ void build_app_menus(MainWindow& mw) {
     playback->addAction(MainWindow::tr("Go &to End"), QKeySequence(Qt::Key_End),
                         [&mw] { mw.controller_.seek(mw.total_frames_ - 1); });
 
+    auto* appearance = mw.ui->menubar->addMenu(MainWindow::tr("A&ppearance"));
+    auto* appearance_group = new QActionGroup(appearance);
+    appearance_group->setExclusive(true);
+    const bool light_mode = is_light();
+    auto* dark_action = appearance->addAction(MainWindow::tr("&Dark"));
+    dark_action->setCheckable(true);
+    dark_action->setChecked(!light_mode);
+    auto* light_action = appearance->addAction(MainWindow::tr("&Light"));
+    light_action->setCheckable(true);
+    light_action->setChecked(light_mode);
+    appearance_group->addAction(dark_action);
+    appearance_group->addAction(light_action);
+    const auto persist_mode = [](bool light) {
+        set_light(light);
+        QSettings().setValue(QStringLiteral("appearance/theme"),
+                             light ? QStringLiteral("light") : QStringLiteral("dark"));
+    };
+    QObject::connect(dark_action, &QAction::triggered, &mw,
+                     [persist_mode] { persist_mode(false); });
+    QObject::connect(light_action, &QAction::triggered, &mw,
+                     [persist_mode] { persist_mode(true); });
+
     for (const char* name : {"Fusion", "Color", "Fairlight", "Workspace", "Help"}) {
         auto* m = mw.ui->menubar->addMenu(MainWindow::tr(name));
         if (qstrcmp(name, "Help") == 0) {
@@ -190,6 +257,19 @@ void build_app_menus(MainWindow& mw) {
             m->setEnabled(false);
         }
     }
+
+    // Round every menubar dropdown (and any submenu, e.g. Open Recent). Must
+    // run after the menus are populated and before any is shown.
+    std::function<void(QMenu*)> round_menu_tree = [&](QMenu* menu) {
+        if (!menu) return;
+        apply_rounded_menu(menu);
+        const auto actions = menu->actions();
+        for (QAction* act : actions)
+            if (QMenu* sub = act->menu()) round_menu_tree(sub);
+    };
+    const auto bar_actions = mw.ui->menubar->actions();
+    for (QAction* act : bar_actions)
+        round_menu_tree(act->menu());
 }
 
 }  // namespace canvas::gui

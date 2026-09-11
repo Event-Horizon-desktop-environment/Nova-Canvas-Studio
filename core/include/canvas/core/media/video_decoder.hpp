@@ -45,6 +45,13 @@ class VideoDecoder {
 public:
     VideoDecoder() = default;
     ~VideoDecoder();
+    // Movable: a prepared decode session (e.g. a transition pre-render parked at
+    // the incoming clip's head) can be handed to another owner without tearing
+    // down and re-opening the FFmpeg contexts. Move-assign closes whatever this
+    // decoder currently holds, steals the source's contexts/state, and leaves the
+    // source closed and reusable.
+    VideoDecoder(VideoDecoder&& o) noexcept;
+    VideoDecoder& operator=(VideoDecoder&& o) noexcept;
     VideoDecoder(const VideoDecoder&) = delete;
     VideoDecoder& operator=(const VideoDecoder&) = delete;
 
@@ -70,6 +77,11 @@ public:
     [[nodiscard]] double duration_seconds() const { return duration_seconds_; }
     [[nodiscard]] int64_t total_frames() const { return total_frames_; }
     [[nodiscard]] int64_t current_frame() const { return next_frame_; }
+    // Resolved per-file color spec: matrix/range read from codecpar and
+    // reconciled against a decoded-luma probe when a `tv`-style tag lies about
+    // full-range data. Every frame this decoder produces (RGBA via make_rgba,
+    // NV12 via decode_to_hw) is consistent with this spec.
+    [[nodiscard]] gpu::ColorSpec color_spec() const { return {matrix_, range_}; }
     // Highest valid target frame index for this stream (inclusive), once known.
     // Returns -1 when the encoded extent is not yet known (no frame decoded and
     // neither the container nor stream duration is available).
@@ -223,10 +235,40 @@ private:
     double frame_rate_ = 0.0;
     double duration_seconds_ = 0.0;
     int64_t total_frames_ = -1;
+    // Resolved per-file color spec (see color_spec()). matrix_/range_ start on
+    // the codecpar tags and range_ may be upgraded to Full by the luma probe.
+    gpu::ColorMatrix matrix_ = gpu::ColorMatrix::BT709;
+    gpu::ColorRange range_ = gpu::ColorRange::Limited;
     int64_t last_frame_ = -1;
     int64_t next_frame_ = 0;
     bool draining_ = false;
     int out_max_dim_ = 0;
+    // Frozen-tail hold frames. When a caller targets a frame past the stream's
+    // encoded end (a clip whose audio outlives its video, or a far-forward
+    // scrub over the media edge), re-seeking and re-decoding the same final
+    // frame on every call is ~90ms/frame wasted work that turns the render tail
+    // into a 10fps crawl. Instead the last real frame is decoded once and held;
+    // any later past-end request serves the cached copy. hold_rgba_ covers the
+    // CPU RGBA path, hold_hw_ the GPU NV12 path (a ref-counted copy of the
+    // device frame, independent of the reused av_frame_).
+    VideoFramePtr hold_rgba_;
+    int64_t hold_rgba_src_ = -1;
+    int hold_rgba_dim_ = -1;
+    AVFrame* hold_hw_ = nullptr;
+    int64_t hold_hw_src_ = -1;
+    // One-frame sequential lookback for the GPU path. When a transition's
+    // fading-out slot runs at a sub-rate (e.g. the B side of a 2:1 clip
+    // ratio), consecutive timeline frames can re-target the SAME source
+    // frame. The repeat would otherwise be served by decode_to_hw_indexed,
+    // whose container seek resets next_frame_ to 0 and forces a full-GOP
+    // re-walk (~54ms on 2K60) for every repeated B frame. retain_hw_ keeps a
+    // ref-counted copy of the last device frame decode_to_hw actually served
+    // (retain_hw_src_ = its frame number); decode_to_hw_indexed serves that
+    // exact copy instead of re-seeking when the walk is already parked past
+    // it, leaving next_frame_ untouched so the following distinct frame keeps
+    // riding the cheap sequential path.
+    AVFrame* retain_hw_ = nullptr;
+    int64_t retain_hw_src_ = -1;
     // Sequential-walk vs keyframe-seek path accounting (see PathStats).
     std::uint64_t path_seq_ = 0;
     std::uint64_t path_seeks_ = 0;
