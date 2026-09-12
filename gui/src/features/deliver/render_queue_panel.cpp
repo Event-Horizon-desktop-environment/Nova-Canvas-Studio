@@ -99,11 +99,7 @@ QString status_text(const canvas::core::RenderJob& j) {
     switch (j.status) {
         case S::Queued: return QStringLiteral("Queued");
         case S::Completed:
-            // Finished cards read like Resolve's: the wall-clock completion
-            // time is the headline ("" only on pre-persistence projects).
-            if (!j.finished_at.empty())
-                return QStringLiteral("Finished %1").arg(QString::fromStdString(j.finished_at));
-            return QStringLiteral("Completed in %1").arg(format_duration(j.elapsed_seconds));
+            return QStringLiteral("Rendered in %1").arg(format_duration(j.elapsed_seconds));
         case S::Failed: return QStringLiteral("Failed");
         case S::Cancelled: return QStringLiteral("Cancelled");
         case S::Rendering: {
