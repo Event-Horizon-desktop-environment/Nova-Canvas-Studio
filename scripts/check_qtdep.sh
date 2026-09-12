@@ -59,6 +59,7 @@ HEADLESS=(
     "gui/src/Widgets/timeline_volume_line.hpp"
     "gui/src/Widgets/timeline_volume_line.cpp"
     "gui/tests"
+    "Vulkan-tests"
 )
 
 OFFENDING=0

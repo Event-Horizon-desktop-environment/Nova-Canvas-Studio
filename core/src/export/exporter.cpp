@@ -97,6 +97,7 @@ std::string hw_device_for_codec(const std::string& codec) {
     if (codec.find("qsv") != std::string::npos) return "qsv";
     if (codec.find("amf") != std::string::npos) return "amf";
     if (codec.find("nvenc") != std::string::npos) return "cuda";
+    if (codec.find("vulkan") != std::string::npos) return "vulkan";
     return "";
 }
 
@@ -838,15 +839,6 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                             fprintf(stderr, "[TIMING] frame=%lld fastpath: frame_gpu=%.3fms resize=%.3fms (avg over %ld)\n",
                                     (long long)f, _st_fg / _cnt, _st_rz / _cnt, _cnt);
                         hw->pts = f;
-                        // Throttled live preview: the fast path composites on
-                        // the device with no host frame to hand off, so pay one
-                        // CPU composite per preview tick (the pixels match — same
-                        // session, same `tl` mapping the encoder frame uses).
-                        if (preview_throttle.due()) {
-                            auto pv = session_ok ? session.frame(tl)
-                                                 : render_video_frame(project, tl, s.width, s.height, 0);
-                            push_preview(pv);
-                        }
                         return {hw, ev, src_ref};
                     }
                     if (src_ref) av_frame_unref(src_ref);
@@ -1197,13 +1189,6 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                                 gfi.dx, gfi.dy, gfi.fade);
                         }
                         if (got) {
-                            // Throttled live preview: one CPU composite per tick
-                            // (the hw fast path has no host frame to hand off).
-                            if (preview_throttle.due()) {
-                                auto pv = session_ok ? session.frame(tl)
-                                                     : render_video_frame(project, tl, s.width, s.height, 0);
-                                push_preview(pv);
-                            }
                             hw->pts = frame;
                             avcodec_send_frame(vctx, hw);
                             gpu_composited = true;

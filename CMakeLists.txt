@@ -11,6 +11,17 @@ enable_testing()
 add_subdirectory(core)
 add_subdirectory(gui)
 
+# Phase 0 (Vulkan-tests): the Vulkan backend is proven test-first. Headless —
+# links only canvas_core + Vulkan, never Qt. Disabled when no Vulkan SDK is
+# present so ordinary builds (and CI without the headers) stay unaffected.
+find_package(Vulkan QUIET)
+if(Vulkan_FOUND)
+    add_subdirectory(Vulkan-tests)
+    message(STATUS "Vulkan-tests enabled (Vulkan ${Vulkan_VERSION})")
+else()
+    message(STATUS "Vulkan headers not found — Vulkan-tests disabled")
+endif()
+
 # ── Formatting ──────────────────────────────────────────────────────────────
 # Opt-in clang-format enforcement, mirroring MLT's clang-format-check
 # discipline. Off by default so ordinary `./build.sh` builds are untouched; the

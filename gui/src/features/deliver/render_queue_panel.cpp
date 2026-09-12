@@ -304,7 +304,7 @@ void RenderQueuePanel::refresh() {
     if (!queue_) return;
     const auto jobs = queue_->jobs();
 
-    int running = 0, done = 0, queued = 0;
+    int running = 0, done = 0, queued = 0, dead = 0;
     double total_progress = 0.0;
 
     QHash<uint64_t, JobRow> next_rows;
@@ -346,6 +346,7 @@ void RenderQueuePanel::refresh() {
         using S = canvas::core::RenderJob::Status;
         if (j.status == S::Queued) ++queued;
         else if (j.status == S::Rendering) ++running;
+        else if (j.status == S::Failed || j.status == S::Cancelled) { ++dead; continue; }
         else ++done;
         if (j.status == S::Rendering) total_progress += j.progress;
         else if (j.status == S::Completed) total_progress += 1.0;
@@ -359,7 +360,8 @@ void RenderQueuePanel::refresh() {
     rows_ = std::move(next_rows);
 
     const int total = (int)jobs.size();
-    const double pct = total > 0 ? total_progress / total : 0.0;
+    const int live = total - dead;
+    const double pct = live > 0 ? total_progress / live : 0.0;
     if (total > 0) {
         summary_->setText(tr("%1 jobs — %2 queued, %3 running, %4 done")
                               .arg(total).arg(queued).arg(running).arg(done));
