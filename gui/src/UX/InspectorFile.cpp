@@ -100,7 +100,7 @@ QString preview_name_style() {
 QString preview_card_style() {
     const ThemeTokens& t = tokens();
     return QStringLiteral("QWidget#inspectorPreviewCard { background-color: %1;"
-                          " border: 1px solid %2; border-radius: 12px; }")
+                          " border: 1px solid %2; border-radius: 8px; }")
         .arg(css(t.surface_raised), css(t.border_soft));
 }
 

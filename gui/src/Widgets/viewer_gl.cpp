@@ -11,6 +11,8 @@
 #include <QOpenGLContext>
 #include <QPainter>
 #include <QVector2D>
+#include <QLineF>
+#include <QFontMetricsF>
 
 #include <array>
 #include <algorithm>
@@ -430,6 +432,25 @@ void ViewerGL::set_mode(ViewerMode mode) {
 
 void ViewerGL::set_scale_mode(ScaleMode mode) {
     scale_mode_ = mode;
+    update();
+}
+
+void ViewerGL::set_overlay(Overlay overlay, const bool on) {
+    const unsigned bit = static_cast<unsigned>(overlay);
+    const bool was_on = (overlay_flags_ & bit) != 0;
+    if (was_on == on) return;
+    if (on) overlay_flags_ |= bit;
+    else overlay_flags_ &= ~bit;
+    update();
+}
+
+bool ViewerGL::overlay_enabled(Overlay overlay) const {
+    return (overlay_flags_ & static_cast<unsigned>(overlay)) != 0;
+}
+
+void ViewerGL::set_playing(const bool playing) {
+    if (playing_ == playing) return;
+    playing_ = playing;
     update();
 }
 
@@ -1394,6 +1415,80 @@ void ViewerGL::paintGL() {
     }
     vao_.release();
     vbo_.release();
+
+    draw_viewer_overlays();
+}
+
+void ViewerGL::draw_viewer_overlays() {
+    if (overlay_flags_ == 0) return;
+
+    // Guides are drawn against the media rect the frame actually occupies on
+    // screen (the letterboxed quad), in widget coordinates — the same qw/qh
+    // math paintGL used to scale the quad, so the guides follow the picture in
+    // Fit mode and crop with it in Fill mode. Overlays are never exported.
+    const float vw = static_cast<float>(width());
+    const float vh = static_cast<float>(height());
+    if (vw < 8.0f || vh < 8.0f) return;
+    const float aspect = tex_h_ > 0 ? static_cast<float>(tex_w_) / tex_h_ : 1.0f;
+    const float va = vw / vh;
+    const float qw = (scale_mode_ == ScaleMode::Fill) ? std::max(aspect / va, 1.0f)
+                                                      : std::min(aspect / va, 1.0f);
+    const float qh = (scale_mode_ == ScaleMode::Fill) ? std::max(va / aspect, 1.0f)
+                                                      : std::min(va / aspect, 1.0f);
+    const QRectF media((vw - qw * vw) / 2.0, (vh - qh * vh) / 2.0, qw * vw, qh * vh);
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setClipRect(rect());
+    const ThemeTokens& t = tokens();
+
+    if (overlay_flags_ & static_cast<unsigned>(Overlay::ThirdsGrid)) {
+        QColor g = t.ink_faint;
+        g.setAlpha(170);
+        painter.setPen(QPen(g, 1.0));
+        for (int i = 1; i < 3; ++i) {
+            const qreal x = media.left() + media.width() * i / 3.0;
+            painter.drawLine(QLineF(x, media.top(), x, media.bottom()));
+            const qreal y = media.top() + media.height() * i / 3.0;
+            painter.drawLine(QLineF(media.left(), y, media.right(), y));
+        }
+    }
+
+    if (overlay_flags_ & static_cast<unsigned>(Overlay::SafeAreas)) {
+        QColor sa = t.ink_muted;
+        sa.setAlpha(150);
+        painter.setPen(QPen(sa, 1.0));
+        painter.setBrush(Qt::NoBrush);
+        // Title safe: 80% box; action safe: 90% box (standard video safety).
+        const QRectF title(media.left() + media.width() * 0.10, media.top() + media.height() * 0.10,
+                           media.width() * 0.80, media.height() * 0.80);
+        const QRectF action(media.left() + media.width() * 0.05, media.top() + media.height() * 0.05,
+                            media.width() * 0.90, media.height() * 0.90);
+        painter.drawRect(title);
+        painter.drawRect(action);
+    }
+
+    if (overlay_flags_ & static_cast<unsigned>(Overlay::PlaybackBadge)) {
+        QFont bf = painter.font();
+        bf.setPointSizeF(8);
+        bf.setBold(true);
+        painter.setFont(bf);
+        const QFontMetricsF bfm(bf);
+        const QString label = playing_ ? tr("PLAYING") : tr("PAUSED");
+        const QRectF pill(media.left() + 8.0, media.top() + 8.0,
+                          bfm.horizontalAdvance(label) + 26.0, 20.0);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(t.surface_low);
+        painter.drawRoundedRect(pill, 10.0, 10.0);
+        // Status dot: amber while live, muted while paused.
+        const QColor dot = playing_ ? t.accent : t.ink_faint;
+        painter.setBrush(dot);
+        painter.drawEllipse(QPointF(pill.left() + 11.0, pill.center().y()), 3.5, 3.5);
+        painter.setPen(t.ink);
+        painter.drawText(pill.adjusted(20.0, 0.0, -6.0, 0.0), Qt::AlignVCenter | Qt::AlignLeft, label);
+    }
+
+    painter.end();
 }
 
 void ViewerGL::draw_blank() {
@@ -1410,6 +1505,36 @@ void ViewerGL::draw_blank() {
     painter.setFont(f);
     painter.drawText(badge, Qt::AlignCenter, mode_ == ViewerMode::Source ? QStringLiteral("SOURCE")
                                                                           : QStringLiteral("PROGRAM"));
+
+    // Branded empty state: a Nova-gold film-strip mark over the monitor's
+    // center, a bold mode-aware title, and a faint one-line hint — the same
+    // voice as the timeline's empty-state panel.
+    const QPointF c = rect().center();
+    const QColor mark = t.accent;
+    const QPixmap mark_pm = icon("film-strip", mark).pixmap(24, 24);
+    painter.drawPixmap(QPointF(c.x() - 12.0, c.y() - 52.0), mark_pm);
+
+    QFont tf = painter.font();
+    tf.setPointSizeF(12.5);
+    tf.setBold(true);
+    painter.setFont(tf);
+    painter.setPen(t.ink);
+    const QString title = mode_ == ViewerMode::Source
+        ? tr("Select a clip to inspect")
+        : tr("Nothing to preview yet");
+    const QRectF title_box(c.x() - 220.0, c.y() - 18.0, 440.0, 22.0);
+    painter.drawText(title_box, Qt::AlignHCenter | Qt::AlignTop, title);
+
+    QFont hf = painter.font();
+    hf.setPointSizeF(9);
+    hf.setBold(false);
+    painter.setFont(hf);
+    painter.setPen(t.ink_faint);
+    const QString hint = mode_ == ViewerMode::Source
+        ? tr("Click a media clip in the Media Pool to load it here")
+        : tr("Add clips to the timeline to build your cut");
+    const QRectF hint_box(c.x() - 260.0, c.y() + 8.0, 520.0, 18.0);
+    painter.drawText(hint_box, Qt::AlignHCenter | Qt::AlignTop, hint);
 }
 
 }

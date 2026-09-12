@@ -28,16 +28,34 @@ SourceViewerPanel::SourceViewerPanel(QWidget* parent) : QWidget(parent) {
     viewer_->set_mode(ViewerGL::ViewerMode::Source);
     viewer_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
-    auto* empty = new QLabel(
-        tr("Source preview\n\nHover a media clip in the pool to inspect it,\nor press the play button to audition."),
-        this);
-    empty->setAlignment(Qt::AlignCenter);
-    empty->setWordWrap(true);
-    apply_theme_style(empty, [] {
+    auto* empty = new QWidget(this);
+    auto* empty_lay = new QVBoxLayout(empty);
+    empty_lay->setContentsMargins(16, 16, 16, 16);
+    empty_lay->setSpacing(8);
+    // Branded two-tier empty state, matching the Program viewer's voice: a
+    // gold title line over a faint hint.
+    auto* empty_title = new QLabel(tr("Source preview"), empty);
+    empty_title->setAlignment(Qt::AlignCenter);
+    apply_theme_style(empty_title, [] {
         return QStringLiteral(
-            "QLabel { color: %1; font-size: 12px; background: transparent; }")
+            "QLabel { color: %1; font-size: 14px; font-weight: 650;"
+            " background: transparent; }")
+            .arg(css(tokens().accent_text));
+    });
+    auto* empty_hint = new QLabel(
+        tr("Hover a media clip in the pool to inspect it,\nor press the play button to audition."),
+        empty);
+    empty_hint->setAlignment(Qt::AlignCenter);
+    empty_hint->setWordWrap(true);
+    apply_theme_style(empty_hint, [] {
+        return QStringLiteral(
+            "QLabel { color: %1; font-size: 11.5px; background: transparent; }")
             .arg(css(tokens().ink_faint));
     });
+    empty_lay->addStretch(1);
+    empty_lay->addWidget(empty_title);
+    empty_lay->addWidget(empty_hint);
+    empty_lay->addStretch(1);
     empty_state_ = empty;
 
     auto* stacked = new QStackedLayout;
@@ -83,7 +101,7 @@ SourceViewerPanel::SourceViewerPanel(QWidget* parent) : QWidget(parent) {
     header->addWidget(mini_scrub_);
 
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(8, 8, 8, 6);
+    layout->setContentsMargins(8, 8, 8, 8);
     layout->setSpacing(4);
     layout->addLayout(header);
     layout->addLayout(stacked, 1);
@@ -130,6 +148,7 @@ void SourceViewerPanel::update_time_label(const int64_t frame, const double fps)
 }
 
 void SourceViewerPanel::set_playing(const bool playing) {
+    viewer_->set_playing(playing);
     play_button_->setIcon(icon(playing ? "pause" : "play"));
     play_button_->setToolTip(playing ? tr("Pause source preview (Space)")
                                      : tr("Play source preview (Space)"));

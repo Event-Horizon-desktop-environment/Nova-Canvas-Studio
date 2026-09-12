@@ -1056,17 +1056,19 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
         // filtering at ANY export rate (no fixed-48 kHz bypass like the RNNoise
         // stage above) and writes exactly the frame count it was given, so the
         // per-output-frame gain law below stays in sync. Disabled clips pass
-        // through bit-exact; the bank drops its filter state then, so toggling
-        // EQ on restarts from a fresh curve.
+        // through bit-exact (the settle-to-dry is crossfaded over kGlideFrames
+        // by the bank; export never toggles mid-clip, so its disabled path is
+        // always already settled). An enabled clip's FIRST tick glides dry->wet
+        // over kGlideFrames so a fresh curve fades in click-free.
         std::vector<float> eqd;
         if (den_frames > 0 && pcm) {
-            if (clip->eq_enabled) {
+            if (clip->eq_enabled || eq_bank_.wants_samples(clip->id, false)) {
                 eqd.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
                 // The EQ is stream-in-place and rate-preserving, so it writes
                 // exactly the frames it was given (the returned count is the
                 // no-lookahead contract, asserted here).
-                den_frames = eq_bank_.tick(clip->id, clip->eq_bands, true, out_sample_rate,
-                                           den_ch, eqd.data(), den_frames);
+                den_frames = eq_bank_.tick(clip->id, clip->eq_bands, clip->eq_enabled,
+                                           out_sample_rate, den_ch, eqd.data(), den_frames);
                 pcm = eqd.data();
             } else {
                 (void)eq_bank_.tick(clip->id, clip->eq_bands, false, out_sample_rate, den_ch,

@@ -87,6 +87,16 @@ if(CUDAToolkit_FOUND)
                       "${CANVAS_CUDA_ROOT}/targets/x86_64-linux/lib"
                 NO_DEFAULT_PATH)
             set(CANVAS_CUDA_RUNTIME "${CANVAS_CUDA_CUDART}")
+            # find_package(CUDAToolkit) also normally supplies cuda_runtime.h's
+            # directory via CUDA::cudart's INTERFACE_INCLUDE_DIRECTORIES. Since
+            # that imported target doesn't exist on this path, locate the header
+            # by hand from the same prefix as nvcc, or any C++ (non-.cu)
+            # translation unit that includes <cuda_runtime.h> directly (e.g.
+            # cuda_convert.hpp, vram_leak_test.cpp) fails with "No such file".
+            find_path(CANVAS_CUDA_INCLUDE_DIR cuda_runtime.h
+                HINTS "${CANVAS_CUDA_ROOT}/include"
+                      "${CANVAS_CUDA_ROOT}/targets/x86_64-linux/include"
+                NO_DEFAULT_PATH)
         endif()
     endif()
 
@@ -141,6 +151,9 @@ if(CANVAS_CUDA_ENABLED)
     target_sources(canvas_core PRIVATE src/gpu/cuda_convert.cu)
     target_compile_definitions(canvas_core PUBLIC CANVAS_HAVE_CUDA=1)
     target_link_libraries(canvas_core PUBLIC "${CANVAS_CUDA_RUNTIME}")
+    if(CANVAS_CUDA_INCLUDE_DIR)
+        target_include_directories(canvas_core PUBLIC "${CANVAS_CUDA_INCLUDE_DIR}")
+    endif()
 endif()
 
 add_executable(canvas_roundtrip_test tests/roundtrip_test.cpp)

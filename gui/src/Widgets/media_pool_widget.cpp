@@ -16,6 +16,7 @@
 using canvas::gui::apply_theme_style;
 using canvas::gui::css;
 using canvas::gui::icon;
+using canvas::gui::register_theme_reapply;
 using canvas::gui::ThemeTokens;
 using canvas::gui::tokens;
 using canvas::gui::with_alpha;
@@ -27,7 +28,7 @@ namespace {
 // a centered icon until the decodable frame/waveform lands, or a cover-fit
 // thumbnail once loaded), a mono duration badge top-left, a media-type chip
 // top-right, and a caption row with name + resolution/fps in mono. Hover
-// brightens the border and lifts the card; selection adds the mint focus ring.
+// brightens the border and lifts the card; selection adds the amber focus ring.
 // When the pool widget is hover-scrubbing this tile (Live Media Preview) a
 // vertical accent playhead is painted across the well at the pointer's x.
 class MediaPoolTileDelegate final : public QStyledItemDelegate {
@@ -36,7 +37,10 @@ public:
         : QStyledItemDelegate(parent), pool_(pool) {}
 
     QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override {
-        return QSize(120, 108);
+        // Wider than the 120px cell so the caption line has room for a real
+        // filename before the ElideRight ellipsis kicks in; the height keeps
+        // the 16:9 well + caption strip identical to the old proportions.
+        return QSize(148, 124);
     }
 
     void paint(QPainter* p, const QStyleOptionViewItem& opt,
@@ -171,12 +175,15 @@ public:
             rf.setPointSizeF(9.0);
             p->setFont(rf);
             p->setPen(with_alpha(t.ink_muted, 230));
+            const QFontMetricsF rfm(rf);
+            const QString resElided = rfm.elidedText(
+                res, Qt::ElideRight, static_cast<int>(cap.width()));
             p->drawText(QRectF(cap.left(), cap.top() + nfm.height() + 1,
                                cap.width(), 14),
-                        Qt::AlignLeft | Qt::AlignVCenter, res);
+                        Qt::AlignLeft | Qt::AlignVCenter, resElided);
         }
 
-        // Border: transparent idle, border_hi on hover, mint ring when selected.
+        // Border: transparent idle, border_hi on hover, amber ring when selected.
         QPen border(selected ? t.accent : (hovered ? t.border_hi : QColor(0, 0, 0, 0)), 1);
         p->setPen(border);
         p->setBrush(Qt::NoBrush);
@@ -245,7 +252,7 @@ private:
 MediaPoolWidget::MediaPoolWidget(QWidget* parent) : QListWidget(parent) {
     setViewMode(QListView::IconMode);
     setIconSize(QSize(0, 0));
-    setGridSize(QSize(124, 110));
+    setGridSize(QSize(152, 128));
     setUniformItemSizes(true);
     setResizeMode(QListView::Adjust);
     setMovement(QListView::Static);
@@ -278,24 +285,41 @@ void MediaPoolWidget::setup_empty_state() {
     empty_state_->installEventFilter(this);
 
     auto* layout = new QVBoxLayout(empty_state_);
-    layout->setContentsMargins(16, 24, 16, 24);
-    layout->setSpacing(14);
+    layout->setContentsMargins(24, 32, 24, 32);
+    layout->setSpacing(8);
 
-    // Primary label.
-    auto* title = new QLabel(tr("No clips in media pool"), empty_state_);
+    // Branded hero icon, re-tinted on theme switches so the empty state can
+    // never drift from the active token set (amber brand mark, quiet presence).
+    auto* brand_icon = new QLabel(empty_state_);
+    brand_icon->setObjectName(QStringLiteral("mediaPoolEmptyIcon"));
+    brand_icon->setAlignment(Qt::AlignCenter);
+    const auto retint_brand = [brand_icon] {
+        const ThemeTokens& t = tokens();
+        brand_icon->setPixmap(icon("film-strip", with_alpha(t.accent, 170)).pixmap(56, 56));
+    };
+    retint_brand();
+    register_theme_reapply(retint_brand);
+    layout->addStretch();
+    layout->addWidget(brand_icon);
+    layout->addSpacing(8);
+
+    // Primary label — display scale, crisp hierarchy.
+    auto* title = new QLabel(tr("Your media pool is empty"), empty_state_);
     title->setAlignment(Qt::AlignCenter);
     apply_theme_style(title, [] {
         return QStringLiteral(
-            "QLabel { color: %1; font-size: 17px; font-weight: 500; background: transparent; }")
+            "QLabel { color: %1; font-size: 20px; font-weight: 600; background: transparent; }")
             .arg(css(tokens().ink));
     });
 
-    // Secondary label.
-    auto* subtitle = new QLabel(tr("Add clips from Media Storage to get started"), empty_state_);
+    // Secondary label — body scale, muted.
+    auto* subtitle = new QLabel(
+        tr("Import clips from Media Storage, then drag them onto the timeline"), empty_state_);
     subtitle->setAlignment(Qt::AlignCenter);
+    subtitle->setWordWrap(true);
     apply_theme_style(subtitle, [] {
         return QStringLiteral(
-            "QLabel { color: %1; font-size: 13px; font-weight: 400; background: transparent; }")
+            "QLabel { color: %1; font-size: 14px; font-weight: 400; background: transparent; }")
             .arg(css(tokens().ink_faint));
     });
 
@@ -308,7 +332,7 @@ void MediaPoolWidget::setup_empty_state() {
         return QStringLiteral(
             "QPushButton#mediaPoolAddButton {"
             "  background-color: %1; color: %2; border: none; border-radius: 8px;"
-            "  padding: 8px 14px; font-size: 13px; font-weight: 500;"
+            "  padding: 8px 20px; font-size: 14px; font-weight: 500;"
             "}"
             "QPushButton#mediaPoolAddButton:hover { background-color: %3; }"
             "QPushButton#mediaPoolAddButton:pressed { background-color: %4; }"
@@ -317,10 +341,10 @@ void MediaPoolWidget::setup_empty_state() {
                  css(t.accent_press));
     });
 
-    layout->addStretch();
     layout->addWidget(title);
+    layout->addSpacing(4);
     layout->addWidget(subtitle);
-    layout->addSpacing(6);
+    layout->addSpacing(12);
     auto* btn_row = new QHBoxLayout;
     btn_row->addStretch();
     btn_row->addWidget(import_button_);

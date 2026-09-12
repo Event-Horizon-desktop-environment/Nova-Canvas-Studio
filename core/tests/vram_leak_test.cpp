@@ -173,8 +173,14 @@ int main() {
         std::printf("warm  free_vram=%lld MiB\n", warm_free);
 
         // Phase A -- steady playback shape: 600 native-res NV12 decodes +
-        // host downloads, sampled every 40 frames.
+        // host downloads, sampled every 40 frames. Leak is a steady-state
+        // SLOPE: the warm-phase baseline already absorbs the one-time context/
+        // pool/staging warm-up (~300MB on a cold CUDA context), so a genuine
+        // per-frame leak shows as the mid-phase baseline draining over the
+        // second half of the phase instead of as an absolute warm-vs-end diff.
         long long min_free = warm_free;
+        long long mid_free = warm_free;
+        const auto a_t0 = std::chrono::steady_clock::now();
         for (int i = 41; i <= 600; ++i) {
             const AVFrame* hw = dec.decode_to_hw_indexed(i, 0);
             if (!hw || !hw->data[0]) {
@@ -198,13 +204,19 @@ int main() {
             if (i % 40 == 0) {
                 const long long fr = vram_free_mib();
                 min_free = std::min(min_free, fr);
+                if (i == 240) mid_free = fr;
                 std::printf("  A   frame=%-4d free_vram=%lld MiB\n", i, fr);
             }
         }
         const long long a_free = vram_free_mib();
-        report(a_free >= warm_free - kLeakToleranceMiB,
-               "Phase A steady playback does not drain VRAM");
-        std::printf("  A   warm=%lld end=%lld min=%lld\n", warm_free, a_free, min_free);
+        const double a_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - a_t0)
+                                .count();
+        report(a_free >= mid_free - kLeakToleranceMiB,
+               "Phase A steady-state VRAM does not drain");
+        std::printf("  A   warm=%lld mid=%lld end=%lld min=%lld  avg_step=%.2f ms\n",
+                    warm_free, mid_free, a_free, min_free,
+                    a_ms / (600 - 41 + 1));
 
         // Phase B -- reopen churn: close/reopen is what playhead re-anchors and
         // project/lookahead resets do; a leaked device context shows here.

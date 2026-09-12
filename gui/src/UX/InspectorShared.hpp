@@ -143,7 +143,7 @@ inline void add_property_row(QVBoxLayout* body, const QString& label, QWidget* f
     auto* lbl = new QLabel(label);
     lbl->setMinimumWidth(78);
     apply_theme_style(lbl, [] {
-        return QStringLiteral("color: %1; font-size: 11px;")
+        return QStringLiteral("color: %1; font-size: 12px;")
             .arg(css(tokens().ink_muted));
     });
     row->addWidget(lbl);

@@ -156,7 +156,12 @@ qt_add_executable(volume_line_drag_qt_test
     ../src/Widgets/transition_handle_editor.cpp
     ../src/Widgets/timeline_volume_line.cpp
     ../src/features/timeline/audio_targets.cpp
-    ../src/UX/theme.cpp
+    ../src/UX/theme_clip_colors.cpp
+    ../src/UX/theme_icons.cpp
+    ../src/UX/theme_menu.cpp
+    ../src/UX/theme_state.cpp
+    ../src/UX/theme_styles.cpp
+    ../src/UX/theme_tokens.cpp
     ../src/UX/horizon_style.cpp
     ../src/features/thumbnails/thumbnail_service.cpp
 )
@@ -193,7 +198,12 @@ qt_add_executable(waveform_placement_qt_test
     ../src/Widgets/transition_handle_editor.cpp
     ../src/Widgets/timeline_volume_line.cpp
     ../src/features/timeline/audio_targets.cpp
-    ../src/UX/theme.cpp
+    ../src/UX/theme_clip_colors.cpp
+    ../src/UX/theme_icons.cpp
+    ../src/UX/theme_menu.cpp
+    ../src/UX/theme_state.cpp
+    ../src/UX/theme_styles.cpp
+    ../src/UX/theme_tokens.cpp
     ../src/UX/horizon_style.cpp
     ../src/features/thumbnails/thumbnail_service.cpp
 )
@@ -228,7 +238,12 @@ qt_add_executable(wheel_panel_roundtrip_qt_test
     ../src/features/color/scopes/vectorscope/vectorscope_scope.cpp
     ../src/features/color/scopes/histogram/histogram_scope.cpp
     ../src/features/color/scopes/chromaticity/chromaticity_widget.cpp
-    ../src/UX/theme.cpp
+    ../src/UX/theme_clip_colors.cpp
+    ../src/UX/theme_icons.cpp
+    ../src/UX/theme_menu.cpp
+    ../src/UX/theme_state.cpp
+    ../src/UX/theme_styles.cpp
+    ../src/UX/theme_tokens.cpp
     ../src/UX/horizon_style.cpp
 )
 target_include_directories(wheel_panel_roundtrip_qt_test PRIVATE

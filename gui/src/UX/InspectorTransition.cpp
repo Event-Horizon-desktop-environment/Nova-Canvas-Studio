@@ -58,7 +58,7 @@ QString pill_button_style() {
     const ThemeTokens& t = tokens();
     return QStringLiteral(
                "QToolButton { background-color: %1; color: %2; border: 1px solid %3;"
-               " border-radius: 18px; padding: 6px 18px; font-weight: 500; }"
+               " border-radius: 8px; padding: 6px 18px; font-weight: 500; }"
                "QToolButton:hover { color: %4; border-color: %5; }"
                "QToolButton:checked { background-color: %6; border-color: %6;"
                " color: %7; font-weight: 600; }")
