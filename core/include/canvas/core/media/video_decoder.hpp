@@ -69,6 +69,13 @@ public:
     [[nodiscard]] int height() const { return height_; }
     [[nodiscard]] int nb_streams() const { return fmt_ctx_ ? fmt_ctx_->nb_streams : 0; }
     [[nodiscard]] int video_stream_index() const { return video_stream_; }
+    // True when the container's best video stream is an embedded still rather
+    // than motion video — album art (mp3/m4a/ogg/flac cover art is exposed as
+    // a one-frame attached-picture or single-packet stream). Import uses this
+    // to classify such files as audio-only so the pool/show preview shows a
+    // spectrum, not the artwork. Ogg/FLAC art has no attached_pic disposition,
+    // so the check also runs a demux-only packet scan (never decodes).
+    [[nodiscard]] bool is_still_picture() const;
     // Container stream census for diagnostics: total stream count, which stream
     // av_find_best_stream picked, and every video stream in the container
     // (index:codec:WxH). Answers "does this file have multiple video streams?".

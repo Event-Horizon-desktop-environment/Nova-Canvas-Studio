@@ -214,13 +214,14 @@ void MainWindow::refresh_media_pool() {
             // Audio-only media: paint its spectrum (waveform) as the pool
             // preview so the pool shows the sound rather than a video frame.
             // Video-bearing files request an actual frame below so the pool
-            // shows the picture, not a spectrum.
-            thumbnails_.request_waveform(static_cast<uint64_t>(i), m.path, 240, 136, 0.0f, 1.0f);
+            // shows the picture, not a spectrum. Ids are namespaced (kPoolThumbNs)
+            // so the timeline's own filmstrip/waveform ids can't land here.
+            thumbnails_.request_waveform(kPoolThumbNs | static_cast<uint64_t>(i), m.path, 240, 136, 0.0f, 1.0f);
             continue;
         }
         if (m.total_frames <= 0) continue;
         ThumbRequest req;
-        req.id = static_cast<uint64_t>(i);
+        req.id = kPoolThumbNs | static_cast<uint64_t>(i);
         req.path = m.path;
         req.frame = std::max<int64_t>(0, std::min<int64_t>(m.total_frames / 2, m.total_frames - 1));
         req.target_width = 240;
@@ -229,7 +230,7 @@ void MainWindow::refresh_media_pool() {
         if (m.has_audio) {
             // Video+audio media get a hybrid tile: the frame top + this
             // audio-spectrum strip bottom, composed by the tile delegate.
-            thumbnails_.request_waveform(static_cast<uint64_t>(i), m.path, 116, 24, 0.0f, 1.0f);
+            thumbnails_.request_waveform(kPoolThumbNs | static_cast<uint64_t>(i), m.path, 116, 24, 0.0f, 1.0f);
         }
     }
 
@@ -396,13 +397,15 @@ int MainWindow::import_media_paths(const QStringList& paths) {
     int imported = 0;
     for (const QString& path : paths) {
         std::string error;
-        // Always-on per-import probe timing: open/stream-probe cost, plus the
-        // media's own dims/fps/duration. A slow probe blocks the UI thread here,
-        // so climbing probe_ms across imports explains import stalls (it used to
-        // feel random whether a big file would hang).
         const auto probe_t0 = std::chrono::steady_clock::now();
         canvas::core::VideoDecoder probe;
-        if (probe.open(path.toStdString(), &error)) {
+        // A stream that is only embedded artwork (mp3/m4a/ogg/flac cover
+        // art — a one-frame attached-picture or single-packet video stream) is
+        // NOT video: treat the file as audio-only so the pool shows a spectrum.
+        const bool probe_opened = probe.open(path.toStdString(), &error);
+        const bool probe_still = probe_opened && probe.is_still_picture();
+        const bool probe_is_video = probe_opened && !probe_still;
+        if (probe_is_video) {
             const double probe_ms = std::chrono::duration<double, std::milli>(
                                         std::chrono::steady_clock::now() - probe_t0).count();
             canvas::core::MediaEntry entry;

@@ -16,12 +16,18 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <utility>
 
 #include "core/timecode.hpp"
 
 namespace canvas::gui {
+
+// ThumbnailService request id for the Dual-Viewer source preview's full-file
+// audio spectrum. Media-pool cells use the media index and the timeline uses a
+// monotonically growing counter, so the top bits keep it collision-free.
+static constexpr std::uint64_t kSourcePreviewWaveformId = 0xF000000000000001ULL;
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     new_untitled_project();
@@ -94,6 +100,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                         QFileInfo(QString::fromStdString(src_preview_.media_path())).completeBaseName(),
                         src_preview_.is_video(), src_preview_.is_audio(),
                         src_preview_.total_frames());
+                    // Audio-only media present as a spectrum, not a video frame:
+                    // feed the panel the full-file waveform once per open (the
+                    // worker reuses the cached raw buckets, so this is a cheap
+                    // re-bucket+paint). The scrub playhead on top is live.
+                    if (src_preview_.is_audio() && !src_preview_.is_video())
+                        thumbnails_.request_waveform(kSourcePreviewWaveformId,
+                                                     src_preview_.media_path(),
+                                                     2048, 260, 0.0f, 1.0f);
                 }
             });
     connect(&controller_, &SequenceController::playback_changed, this, [this](bool playing) {
@@ -132,25 +146,35 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(&thumbnails_, &ThumbnailService::thumbnail_ready, this,
             [this](uint64_t id, QImage image) {
-                const int idx = static_cast<int>(id);
-                if (media_pool_ && idx >= 0 && idx < media_pool_->count()) {
+                // Timeline filmstrip frames ride the same service; only
+                // pool-namespaced ids may touch pool tiles (kPoolThumbNs).
+                if (!(id & kPoolThumbNs)) return;
+                const int idx = static_cast<int>(id & ~kPoolThumbNs);
+                if (media_pool_ && idx >= 0 && idx < media_pool_->count())
                     media_pool_->item(idx)->setIcon(QIcon(QPixmap::fromImage(image)));
-                }
             });
     connect(&thumbnails_, &ThumbnailService::waveform_ready, this,
             [this](uint64_t id, QImage image) {
-                const int idx = static_cast<int>(id);
+                // Source-preview spectrum (audio-only media) comes back on its
+                // own sentinel id — never a pool cell or timeline clip.
+                if (id == kSourcePreviewWaveformId) {
+                    if (source_panel_) source_panel_->set_audio_waveform(image);
+                    return;
+                }
+                // Timeline waveforms are handled by TimelineWidget's own
+                // connection; only pool-namespaced ids route to pool tiles.
+                if (!(id & kPoolThumbNs)) return;
+                const int idx = static_cast<int>(id & ~kPoolThumbNs);
                 if (media_pool_ && idx >= 0 && idx < media_pool_->count()) {
                     QListWidgetItem* item = media_pool_->item(idx);
                     // Hybrid video+audio tiles keep the frame as the icon (top)
                     // and stash this spectrum for the bottom strip; audio-only
                     // media still use it as the whole-tile preview.
                     if (item->data(kPoolIsVideoRole).toBool() &&
-                        item->data(kPoolHasAudioRole).toBool()) {
+                        item->data(kPoolHasAudioRole).toBool())
                         item->setData(kPoolWaveformImageRole, image);
-                    } else {
+                    else
                         item->setIcon(QIcon(QPixmap::fromImage(image)));
-                    }
                 }
             });
 

@@ -11,6 +11,7 @@
 
 #include <cstdint>
 
+class QImage;
 class QLabel;
 class QSlider;
 class QStackedLayout;
@@ -35,6 +36,9 @@ public:
     void set_media_position(int64_t frame, double fps);
     void set_playing(bool playing);
     void clear_media();
+    // Full-file spectrum for audio-only media (painted by the embedded
+    // AudioSpectrumView page with a live scrub playhead).
+    void set_audio_waveform(const QImage& image);
 
 signals:
     void play_clicked();
@@ -44,6 +48,8 @@ signals:
 private:
     void update_time_label(int64_t frame, double fps);
 
+    class AudioSpectrumView;
+    AudioSpectrumView* audio_spectrum_ = nullptr;
     ViewerGL* viewer_ = nullptr;
     QStackedLayout* stacked_ = nullptr;
     QLabel* name_label_ = nullptr;
@@ -53,6 +59,7 @@ private:
     QWidget* empty_state_ = nullptr;
     int64_t total_frames_ = 0;
     bool slider_down_ = false;
+    bool audio_mode_ = false;
 };
 
 }  // namespace canvas::gui::source_preview

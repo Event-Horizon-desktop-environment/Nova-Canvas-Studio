@@ -4,6 +4,8 @@
 
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPainter>
+#include <QPaintEvent>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QSlider>
@@ -21,12 +23,63 @@
 
 namespace canvas::gui::source_preview {
 
+// Painted audio-preview page: the full-file spectrum (produced by
+// ThumbnailService) scaled to fit, over which a live scrub playhead tracks the
+// hover/panel position. Scrub moves only redraw a line — zero decode cost —
+// which keeps the source preview realtime for audio while the worker is
+// otherwise idle. Plain QWidget paint, no signals/slots.
+class SourceViewerPanel::AudioSpectrumView final : public QWidget {
+public:
+    explicit AudioSpectrumView(QWidget* parent = nullptr) : QWidget(parent) {
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    }
+    void set_waveform(QImage image) {
+        waveform_ = std::move(image);
+        update();
+    }
+    void set_playhead_fraction(double fraction) {
+        fraction_ = std::clamp(fraction, 0.0, 1.0);
+        update();
+    }
+    void clear() {
+        waveform_ = QImage();
+        fraction_ = 0.0;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.fillRect(rect(), tokens().surface_low);
+        if (waveform_.isNull()) {
+            p.setPen(tokens().ink_faint);
+            p.drawText(rect(), Qt::AlignCenter, tr("Audio spectrum"));
+            return;
+        }
+        const QSize scaled = waveform_.size().scaled(size(), Qt::KeepAspectRatio);
+        const QRect target(
+            QPoint((width() - scaled.width()) / 2, (height() - scaled.height()) / 2),
+            scaled);
+        p.drawImage(target, waveform_);
+        QPen pen(tokens().accent, 1.5);
+        p.setPen(pen);
+        const int x = target.x() + static_cast<int>(std::lround(fraction_ * target.width()));
+        p.drawLine(x, target.top(), x, target.bottom());
+    }
+
+private:
+    QImage waveform_;
+    double fraction_ = 0.0;
+};
+
 SourceViewerPanel::SourceViewerPanel(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("sourceViewerPanel"));
 
     viewer_ = new ViewerGL(this);
     viewer_->set_mode(ViewerGL::ViewerMode::Source);
     viewer_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    audio_spectrum_ = new AudioSpectrumView(this);
 
     auto* empty = new QWidget(this);
     auto* empty_lay = new QVBoxLayout(empty);
@@ -60,6 +113,7 @@ SourceViewerPanel::SourceViewerPanel(QWidget* parent) : QWidget(parent) {
 
     auto* stacked = new QStackedLayout;
     stacked->addWidget(viewer_);
+    stacked->addWidget(audio_spectrum_);
     stacked->addWidget(empty);
     stacked->setCurrentWidget(empty);
     stacked_ = stacked;
@@ -127,16 +181,31 @@ void SourceViewerPanel::set_media_info(const QString& name, const bool is_video,
         QSignalBlocker b(mini_scrub_);
         mini_scrub_->setValue(0);
     }
-    stacked_->setCurrentWidget(viewer_);
+    // Audio-only media have no video track to present, so they preview as a
+    // spectrum page (ThumbnailService feeds the full-file image via
+    // set_audio_waveform) with a scrub playhead instead of an empty GL pane.
+    audio_mode_ = is_audio && !is_video;
+    if (audio_mode_) {
+        audio_spectrum_->set_playhead_fraction(0.0);
+        stacked_->setCurrentWidget(audio_spectrum_);
+    } else {
+        stacked_->setCurrentWidget(viewer_);
+    }
 }
 
 void SourceViewerPanel::set_media_position(const int64_t frame, const double fps) {
     update_time_label(frame, fps);
+    if (audio_mode_ && total_frames_ > 1)
+        audio_spectrum_->set_playhead_fraction(frame_to_fraction(frame, total_frames_));
     if (!slider_down_ && total_frames_ > 1) {
         QSignalBlocker b(mini_scrub_);
         const double frac = frame_to_fraction(frame, total_frames_);
         mini_scrub_->setValue(static_cast<int>(std::lround(frac * 10000.0)));
     }
+}
+
+void SourceViewerPanel::set_audio_waveform(const QImage& image) {
+    if (audio_spectrum_) audio_spectrum_->set_waveform(image);
 }
 
 // Format the position as HH:MM:SS:FF at the media's frame rate (the shared
@@ -156,6 +225,8 @@ void SourceViewerPanel::set_playing(const bool playing) {
 
 void SourceViewerPanel::clear_media() {
     total_frames_ = 0;
+    audio_mode_ = false;
+    audio_spectrum_->clear();
     name_label_->clear();
     update_time_label(0, 0.0);
     stacked_->setCurrentWidget(empty_state_);

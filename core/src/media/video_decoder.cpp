@@ -635,6 +635,24 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
     return true;
 }
 
+bool VideoDecoder::is_still_picture() const {
+    if (!fmt_ctx_ || video_stream_ < 0) return false;
+    if (fmt_ctx_->streams[video_stream_]->disposition & AV_DISPOSITION_ATTACHED_PIC)
+        return true;
+    // No disposition hint (ogg/flac-style art): a still is demuxed as a single
+    // video packet, while motion footage hands back one per frame. Count packets
+    // for the picked stream with a demux-only scan — no decoding, and it stops
+    // at the second video packet.
+    AVPacket* pkt = av_packet_alloc();
+    int64_t video_packets = 0;
+    while (av_read_frame(fmt_ctx_, pkt) >= 0) {
+        if (pkt->stream_index == video_stream_ && ++video_packets > 1) break;
+        av_packet_unref(pkt);
+    }
+    av_packet_free(&pkt);
+    return video_packets <= 1;
+}
+
 void VideoDecoder::close() {
     CANVAS_LOG("video_decoder: close '%s' hw=%d next_frame=%lld",
            path_.c_str(), (int)hw_avail_, (long long)next_frame_);

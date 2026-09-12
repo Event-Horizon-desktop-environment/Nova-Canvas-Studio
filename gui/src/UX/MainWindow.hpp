@@ -40,6 +40,13 @@ class MainWindow;
 
 namespace canvas::gui {
 
+// Namespace bit for ThumbnailService preview ids that belong to media-pool
+// tiles. The pool and the timeline share one id space, and the pool's ids are
+// media indices, so pool requests OR this bit in and the ready-routers mask it
+// out before touching a tile — a timeline filmstrip frame can no longer land on
+// a pool cell under the same numeric id.
+inline constexpr std::uint64_t kPoolThumbNs = 0x8000000000000000ULL;
+
 // Color-page chrome module (features/color/color_page.cpp) is a new-file
 // builder; the strip type is only pointer-held here, so a forward decl suffices.
 class MiniTimelineStrip;
