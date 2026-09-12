@@ -696,32 +696,40 @@ void TimelineWidget::draw_tracks() {
         // with a gold label (video identity lives in the label color, not the pill).
         const QString badge_text = tname.isEmpty() ? QStringLiteral("V%1").arg(i + 1) : tname;
         const double badge_top = full ? y + 8.0 : y + (th - 15.0) / 2.0;
-        TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 8, badge_top),
+        TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 28, badge_top),
                                   t.surface_highest, t.accent);
         auto* badge_pill = tb.pill;
         auto* badge = tb.text;
+
+        // Collapse chevron on the far-left edge (just right of the accent bar),
+        // left of the badge, mirroring Resolve's track-header collapse control.
+        // Points down on an expanded track (click to collapse), right on a
+        // collapsed one (click to expand).
+        const bool vcollapsed = sequence_->video_tracks[i].collapsed;
+        QGraphicsPixmapItem* collapse_icon =
+            add_icon(scene_, vcollapsed ? QStringLiteral("chevron_right")
+                                        : QStringLiteral("chevron_down"),
+                     left + 8, y + (th - 13.0) / 2.0, kIconColor);
 
         // Thin full-height accent bar on the far-left edge (per-track-type code).
         scene_.addRect(QRectF(left, y + 1, 4, th - 2), QPen(Qt::NoPen),
                        QBrush(t.accent))->setZValue(1);
 
-        // Reorder / lock / view-mode icon row, right-aligned in the header.
+        // Reorder / lock icon row, right-aligned in the header. Collapsed tracks
+        // drop the lock/reorder chrome and keep just the badge + chevron.
         QGraphicsPixmapItem* lock_icon = nullptr;
-        QGraphicsPixmapItem* view_mode_icon = nullptr;
         const bool vlocked = sequence_->video_tracks[i].locked;
-        if (full) {
+        if (!vcollapsed && full) {
             add_icon(scene_, QStringLiteral("reorder"), left + kTrackHeaderWidth - 44, y + 10, kIconColorDim, 13);
             lock_icon = add_icon(scene_, vlocked ? QStringLiteral("lock") : QStringLiteral("unlock"),
                                  left + kTrackHeaderWidth - 26, y + 9,
                                  vlocked ? kIconAccent : kIconColor);
-            view_mode_icon = add_icon(scene_, QStringLiteral("track_viewmode"), left + kTrackHeaderWidth - 44, y + 21, kIconColor);
-        } else {
+        } else if (!vcollapsed) {
             const double ic_y = y + (th - 13.0) / 2.0;
             add_icon(scene_, QStringLiteral("reorder"), left + kTrackHeaderWidth - 53, ic_y, kIconColorDim, 13);
             lock_icon = add_icon(scene_, vlocked ? QStringLiteral("lock") : QStringLiteral("unlock"),
                                  left + kTrackHeaderWidth - 37, ic_y,
                                  vlocked ? kIconAccent : kIconColor);
-            view_mode_icon = add_icon(scene_, QStringLiteral("track_viewmode"), left + kTrackHeaderWidth - 21, ic_y, kIconColor);
         }
 
         // "Video N" label. Hidden below 56px rows so it can never bleed out of the
@@ -734,7 +742,7 @@ void TimelineWidget::draw_tracks() {
             lf.setPointSizeF(9);
             lf.setBold(true);
             label->setFont(lf);
-            label->setPos(QPointF(left + 8, y + 28));
+            label->setPos(QPointF(left + 28, y + 28));
             label->setZValue(1);
         }
 
@@ -747,7 +755,7 @@ void TimelineWidget::draw_tracks() {
             QFont cf = count->font();
             cf.setPointSizeF(8);
             count->setFont(cf);
-            count->setPos(QPointF(left + 8, std::min(y + 44.0, y + th - 14.0)));
+            count->setPos(QPointF(left + 28, std::min(y + 44.0, y + th - 14.0)));
             count->setZValue(1);
         }
         TrackHeader header;
@@ -757,7 +765,7 @@ void TimelineWidget::draw_tracks() {
         header.badge_pill = badge_pill;
         header.count = count;
         header.lock_icon = lock_icon;
-        header.view_mode_icon = view_mode_icon;
+        header.collapse_icon = collapse_icon;
         video_track_headers_.push_back(header);
 
         const canvas::core::Track* track = &sequence_->video_tracks[i];
@@ -767,10 +775,12 @@ void TimelineWidget::draw_tracks() {
             const double cw = clip.duration() / frames_per_pixel_;
             const double cy = y + 2;
             const double ch = th - 6;
+            // View options pulled once per clip body so the render below reads
+            // the same snapshot for every toggled feature (names / durations /
+            // thumbnail mode / waveforms all live in one struct).
+            const TimelineViewOptions& vopts = eff_view_options();
             const double label_h = std::min(kClipLabelHeight, ch * 0.35);
             const double body_h = ch - label_h;
-
-            // Semi-rounded flat clip block; neutral cool outline when unselected,
             // blue (selection) applied on top by apply_selection_highlight.
             auto* rect = scene_.addRect(
                 QRectF(0, 0, cw, ch), QPen(Qt::NoPen), QBrush(Qt::transparent));
@@ -810,16 +820,21 @@ void TimelineWidget::draw_tracks() {
 
             // Semi-rounded label bar: flat muted blue strip with the clip filename,
             // hugging the bottom of the clip. Toned toward black a bit more than
-            // the shell (135 = ~0.74x) so the filename stays legible.
-            auto* label_bar = scene_.addPath(
-                rounded_rect_path(QRectF(0, body_h, cw, label_h), 6),
-                QPen(Qt::NoPen),
-                QBrush(cc_v.isValid() ? shell_v.darker(135) : t.clip_label));
-            label_bar->setPos(QPointF(cx, cy));
-            label_bar->setZValue(0);
+            // the shell (135 = ~0.74x) so the filename stays legible. Hidden when
+            // the view option suppresses clip names (the body then reads as a
+            // full-bleed filmstrip, Resolve-style).
+            QGraphicsPathItem* label_bar = nullptr;
+            if (vopts.show_clip_names) {
+                label_bar = scene_.addPath(
+                    rounded_rect_path(QRectF(0, body_h, cw, label_h), 6),
+                    QPen(Qt::NoPen),
+                    QBrush(cc_v.isValid() ? shell_v.darker(135) : t.clip_label));
+                label_bar->setPos(QPointF(cx, cy));
+                label_bar->setZValue(0);
+            }
 
             QGraphicsTextItem* text = nullptr;
-            if (cw > 60.0) {
+            if (vopts.show_clip_names && cw > 60.0) {
                 text = scene_.addText(QString::fromStdString(clip.name));
                 text->setDefaultTextColor(t.ink);
                 QFont tf = text->font();
@@ -828,6 +843,20 @@ void TimelineWidget::draw_tracks() {
                 text->setPos(QPointF(cx + 4, cy + body_h + 1));
                 text->setZValue(2);
                 text->setAcceptedMouseButtons(Qt::NoButton);
+            }
+
+            // "Display Clip Durations": the clip's timeline duration as a small
+            // timecode chip pinned to the body's top-right corner.
+            QGraphicsTextItem* duration = nullptr;
+            if (vopts.show_clip_durations && cw > 84.0) {
+                duration = scene_.addText(timecode(clip.duration(), fps_));
+                duration->setDefaultTextColor(t.ink_muted);
+                QFont df = duration->font();
+                df.setPointSizeF(7.0);
+                duration->setFont(df);
+                duration->setPos(QPointF(cx + cw - 6 - duration->boundingRect().width(), cy + 3));
+                duration->setZValue(2);
+                duration->setAcceptedMouseButtons(Qt::NoButton);
             }
 
             ClipItem item;
@@ -844,7 +873,7 @@ void TimelineWidget::draw_tracks() {
             // content (filmstrip, outline) can never overlap its neighbour.
             auto* clip_group = new ClipClipGroup(QRectF(cx, cy, cw, ch));
             scene_.addItem(clip_group);
-            for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{shadow, rect, shell, outline, label_bar, text})
+            for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{shadow, rect, shell, outline, label_bar, text, duration})
                 if (child) child->setParentItem(clip_group);
 
             // OUT-transition badge: a small SVG mark near the clip's trailing edge for
@@ -867,9 +896,15 @@ void TimelineWidget::draw_tracks() {
             // to edge. The pitch is 42px/cell at most: long clips at extreme zoom
             // would otherwise queue hundreds of decodes per zoom step, so cap the
             // cell count (cells then just widen, the strip stays fully covered).
-            const int num_cells =
-                std::min(std::max(1, static_cast<int>(cw / kFilmstripCellWidth)), 320);
-            const double cell_w = cw / num_cells;
+            // The "Thumbnail View" submenu drives how many cells render: Off
+            // shows none (the tinted shell fills the body), SingleFrame asks for
+            // exactly one full-width frame, Filmstrip uses the zoom pitch.
+            int num_cells = 0;
+            if (vopts.thumbnails == ThumbnailMode::Filmstrip)
+                num_cells = std::min(std::max(1, static_cast<int>(cw / kFilmstripCellWidth)), 320);
+            else if (vopts.thumbnails == ThumbnailMode::SingleFrame)
+                num_cells = 1;
+            const double cell_w = num_cells > 0 ? cw / num_cells : 0.0;
             for (int c = 0; c < num_cells; ++c) {
                 auto* cell = scene_.addPixmap(QPixmap());
                 cell->setPos(cx + c * cell_w, cy + 2);
@@ -900,11 +935,20 @@ void TimelineWidget::draw_tracks() {
         const double badge_top = full ? y + 8.0 : y + (th - 15.0) / 2.0;
         // Quiet raised pill; the label carries the role identity (cyan=dialogue,
         // amber=music) so the header reads as one system with the accent bar.
-        TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 8, badge_top),
+        TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 28, badge_top),
                                   t.surface_highest,
                                   is_music_role ? t.accent_text : t.playhead);
         auto* badge_pill = tb.pill;
         auto* badge = tb.text;
+
+        // Collapse chevron on the far-left edge, mirroring the video rows (and
+        // Resolve's own header): down = expanded, right = collapsed.
+        const auto& hdr_track = sequence_->audio_tracks[i];
+        const bool acollapsed = hdr_track.collapsed;
+        QGraphicsPixmapItem* collapse_icon =
+            add_icon(scene_, acollapsed ? QStringLiteral("chevron_right")
+                                        : QStringLiteral("chevron_down"),
+                     left + 8, y + (th - 13.0) / 2.0, kIconColor);
 
         // Thin full-height accent bar on the far-left edge. Music-role tracks
         // (A3/A4) get the warm orange mark; dialogue tracks get the audio cyan.
@@ -914,11 +958,10 @@ void TimelineWidget::draw_tracks() {
         QGraphicsPixmapItem* lock_icon = nullptr;
         QGraphicsPixmapItem* solo_icon = nullptr;
         QGraphicsPixmapItem* mute_icon = nullptr;
-        const auto& hdr_track = sequence_->audio_tracks[i];
         const bool alocked = hdr_track.locked;
         const bool asolo = hdr_track.solo;
         const bool amuted = hdr_track.muted;
-        if (full) {
+        if (full && !acollapsed) {
             lock_icon = add_icon(scene_, alocked ? QStringLiteral("lock") : QStringLiteral("unlock"),
                                  left + kTrackHeaderWidth - 26, y + 9,
                                  alocked ? kIconAccent : kIconColor);
@@ -927,7 +970,7 @@ void TimelineWidget::draw_tracks() {
             mute_icon = add_icon(scene_, amuted ? QStringLiteral("mute") : QStringLiteral("volume"),
                                  left + kTrackHeaderWidth - 26, y + 20,
                                  amuted ? QColor(0xEF, 0x44, 0x44) : kIconColor);
-        } else {
+        } else if (!acollapsed) {
             const double ic_y = y + (th - 13.0) / 2.0;
             lock_icon = add_icon(scene_, alocked ? QStringLiteral("lock") : QStringLiteral("unlock"),
                                  left + kTrackHeaderWidth - 53, ic_y,
@@ -948,7 +991,7 @@ void TimelineWidget::draw_tracks() {
             lf.setPointSizeF(9);
             lf.setBold(true);
             label->setFont(lf);
-            label->setPos(QPointF(left + 8, y + 28));
+            label->setPos(QPointF(left + 28, y + 28));
             label->setZValue(1);
         }
 
@@ -960,7 +1003,7 @@ void TimelineWidget::draw_tracks() {
             QFont cf = count->font();
             cf.setPointSizeF(8);
             count->setFont(cf);
-            count->setPos(QPointF(left + 8, std::min(y + 44.0, y + th - 14.0)));
+            count->setPos(QPointF(left + 28, std::min(y + 44.0, y + th - 14.0)));
             count->setZValue(1);
         }
 
@@ -984,6 +1027,7 @@ void TimelineWidget::draw_tracks() {
         header.lock_icon = lock_icon;
         header.solo_icon = solo_icon;
         header.mute_icon = mute_icon;
+        header.collapse_icon = collapse_icon;
         header.channel_badge = channel_badge;
         audio_track_headers_.push_back(header);
 
@@ -996,9 +1040,10 @@ void TimelineWidget::draw_tracks() {
             const double ch = th - 6;
             const double label_h = std::min(kClipLabelHeight, ch * 0.35);
             const double body_h = ch - label_h;
+            const TimelineViewOptions& vopts = eff_view_options();
 
-            // Semi-rounded flat clip block; neutral green-cast outline when unselected,
-            // amber (selection) applied on top by apply_selection_highlight; sage fill.
+            // Semi-rounded flat clip block; neutral green-cast outline when
+            // unselected, amber (selection) applied on top; sage fill.
             auto* rect = scene_.addRect(
                 QRectF(0, 0, cw, ch), QPen(Qt::NoPen), QBrush(Qt::transparent));
             rect->setPos(QPointF(cx, cy));
@@ -1029,7 +1074,7 @@ void TimelineWidget::draw_tracks() {
             outline->setAcceptedMouseButtons(Qt::NoButton);
 
             QGraphicsTextItem* text = nullptr;
-            if (cw > 60.0) {
+            if (vopts.show_clip_names && cw > 60.0) {
                 text = scene_.addText(QString::fromStdString(clip.name));
                 text->setDefaultTextColor(t.ink);
                 QFont tf = text->font();
@@ -1039,16 +1084,33 @@ void TimelineWidget::draw_tracks() {
                 text->setZValue(2);
                 text->setAcceptedMouseButtons(Qt::NoButton);
             }
-            auto* wf = scene_.addPixmap(QPixmap());
+            // Clip-duration timecode chip (top-right), same law as the video side.
+            QGraphicsTextItem* duration = nullptr;
+            if (vopts.show_clip_durations && cw > 84.0) {
+                duration = scene_.addText(timecode(clip.duration(), fps_));
+                duration->setDefaultTextColor(t.ink_muted);
+                QFont df = duration->font();
+                df.setPointSizeF(7.0);
+                duration->setFont(df);
+                duration->setPos(QPointF(cx + cw - 6 - duration->boundingRect().width(), cy + 3));
+                duration->setZValue(2);
+                duration->setAcceptedMouseButtons(Qt::NoButton);
+            }
             // The wave pixmap must sit EXACTLY on the clip body's left edge (cx).
             // frame_at_x() has no x-inset: scene_x = kSceneMargin + kTrackHeaderWidth
             // + frame/fpp. Any horizontal inset here shifts the drawn spectrum
             // relative to the razor grid -> blade aims land N frames off (the
             // 2026-09-08 wrong-cut bug). The vertical +2 inset is fine (y has no
-            // frame meaning).
-            wf->setPos(cx, cy + 2);
-            wf->setZValue(1);
-            wf->setAcceptedMouseButtons(Qt::NoButton);
+            // frame meaning). When "Display Audio Waveforms" is off the pixmap is
+            // never created and no cell is registered, so no waveform is served
+            // either (request_clip_thumbnails skips clips with no cells).
+            QGraphicsPixmapItem* wf = nullptr;
+            if (vopts.show_waveforms) {
+                wf = scene_.addPixmap(QPixmap());
+                wf->setPos(cx, cy + 2);
+                wf->setZValue(1);
+                wf->setAcceptedMouseButtons(Qt::NoButton);
+            }
 
             // Persistent audio volume line (Phase 5): a luminous hairline at the
             // clip's current gain. It doubles as a drag handle (see the volume
@@ -1083,7 +1145,7 @@ void TimelineWidget::draw_tracks() {
             item.outline = outline;
             item.label_bar = nullptr;
             item.text = text;
-            item.cells.push_back(ClipCell{wf, 0});
+            if (wf) item.cells.push_back(ClipCell{wf, 0});
             item.clip = &clip;
             item.track_index = v_count + track_index;
             item.track_kind = canvas::core::Track::Kind::Audio;
@@ -1094,7 +1156,7 @@ void TimelineWidget::draw_tracks() {
             // Clip every child to the clip's own rect (see video branch).
             auto* clip_group = new ClipClipGroup(QRectF(cx, cy, cw, ch));
             scene_.addItem(clip_group);
-            for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{shadow, rect, shell, outline, text, vol})
+            for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{shadow, rect, shell, outline, text, duration, vol})
                 if (child) child->setParentItem(clip_group);
             for (const auto& cell : item.cells)
                 if (cell.item) cell.item->setParentItem(clip_group);

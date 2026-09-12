@@ -21,6 +21,7 @@
 #include "features/source_preview/source_preview_controller.hpp"
 #include "features/source_preview/source_viewer_panel.hpp"
 #include "features/thumbnails/thumbnail_service.hpp"
+#include "features/timeline/timeline_view_options.hpp"
 #include "Widgets/timeline_widget.hpp"
 #include "Widgets/viewer_gl.hpp"
 
@@ -141,6 +142,16 @@ public:
     void open_source_preview(const canvas::core::MediaEntry& media);
     void clear_source_preview();
 
+    // Timeline view-options (transport bar > view-options dropdown, Resolve
+    // style): one lifecycle-owned struct, painted into the timeline + viewer
+    // whenever the menu's apply path runs.
+    [[nodiscard]] TimelineViewOptions& view_options() { return view_options_; }
+
+    // Raw accessors for the split shell builders and view-options menu (the
+    // widgets are created late by build_center_workspace, so null before then).
+    [[nodiscard]] TimelineWidget* timeline() const { return timeline_; }
+    [[nodiscard]] ViewerGL* viewer() const { return viewer_; }
+
 protected:
     void keyPressEvent(QKeyEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
@@ -238,6 +249,7 @@ private:
     ViewerGL* viewer_ = nullptr;
     source_preview::SourceViewerPanel* source_panel_ = nullptr;
     TimelineWidget* timeline_ = nullptr;
+    TimelineViewOptions view_options_;  // persisted view state; see view_options_menu.cpp
     QSlider* scrub_ = nullptr;
     QToolButton* play_button_ = nullptr;
     QLabel* time_label_ = nullptr;
@@ -299,6 +311,8 @@ private:
     friend void update_inspector_file(MainWindow& main_window);
     friend void apply_inspector_file(MainWindow& main_window);
     friend void build_center_workspace(MainWindow& main_window);
+    friend void apply_view_options(MainWindow& main_window);
+    friend void attach_timeline_view_options_button(MainWindow& main_window, QToolButton* button);
     friend void build_color_page(MainWindow& main_window);
     friend void enter_color_page(MainWindow& main_window);
     friend void leave_color_page(MainWindow& main_window);

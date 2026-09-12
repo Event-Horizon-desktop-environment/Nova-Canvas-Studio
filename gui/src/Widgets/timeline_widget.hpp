@@ -27,6 +27,7 @@
 #include "Widgets/timeline_selection.hpp"
 #include "Widgets/timeline_drag.hpp"
 #include "Widgets/transition_handle_editor.hpp"
+#include "features/timeline/timeline_view_options.hpp"
 
 class QGraphicsRectItem;
 class QGraphicsLineItem;
@@ -106,6 +107,11 @@ public:
     static constexpr double kDefaultTrackHeight = 60.0;
     static constexpr double kMinTrackHeight = 44.0;
     static constexpr double kMaxTrackHeight = 200.0;
+    // A collapsed track renders at 55% of its stored height (a 45% reduction) —
+    // still fitting thumbnails/waveforms into a compact strip. Collapsed is a
+    // real model flag, not a per-row height, so undo/JSON round-trips and the
+    // stored per-track heights survive collapse.
+    static constexpr double kCollapsedHeightFactor = 0.55;
     // Empty strips above the top video row and below the bottom audio row; the
     // stack-edge resize dividers edit the two paddings, which always leave room
     // to start a drag-select marquee.
@@ -185,6 +191,16 @@ public:
     [[nodiscard]] double zoom_percent() const { return kDefaultFramesPerPixel / frames_per_pixel_ * 100.0; }
     void set_thumbnail_service(ThumbnailService* service);
     void set_media_paths(std::unordered_map<canvas::core::MediaId, MediaMeta> paths);
+    // Timeline view-options (transport bar > view-options dropdown, Resolve
+    // style). MainWindow owns the struct and hands the widget a borrowed
+    // pointer; the pointer must outlive the widget. notify_view_options_changed
+    // rebuilds the scene (and re-serves thumbnails/waveforms) under the new
+    // flags.
+    void set_view_options(const TimelineViewOptions* options);
+    void notify_view_options_changed();
+    // Resolve's Track Height sliders: set every video/audio row to one height.
+    void set_all_video_heights(double height);
+    void set_all_audio_heights(double height);
     // Highlight a set of selected clip ids (paints their shells blue).
     void set_selection(const std::vector<canvas::core::ClipId>& ids);
     void clear_selection();
@@ -287,6 +303,9 @@ signals:
     void track_mute_toggled(canvas::core::Track::Kind kind, int track_index, bool on);
     void track_solo_toggled(canvas::core::Track::Kind kind, int track_index, bool on);
     void track_lock_toggled(canvas::core::Track::Kind kind, int track_index, bool on);
+    // Emitted when the user clicks a header's collapse chevron. `on` is the
+    // DESIRED state (true = collapse), mirroring the M/S/L toggle convention.
+    void track_collapse_toggled(canvas::core::Track::Kind kind, int track_index, bool on);
     // Emitted from the clip context menu's "Add Transition" submenu.
     void transition_requested(const canvas::core::Clip* clip, canvas::core::TransitionType type,
                               int64_t duration);
@@ -595,6 +614,9 @@ private:
     // vertical scale (about the box's vertical center). Keeps the spectrum in
     // sync with the volume after a commit/rebuild re-rendered the waveform.
     void apply_waveform_volume_scale(ClipItem& item, float db);
+    // The effective view-options struct: the borrowed one if set, else a shared
+    // default (safe for pre-UI drawing and tests).
+    [[nodiscard]] const TimelineViewOptions& eff_view_options() const;
     // Appends each given id's linked mate so selecting/deleting one half of a
     // linked A/V pair selects both halves.
     std::vector<canvas::core::ClipId> expand_with_mates(const std::vector<canvas::core::ClipId>& ids);
@@ -627,7 +649,7 @@ private:
         QGraphicsPixmapItem* lock_icon = nullptr;
         QGraphicsPixmapItem* solo_icon = nullptr;
         QGraphicsPixmapItem* mute_icon = nullptr;
-        QGraphicsPixmapItem* view_mode_icon = nullptr;
+        QGraphicsPixmapItem* collapse_icon = nullptr;
         QGraphicsTextItem* channel_badge = nullptr;
     };
     std::vector<TrackHeader> video_track_headers_;
@@ -682,6 +704,9 @@ private:
     // Per-track row heights (flat: video 0..v-1, then audio v..total-1).
     std::vector<double> video_track_heights_;
     std::vector<double> audio_track_heights_;
+    // Borrowed timeline view-options (MainWindow-owned). Null until the
+    // transport bar hands it over; drawing falls back to the defaults.
+    const TimelineViewOptions* view_options_ = nullptr;
     // Live header-edge resize drag state. `resize_edge_` is a boundary index in
     // screen order; interior edges reallocate the two neighbours (above -=
     // delta, below += delta, both clamped), stack edges grow/shrink the paddings.

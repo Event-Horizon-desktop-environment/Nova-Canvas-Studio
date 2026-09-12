@@ -169,7 +169,8 @@ json track_to_json(const Track& t) {
     json clips = json::array();
     for (const auto& c : t.clips) clips.push_back(clip_to_json(c));
     return json{{"name", t.name}, {"locked", t.locked}, {"muted", t.muted},
-                {"solo", t.solo}, {"gain_db", t.gain_db}, {"clips", clips}};
+                {"solo", t.solo}, {"collapsed", t.collapsed}, {"gain_db", t.gain_db},
+                {"clips", clips}};
 }
 
 Track track_from_json(const json& j, const Track::Kind kind) {
@@ -179,6 +180,7 @@ Track track_from_json(const json& j, const Track::Kind kind) {
     if (j.contains("locked")) j.at("locked").get_to(t.locked);
     if (j.contains("muted")) j.at("muted").get_to(t.muted);
     if (j.contains("solo")) j.at("solo").get_to(t.solo);
+    if (j.contains("collapsed")) j.at("collapsed").get_to(t.collapsed);
     if (j.contains("gain_db")) j.at("gain_db").get_to(t.gain_db);
     for (const auto& cj : j.at("clips")) t.clips.push_back(clip_from_json(cj));
     std::sort(t.clips.begin(), t.clips.end(), [](const Clip& a, const Clip& b) { return a.tl_in < b.tl_in; });

@@ -1204,6 +1204,10 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
                     emit track_lock_toggled(kind, static_cast<int>(i), !tracks[i].locked);
                     return true;
                 }
+                if (h.collapse_icon && h.collapse_icon->sceneBoundingRect().contains(scene_pos)) {
+                    emit track_collapse_toggled(kind, static_cast<int>(i), !tracks[i].collapsed);
+                    return true;
+                }
             }
             return false;
         };
@@ -1670,8 +1674,24 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
             // fixed band (flat_of_screen_row -1) and is skipped.
             const int up_flat = flat_of_screen_row(resize_edge_ - 1, v_count);
             const int dn_flat = flat_of_screen_row(resize_edge_, v_count);
-            if (up_flat >= 0) set_track_height(up_flat, v_count, resize_above_start_ + dy);
-            if (dn_flat >= 0) set_track_height(dn_flat, v_count, resize_below_start_ - dy);
+            // Resizing a divider that borders a COLLAPSED track is a no-op on
+            // that row: the collapsed strip renders at kCollapsedHeightFactor of
+            // its stored height, so writing a stored height would silently skew
+            // the row's size when it expands again. The other row on the edge
+            // still resizes.
+            const auto flat_collapsed = [&](int flat) {
+                if (!sequence_ || flat < 0) return false;
+                if (flat < v_count)
+                    return static_cast<std::size_t>(flat) < sequence_->video_tracks.size() &&
+                           sequence_->video_tracks[static_cast<std::size_t>(flat)].collapsed;
+                const int ai = flat - v_count;
+                return static_cast<std::size_t>(ai) < sequence_->audio_tracks.size() &&
+                       sequence_->audio_tracks[static_cast<std::size_t>(ai)].collapsed;
+            };
+            if (up_flat >= 0 && !flat_collapsed(up_flat))
+                set_track_height(up_flat, v_count, resize_above_start_ + dy);
+            if (dn_flat >= 0 && !flat_collapsed(dn_flat))
+                set_track_height(dn_flat, v_count, resize_below_start_ - dy);
         }
         rebuild_timeline();
         // Per-move cost of a track-row drag. Each move teardowns the whole

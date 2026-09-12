@@ -56,6 +56,8 @@ qt_add_executable(canvas
     src/features/project/ProjectActions.cpp
     src/features/timeline/TimelineActions.cpp
     src/features/timeline/audio_targets.cpp
+    src/features/timeline/timeline_view_options.cpp
+    src/features/timeline/view_options_menu.cpp
 
     src/features/playback/sequence_controller.cpp
     src/features/playback/audio_pipeline.cpp

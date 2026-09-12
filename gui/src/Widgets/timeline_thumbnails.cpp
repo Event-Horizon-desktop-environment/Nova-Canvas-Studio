@@ -2,6 +2,8 @@
 
 #include "Logging.hpp"
 
+#include "UX/theme.hpp"
+
 #include "features/thumbnails/thumbnail_service.hpp"
 
 #include <QImage>
@@ -9,6 +11,8 @@
 #include <QRectF>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsRectItem>
+#include <QPainter>
+#include <QPen>
 
 #include <algorithm>
 #include <cmath>
@@ -157,8 +161,41 @@ void TimelineWidget::on_waveform_ready(uint64_t id, const QImage& image) {
         // frame grid — the blade wrong-cut bug. Height keeps its existing inset.
         const int cw = std::max(1, static_cast<int>(r.width()));
         const int ch = std::max(1, static_cast<int>(r.height() - kClipLabelHeight - 4.0));
-        item.cells[0].item->setPixmap(QPixmap::fromImage(image).scaled(
-            cw, ch, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+        // Waveform view flags applied at serve time (before the volume scale) so
+        // the spectrum lands pre-shaped: rectification keeps one side, Full/Scaled
+        // height laws shrink the body, and the border is a hairline box. The
+        // generator's images are bipolar (peaks mirrored about the vertical
+        // center), so "Non-Rectified" (the default) passes them through whole;
+        // "Rectified" crops the upper half and stretches it to the full box.
+        const TimelineViewOptions& vopts = eff_view_options();
+        QImage shaped = image;
+        if (!vopts.non_rectified_waveforms && shaped.height() > 2) {
+            shaped = shaped.copy(0, shaped.height() / 2, shaped.width(),
+                                 shaped.height() - shaped.height() / 2);
+        }
+        int th = ch;
+        if (!vopts.full_waveforms) th = std::max(1, static_cast<int>(std::lround(ch * 0.62)));
+        if (!vopts.scaled_waveforms) th = std::max(1, static_cast<int>(std::lround(th * 0.60)));
+        QPixmap pm = QPixmap::fromImage(shaped).scaled(
+            cw, th, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        if (vopts.waveform_borders && th > 2) {
+            QPixmap framed(cw, th);
+            framed.fill(Qt::transparent);
+            QPainter p(&framed);
+            p.drawPixmap(0, 0, pm);
+            p.setPen(QPen(tokens().ink_muted, 1.0));
+            p.setBrush(Qt::NoBrush);
+            p.drawRect(QRectF(0.5, 0.5, cw - 1.0, th - 1.0));
+            p.end();
+            pm = framed;
+        }
+        item.cells[0].item->setPixmap(pm);
+        // A Short/Unscaled body centers itself in the clip's waveform box (the
+        // pixmap top stays at volume_y0, matching the volume-line's own box).
+        if (th < ch) {
+            const double yoff = item.volume_y0 + static_cast<double>(ch - th) * 0.5;
+            item.cells[0].item->setPos(item.cells[0].item->pos().x(), yoff);
+        }
         // Always-on placement audit: the wave pixmap must fill the clip body EXACTLY
         // (no horizontal inset, no width-4 shrink — see timeline_view for the
         // frame_at_x law). Log the cell scene position + fpp so the drawn

@@ -1,6 +1,7 @@
 #include "canvas/core/export/exporter.hpp"
 
 #include "canvas/core/export/renderer.hpp"
+#include "canvas/core/export/vaapi_encode.hpp"
 #include "canvas/core/gpu/colorspace.hpp"
 #include "canvas/core/gpu/cuda_convert.hpp"
 #include "canvas/core/util/log.hpp"
@@ -378,7 +379,17 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
 
     // crf drives quality modes (>= 0; "Best" is 0). Keep crf and bit_rate
     // mutually exclusive: constant-quality encoders reject both set together.
-    if (s.crf >= 0) av_opt_set_int(vctx->priv_data, "crf", s.crf, 0);
+    // VAAPI encoders have no `crf` option — that push silently no-ops and the
+    // export runs at the driver's default rate control (docs/vaapi.md §8.1).
+    // Map the crf/rc intent onto VAAPI's rc_mode/global_quality knobs instead.
+    if (s.crf >= 0) {
+        if (is_vaapi_codec(s.video_codec)) {
+            apply_vaapi_rate_control(vctx, vaapi_rate_control_from(
+                s.video_codec, s.crf, s.vid_rc_mode, s.video_bitrate_kbps));
+        } else {
+            av_opt_set_int(vctx->priv_data, "crf", s.crf, 0);
+        }
+    }
     // Bitrate-driven mode: only when a rate is given AND crf is inactive.
     // Quality modes carry video_bitrate_kbps==0, so this is a no-op for them.
     const bool is_nvenc = s.video_codec.find("nvenc") != std::string::npos;
@@ -400,6 +411,9 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             av_opt_set_int(vctx, "bufsize", bufsize_bps, AV_OPT_SEARCH_CHILDREN);
             if (is_nvenc)
                 av_opt_set(vctx->priv_data, "rc", cbr ? "cbr" : "vbr", 0);
+            else if (is_vaapi_codec(s.video_codec))
+                // VAAPI needs rc_mode too, else VBR/CBR requests are ignored.
+                av_opt_set(vctx->priv_data, "rc_mode", cbr ? "CBR" : "VBR", 0);
         }
     }
     // NVENC constant-QP: set rc + cq so quality is honored instead of the

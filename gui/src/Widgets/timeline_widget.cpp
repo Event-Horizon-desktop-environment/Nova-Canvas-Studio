@@ -163,15 +163,27 @@ double TimelineWidget::tracks_origin_y() const {
 }
 
 double TimelineWidget::track_height(int track_index, int v_count) const {
+    // A collapsed track renders at 55% of its stored height (thumbnails +
+    // waveforms still fit), scaled by kCollapsedHeightFactor. Consult the model
+    // flag so every geometry caller (track_top, content height, scroll math)
+    // stays consistent without duplicating the check.
+    double stored = kDefaultTrackHeight;
     if (track_index < v_count) {
-        return (track_index >= 0 && track_index < static_cast<int>(video_track_heights_.size()))
-                   ? video_track_heights_[track_index]
-                   : kDefaultTrackHeight;
+        if (track_index >= 0 && track_index < static_cast<int>(video_track_heights_.size()))
+            stored = video_track_heights_[track_index];
+        if (sequence_ && track_index >= 0 &&
+            track_index < static_cast<int>(sequence_->video_tracks.size()) &&
+            sequence_->video_tracks[static_cast<std::size_t>(track_index)].collapsed)
+            return stored * kCollapsedHeightFactor;
+    } else {
+        const int ai = track_index - v_count;
+        if (ai >= 0 && ai < static_cast<int>(audio_track_heights_.size()))
+            stored = audio_track_heights_[ai];
+        if (sequence_ && ai >= 0 && ai < static_cast<int>(sequence_->audio_tracks.size()) &&
+            sequence_->audio_tracks[static_cast<std::size_t>(ai)].collapsed)
+            return stored * kCollapsedHeightFactor;
     }
-    const int ai = track_index - v_count;
-    return (ai >= 0 && ai < static_cast<int>(audio_track_heights_.size()))
-               ? audio_track_heights_[ai]
-               : kDefaultTrackHeight;
+    return stored;
 }
 
 double TimelineWidget::track_top(int track_index, int v_count) const {
@@ -302,6 +314,35 @@ void TimelineWidget::set_track_height(int flat_track, int v_count, const double 
 
 void TimelineWidget::set_media_paths(std::unordered_map<canvas::core::MediaId, MediaMeta> paths) {
     media_paths_ = std::move(paths);
+}
+
+void TimelineWidget::set_view_options(const TimelineViewOptions* options) {
+    view_options_ = options;
+}
+
+const TimelineViewOptions& TimelineWidget::eff_view_options() const {
+    static const TimelineViewOptions kDefaultOptions;
+    return view_options_ ? *view_options_ : kDefaultOptions;
+}
+
+void TimelineWidget::notify_view_options_changed() {
+    if (!sequence_) return;
+    // A full rebuild re-renders clip bodies (names/durations/thumbnail-mode
+    // cells/waveforms) and re-issues thumbnail + waveform requests inside
+    // rebuild_timeline(), so a toggle always re-serves under the new flags.
+    rebuild_timeline();
+}
+
+void TimelineWidget::set_all_video_heights(double height) {
+    const double clamped = std::clamp(height, kMinTrackHeight, kMaxTrackHeight);
+    std::fill(video_track_heights_.begin(), video_track_heights_.end(), clamped);
+    rebuild_timeline();
+}
+
+void TimelineWidget::set_all_audio_heights(double height) {
+    const double clamped = std::clamp(height, kMinTrackHeight, kMaxTrackHeight);
+    std::fill(audio_track_heights_.begin(), audio_track_heights_.end(), clamped);
+    rebuild_timeline();
 }
 
 void TimelineWidget::wheelEvent(QWheelEvent* event) {

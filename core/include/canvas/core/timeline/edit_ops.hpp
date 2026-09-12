@@ -15,6 +15,7 @@ struct TrackSnapshot {
     bool locked = false;
     bool muted = false;
     bool solo = false;
+    bool collapsed = false;
     float gain_db = 0.0f;
     std::vector<Clip> clips;
 };
@@ -239,6 +240,17 @@ std::unique_ptr<ICommand> set_track_locked(Sequence& seq, Track::Kind kind,
 // the track index is out of range.
 std::unique_ptr<ICommand> set_track_gain(Sequence& seq, Track::Kind kind,
                                          std::size_t track_index, float gain_db);
+
+// Collapse/expand a track in the timeline UI (a display-only flag on the model
+// so undo + project round-trip are free). Returns nullptr if the track is out
+// of range; a null-op command if the flag already has the requested value.
+std::unique_ptr<ICommand> set_track_collapsed(Sequence& seq, Track::Kind kind,
+                                              std::size_t track_index, bool collapsed);
+
+// Collapse/expand EVERY video and audio track in one undoable command (the
+// one-click "turn the timeline into strips" action). Returns a single command
+// covering all tracks, so one Undo restores the per-track states.
+std::unique_ptr<ICommand> set_all_tracks_collapsed(Sequence& seq, bool collapsed);
 
 class UndoStack {
 public:

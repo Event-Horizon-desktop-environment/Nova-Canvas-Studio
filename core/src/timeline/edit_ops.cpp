@@ -62,7 +62,7 @@ std::vector<Clip> clipped_range(const std::vector<Clip>& clips, const int64_t in
 TrackSnapshot snapshot(const Sequence& seq, const Track::Kind kind, const std::size_t index) {
     const Track* t = seq.track(kind, index);
     assert(t);
-    return {kind, index, t->locked, t->muted, t->solo, t->gain_db, t->clips};
+    return {kind, index, t->locked, t->muted, t->solo, t->collapsed, t->gain_db, t->clips};
 }
 
 void shift_from(std::vector<Clip>& clips, const int64_t from, const int64_t delta) {
@@ -394,6 +394,7 @@ void EditCommand::apply(Sequence& seq, const std::vector<TrackSnapshot>& state) 
         t->locked = snap.locked;
         t->muted = snap.muted;
         t->solo = snap.solo;
+        t->collapsed = snap.collapsed;
         t->gain_db = snap.gain_db;
         t->clips = snap.clips;
     }
@@ -1421,6 +1422,42 @@ std::unique_ptr<ICommand> set_track_locked(Sequence& seq, const Track::Kind kind
     std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
     return std::make_unique<EditCommand>(locked ? "lock track" : "unlock track",
                                          std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> set_track_collapsed(Sequence& seq, const Track::Kind kind,
+                                              const std::size_t track_index, const bool collapsed) {
+    Track* t = seq.track(kind, track_index);
+    if (!t) return nullptr;
+    std::vector<TrackRef> involved{{kind, track_index}};
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+    if (t->collapsed == collapsed) {
+        std::vector<TrackSnapshot> same = before;
+        return std::make_unique<EditCommand>(collapsed ? "collapse track" : "expand track",
+                                             std::move(before), std::move(same));
+    }
+    t->collapsed = collapsed;
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    return std::make_unique<EditCommand>(collapsed ? "collapse track" : "expand track",
+                                         std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> set_all_tracks_collapsed(Sequence& seq, const bool collapsed) {
+    std::vector<TrackRef> involved;
+    for (std::size_t k = 0; k < 2; ++k) {
+        const Track::Kind kind = k == 0 ? Track::Kind::Video : Track::Kind::Audio;
+        for (std::size_t i = 0; i < seq.track_count(kind); ++i)
+            involved.push_back({kind, i});
+    }
+    if (involved.empty()) return nullptr;
+    std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
+    for (const auto& ref : involved) {
+        Track* t = seq.track(ref.kind, ref.index);
+        assert(t);
+        t->collapsed = collapsed;
+    }
+    std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
+    const char* name = collapsed ? "collapse all tracks" : "expand all tracks";
+    return std::make_unique<EditCommand>(name, std::move(before), std::move(after));
 }
 
 std::unique_ptr<ICommand> set_track_gain(Sequence& seq, const Track::Kind kind,

@@ -76,5 +76,6 @@
         <file alias="grid.svg">resources/icons/grid.svg</file>
         <file alias="hdr.svg">resources/icons/hdr.svg</file>
         <file alias="proxy.svg">resources/icons/proxy.svg</file>
+        <file alias="TimeLine-View-option.svg">resources/icons/TimeLine-View-option.svg</file>
     </qresource>
 </RCC>

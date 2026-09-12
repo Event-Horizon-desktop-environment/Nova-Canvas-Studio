@@ -741,6 +741,11 @@ void MainWindow::connect_timeline() {
                 toggle_track_flag(kind, idx, on,
                                   canvas::core::set_track_locked);
             });
+    connect(timeline_, &TimelineWidget::track_collapse_toggled, this,
+            [toggle_track_flag, this](canvas::core::Track::Kind kind, int idx, bool on) {
+                toggle_track_flag(kind, idx, on,
+                                  canvas::core::set_track_collapsed);
+            });
 }
 
 bool MainWindow::find_selected_clip(canvas::core::Track::Kind& out_kind, std::size_t& out_index,

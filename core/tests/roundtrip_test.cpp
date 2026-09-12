@@ -1112,6 +1112,65 @@ int main() {
         check(p.sequence.audio_tracks[0].locked, "audio-mix: lock applied");
         check(undo.undo(p.sequence), "audio-mix: undo lock");
         check(!p.sequence.audio_tracks[0].locked, "audio-mix: undo clears lock");
+
+        const auto& atrk = p.sequence.audio_tracks[0];
+        const auto& vtrk = p.sequence.video_tracks[0];
+        check(!atrk.collapsed && !vtrk.collapsed,
+              "audio-mix: tracks start expanded");
+        cmd = set_track_collapsed(p.sequence, Track::Kind::Audio, 0, true);
+        check(cmd != nullptr, "collapse: set_track_collapsed returns command");
+        undo.record(std::move(cmd));
+        check(p.sequence.audio_tracks[0].collapsed, "collapse: audio track collapsed");
+        cmd = set_track_collapsed(p.sequence, Track::Kind::Video, 0, true);
+        check(cmd != nullptr, "collapse: set_track_collapsed (video) returns command");
+        undo.record(std::move(cmd));
+        cmd = set_track_collapsed(p.sequence, Track::Kind::Video, 0, true);
+        check(cmd != nullptr && p.sequence.video_tracks[0].collapsed,
+              "collapse: video track collapsed");
+        undo.record(std::move(cmd));
+
+        std::string cerr;
+        check(save_project(p, "/tmp/opencode/media/collapse.ehproj", &cerr),
+              "collapse: save project");
+        Project cloaded;
+        check(load_project(cloaded, "/tmp/opencode/media/collapse.ehproj", &cerr),
+              "collapse: load project");
+        check(cloaded.sequence.audio_tracks[0].collapsed &&
+                  cloaded.sequence.video_tracks[0].collapsed,
+              "collapse: collapsed flags round-trip through serialization");
+
+        check(undo.undo(p.sequence), "collapse: undo video no-op");
+        check(p.sequence.video_tracks[0].collapsed, "collapse: no-op undo leaves video collapsed");
+        check(undo.undo(p.sequence), "collapse: undo video collapse");
+        check(!p.sequence.video_tracks[0].collapsed, "collapse: undo expands video");
+        check(undo.undo(p.sequence), "collapse: undo audio collapse");
+        check(p.sequence.audio_tracks[0].collapsed == false &&
+                  p.sequence.video_tracks[0].collapsed == false,
+              "collapse: undo restores all-expanded state");
+
+        check(!atrk.collapsed && !vtrk.collapsed,
+              "collapse-all: tracks start expanded");
+        cmd = set_all_tracks_collapsed(p.sequence, true);
+        check(cmd != nullptr, "collapse-all: returns single command");
+        undo.record(std::move(cmd));
+        check(p.sequence.audio_tracks[0].collapsed && p.sequence.video_tracks[0].collapsed,
+              "collapse-all: every track collapsed to a strip");
+        check(undo.undo(p.sequence), "collapse-all: undo");
+        check(!p.sequence.audio_tracks[0].collapsed &&
+                  !p.sequence.video_tracks[0].collapsed,
+              "collapse-all: one undo restores every track");
+        cmd = set_all_tracks_collapsed(p.sequence, false);
+        check(cmd == nullptr || (!p.sequence.audio_tracks[0].collapsed &&
+                                    !p.sequence.video_tracks[0].collapsed),
+              "collapse-all: expand-no-op leaves tracks expanded");
+
+        try {
+            Sequence empty;
+            check(set_all_tracks_collapsed(empty, true) == nullptr,
+                  "collapse-all: empty sequence returns nullptr");
+        } catch (const std::exception&) {
+            check(false, "collapse-all: empty sequence must not throw");
+        }
     }
 
     {

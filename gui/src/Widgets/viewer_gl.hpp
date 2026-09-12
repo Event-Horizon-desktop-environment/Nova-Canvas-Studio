@@ -7,11 +7,13 @@
 #include <QOpenGLTexture>
 #include <QOpenGLBuffer>
 #include <QOpenGLVertexArrayObject>
+#include <QColor>
 
 #include <chrono>
 #include <memory>
 
 #include "canvas/core/media/frame.hpp"
+#include "features/timeline/timeline_view_options.hpp"
 
 namespace canvas::core::grade_graph {
 struct GradeLut3D;
@@ -41,6 +43,11 @@ public:
     void clear();
     void set_mode(ViewerMode mode);
     void set_scale_mode(ScaleMode mode);
+    // Canvas fill behind a letterboxed frame (Black / Checkerboard / White /
+    // Gray), driven by the timeline view-options dropdown's Viewer Background
+    // submenu. Called from apply_view_options(); the view repaints.
+    void set_viewer_background(ViewerBackground background);
+    [[nodiscard]] ViewerBackground viewer_background() const { return viewer_background_; }
 
     // Optional editor overlays drawn over the presented frame: action/title
     // safe areas, a rule-of-thirds grid, and a live playback indicator. They
@@ -72,10 +79,16 @@ private:
     // Paints the monitor overlays (safe areas / thirds grid / playback badge)
     // after the frame quad, in widget coordinates and clipped to the widget.
     void draw_viewer_overlays();
+    // Paints the checkerboard canvas fill in the letterbox area (the exterior
+    // of the media rect). Solid Black/White/Gray backgrounds are handled by the
+    // paintGL clear color; only the checker needs a painter pass.
+    void draw_viewer_background();
+    [[nodiscard]] QColor viewer_background_color() const;
 
     canvas::core::RenderFramePtr frame_;
     ViewerMode mode_ = ViewerMode::Program;
     ScaleMode scale_mode_ = ScaleMode::Fit;
+    ViewerBackground viewer_background_ = ViewerBackground::Black;
     // All overlays default OFF: the monitor stays a clean picture unless the
     // operator opts in (Guides button in the top bar, or the viewer's
     // right-click menu). ShellCenter reads QSettings and overrides before

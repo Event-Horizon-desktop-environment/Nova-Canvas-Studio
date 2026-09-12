@@ -7,6 +7,8 @@
 
 #include "Widgets/viewer_gl.hpp"
 
+#include "features/timeline/view_options_menu.hpp"
+
 #include <QAction>
 #include <QDockWidget>
 #include <QDir>
@@ -635,6 +637,10 @@ void build_center_workspace(MainWindow& mw) {
     mw.timeline_->set_sequence(&mw.project_->sequence);
     mw.timeline_->set_fps(mw.project_->sequence.fps);
     mw.timeline_->set_thumbnail_service(&mw.thumbnails_);
+    // Apply the persisted view-options baseline now the timeline exists: the
+    // transport bar already loaded QSettings into MainWindow's options and
+    // built the dropdown, but the timeline widget was created after it.
+    apply_view_options(mw);
     mw.thumbnails_.set_cache_dir(
         QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
             .filePath(QStringLiteral("thumbs")));

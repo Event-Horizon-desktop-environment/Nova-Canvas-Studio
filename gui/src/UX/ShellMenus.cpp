@@ -137,6 +137,21 @@ void build_app_menus(MainWindow& mw) {
     timeline_menu->addAction(MainWindow::tr("Add Marker"), QKeySequence(Qt::Key_M));
     timeline_menu->addAction(MainWindow::tr("Zoom to Fit"), QKeySequence(Qt::SHIFT | Qt::Key_Z), &mw,
                              [&mw] { mw.timeline_->zoom_fit(); });
+    const auto collapse_all = [&mw](bool collapsed) {
+        if (!mw.project_) return;
+        auto cmd = canvas::core::set_all_tracks_collapsed(mw.project_->sequence, collapsed);
+        if (!cmd) return;
+        mw.has_unsaved_changes_ = true;
+        mw.undo_.record(std::move(cmd));
+        mw.refresh_timeline();
+        mw.push_snapshot();
+    };
+    timeline_menu->addAction(MainWindow::tr("Collapse All Tracks"),
+                             QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C), &mw,
+                             [collapse_all] { collapse_all(true); });
+    timeline_menu->addAction(MainWindow::tr("Expand All Tracks"),
+                             QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E), &mw,
+                             [collapse_all] { collapse_all(false); });
 
     auto* clip_menu = mw.ui->menubar->addMenu(MainWindow::tr("&Clip"));
     clip_menu->addAction(MainWindow::tr("Add Transition"), QKeySequence(Qt::CTRL | Qt::Key_T));

@@ -10,6 +10,7 @@
 #include <QImage>
 #include <QOpenGLContext>
 #include <QPainter>
+#include <QPainterPath>
 #include <QVector2D>
 #include <QLineF>
 #include <QFontMetricsF>
@@ -54,6 +55,25 @@ void main() {
     gl_Position = vec4(in_pos, 0.0, 1.0);
 }
 )";
+
+// Canvas fill for the Viewer Background Checkerboard option: a classic
+// A-roll two-tone transparency tile at 14px cells, shared by the letterbox
+// exterior pass (draw_viewer_background) and the empty-view tile.
+void paint_checkerboard(QPainter& painter, const QRectF& area) {
+    const QColor a(0x22, 0x22, 0x26);
+    const QColor b(0x33, 0x33, 0x38);
+    constexpr int kCell = 14;
+    const int x0 = std::max(0, static_cast<int>(area.left()) - kCell);
+    const int y0 = std::max(0, static_cast<int>(area.top()) - kCell);
+    const int x1 = static_cast<int>(area.right()) + kCell;
+    const int y1 = static_cast<int>(area.bottom()) + kCell;
+    for (int y = y0; y < y1; y += kCell) {
+        for (int x = x0; x < x1; x += kCell) {
+            const bool even = (((x / kCell) + (y / kCell)) & 1) == 0;
+            painter.fillRect(QRect(x, y, kCell, kCell), even ? a : b);
+        }
+    }
+}
 
 // NV12 -> RGB conversion driven by the frame's per-file color spec (u_matrix,
 // u_range), matching the CUDA composite kernel's frame-space convention
@@ -1035,7 +1055,7 @@ void ViewerGL::paintGL() {
     glViewport(0, 0, std::max(1, static_cast<int>(std::lround(width() * dpr))),
                std::max(1, static_cast<int>(std::lround(height() * dpr))));
 
-    const QColor bg(10, 10, 12);
+    const QColor bg = viewer_background_color();
     glClearColor(bg.redF(), bg.greenF(), bg.blueF(), 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -1416,6 +1436,7 @@ void ViewerGL::paintGL() {
     vao_.release();
     vbo_.release();
 
+    draw_viewer_background();
     draw_viewer_overlays();
 }
 
@@ -1494,7 +1515,11 @@ void ViewerGL::draw_viewer_overlays() {
 void ViewerGL::draw_blank() {
     const ThemeTokens& t = tokens();
     QPainter painter(this);
-    painter.fillRect(rect(), t.surface);
+    // The canvas fill honours the view-options Viewer Background: solid colors
+    // matched the glClear already, the checkerboard tiles the whole empty view.
+    painter.fillRect(rect(), viewer_background_color());
+    if (viewer_background_ == ViewerBackground::Checkerboard)
+        paint_checkerboard(painter, rect());
     painter.setPen(QPen(t.border, 1.0));
     painter.setBrush(t.surface_low);
     const QRectF badge(4, 4, 64, 16);
@@ -1536,4 +1561,48 @@ void ViewerGL::draw_blank() {
     painter.drawText(hint_box, Qt::AlignHCenter | Qt::AlignTop, hint);
 }
 
+void ViewerGL::set_viewer_background(ViewerBackground background) {
+    if (viewer_background_ == background) return;
+    viewer_background_ = background;
+    update();
 }
+
+QColor ViewerGL::viewer_background_color() const {
+    switch (viewer_background_) {
+        case ViewerBackground::White:      return QColor(0xE8, 0xE8, 0xE8);
+        case ViewerBackground::Gray:       return QColor(0x5A, 0x5A, 0x5A);
+        case ViewerBackground::Checkerboard:
+            // Same near-black base as Black; the checker tiles sit on top.
+            return QColor(0x0A, 0x0A, 0x0C);
+        case ViewerBackground::Black:
+        default:                           return QColor(0x0A, 0x0A, 0x0C);
+    }
+}
+
+void ViewerGL::draw_viewer_background() {
+    // Solid backgrounds are the glClear color in paintGL — no painter pass.
+    // Checkerboard needs the letterbox GL quad punched out of the tiled fill.
+    if (viewer_background_ != ViewerBackground::Checkerboard) return;
+    const float vw = static_cast<float>(width());
+    const float vh = static_cast<float>(height());
+    if (vw < 8.0f || vh < 8.0f) return;
+    if (!(texture_valid_ || nv12_valid_)) return;  // blank already tiled everything
+    const float aspect = tex_h_ > 0 ? static_cast<float>(tex_w_) / tex_h_ : 1.0f;
+    const float va = vw / vh;
+    const float qw = (scale_mode_ == ScaleMode::Fill) ? std::max(aspect / va, 1.0f)
+                                                      : std::min(aspect / va, 1.0f);
+    const float qh = (scale_mode_ == ScaleMode::Fill) ? std::max(va / aspect, 1.0f)
+                                                      : std::min(va / aspect, 1.0f);
+    const QRectF media((vw - qw * vw) / 2.0, (vh - qh * vh) / 2.0, qw * vw, qh * vh);
+    // Punch the media rect out of the fill with an even-odd path so the checker
+    // only shows in the letterbox bars / crop overflow.
+    QPainterPath exterior;
+    exterior.setFillRule(Qt::OddEvenFill);
+    exterior.addRect(rect());
+    exterior.addRect(media);
+    QPainter painter(this);
+    painter.setClipPath(exterior);
+    paint_checkerboard(painter, rect());
+}
+
+}  // namespace canvas::gui

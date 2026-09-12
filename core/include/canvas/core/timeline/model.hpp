@@ -220,6 +220,11 @@ struct Track {
     Kind kind = Kind::Video;
     std::string name;
     bool locked = false;
+    // UI-only display flag: the header shows a collapsed chevron and the body
+    // renders at kCollapsedTrackHeight in the timeline. Stored on the model so
+    // it survives project round-trips and undo (see set_track_collapsed), even
+    // though it never touches playback/export math.
+    bool collapsed = false;
     // Audio mixing state. `muted` silences the track entirely; `solo` isolates
     // it: if ANY audio track is soloed, only soloed tracks are audible (mute
     // still beats solo). Meaningless for video tracks, which carry no mix.

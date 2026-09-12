@@ -52,6 +52,7 @@ ctest --test-dir build     # tests
   the 11-test suite
 - [Current State](docs/CURRENT-STATE.md) — what works, known issues, recent
   changes
+- [Keyboard Shortcuts](docs/KEYBINDS.md) — every keybind bound so far, by area
 
 ## Quick notes
 

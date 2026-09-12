@@ -11,6 +11,7 @@
 
 #include "Widgets/viewport_selector.hpp"
 #include "core/timecode.hpp"
+#include "features/timeline/view_options_menu.hpp"
 
 #include <QHBoxLayout>
 #include <QIcon>
@@ -83,6 +84,11 @@ QWidget* build_transport_bar(MainWindow& mw) {
     auto* right_flank_layout = new QHBoxLayout(right_flank);
     right_flank_layout->setContentsMargins(0, 0, 0, 0);
     right_flank_layout->setSpacing(6);
+    // Resolve-style timeline view-options dropdown sits LEFT of Snap. It owns
+    // its popup QMenu; the button itself is a standard boxed transport tool.
+    auto* view_opts_btn = btn(icon("TimeLine-View-option"), "Timeline view options", false);
+    attach_timeline_view_options_button(mw, view_opts_btn);
+    right_flank_layout->addWidget(view_opts_btn);
     auto* snap_btn = btn(icon("snap"), "Snap", true);
     snap_btn->setChecked(true);
     right_flank_layout->addWidget(snap_btn);
