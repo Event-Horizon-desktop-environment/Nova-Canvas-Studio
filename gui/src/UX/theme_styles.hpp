@@ -31,6 +31,7 @@ QString inspector_tab_track_style();
 QString inspector_tab_style();
 QString page_pill_style();
 QString flat_tool_style();
+QString transport_tool_style();
 QString tool_cluster_style();
 QString outline_pill_style();
 QString slider_style();

@@ -16,6 +16,7 @@
 using canvas::gui::apply_theme_style;
 using canvas::gui::css;
 using canvas::gui::icon;
+using canvas::gui::raw_icon;
 using canvas::gui::register_theme_reapply;
 using canvas::gui::ThemeTokens;
 using canvas::gui::tokens;
@@ -288,17 +289,11 @@ void MediaPoolWidget::setup_empty_state() {
     layout->setContentsMargins(24, 32, 24, 32);
     layout->setSpacing(8);
 
-    // Branded hero icon, re-tinted on theme switches so the empty state can
-    // never drift from the active token set (amber brand mark, quiet presence).
+    // Branded hero icon: the film-strip mark (authored art, no tint).
     auto* brand_icon = new QLabel(empty_state_);
     brand_icon->setObjectName(QStringLiteral("mediaPoolEmptyIcon"));
     brand_icon->setAlignment(Qt::AlignCenter);
-    const auto retint_brand = [brand_icon] {
-        const ThemeTokens& t = tokens();
-        brand_icon->setPixmap(icon("film-strip", with_alpha(t.accent, 170)).pixmap(56, 56));
-    };
-    retint_brand();
-    register_theme_reapply(retint_brand);
+    brand_icon->setPixmap(raw_icon("film-strip").pixmap(56, 56));
     layout->addStretch();
     layout->addWidget(brand_icon);
     layout->addSpacing(8);

@@ -240,6 +240,23 @@ QString flat_tool_style() {
              css(t.state_selected), css(t.accent_line));
 }
 
+// Boxed transport buttons — the transport cluster reads as real controls, not
+// the invisible-flat glyph idiom: a raised rounded surface (borderless, so the
+// rounded corners stay antialiased and clean — hard 1px QSS borders jag), which
+// brightens on hover, darkens on press, and shows an accent wash when checked.
+// Uniform across Snap/Mark/transport/edge controls.
+QString transport_tool_style() {
+    const ThemeTokens& t = tokens();
+    return QStringLiteral(
+        "QToolButton { color: %1; background-color: %2; border: none;"
+        " border-radius: 8px; padding: 5px 7px; }"
+        "QToolButton:hover { background-color: %3; }"
+        "QToolButton:pressed { background-color: %4; }"
+        "QToolButton:checked { background-color: %5; }")
+        .arg(css(t.ink), css(t.surface_raised), css(t.surface_higher),
+             css(t.state_press), css(t.accent_soft));
+}
+
 // "Bracket-pill" edit-tool cluster (select/trim/blade/mode): flat members,
 // active member shows a plain accent fill — no idle border.
 QString tool_cluster_style() {

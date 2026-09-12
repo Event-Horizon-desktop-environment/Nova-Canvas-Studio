@@ -1506,12 +1506,11 @@ void ViewerGL::draw_blank() {
     painter.drawText(badge, Qt::AlignCenter, mode_ == ViewerMode::Source ? QStringLiteral("SOURCE")
                                                                           : QStringLiteral("PROGRAM"));
 
-    // Branded empty state: a Nova-gold film-strip mark over the monitor's
-    // center, a bold mode-aware title, and a faint one-line hint — the same
-    // voice as the timeline's empty-state panel.
+    // Branded empty state: the film-strip mark over the monitor's center, a
+    // bold mode-aware title, and a faint one-line hint — the same voice as
+    // the timeline's empty-state panel.
     const QPointF c = rect().center();
-    const QColor mark = t.accent;
-    const QPixmap mark_pm = icon("film-strip", mark).pixmap(24, 24);
+    const QPixmap mark_pm = raw_icon("film-strip").pixmap(24, 24);
     painter.drawPixmap(QPointF(c.x() - 12.0, c.y() - 52.0), mark_pm);
 
     QFont tf = painter.font();
