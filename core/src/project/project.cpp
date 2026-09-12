@@ -1,8 +1,10 @@
 #include "canvas/core/project/project.hpp"
 
+#include "canvas/core/grade_graph/serialize.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <fstream>
 #include <iterator>
 #include <chrono>
@@ -13,10 +15,10 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr int kProjectVersion = 3;
+constexpr int kProjectVersion = 4;
 
 json clip_to_json(const Clip& c) {
-    return json{{"id", c.id},
+    json j{{"id", c.id},
                 {"media", c.media},
                 {"tl_in", c.tl_in},
                 {"tl_out", c.tl_out},
@@ -38,6 +40,7 @@ json clip_to_json(const Clip& c) {
                 {"transition_in_end_ratio", c.transition_in_end_ratio},
                 {"volume_db", c.volume_db},
                 {"pan", c.pan},
+                {"voice_isolation", static_cast<int>(c.voice_isolation)},
                 {"scale_x", c.scale_x},
                 {"scale_y", c.scale_y},
                 {"pos_x", c.pos_x},
@@ -49,7 +52,27 @@ json clip_to_json(const Clip& c) {
                 {"flip_v", c.flip_v},
                 {"opacity", c.opacity},
                 {"blend_mode", static_cast<int>(c.blend_mode)},
-                {"name", c.name}};
+                {"name", c.name},
+                {"clip_tag", static_cast<int>(c.clip_tag)},
+                {"clip_color", c.clip_color},
+                {"comments", c.comments},
+                {"speed_enabled", c.speed_enabled},
+                {"speed_factor", c.speed_factor},
+                {"pitch_semitones", c.pitch_semitones},
+                {"pitch_cents", c.pitch_cents},
+                {"eq_enabled", c.eq_enabled},
+                {"eq_bands", [&]() {
+                     json arr = json::array();
+                     for (const Clip::EqBand& b : c.eq_bands)
+                         arr.push_back({{"type", static_cast<int>(b.type)},
+                                        {"frequency", b.frequency},
+                                        {"gain", b.gain},
+                                        {"q", b.q},
+                                        {"enabled", b.enabled}});
+                     return arr;
+                 }()}};
+    if (c.has_grade()) j["grade"] = grade_graph::grade_graph_to_json(c.grade);
+    return j;
 }
 
 Clip clip_from_json(const json& j) {
@@ -88,6 +111,9 @@ Clip clip_from_json(const json& j) {
         j.at("transition_in_end_ratio").get_to(c.transition_in_end_ratio);
     if (j.contains("volume_db")) j.at("volume_db").get_to(c.volume_db);
     if (j.contains("pan")) j.at("pan").get_to(c.pan);
+    if (j.contains("voice_isolation"))
+        c.voice_isolation =
+            static_cast<VoiceIsolationMode>(j.at("voice_isolation").get<int>());
     if (j.contains("scale_x")) j.at("scale_x").get_to(c.scale_x);
     if (j.contains("scale_y")) j.at("scale_y").get_to(c.scale_y);
     if (j.contains("pos_x")) j.at("pos_x").get_to(c.pos_x);
@@ -101,6 +127,41 @@ Clip clip_from_json(const json& j) {
     if (j.contains("blend_mode"))
         c.blend_mode = static_cast<BlendMode>(j.at("blend_mode").get<int>());
     if (j.contains("name")) j.at("name").get_to(c.name);
+    if (j.contains("clip_tag"))
+        c.clip_tag = static_cast<Clip::ClipTag>(j.at("clip_tag").get<int>());
+    if (j.contains("clip_color")) j.at("clip_color").get_to(c.clip_color);
+    if (j.contains("comments")) j.at("comments").get_to(c.comments);
+    if (j.contains("speed_enabled")) j.at("speed_enabled").get_to(c.speed_enabled);
+    if (j.contains("speed_factor")) j.at("speed_factor").get_to(c.speed_factor);
+    if (j.contains("pitch_semitones")) j.at("pitch_semitones").get_to(c.pitch_semitones);
+    if (j.contains("pitch_cents")) j.at("pitch_cents").get_to(c.pitch_cents);
+    if (j.contains("eq_enabled")) j.at("eq_enabled").get_to(c.eq_enabled);
+    if (j.contains("eq_bands")) {
+        const auto& arr = j.at("eq_bands");
+        const std::size_t n = std::min(arr.size(), c.eq_bands.size());
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto& bj = arr[i];
+            Clip::EqBand b;
+            if (bj.contains("type"))
+                b.type = static_cast<Clip::EqBand::Type>(bj.at("type").get<int>());
+            if (bj.contains("frequency")) bj.at("frequency").get_to(b.frequency);
+            if (bj.contains("gain")) bj.at("gain").get_to(b.gain);
+            if (bj.contains("q")) bj.at("q").get_to(b.q);
+            // Pre-enabled files omit `enabled`; treat the band as enabled.
+            if (bj.contains("enabled")) bj.at("enabled").get_to(b.enabled);
+            c.eq_bands[i] = b;
+        }
+    }
+    // A malformed grade must not kill the whole project load; drop the grade
+    // block and keep the clip (matches the deliver-settings tolerance below).
+    if (j.contains("grade")) {
+        try {
+            c.grade = grade_graph::grade_graph_from_json(j.at("grade"));
+        } catch (const std::exception& e) {
+            CANVAS_LOG("project: dropping malformed grade on clip %lld (%s)",
+                       (long long)c.id, e.what());
+        }
+    }
     return c;
 }
 

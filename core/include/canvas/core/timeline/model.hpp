@@ -1,5 +1,8 @@
 #pragma once
 
+#include "canvas/core/grade_graph/graph.hpp"
+#include "canvas/core/media/voice_isolation.hpp"
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -118,6 +121,15 @@ struct Clip {
     float opacity = 1.0f;
     BlendMode blend_mode = BlendMode::Normal;
 
+    // Color grade: the node-grade tree applied to this clip's video BEFORE the
+    // transform/composite blit (Phase 3). An empty graph (no wired nodes) is
+    // the reporter's "no grade" — the evaluator passes the frame through and
+    // the project file omits the `grade` key, so ungraded clips save
+    // byte-identically to legacy files. Stored per-clip so the track-snapshot
+    // undo machinery restores it automatically. Only meaningful on video clips;
+    // an A/V pair's audio half never grades.
+    grade_graph::GradeGraph grade;
+
     // Audio processing — pitch shift, speed change, and parametric EQ. These
     // fields are stored per-clip so track-snapshot undo restores them
     // automatically. Pitch is split into semitones (coarse) and cents (fine);
@@ -134,36 +146,37 @@ struct Clip {
         float frequency = 1000.0f;
         float gain = 0.0f;
         float q = 1.0f;
+        // Per-band bypass: a disabled band is excluded from the cascade and the
+        // displayed curve, but keeps its settings so toggling it back on restores
+        // the exact band. Defaults to enabled so existing clips/bands behave
+        // identically.
+        bool enabled = true;
         bool operator==(const EqBand&) const = default;
     };
-    // The reference EQ curve shown when a clip first gains EqBand defaults
-    // (mirrors the reference app's six-band layout).
+    // The EQ curve a clip starts with. Flat by default: enabling EQ must be
+    // silent until the user shapes it (a 0 dB five-band lift would otherwise
+    // boom the mix the moment EQ is toggled on). All-Bell so a fresh EQ is a
+    // bit-exact pass-through (LowPass/HighPass/Notch always filter, even at
+    // 0 dB of gain).
     [[nodiscard]] static std::array<EqBand, 6> default_eq_bands() noexcept {
         std::array<EqBand, 6> bands{};
-        bands[0].type = EqBand::Type::LowShelf;
-        bands[0].frequency = 20.0f;
-        bands[0].gain = 18.1f;
-        bands[1].type = EqBand::Type::Bell;
-        bands[1].frequency = 57.0f;
-        bands[1].gain = 18.1f;
-        bands[2].type = EqBand::Type::Bell;
-        bands[2].frequency = 97.0f;
-        bands[2].gain = 10.5f;
-        bands[2].q = 1.0f;
-        bands[3].type = EqBand::Type::Bell;
-        bands[3].frequency = 1200.0f;
-        bands[3].gain = 0.0f;
-        bands[3].q = 1.0f;
-        bands[4].type = EqBand::Type::HighShelf;
-        bands[4].frequency = 6000.0f;
-        bands[4].gain = 0.0f;
-        bands[5].type = EqBand::Type::LowPass;
-        bands[5].frequency = 19000.0f;
-        bands[5].gain = 0.0f;
+        for (auto& b : bands) {
+            b.type = EqBand::Type::Bell;
+            b.frequency = 1000.0f;
+            b.gain = 0.0f;
+            b.q = 1.0f;
+        }
         return bands;
     }
     bool eq_enabled = false;
     std::array<EqBand, 6> eq_bands = default_eq_bands();
+
+    // AI voice isolation engine applied to this clip's audio BEFORE its gains
+    // and mix, in both playback and export. `None` by default so existing clips
+    // (and untouched projects) decode identically. Stored per-clip so the
+    // track-snapshot undo machinery restores it automatically. The engine names
+    // in `voice_isolation_mode_name()` back the Inspector's dropdown.
+    VoiceIsolationMode voice_isolation = VoiceIsolationMode::None;
 
     // Clip metadata — tag (good-take / rejected), colour swatch (0 = none,
     // 1–12 = swatch index), and free-form comments. Stored per-clip so undo
@@ -191,6 +204,10 @@ struct Clip {
                rotation_deg != 0.0f || anchor_dx != 0.0 || anchor_dy != 0.0 ||
                flip_h || flip_v;
     }
+    // True when the clip carries a wired grade tree that the renderer must
+    // apply. Nodes alone (no wires) are a no-op tree and read as "no grade",
+    // so they keep the fast path.
+    [[nodiscard]] bool has_grade() const noexcept { return !grade.edges().empty(); }
     // True when the clip draws non-opaque (transparency / blend mode).
     [[nodiscard]] bool needs_compositing() const noexcept {
         return opacity != 1.0f || blend_mode != BlendMode::Normal;

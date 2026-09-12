@@ -4,9 +4,11 @@
 
 #include <QColor>
 #include <QContextMenuEvent>
+#include <QIcon>
 #include <QMenu>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QPixmap>
 #include <QScrollBar>
 #include <QKeyEvent>
 #include <QWheelEvent>
@@ -76,6 +78,10 @@ bool TimelineWidget::eventFilter(QObject* watched, QEvent* event) {
 
 void TimelineWidget::set_sequence(const canvas::core::Sequence* sequence) {
     sequence_ = sequence;
+    // Reconcile the ruler/playhead timecode rate from the live sequence so a
+    // project (re)loaded at a different fps re-derives its tick labels instead
+    // of carrying the previous project's rate.
+    if (sequence && sequence->fps > 0.0) fps_ = sequence->fps;
     rebuild_timeline();
     update_playhead_position(playhead_frame_);
 }
@@ -361,7 +367,7 @@ void TimelineWidget::resizeEvent(QResizeEvent* event) {
     const auto rz_now = std::chrono::steady_clock::now();
     if (s_rz_n == 1 || rz_now - s_rz_at >= std::chrono::seconds(1)) {
         s_rz_at = rz_now;
-        qWarning() << "[ui:timeline] resize ms_avg=" << QString::number(s_rz_ms / s_rz_n, 'f', 2)
+        qDebug() << "[ui:timeline] resize ms_avg=" << QString::number(s_rz_ms / s_rz_n, 'f', 2)
                    << "ms_last=" << QString::number(rz_ms, 'f', 2)
                    << "ms_max=" << QString::number(s_max_ms, 'f', 2)
                    << "resizes/s=" << s_rz_n
@@ -420,7 +426,7 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
                   [&](const QString& a, const QString& b) { return classes[a] > classes[b]; });
         for (const QString& k : keys) cls << (k + "=" + QString::number(classes[k]));
         s_pt_at = pt_now;
-        qWarning() << "[ui:timeline] paint ms_avg=" << QString::number(s_pt_ms / s_pt_n, 'f', 2)
+        qDebug() << "[ui:timeline] paint ms_avg=" << QString::number(s_pt_ms / s_pt_n, 'f', 2)
                    << " ms_last=" << QString::number(pt_ms, 'f', 2)
                    << " ms_max=" << QString::number(s_max_ms, 'f', 2)
                    << " paints/s=" << s_pt_n
@@ -440,6 +446,7 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     }
     const QPointF scene_pos = mapToScene(event->pos());
     QMenu menu(this);
+    apply_rounded_menu(&menu);
 
     // Right-clicking directly on an edit point (cut) between two clips shows the
     // cut context menu: delete-through-edit + preset cross-dissolve lengths.
@@ -547,6 +554,7 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     QAction* clear_transition_in_action = nullptr;
     std::vector<QAction*> transition_actions;
     std::vector<QAction*> transition_in_actions;
+    std::vector<QAction*> color_actions;
     if (hit_clip) {
         emit clip_selected(hit_clip->clip);
         // Checkable "Link Clips" action: checked when this clip is part of a
@@ -561,11 +569,13 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
         // no right neighbour it fades that clip OUT to black at its tail.
         auto* transition_menu = menu.addMenu(tr("Out Transition") + QStringLiteral(" >"));
         transition_menu->setIcon(icon("transition_out"));
+        apply_rounded_menu(transition_menu);
         // "In Transition >" (the clip's leading edge) fades the clip IN from black
         // at its head, with no preceding clip/cut required. Independent of the OUT
         // transition.
         auto* transition_in_menu = menu.addMenu(tr("In Transition") + QStringLiteral(" >"));
         transition_in_menu->setIcon(icon("transition_in"));
+        apply_rounded_menu(transition_in_menu);
         struct Entry { const char* label; canvas::core::TransitionType type; int64_t dur; };
         static const Entry kVideo[] = {
             {"Cross Dissolve", canvas::core::TransitionType::CrossDissolve, 6},
@@ -600,6 +610,38 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
         add_entries(transition_in_menu, &transition_in_actions);
         clear_transition_action = menu.addAction(tr("Clear Out Transition"));
         clear_transition_in_action = menu.addAction(tr("Clear In Transition"));
+
+        // "Clip Colour >" submenu (Resolve-style): the full 12-swatch palette
+        // plus "No Colour". Carries the swatch index in the action data so the
+        // post-exec handler just reads it back; the CLIP itself is captured by
+        // the hit_clip variable at the top of this block.
+        auto* color_menu = menu.addMenu(tr("Clip Colour") + QStringLiteral(" >"));
+        apply_rounded_menu(color_menu);
+        const auto swatch_icon = [](const QColor& c) {
+            QPixmap pm(16, 16);
+            pm.fill(Qt::transparent);
+            QPainter p(&pm);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setBrush(QBrush(c));
+            p.setPen(QPen(QColor(0x55, 0x55, 0x55), 1));
+            p.drawRoundedRect(QRectF(0.5, 0.5, 15, 15), 3, 3);
+            return QIcon(pm);
+        };
+        const QColor* swatches = clip_color_swatches();
+        for (int i = 0; i < 12; ++i) {
+            QAction* act = color_menu->addAction(
+                QStringLiteral("#%1").arg(swatches[i].name()));
+            act->setIcon(swatch_icon(swatches[i]));
+            act->setData(i + 1);
+            act->setCheckable(true);
+            act->setChecked(hit_clip->clip->clip_color == static_cast<uint8_t>(i + 1));
+            color_actions.push_back(act);
+        }
+        color_menu->addSeparator();
+        QAction* color_none = color_menu->addAction(tr("&No Colour"));
+        color_none->setCheckable(true);
+        color_none->setChecked(hit_clip->clip->clip_color == 0);
+        color_actions.push_back(color_none);
 
         menu.addSeparator();
     }
@@ -645,6 +687,13 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
         emit clear_transition_requested(hit_clip->clip);
     } else if (chosen == clear_transition_in_action) {
         emit clear_transition_in_requested(hit_clip->clip);
+    } else if (std::find(color_actions.begin(), color_actions.end(), chosen) !=
+               color_actions.end()) {
+        const uint8_t color = static_cast<uint8_t>(chosen->data().toInt());
+        if (debug_enabled())
+            qDebug() << "timeline: clip color menu on clip" << hit_clip->clip->id
+                     << "color=" << static_cast<int>(color);
+        emit clip_color_requested(hit_clip->clip, color);
     } else if (chosen) {
         // A transition submenu entry was chosen; resolve OUT vs IN by which
         // action list the chosen action belongs to.

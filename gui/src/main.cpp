@@ -9,6 +9,8 @@
 #include "Logging.hpp"
 #include "UX/MainWindow.hpp"
 #include "UX/theme.hpp"
+#include "canvas/core/colorsci/wheels_ui.hpp"
+#include "canvas/core/gpu/colorspace.hpp"
 #include "canvas/core/media/hw_device.hpp"
 
 extern "C" {
@@ -72,6 +74,18 @@ int main(int argc, char* argv[]) {
     // can be matched to the binary that produced it and stale runs are obvious.
     qWarning() << "eh: boot" << QApplication::applicationVersion()
                << "built" << __DATE__ << __TIME__;
+    // Always-on compiled-in constants report: proves which law the running
+    // binary was built with. If this line ever disagrees with the source, the
+    // binary is stale (wrong build dir / ccache / un-rebuilt) and NOTHING else
+    // in the log can be trusted. Also anchors the YUV matrix so a BT.601 vs
+    // BT.709 mismatch — the purple-skin suspect — is decided by the log alone.
+    qWarning().nospace()
+        << "[build] wheel_scales lift="
+        << canvas::core::colorsci::kWheelLiftScale
+        << " gamma=" << canvas::core::colorsci::kWheelGammaScale
+        << " gain=" << canvas::core::colorsci::kWheelGainScale
+        << " offset=" << canvas::core::colorsci::kWheelOffsetScale
+        << " yuv=bt709 limited yuv2rgb(Y=1.164 R=1.793 G=-0.213/-0.533 B=2.112)";
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("canvas"));
     QApplication::setApplicationDisplayName(QStringLiteral("Nova Canvas Studio"));
@@ -86,7 +100,7 @@ int main(int argc, char* argv[]) {
     // Feeding the manager triggers its own themed probe log ([hw] probing...),
     // so we just surface the outcome here rather than re-probing.
     const auto env_t0 = std::chrono::steady_clock::now();
-    canvas::core::HwDeviceManager hw;
+    canvas::core::HwDeviceManager hw{"main"};
     (void)hw.device_ctx();
     const double env_probe_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - env_t0).count();
@@ -114,7 +128,31 @@ int main(int argc, char* argv[]) {
     const bool light_theme = QSettings()
         .value(QStringLiteral("appearance/theme"), QStringLiteral("dark"))
         .toString() == QStringLiteral("light");
-    canvas::gui::apply_theme(app, light_theme);
+    // "HyprDark" auto-trigger: on Hyprland's native Wayland backend only,
+    // Hyprland re-quantizes surfaces through its FP16 sRGB color-management
+    // pipeline (XWayland is blitted raw), so the dark palette reads darker with
+    // flattened blue there. The hypr_dark token set pre-lifts the base palette
+    // by the measured shift so the on-screen result matches the design.
+    // Detected via Hyprland's per-client env var; inert on xcb (byte-accurate
+    // already) and under any other compositor. An explicit user choice in the
+    // Nova Canvas > Appearance menu (appearance/hypr_dark) overrides the rule.
+    const bool on_hyprland =
+        !qEnvironmentVariableIsEmpty("HYPRLAND_INSTANCE_SIGNATURE");
+    QSettings appearance_settings;
+    const bool hypr_dark =
+        appearance_settings.contains(QStringLiteral("appearance/hypr_dark"))
+            ? appearance_settings.value(QStringLiteral("appearance/hypr_dark")).toBool()
+            : (!light_theme && on_hyprland
+               && app.platformName() == QLatin1String("wayland"));
+    canvas::gui::apply_theme(app, light_theme, hypr_dark);
+
+    qWarning().nospace()
+        << "[theme] mode=" << (hypr_dark ? "hypr-dark"
+                                         : (light_theme ? "light" : "dark"))
+        << " platform=" << app.platformName()
+        << " qpa_env=" << qEnvironmentVariable("QT_QPA_PLATFORM")
+        << " hyprland=" << (on_hyprland ? "yes" : "no");
+    canvas::gui::log_theme_tokens();
 
     canvas::gui::MainWindow window;
     QApplication::setWindowIcon(canvas::gui::raw_icon("app_icon"));

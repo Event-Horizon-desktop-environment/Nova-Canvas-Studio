@@ -37,6 +37,7 @@ class QGraphicsPixmapItem;
 class QGraphicsItemGroup;
 class QDragEnterEvent;
 class QDragMoveEvent;
+class QDragLeaveEvent;
 class QDropEvent;
 class QMenu;
 
@@ -57,6 +58,7 @@ inline QPainterPath rounded_rect_path(const QRectF& r, qreal radius) {
 struct MediaMeta {
     std::string path;
     int64_t total_frames = 0;
+    double fps = 0.0;
 };
 
 // Transparent clip container used purely as a paint clip: children (filmstrip
@@ -147,6 +149,7 @@ public:
     static constexpr double kClipLabelHeight = 18.0;
     static constexpr double kClipOutlineW = 1.5;   // clip-bound stroke; inset by pen/2 so it never overhangs
     static constexpr double kClipSelectedOutlineW = 2.2;
+    static constexpr double kClipShadowOffset = 2.0;  // baseline drop under a clip body
 
     explicit TimelineWidget(QWidget* parent = nullptr);
     ~TimelineWidget() override;
@@ -295,6 +298,9 @@ signals:
     void clear_transition_requested(const canvas::core::Clip* clip);
     // Emitted when the user clears a clip's IN (leading-edge) transition.
     void clear_transition_in_requested(const canvas::core::Clip* clip);
+    // Emitted when the user picks a clip colour from the context menu's
+    // "Clip Colour" submenu: `color` is the 1-12 swatch index, 0 = no colour.
+    void clip_color_requested(const canvas::core::Clip* clip, uint8_t color);
     // Emitted when the transition handle drag finishes with a new duration;
     // the outgoing clip receives the change.
     void transition_resized(const canvas::core::Clip* clip, int64_t duration);
@@ -336,8 +342,10 @@ protected:
     // disables playhead-follow; wheelEvent() covers viewport wheel scrolling.
     bool eventFilter(QObject* watched, QEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
+    void leaveEvent(QEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
+    void dragLeaveEvent(QDragLeaveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 
 private slots:
@@ -416,6 +424,10 @@ private:
     // Converts a flat track index to a per-kind index (0..kind_count-1).
     int kind_track_index(int flat_track, int v_count) const;
     int64_t frame_at_x(int x) const;
+    // Blade cut frame for a pointer at viewport x: the NEAREST frame to the
+    // mouse (llround — no floor left-bias). The razor ignores the playhead and
+    // snapping entirely: it cuts exactly where the user points.
+    int64_t blade_cut_frame(int x) const;
     void scrub_to_frame(int64_t frame);
     // Cached snap targets for the live drag (see collect_snap_targets); empty
     // between drags.
@@ -587,6 +599,25 @@ private:
     // linked A/V pair selects both halves.
     std::vector<canvas::core::ClipId> expand_with_mates(const std::vector<canvas::core::ClipId>& ids);
 
+    // Lane-feedback chrome: the row under the idle pointer gets a subtle
+    // full-width highlight (header column included), and a Media Pool drag
+    // lights up the drop target lane with an accent ring. Both are pure scene
+    // rects recreated with the scene; the flat index lives here so a rebuild
+    // (which nulls the item) still lets the next move restore the highlight.
+    int flat_row_at_scene_y(double scene_y) const;
+    QGraphicsRectItem* highlight_scene_item(QGraphicsRectItem*& slot);
+    void set_rect_highlight(QGraphicsRectItem*& slot, const QRectF& rect,
+                            const QBrush& fill, const QPen& pen);
+    void set_row_highlight(QGraphicsRectItem*& slot, int flat,
+                           const QBrush& fill, const QPen& pen);
+    void clear_row_highlight(QGraphicsRectItem*& slot, int& flat);
+    void update_hover_row(const QPointF& scene_pos);
+    void update_drop_lane(const QPointF& scene_pos);
+    QGraphicsRectItem* hover_highlight_ = nullptr;
+    int hover_flat_ = -1;
+    QGraphicsRectItem* drop_lane_highlight_ = nullptr;
+    int drop_lane_flat_ = -1;
+
     struct TrackHeader {
         QGraphicsRectItem* background = nullptr;
         QGraphicsTextItem* label = nullptr;
@@ -642,6 +673,11 @@ private:
     bool volume_dragging_ = false;
     canvas::core::ClipId volume_drag_clip_ = 0;
     float volume_drag_db_ = 0.0f;
+    // Audio clips the current volume drag previews/commits onto, resolved from
+    // the selection at press time (multi-selection: every selected audio target,
+    // incl. linked mates). Each move re-anchors ALL of them live; the commit
+    // handler resolves the same set so preview == commit.
+    std::vector<canvas::core::ClipId> volume_drag_targets_;
 
     // Per-track row heights (flat: video 0..v-1, then audio v..total-1).
     std::vector<double> video_track_heights_;

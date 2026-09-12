@@ -5,18 +5,19 @@
 #include "UX/InspectorVisual.hpp"
 #include "ui_MainWindow.h"
 
+#include "Widgets/viewer_gl.hpp"
+
 #include <QAction>
 #include <QDockWidget>
 #include <QDir>
 #include <QFrame>
 #include <QHBoxLayout>
-#include <QLabel>
 #include <QMenu>
-#include <QMessageBox>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QSlider>
+#include <QSplitter>
 #include <QStandardPaths>
 #include <QToolBar>
 #include <QToolButton>
@@ -30,22 +31,83 @@
 #include "Widgets/timeline_widget.hpp"
 #include "Widgets/viewer_gl.hpp"
 #include "core/timecode.hpp"
+#include "features/source_preview/source_viewer_panel.hpp"
 
 namespace canvas::gui {
+
+namespace {
+
+// One factory for the three monitor-overlay toggles: the viewer's right-click
+// menu and the Guides button in the top bar build the same actions from it,
+// so labels, keys and behavior can never drift apart. Takes the viewer
+// explicitly (only friends may touch MainWindow::viewer_).
+QAction* add_overlay_action(MainWindow& mw, ViewerGL* viewer, QMenu& m, const char* key,
+                            ViewerGL::Overlay overlay, const QString& label) {
+    QAction* a = m.addAction(label);
+    a->setCheckable(true);
+    a->setChecked(viewer->overlay_enabled(overlay));
+    QObject::connect(a, &QAction::toggled, &mw, [&mw, viewer, key, overlay](bool on) {
+        viewer->set_overlay(overlay, on);
+        QSettings().setValue(QLatin1String(key), on);
+        // Keep the Guides button's checked state honest (guides = safe
+        // areas and/or thirds grid). Blocked so the button's own
+        // group-toggle never cascades off a single-overlay change.
+        if (auto* guides = mw.findChild<QToolButton*>(QStringLiteral("guidesButton"))) {
+            const QSignalBlocker b(guides);
+            guides->setChecked(viewer->overlay_enabled(ViewerGL::Overlay::SafeAreas) ||
+                               viewer->overlay_enabled(ViewerGL::Overlay::ThirdsGrid));
+        }
+    });
+    return a;
+}
+
+}  // namespace
 
 void build_center_workspace(MainWindow& mw) {
     // ---- 6. CENTER — the viewer with its contextual toolbar ----
     mw.viewer_ = new ViewerGL(&mw);
 
-    // Fit/Fill monitor scaling, available via right-click on the viewer:
+    // Dual-Viewer: the optional source preview pane (media-pool hover/audition)
+    // shares the monitor column with the program viewer through a splitter.
+    // Its play/scrub chrome drives the SourcePreviewController; frame/position
+    // presentation is wired in MainWindow's ctor.
+    mw.source_panel_ = new source_preview::SourceViewerPanel(&mw);
+    mw.source_panel_->viewer()->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    if (QSettings().value(QStringLiteral("dualViewer"), false).toBool())
+        mw.source_panel_->setVisible(true);
+    QObject::connect(mw.source_panel_, &source_preview::SourceViewerPanel::play_clicked, &mw,
+            [&mw] { mw.src_preview_.toggle_play_pause(); });
+    QObject::connect(mw.source_panel_, &source_preview::SourceViewerPanel::scrub_fraction, &mw,
+            [&mw](double fraction) {
+                // Scrubbing the source pauses any source playback first (the
+                // preview decode and the play-loop would fight each other).
+                if (mw.src_preview_.is_playing()) mw.src_preview_.pause();
+                mw.src_preview_.scrub_fraction(fraction);
+            });
+
+    // Fit/Fill monitor scaling + monitor overlays, available via right-click on
+    // the viewer (the Guides button in the top bar mirrors the overlays):
     // Fit shows the whole frame with letterbox bars (default),
     // Fill crops to cover the media window edge-to-edge.
     mw.viewer_->setContextMenuPolicy(Qt::CustomContextMenu);
     const bool saved_scale = QSettings().value(QStringLiteral("viewerScaleFill"), false).toBool();
     mw.viewer_->set_scale_mode(saved_scale ? ViewerGL::ScaleMode::Fill : ViewerGL::ScaleMode::Fit);
+    // Monitor overlays (safe areas / thirds grid / playback indicator), persisted
+    // per-machine so a session remembers the operator's monitor setup. All
+    // default OFF: the monitor stays a clean picture unless opted in.
+    {
+        QSettings settings;
+        mw.viewer_->set_overlay(ViewerGL::Overlay::SafeAreas,
+                                settings.value(QStringLiteral("viewerOverlaySafeAreas"), false).toBool());
+        mw.viewer_->set_overlay(ViewerGL::Overlay::ThirdsGrid,
+                                settings.value(QStringLiteral("viewerOverlayThirdsGrid"), false).toBool());
+        mw.viewer_->set_overlay(ViewerGL::Overlay::PlaybackBadge,
+                                settings.value(QStringLiteral("viewerOverlayPlaybackBadge"), false).toBool());
+    }
     QObject::connect(mw.viewer_, &QWidget::customContextMenuRequested, &mw,
             [&mw](const QPoint& pos) {
                 QMenu menu(MainWindow::tr("Monitor Scale"), &mw);
+                apply_rounded_menu(&menu);
                 QAction* fit = menu.addAction(MainWindow::tr("Fit (letterbox)"));
                 fit->setCheckable(true);
                 fit->setChecked(mw.viewer_->scale_mode() == ViewerGL::ScaleMode::Fit);
@@ -64,12 +126,21 @@ void build_center_workspace(MainWindow& mw) {
                     mw.viewer_->set_scale_mode(ViewerGL::ScaleMode::Fill);
                     QSettings().setValue(QStringLiteral("viewerScaleFill"), true);
                 });
+
+                menu.addSeparator();
+                add_overlay_action(mw, mw.viewer_, menu, "viewerOverlaySafeAreas", ViewerGL::Overlay::SafeAreas,
+                                  MainWindow::tr("Show Safe Areas"));
+                add_overlay_action(mw, mw.viewer_, menu, "viewerOverlayThirdsGrid", ViewerGL::Overlay::ThirdsGrid,
+                                  MainWindow::tr("Show Thirds Grid"));
+                add_overlay_action(mw, mw.viewer_, menu, "viewerOverlayPlaybackBadge", ViewerGL::Overlay::PlaybackBadge,
+                                  MainWindow::tr("Show Playback Indicator"));
+
                 menu.exec(mw.viewer_->mapToGlobal(pos));
             });
 
-    // Contextual editing toolbar — sits directly under the viewer, matching
-    // the timeline toolbar icon row: tool cluster, marker
-    // cluster, then a right-aligned zoom cluster.
+    // Contextual editing toolbar — heads the timeline dock (above the transport
+    // bar), so in collapsed mode the tool row runs full-width straight under the
+    // media pool; icon row: tool cluster, marker cluster, right-aligned zoom.
     auto* contextual_bar = new QToolBar(MainWindow::tr("Editing Tools"), &mw);
     contextual_bar->setMovable(false);
     contextual_bar->setObjectName(QStringLiteral("contextualTools"));
@@ -301,36 +372,49 @@ void build_center_workspace(MainWindow& mw) {
     viewer_frame->setObjectName(QStringLiteral("viewerFrame"));
     apply_theme_style(viewer_frame, &viewer_frame_style);
     auto* viewer_frame_layout = new QVBoxLayout(viewer_frame);
-    viewer_frame_layout->setContentsMargins(6, 6, 6, 6);
-    viewer_frame_layout->addWidget(mw.viewer_, 1);
+    viewer_frame_layout->setContentsMargins(8, 8, 8, 8);
+    // [source preview | program viewer] splitter; the source pane participates
+    // only while Dual-View is on (hidden widgets are ignored by the splitter).
+    auto* monitor_split = new QSplitter(Qt::Horizontal, viewer_frame);
+    monitor_split->setObjectName(QStringLiteral("monitorSplit"));
+    monitor_split->setChildrenCollapsible(false);
+    monitor_split->setHandleWidth(4);
+    monitor_split->addWidget(mw.source_panel_);
+    monitor_split->addWidget(mw.viewer_);
+    // Equal partners: the media-pool source preview and the timeline viewer
+    // each take half of the monitor on Dual-View (with matching stretch so a
+    // manual resize stays proportional when the monitor-frame resizes).
+    monitor_split->setStretchFactor(0, 1);
+    monitor_split->setStretchFactor(1, 1);
+    if (mw.source_panel_->isVisible()) monitor_split->setSizes({1, 1});
+    viewer_frame_layout->addWidget(monitor_split, 1);
 
-    // Transport bar (playback) + overview scrub slider — ShellTopBar.cpp.
+    // Transport bar (playback) + overview scrub slider — ShellTransportBar.cpp.
     auto* transport = build_transport_bar(mw);
 
     // Top status bar — ShellTopBar.cpp (needs to be a child of the column so the
     // viewer column can stack it above the monitor).
     auto* top_bar = build_top_bar(mw);
 
-    // Assemble the viewer column: top scrub bar > top status bar > viewer(frame)
-    // > contextual tools > transport. The column's own background carries the
-    // workspace's soft mint radial glow (the Alt-html "grad-workspace"), which
-    // shows around the floating rounded panels; opaque bars/panels cover it.
+    // Assemble the viewer column: top status bar > viewer(frame). The column's
+    // own background carries the flat workspace surface; the monitor is a flush
+    // darker well with a hairline rim, no float, no shadow. (The contextual
+    // editing tools, transport/play row, and the progress scrub bar all head
+    // the TIMELINE dock so they span the full width right under a collapsed
+    // media pool — see the timeline section below.)
     auto* viewer_column = new QWidget(&mw);
     viewer_column->setObjectName(QStringLiteral("viewerColumn"));
     apply_theme_style(viewer_column, [] {
-        const auto& t = tokens();
-        return QStringLiteral("QWidget#viewerColumn { background:"
-                              " qradialgradient(cx:0.72, cy:0.0, radius:1.6, fx:0.72, fy:0.0,"
-                              " stop:0 %1, stop:0.5 %2, stop:1 %3); }")
-            .arg(css(with_alpha(t.accent, 20)), css(with_alpha(t.accent, 6)),
-                 css(t.surface));
+        return QStringLiteral("QWidget#viewerColumn { background-color: %1; }")
+            .arg(css(tokens().surface));
     });
     auto* viewer_layout = new QVBoxLayout(viewer_column);
     viewer_layout->setContentsMargins(0, 0, 0, 0);
     viewer_layout->setSpacing(0);
 
-    // Thin full-width overview scrub bar at the very top: small playhead marker
-    // on the left, the overview scrubber in the middle, a lock icon far right.
+    // Thin full-width playback-progress / overview scrub bar. Rides the timeline
+    // dock directly under the transport (play) row so progress sits below the
+    // play buttons; here: playhead marker left, overview scrubber, lock icon.
     auto* top_scrub = new QWidget(viewer_column);
     top_scrub->setObjectName(QStringLiteral("topScrubBar"));
     apply_theme_style(top_scrub, [] {
@@ -338,8 +422,190 @@ void build_center_workspace(MainWindow& mw) {
             .arg(css(tokens().surface), css(tokens().border));
     });
     auto* top_scrub_layout = new QHBoxLayout(top_scrub);
-    top_scrub_layout->setContentsMargins(10, 4, 10, 4);
+    top_scrub_layout->setContentsMargins(8, 4, 8, 4);
     top_scrub_layout->setSpacing(8);
+    // Dual-Viewer toggle: splits the monitor with the source preview pane.
+    // Persisted so the user's monitor arrangement survives restarts. Lives at
+    // the far-left of the top status bar, just before the "1440p · Edited fps"
+    // cluster (see below).
+    auto* dual_view = new QToolButton(&mw);
+    dual_view->setIcon(icon("Dual-View"));
+    dual_view->setIconSize(QSize(14, 14));
+    dual_view->setCheckable(true);
+    dual_view->setChecked(mw.source_panel_->isVisible());
+    dual_view->setAutoRaise(true);
+    dual_view->setToolTip(MainWindow::tr("Dual Viewer — split the monitor with a scrubbable source preview"));
+    apply_theme_style(dual_view, &flat_tool_style);
+    QObject::connect(dual_view, &QToolButton::toggled, &mw,
+            [&mw, dual_view, monitor_split](bool on) {
+                mw.source_panel_->setVisible(on);
+                QSettings().setValue(QStringLiteral("dualViewer"), on);
+                if (on) {
+                    // Half-and-half: source preview and timeline viewer start
+                    // as equal partners in the monitor on Dual-View.
+                    monitor_split->setSizes({1, 1});
+                } else {
+                    // Collapsing the pane: end any audible hover session (this
+                    // CLOSES the source's device), then pause + release so the
+                    // timeline owns audio again.
+                    mw.src_preview_.end_hover_scrub();
+                    mw.src_preview_.release_audio();
+                    mw.source_hovering_ = false;
+                    monitor_split->setSizes({0, 1});
+                }
+                dual_view->setChecked(on);
+            });
+    // Guides cluster: sits right of Dual-View in the top status bar. The grid
+    // button toggles the composition guides (safe areas + thirds grid) together;
+    // the chevron button owns the dropdown so it stays a separate half — a
+    // plain hairline "|" between them, clear spacing, and no tinted subcontrol
+    // anywhere. Everything defaults OFF — the monitor stays a clean picture
+    // unless opted in.
+    auto* guides_btn = new QToolButton(&mw);
+    guides_btn->setObjectName(QStringLiteral("guidesButton"));
+    guides_btn->setIcon(icon("grid"));
+    guides_btn->setIconSize(QSize(14, 14));
+    guides_btn->setCheckable(true);
+    guides_btn->setChecked(mw.viewer_->overlay_enabled(ViewerGL::Overlay::SafeAreas) ||
+                           mw.viewer_->overlay_enabled(ViewerGL::Overlay::ThirdsGrid));
+    guides_btn->setAutoRaise(true);
+    guides_btn->setToolTip(MainWindow::tr("Monitor Overlays — toggle guides, or pick each overlay from the menu"));
+    // Own style, not flat_tool_style: the checked wash there is amber
+    // (accent). Guides-on reads as a neutral highlight instead.
+    apply_theme_style(guides_btn, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral(
+            "QToolButton#guidesButton { background: transparent; border: 1px solid transparent;"
+            " border-radius: 8px; padding: 5px; }"
+            "QToolButton#guidesButton:hover { background: %1; }"
+            "QToolButton#guidesButton:pressed { background: %2; }"
+            "QToolButton#guidesButton:checked { background: %1; border: 1px solid %3; }")
+            .arg(css(t.state_hover), css(t.state_press), css(t.border));
+    });
+    // Hairline divider between the two halves of the cluster.
+    auto* guides_sep = new QWidget(&mw);
+    guides_sep->setObjectName(QStringLiteral("guidesSeparator"));
+    guides_sep->setFixedSize(1, 16);
+    apply_theme_style(guides_sep, [] {
+        return QStringLiteral("QWidget#guidesSeparator { background-color: %1; }")
+                .arg(css(tokens().border));
+    });
+    // Chevron half: opens the overlay picker; never carries checked state.
+    auto* guides_menu_btn = new QToolButton(&mw);
+    guides_menu_btn->setObjectName(QStringLiteral("guidesMenuButton"));
+    guides_menu_btn->setIcon(icon("chevron_down"));
+    guides_menu_btn->setIconSize(QSize(12, 12));
+    guides_menu_btn->setAutoRaise(true);
+    guides_menu_btn->setPopupMode(QToolButton::InstantPopup);
+    guides_menu_btn->setToolTip(MainWindow::tr("Overlay options"));
+    apply_theme_style(guides_menu_btn, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral(
+            "QToolButton#guidesMenuButton { background: transparent; border: none;"
+            " border-radius: 8px; padding: 4px; }"
+            "QToolButton#guidesMenuButton:hover { background: %1; }"
+            "QToolButton#guidesMenuButton:pressed { background: %2; }"
+            "QToolButton#guidesMenuButton::menu-indicator { image: none;"
+            " width: 0px; height: 0px; }")
+            .arg(css(t.state_hover), css(t.state_press));
+    });
+    auto* guides_cluster = new QWidget(&mw);
+    auto* cluster_row = new QHBoxLayout(guides_cluster);
+    cluster_row->setContentsMargins(0, 0, 0, 0);
+    cluster_row->setSpacing(3);
+    cluster_row->addWidget(guides_btn);
+    cluster_row->addWidget(guides_sep);
+    cluster_row->addWidget(guides_menu_btn);
+    cluster_row->setAlignment(guides_sep, Qt::AlignCenter);
+    auto* guides_menu = new QMenu(guides_menu_btn);
+    apply_rounded_menu(guides_menu);
+    QAction* guides_safe = add_overlay_action(mw, mw.viewer_, *guides_menu, "viewerOverlaySafeAreas",
+                                              ViewerGL::Overlay::SafeAreas,
+                                              MainWindow::tr("Show Safe Areas"));
+    QAction* guides_thirds = add_overlay_action(mw, mw.viewer_, *guides_menu, "viewerOverlayThirdsGrid",
+                                                ViewerGL::Overlay::ThirdsGrid,
+                                                MainWindow::tr("Show Thirds Grid"));
+    QAction* guides_badge = add_overlay_action(mw, mw.viewer_, *guides_menu, "viewerOverlayPlaybackBadge",
+                                               ViewerGL::Overlay::PlaybackBadge,
+                                               MainWindow::tr("Show Playback Indicator"));
+    guides_menu_btn->setMenu(guides_menu);
+    QObject::connect(guides_btn, &QToolButton::toggled, &mw,
+            [&mw, guides_safe, guides_thirds](bool on) {
+                mw.viewer_->set_overlay(ViewerGL::Overlay::SafeAreas, on);
+                mw.viewer_->set_overlay(ViewerGL::Overlay::ThirdsGrid, on);
+                QSettings().setValue(QStringLiteral("viewerOverlaySafeAreas"), on);
+                QSettings().setValue(QStringLiteral("viewerOverlayThirdsGrid"), on);
+                // Mirror into the dropdown (blocked: the actions would just
+                // re-apply the same state + settings values).
+                const QSignalBlocker b1(guides_safe);
+                const QSignalBlocker b2(guides_thirds);
+                guides_safe->setChecked(on);
+                guides_thirds->setChecked(on);
+            });
+    // The dropdown lives across right-click-menu edits, so refresh it (and the
+    // button) from the viewer every time it opens.
+    QObject::connect(guides_menu, &QMenu::aboutToShow, &mw,
+            [&mw, guides_btn, guides_safe, guides_thirds, guides_badge] {
+                const QSignalBlocker b1(guides_safe);
+                const QSignalBlocker b2(guides_thirds);
+                const QSignalBlocker b3(guides_badge);
+                const QSignalBlocker b4(guides_btn);
+                guides_safe->setChecked(mw.viewer_->overlay_enabled(ViewerGL::Overlay::SafeAreas));
+                guides_thirds->setChecked(mw.viewer_->overlay_enabled(ViewerGL::Overlay::ThirdsGrid));
+                guides_badge->setChecked(mw.viewer_->overlay_enabled(ViewerGL::Overlay::PlaybackBadge));
+                guides_btn->setChecked(mw.viewer_->overlay_enabled(ViewerGL::Overlay::SafeAreas) ||
+                                       mw.viewer_->overlay_enabled(ViewerGL::Overlay::ThirdsGrid));
+            });
+    // Media-pool collapse/expand lives here now — moved up from the dock's edge
+    // sliver (ShellMediaDock) so the dock stays clean. Same corner-flip
+    // roundtrip as before; the pool keeps its width and its HEIGHT folds to
+    // sit above the timeline, which then spans to the app's far-left edge.
+    auto* media_collapse_btn = new QToolButton(&mw);
+    media_collapse_btn->setObjectName(QStringLiteral("mediaCollapseBtn"));
+    media_collapse_btn->setIcon(icon("Collapse"));
+    media_collapse_btn->setIconSize(QSize(16, 16));
+    media_collapse_btn->setAutoRaise(true);
+    media_collapse_btn->setFixedSize(30, 30);
+    media_collapse_btn->setCursor(Qt::PointingHandCursor);
+    media_collapse_btn->setToolTip(MainWindow::tr("Collapse Media Pool"));
+    apply_theme_style(media_collapse_btn, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral(
+            "QToolButton#mediaCollapseBtn { background: transparent; border: none;"
+            " border-radius: 6px; padding: 4px; }"
+            "QToolButton#mediaCollapseBtn:hover { background-color: %1; }"
+            "QToolButton#mediaCollapseBtn:pressed { background-color: %2; }")
+            .arg(css(t.state_hover), css(t.border));
+    });
+    QObject::connect(media_collapse_btn, &QToolButton::clicked, &mw,
+            [media_collapse_btn, &mw] {
+        const bool collapsing =
+            mw.corner(Qt::BottomLeftCorner) == Qt::LeftDockWidgetArea;
+        if (collapsing)
+            // Pool keeps its width/position; only its height folds to sit ABOVE
+            // the timeline, which then spans to the app's far-left edge.
+            mw.setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
+        else
+            mw.setCorner(Qt::BottomLeftCorner, Qt::LeftDockWidgetArea);
+        // Re-apply the pool's width so the corner flip never eats it.
+        mw.resizeDocks({mw.media_dock_}, {mw.media_dock_->width()}, Qt::Horizontal);
+        // Kick the main-window layout so the corner change re-flows instantly.
+        const QSize cur = mw.size();
+        mw.resize(cur.width() + 1, cur.height());
+        mw.resize(cur);
+        media_collapse_btn->setIcon(icon(collapsing ? "Expand" : "Collapse"));
+        media_collapse_btn->setToolTip(MainWindow::tr(collapsing ? "Expand Media Pool"
+                                                                 : "Collapse Media Pool"));
+    });
+    // Far-left of the top status bar: the run of Quick Export/Full Screen/
+    // Mixer/Metadata/Inspector sits on the right, and the "1440p · Edited ·
+    // fps" readout opens the bar — the media-pool collapse toggle, the
+    // Dual-Viewer button and the Guides button go left of it, in that order.
+    if (auto* tl = qobject_cast<QHBoxLayout*>(top_bar->layout())) {
+        tl->insertWidget(0, media_collapse_btn);
+        tl->insertWidget(1, dual_view);
+        tl->insertWidget(2, guides_cluster);
+    }
     auto* scrub_marker = new QToolButton(top_scrub);
     scrub_marker->setIcon(icon("play"));
     scrub_marker->setIconSize(QSize(12, 12));
@@ -356,15 +622,12 @@ void build_center_workspace(MainWindow& mw) {
     apply_theme_style(scrub_lock, &flat_tool_style);
     scrub_lock->setToolTip(MainWindow::tr("Lock timeline"));
     top_scrub_layout->addWidget(scrub_lock);
-    viewer_layout->addWidget(top_scrub);
     viewer_layout->addWidget(top_bar);
     auto* viewer_inner = new QWidget(viewer_column);
     auto* viewer_inner_layout = new QVBoxLayout(viewer_inner);
-    viewer_inner_layout->setContentsMargins(8, 6, 8, 6);
+    viewer_inner_layout->setContentsMargins(8, 8, 8, 8);
     viewer_inner_layout->setSpacing(4);
     viewer_inner_layout->addWidget(viewer_frame, 1);
-    viewer_inner_layout->addWidget(contextual_bar);
-    viewer_inner_layout->addWidget(transport);
     viewer_layout->addWidget(viewer_inner, 1);
 
     // ---- 7. TIMELINE — locked to the bottom of the window ----
@@ -383,8 +646,17 @@ void build_center_workspace(MainWindow& mw) {
     auto* timeline_frame = new QFrame(&mw);
     timeline_frame->setObjectName(QStringLiteral("timelineFrame"));
     apply_theme_style(timeline_frame, &timeline_frame_style);
+    // Editing tools + transport (play) row + playback-progress scrub bar head
+    // the timeline so they span the dock's full width — under the collapsed
+    // media pool, flush to the window's left edge. Auto-grow math below must
+    // add their combined height.
+    constexpr int kTimelineBarRows = 124;
     auto* timeline_frame_layout = new QVBoxLayout(timeline_frame);
-    timeline_frame_layout->setContentsMargins(6, 6, 6, 4);
+    timeline_frame_layout->setContentsMargins(8, 8, 8, 8);
+    timeline_frame_layout->setSpacing(4);
+    timeline_frame_layout->addWidget(contextual_bar);
+    timeline_frame_layout->addWidget(transport);
+    timeline_frame_layout->addWidget(top_scrub);
     timeline_frame_layout->addWidget(mw.timeline_, 1);
 
     auto* timeline_dock = mw.ui->timelineDock;
@@ -399,25 +671,28 @@ void build_center_workspace(MainWindow& mw) {
     timeline_dock->setTitleBarWidget(timeline_title);
     timeline_dock->setWidget(timeline_frame);
     timeline_dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-    timeline_dock->setMinimumHeight(140);
+    timeline_dock->setMinimumHeight(140 + kTimelineBarRows);
     // Auto-grow the dock so the timeline height follows its channel count:
     // every channel stays flush and reachable instead of being severed inside a
     // fixed-height dock. The signal only fires when the channel count (or track
     // heights) actually change, so scrub/zoom/edits never yank the user's dock
-    // size around.
+    // size around. The two bar rows above the timeline add to the fit height.
     QObject::connect(mw.timeline_, &TimelineWidget::content_height_changed, &mw,
             [&mw, timeline_dock](int height_px) {
                 // Never let the auto-fit swallow more than ~3/4 of the window.
                 const int cap = std::max(265, static_cast<int>(mw.height() * 3 / 4));
-                mw.resizeDocks({timeline_dock}, {std::min(height_px, cap)}, Qt::Vertical);
+                mw.resizeDocks({timeline_dock},
+                        {std::min(height_px, cap) + kTimelineBarRows}, Qt::Vertical);
             });
     // Open at a dock height that fits the initial channel stack (265px floor so
     // an empty project still opens compact; taller timelines open showing every
     // channel). (There is no saveState/restoreState yet, so this is the standing
     // default.)
     const int initial_height = mw.timeline_->desired_timeline_height();
-    mw.resizeDocks({timeline_dock}, {std::max(initial_height, 265)}, Qt::Vertical);
+    mw.resizeDocks({timeline_dock},
+            {std::max(initial_height, 265) + kTimelineBarRows}, Qt::Vertical);
 
+    // ---- 7. CENTRAL WORKSPACE — the viewer column locks into view ----
     // Central workspace = the viewer column (regions lock into place around it).
     if (QWidget* vf = mw.ui->viewerFrame) {
         auto* vf_layout = new QVBoxLayout(vf);
@@ -427,105 +702,15 @@ void build_center_workspace(MainWindow& mw) {
     }
 
     // ---- 7b. DELIVER page docks — settings left, render queue right ----
-    mw.deliver_settings_ = new DeliverSettingsPanel(&mw);
-    mw.deliver_settings_->setObjectName(QStringLiteral("deliverSettings"));
-    mw.deliver_settings_dock_ = new QDockWidget(MainWindow::tr("Deliver Settings"), &mw);
-    mw.deliver_settings_dock_->setObjectName(QStringLiteral("deliverSettingsDock"));
-    mw.deliver_settings_dock_->setWidget(mw.deliver_settings_);
-    mw.deliver_settings_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-    mw.deliver_settings_dock_->setMinimumWidth(360);
-    mw.addDockWidget(Qt::LeftDockWidgetArea, mw.deliver_settings_dock_);
-    mw.deliver_settings_dock_->hide();
-
-    mw.deliver_queue_panel_ = new RenderQueuePanel(&mw);
-    mw.deliver_queue_panel_->setObjectName(QStringLiteral("deliverQueue"));
-    mw.deliver_queue_panel_->set_queue(&mw.render_queue_);
-    mw.deliver_queue_dock_ = new QDockWidget(MainWindow::tr("Render Queue"), &mw);
-    mw.deliver_queue_dock_->setObjectName(QStringLiteral("deliverQueueDock"));
-    mw.deliver_queue_dock_->setWidget(mw.deliver_queue_panel_);
-    mw.deliver_queue_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-    mw.deliver_queue_dock_->setMinimumWidth(300);
-    mw.addDockWidget(Qt::RightDockWidgetArea, mw.deliver_queue_dock_);
-    mw.deliver_queue_dock_->hide();
-
-    // Deliver widget signals -> MainWindow actions.
-    QObject::connect(mw.deliver_settings_, &DeliverSettingsPanel::add_to_queue_clicked, &mw,
-            &MainWindow::add_current_to_render_queue);
-    QObject::connect(mw.deliver_settings_, &DeliverSettingsPanel::render_all_clicked, &mw,
-            &MainWindow::render_all_from_queue);
-    QObject::connect(mw.deliver_queue_panel_, &RenderQueuePanel::render_all_clicked, &mw,
-            &MainWindow::render_all_from_queue);
-    QObject::connect(mw.deliver_queue_panel_, &RenderQueuePanel::clear_queued_clicked, &mw,
-            [&mw] { mw.render_queue_.clear_queued(); mw.has_unsaved_changes_ = true;
-                    mw.reflect_render_queue(); });
-    QObject::connect(mw.deliver_queue_panel_, &RenderQueuePanel::job_remove_clicked, &mw,
-            [&mw](uint64_t id) { mw.render_queue_.remove(id); mw.has_unsaved_changes_ = true;
-                                 mw.reflect_render_queue(); });
-    QObject::connect(mw.deliver_queue_panel_, &RenderQueuePanel::cancel_all_clicked, &mw,
-            [&mw] { mw.render_queue_.cancel_all(); mw.has_unsaved_changes_ = true;
-                    mw.reflect_render_queue(); });
-
-    // Reflect queue changes into the UI panel (called on the main thread via a
-    // queued-style refresh using QMetaObject to stay thread-safe with the
-    // worker thread).
-    mw.render_queue_.on_changed = [&mw] {
-        QMetaObject::invokeMethod(&mw, [&mw] { mw.reflect_render_queue(); },
-                                  Qt::QueuedConnection);
-    };
-
-    // While a job is being exported, park the thumbnail workers so their
-    // full-res NVDEC decodes don't steal the render's GPU/disk bandwidth.
-    // set_paused is atomic + CV-notified, so it can be driven straight from
-    // the worker thread; requests queue up meanwhile and flush on finish.
-    mw.render_queue_.on_job_started = [&mw](uint64_t) { mw.thumbnails_.set_paused(true); };
-
-    // Pop a dialog when a render job fails, so the user isn't left guessing at
-    // a bare "Failed" status. Errors are categorized so each kind of failure
-    // gets its own popup type instead of a single generic message:
-    //   - Configuration problems (missing output path / no codec selected) are
-    //     shown as a persistent Information prompt to fix settings and retry.
-    //   - Encoder/container/open-file failures are shown as a Warning with the
-    //     FFmpeg detail.
-    //   - Anything unexpected is shown as a Critical error.
-    mw.render_queue_.on_job_finished = [&mw](uint64_t id) {
-        mw.thumbnails_.set_paused(false);
-        QMetaObject::invokeMethod(&mw, [&mw, id] {
-            for (const auto& j : mw.render_queue_.jobs()) {
-                if (j.id != id) continue;
-                if (j.status != canvas::core::RenderJob::Status::Failed) break;
-                const QString detail = j.error.empty()
-                    ? MainWindow::tr("The renderer reported no error message. Check canvas_debug.log.")
-                    : QString::fromStdString(j.error);
-                const QString title = MainWindow::tr("Render Failed");
-                if (j.error.find("Output path") != std::string::npos) {
-                    QMessageBox::information(
-                        &mw, title,
-                        MainWindow::tr("There's no output location for \"%1\".\n\n%2\n\n"
-                                       "Choose an output folder on the Deliver panel, then add to the queue again.")
-                            .arg(QString::fromStdString(j.name), detail));
-                } else if (j.error.find("codec") != std::string::npos ||
-                           j.error.find("encoder") != std::string::npos) {
-                    QMessageBox::warning(
-                        &mw, title,
-                        MainWindow::tr("\"%1\" couldn't start encoding.\n\n%2\n\n"
-                                       "Try a different codec or encoder in Deliver settings.")
-                            .arg(QString::fromStdString(j.name), detail));
-                } else {
-                    QMessageBox::critical(
-                        &mw, title,
-                        MainWindow::tr("\"%1\" failed.\n\n%2")
-                            .arg(QString::fromStdString(j.name), detail));
-                }
-                break;
-            }
-        }, Qt::QueuedConnection);
-    };
+    // The deliver chrome (docks + render-queue plumbing + job-failure dialogs)
+    // lives in ShellDeliverPage.cpp; this call owns the page docks so the
+    // center workspace can ship without the deliver module.
+    build_deliver_docks(mw);
 
     mw.status_ = mw.ui->statusbar;
     const ThemeTokens& t = tokens();
     mw.status_->setStyleSheet(QStringLiteral("background-color: %1; color: %2; border-top: 1px solid %3;")
                                   .arg(css(t.surface), css(t.ink_muted), css(t.border_soft)));
-    mw.status_->addPermanentWidget(new QLabel(MainWindow::tr("Nova Canvas Studio"), mw.status_));
 
     mw.connect_timeline();
 
@@ -536,6 +721,10 @@ void build_center_workspace(MainWindow& mw) {
     attach_inspector_audio(mw, mw.timeline_);
     attach_inspector_transition(mw, mw.timeline_);
     attach_inspector_file(mw, mw.timeline_);
+
+    // 7c. COLOR page docks + panels (features/color/color_page.cpp) — the last
+    // chrome built, so it can read the viewer/timeline/controller state.
+    build_color_page(mw);
 }
 
 }  // namespace canvas::gui

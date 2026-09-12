@@ -87,12 +87,10 @@ QVBoxLayout* make_section(const QString& title, QVBoxLayout* page) {
     auto* card = new QWidget;
     apply_theme_style(card, [] {
         const ThemeTokens& t = tokens();
-        return QStringLiteral("QWidget{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-                              " stop:0 %3, stop:0.2 %1, stop:1 %1);"
-                              "border:1px solid %2;border-top:1px solid %4;"
+        return QStringLiteral("QWidget{background-color:%1;"
+                              "border:1px solid %2;"
                               "border-radius:14px;}")
-            .arg(css(t.surface_low), css(t.border_soft), css(t.surface_highest),
-                 css(t.border_hi));
+            .arg(css(t.surface_low), css(t.border_soft));
     });
     auto* inner = new QVBoxLayout(card);
     inner->setContentsMargins(10, 8, 10, 10);

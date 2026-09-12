@@ -26,9 +26,9 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
     if (ctrl && event->key() == Qt::Key_Z) {
         const bool redoing = shift;
         if (redoing && undo_.can_redo())
-            qWarning() << "[edit] REDO cmd=" << QString::fromStdString(undo_.next_redo_name());
+            qDebug() << "[edit] REDO cmd=" << QString::fromStdString(undo_.next_redo_name());
         else if (!redoing && undo_.can_undo())
-            qWarning() << "[edit] UNDO cmd=" << QString::fromStdString(undo_.next_undo_name())
+            qDebug() << "[edit] UNDO cmd=" << QString::fromStdString(undo_.next_undo_name())
                        << "depth=" << undo_.count();
         bool changed = false;
         if (redoing) changed = undo_.redo(project_->sequence);
@@ -183,7 +183,7 @@ void MainWindow::delete_selected_clip(const bool ripple) {
                     : canvas::core::lift_clip(project_->sequence, canvas::core::Track::Kind::Audio, ai, id);
         }
         if (cmd) {
-            qWarning() << "[edit] DELETE" << (ripple ? "ripple" : "lift")
+            qDebug() << "[edit] DELETE" << (ripple ? "ripple" : "lift")
                        << "id=" << static_cast<quint64>(id)
                        << "cmd=" << QString::fromStdString(cmd->name());
             undo_.record(std::move(cmd));
@@ -252,7 +252,7 @@ void MainWindow::toggle_disable_selected_clip() {
                 cmd = canvas::core::set_clip_enabled(project_->sequence, canvas::core::Track::Kind::Audio, ai, id, enabling);
         }
         if (cmd) {
-            qWarning() << "[edit] SET-ENABLED id=" << static_cast<quint64>(id)
+            qDebug() << "[edit] SET-ENABLED id=" << static_cast<quint64>(id)
                        << "-> enabled=" << enabling;
             undo_.record(std::move(cmd));
             any = true;
@@ -307,7 +307,7 @@ void MainWindow::toggle_transition_on_selected() {
                                                 id, canvas::core::TransitionType::CrossDissolve, 6);
     }
     if (cmd) {
-        qWarning() << "[edit] TOGGLE-TRANSITION id=" << static_cast<quint64>(id)
+        qDebug() << "[edit] TOGGLE-TRANSITION id=" << static_cast<quint64>(id)
                    << "clearing=" << clearing;
         undo_.record(std::move(cmd));
         has_unsaved_changes_ = true;
@@ -318,7 +318,7 @@ void MainWindow::toggle_transition_on_selected() {
 
 void MainWindow::toggle_bookmark_at_playhead() {
     if (!project_) return;
-    qWarning() << "[edit] BOOKMARK toggle frame=" << current_frame_;
+    qDebug() << "[edit] BOOKMARK toggle frame=" << current_frame_;
     (void)project_->sequence.toggle_bookmark(current_frame_, "");
     has_unsaved_changes_ = true;
     refresh_timeline();
@@ -356,7 +356,7 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
     const auto now = std::chrono::steady_clock::now();
     if (s_n == 1 || now - s_at >= std::chrono::seconds(1)) {
         s_at = now;
-        qWarning().nospace()
+        qDebug().nospace()
             << "[ui:window] resize ms_avg=" << QString::number(s_ms / s_n, 'f', 2)
             << " ms_last=" << QString::number(rz_ms, 'f', 2)
             << " ms_max=" << QString::number(s_max, 'f', 2)

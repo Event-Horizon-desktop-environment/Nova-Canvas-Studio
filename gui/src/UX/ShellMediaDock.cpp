@@ -1,16 +1,12 @@
 #include "UX/MainWindow.hpp"
 #include "ui_MainWindow.h"
 
-#include "UX/InspectorAudio.hpp"
-#include "UX/InspectorFile.hpp"
-#include "UX/InspectorTransition.hpp"
-#include "UX/InspectorVisual.hpp"
+#include "UX/theme.hpp"
+#include "UX/empty_state.hpp"
+#include "Widgets/media_pool_widget.hpp"
 
 #include <QAbstractItemView>
-#include <QButtonGroup>
-#include <QColor>
 #include <QDockWidget>
-#include <QDoubleSpinBox>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -21,11 +17,8 @@
 #include <QPalette>
 #include <QPoint>
 #include <QPushButton>
-#include <QScrollArea>
 #include <QSize>
-#include <QStackedWidget>
 #include <QTabWidget>
-#include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVariant>
@@ -34,18 +27,20 @@
 
 #include <algorithm>
 
-#include "UX/theme.hpp"
-#include "Widgets/media_pool_widget.hpp"
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/media/video_decoder.hpp"
 
 namespace canvas::gui {
 
+// The left dock: Bins column + Media Pool grid, in a Resolve-style tab strip
+// with a floating glass card and a collapse sliver at the dock's outer edge.
+// Split out of the old ShellDocks.cpp so the media-pool chrome can move
+// independently of the Inspector (ShellInspectorDock.cpp).
 void build_left_dock(MainWindow& mw) {
     auto* left_tabs = new QTabWidget(&mw);
     left_tabs->setObjectName(QStringLiteral("leftTabStrip"));
     left_tabs->setTabPosition(QTabWidget::North);
-    left_tabs->setMinimumWidth(380);
+    left_tabs->setMinimumWidth(384);
     left_tabs->setDocumentMode(true);
     apply_theme_style(left_tabs, &left_tab_strip_style);
 
@@ -58,7 +53,7 @@ void build_left_dock(MainWindow& mw) {
     auto* search_row = new QWidget(pool_tab);
     auto* search_layout = new QHBoxLayout(search_row);
     search_layout->setContentsMargins(0, 0, 0, 0);
-    search_layout->setSpacing(6);
+    search_layout->setSpacing(8);
     auto* search = new QLineEdit(search_row);
     search->setObjectName(QStringLiteral("mediaSearch"));
     search->setPlaceholderText(MainWindow::tr("Search media…"));
@@ -68,7 +63,7 @@ void build_left_dock(MainWindow& mw) {
         const ThemeTokens& t = tokens();
         return QStringLiteral(
             "QLineEdit#mediaSearch { background-color: %1; border: 1px solid %2;"
-            " border-radius: 8px; padding: 5px 10px; color: %3; font-size: 13px;}"
+            " border-radius: 8px; padding: 6px 12px; color: %3; font-size: 14px;}"
             "QLineEdit#mediaSearch:focus { border-color: %4; }"
             "QLineEdit#mediaSearch::placeholder { color: %5; }")
             .arg(css(t.surface_raised), css(t.border), css(t.ink), css(t.accent),
@@ -83,7 +78,7 @@ void build_left_dock(MainWindow& mw) {
         const ThemeTokens& t = tokens();
         return QStringLiteral(
             "QPushButton#mediaImport { background-color: %1; color: %2; border: none;"
-            " border-radius: 8px; padding: 0 14px; font-size: 13px; font-weight: 550;}"
+            " border-radius: 8px; padding: 0 16px; font-size: 14px; font-weight: 550;}"
             "QPushButton#mediaImport:hover { background-color: %3; }"
             "QPushButton#mediaImport:pressed { background-color: %4; }"
             "QPushButton#mediaImport:focus { outline: none; }")
@@ -159,6 +154,7 @@ void build_left_dock(MainWindow& mw) {
     QObject::connect(mw.bin_tree_, &QTreeWidget::customContextMenuRequested, &mw,
             [&mw](const QPoint& pos) {
                 QMenu menu;
+                apply_rounded_menu(&menu);
                 QTreeWidgetItem* item = mw.bin_tree_->itemAt(pos);
                 menu.addAction(MainWindow::tr("New Bin"), &mw, [&mw]() {
                     mw.project_->bins.push_back("New Bin");
@@ -230,7 +226,7 @@ void build_left_dock(MainWindow& mw) {
     mw.media_pool_->setObjectName(QStringLiteral("mediaPool"));
     apply_theme_style(mw.media_pool_, &media_pool_style);
     mw.media_pool_->setContextMenuPolicy(Qt::CustomContextMenu);
-    mw.media_pool_->setSpacing(6);
+    mw.media_pool_->setSpacing(8);
     QObject::connect(mw.media_pool_, &MediaPoolWidget::importRequested, &mw, &MainWindow::on_import_media);
     QObject::connect(mw.media_pool_, &MediaPoolWidget::deleteSelectedRequested, &mw,
                      &MainWindow::delete_selected_media);
@@ -241,6 +237,7 @@ void build_left_dock(MainWindow& mw) {
     QObject::connect(mw.media_pool_, &QListWidget::customContextMenuRequested, &mw,
             [&mw](const QPoint& pos) {
                 QMenu menu;
+                apply_rounded_menu(&menu);
                 menu.addAction(MainWindow::tr("Import Media..."), &mw, &MainWindow::on_import_media);
                 menu.addSeparator();
                 menu.addAction(MainWindow::tr("Delete Selected Media"),
@@ -295,19 +292,23 @@ void build_left_dock(MainWindow& mw) {
 
     left_tabs->addTab(pool_tab, MainWindow::tr("Media Pool"));
 
-    for (const char* tab_name : {"Sync Bin", "Transitions", "Titles", "Effects", "Index", "Sound Library", "Keyframes"}) {
-        auto* placeholder = new QLabel(MainWindow::tr("%1 — placeholder").arg(MainWindow::tr(tab_name)), left_tabs);
-        placeholder->setAlignment(Qt::AlignCenter);
-        apply_theme_style(placeholder, [] {
-            return QStringLiteral("color: %1;").arg(css(tokens().ink_faint));
-        });
-        left_tabs->addTab(placeholder, MainWindow::tr(tab_name));
+    const struct { const char* tab; const char* icon; } placeholders[] = {
+        {"Sync Bin", "sync_lock"},       {"Transitions", "transition"},
+        {"Titles", "edit"},              {"Effects", "effects"},
+        {"Index", "search"},             {"Sound Library", "volume"},
+        {"Keyframes", "mode"},
+    };
+    for (const auto& p : placeholders) {
+        auto* page = build_empty_state(left_tabs, p.icon,
+                                       MainWindow::tr(p.tab),
+                                       MainWindow::tr("This panel is coming in a future update."));
+        left_tabs->addTab(page, MainWindow::tr(p.tab));
     }
 
     mw.media_dock_ = mw.ui->mediaDock;
     mw.media_dock_->setObjectName(QStringLiteral("mediaDock"));
-    // The dock's own background carries the mint workspace glow; the glass card
-    // below floats on it (mirror of the viewer column's viewerFrame).
+    // The dock backdrop paints the flat workspace surface; the glass card below
+    // floats on it (mirror of the viewer column's viewerFrame).
     apply_theme_style(mw.media_dock_, &dock_glow_style);
     auto* media_title = new QWidget(mw.media_dock_);
     media_title->setObjectName(QStringLiteral("mediaDockTitle"));
@@ -316,8 +317,9 @@ void build_left_dock(MainWindow& mw) {
                               " border: none; }");
     });
     mw.media_dock_->setTitleBarWidget(media_title);
-    // Floating glass card wrapping the tab strip, so the tab strip + its panes
-    // read as one rounded panel hovering over the workspace glow.
+
+    // Edge-to-edge panel wrapping the tab strip: the dock content is a flat
+    // square well flush against the workspace surface — no float, no shadow.
     auto* media_glass = new QFrame(&mw);
     media_glass->setObjectName(QStringLiteral("dockGlassCard"));
     apply_theme_style(media_glass, &dock_panel_style);
@@ -325,180 +327,13 @@ void build_left_dock(MainWindow& mw) {
     media_glass_layout->setContentsMargins(0, 0, 0, 0);
     media_glass_layout->setSpacing(0);
     media_glass_layout->addWidget(left_tabs);
+
+    // The collapse/expand toggle now lives on the top status bar (ShellCenter,
+    // just left of the Dual-Viewer button) so the dock edge stays clean. The
+    // pool panel keeps its flat full-width glass below the tab strip; the
+    // same QAbstractButton-style roundtrips mw.media_dock_ corner flips.
     mw.media_dock_->setWidget(media_glass);
     mw.media_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-}
-
-void build_inspector_dock(MainWindow& mw) {
-    mw.inspector_dock_ = mw.ui->inspectorDock;
-    mw.inspector_dock_->setObjectName(QStringLiteral("inspectorDock"));
-    apply_theme_style(mw.inspector_dock_, &dock_glow_style);
-    auto* inspector_title = new QWidget(mw.inspector_dock_);
-    inspector_title->setObjectName(QStringLiteral("inspectorDockTitle"));
-    apply_theme_style(inspector_title, [] {
-        return QStringLiteral("QWidget#inspectorDockTitle { background: transparent;"
-                              " border: none; }");
-    });
-    mw.inspector_dock_->setTitleBarWidget(inspector_title);
-    mw.inspector_dock_->setMinimumWidth(320);
-    mw.inspector_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-
-    auto* inspector_body = new QWidget(mw.inspector_dock_);
-    inspector_body->setObjectName(QStringLiteral("dockGlassCard"));
-    apply_theme_style(inspector_body, &dock_panel_style);
-    auto* inspector_outer = new QVBoxLayout(inspector_body);
-    inspector_outer->setContentsMargins(0, 0, 0, 0);
-    inspector_outer->setSpacing(0);
-
-    auto* mode_row = new QWidget(inspector_body);
-    apply_theme_style(mode_row, &inspector_tab_track_style);
-    auto* mode_row_layout = new QHBoxLayout(mode_row);
-    mode_row_layout->setContentsMargins(4, 4, 4, 4);
-    mode_row_layout->setSpacing(2);
-    struct ModePill { const char* label; const char* icon_name; };
-    const ModePill modes[] = {
-        {"Video", "settings"}, {"Audio", "volume"}, {"Effects", "mode"},
-        {"Transition", "transition"}, {"Image", "viewport"}, {"File", "film-strip"},
-    };
-    auto* mode_group = new QButtonGroup(mode_row);
-    mode_group->setExclusive(true);
-    std::vector<QToolButton*> mode_buttons;
-    for (const auto& m : modes) {
-        auto* b = new QToolButton(mode_row);
-        const bool is_video = qstrcmp(m.label, "Video") == 0;
-        b->setText(MainWindow::tr(m.label));
-        b->setIcon(icon(m.icon_name));
-        b->setIconSize(QSize(14, 14));
-        b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        b->setCheckable(true);
-        b->setChecked(is_video);
-        b->setAutoRaise(true);
-        apply_theme_style(b, &inspector_tab_style);
-        b->setToolTip(MainWindow::tr(m.label));
-        // Allow the pill to shrink below its text width so six mode buttons
-        // fit comfortably at any DPI scale and dock width.  A tooltip makes
-        // the truncated label discoverable.
-        b->setMinimumWidth(1);
-        b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        mode_group->addButton(b);
-        mode_row_layout->addWidget(b);
-        mode_buttons.push_back(b);
-    }
-    inspector_outer->addWidget(mode_row);
-
-    auto* scroll = new QScrollArea(inspector_body);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-
-    // One category stack per mode tab; the tabs switch which one is on top.
-    // "Audio" carries the working per-clip mix controls; the other modes keep
-    // their reference layouts until their properties are wired to the model.
-    auto* stack = new QStackedWidget(scroll);
-    const int video_tab_index = 0;
-    const int audio_tab_index = 1;
-    const int transition_tab_index = 3;
-
-    // --- Video page ---------------------------------------------------------
-    auto* video_page = new QWidget(stack);
-    auto* video_layout = new QVBoxLayout(video_page);
-    // Vertical gutters so the floating category cards sit off the page edges
-    // and each card has clear separation from the next.
-    video_layout->setContentsMargins(0, 4, 0, 8);
-    video_layout->setSpacing(0);
-
-    // Video tab's property categories (Transform/Composite + the reference
-    // placeholders) all build in InspectorVisual.cpp (splitplan refactor); the
-    // widget handles + selection wiring live there too.
-    build_inspector_visual(mw, video_layout);
-    video_layout->addStretch(1);
-    stack->addWidget(video_page);
-
-    // --- Audio page ---------------------------------------------------------
-    // The full Audio tab (Volume/Pan, Pitch, Speed Change, Equalizer + the AI
-    // placeholder sections) builds in InspectorAudio.cpp (splitplan refactor).
-    // Its volume/pan spins subscribe to MainWindow::apply_inspector_audio and
-    // feed the legacy member pointers, so the pre-split commit path still works.
-    auto* audio_page = new QWidget(stack);
-    auto* audio_layout = new QVBoxLayout(audio_page);
-    audio_layout->setContentsMargins(0, 4, 0, 8);
-    audio_layout->setSpacing(0);
-    build_inspector_audio(mw, audio_layout, mode_buttons[audio_tab_index]);
-    audio_layout->addStretch(1);
-    stack->addWidget(audio_page);
-
-    // --- Effects / Image pages (placeholders for now) -----------------------
-    // Pages are added to the stack in the SAME order as the mode pills above
-    // (Video, Audio, Effects, Transition, Image, File); the toggled handler
-    // switches by pill index, so a misplaced page surfaces under the wrong tab.
-    auto* effects_page = new QWidget(stack);
-    {
-        auto* page_layout = new QVBoxLayout(effects_page);
-        page_layout->setContentsMargins(10, 10, 10, 10);
-        page_layout->setSpacing(0);
-        auto* hint = new QLabel(MainWindow::tr("Effects properties — not available yet."),
-                                effects_page);
-        hint->setContentsMargins(10, 10, 10, 10);
-        apply_theme_style(hint, [] {
-            return QStringLiteral("color: %1; font-size: 11px;").arg(css(tokens().ink_faint));
-        });
-        hint->setWordWrap(true);
-        page_layout->addWidget(hint);
-        page_layout->addStretch(1);
-    }
-    stack->addWidget(effects_page);  // index 2
-
-    // --- Transition page ----------------------------------------------------
-    // Start/End sub-tabs + Video/Audio categories (InspectorTransition.cpp).
-    // Only active while a transition bubble is selected on the timeline.
-    auto* transition_page = new QWidget(stack);
-    auto* transition_layout = new QVBoxLayout(transition_page);
-    transition_layout->setContentsMargins(0, 4, 0, 8);
-    transition_layout->setSpacing(0);
-    build_inspector_transition(mw, transition_layout, mode_buttons[transition_tab_index]);
-    stack->addWidget(transition_page);  // index 3
-
-    auto* image_page = new QWidget(stack);
-    {
-        auto* page_layout = new QVBoxLayout(image_page);
-        page_layout->setContentsMargins(10, 10, 10, 10);
-        page_layout->setSpacing(0);
-        auto* hint = new QLabel(MainWindow::tr("Image properties — not available yet."),
-                                image_page);
-        hint->setContentsMargins(10, 10, 10, 10);
-        apply_theme_style(hint, [] {
-            return QStringLiteral("color: %1; font-size: 11px;").arg(css(tokens().ink_faint));
-        });
-        hint->setWordWrap(true);
-        page_layout->addWidget(hint);
-        page_layout->addStretch(1);
-    }
-    stack->addWidget(image_page);  // index 4
-
-    // --- File page ----------------------------------------------------------
-    // Read-only source header info + fully-wired metadata (InspectorFile.cpp).
-    auto* file_page = new QWidget(stack);
-    auto* file_layout = new QVBoxLayout(file_page);
-    file_layout->setContentsMargins(0, 4, 0, 8);
-    file_layout->setSpacing(0);
-    build_inspector_file(mw, file_layout);
-    stack->addWidget(file_page);
-
-    for (std::size_t i = 0; i < mode_buttons.size(); ++i) {
-        const int idx = static_cast<int>(i);
-        QObject::connect(mode_buttons[idx], &QToolButton::toggled, stack, [stack, idx](bool on) {
-            if (on) stack->setCurrentIndex(idx);
-        });
-    }
-    stack->setCurrentIndex(video_tab_index);
-
-    scroll->setWidget(stack);
-    inspector_outer->addWidget(scroll, 1);
-
-    mw.inspector_dock_->setWidget(inspector_body);
-    mw.inspector_dock_->hide();
-    QObject::connect(mw.inspector_toggle_action_, &QAction::toggled, mw.inspector_dock_, &QDockWidget::setVisible);
-    // The top-bar Inspector button is created later (build_top_bar) — it connects
-    // back to this action/dock there, where all three objects are already alive.
 }
 
 }  // namespace canvas::gui

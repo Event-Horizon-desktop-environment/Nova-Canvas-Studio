@@ -1,25 +1,28 @@
 #include "UX/InspectorAudio.hpp"
 
+#include "UX/InspectorAudioEq.hpp"
 #include "UX/InspectorShared.hpp"
 #include "UX/MainWindow.hpp"
 
+#include "canvas/core/media/equalizer.hpp"
 #include "canvas/core/timeline/audio_mix.hpp"
 #include "canvas/core/timeline/audio_processing.hpp"
 #include "canvas/core/timeline/edit_ops.hpp"
 
+#include <QButtonGroup>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QPainter>
-#include <QPainterPath>
 #include <QSlider>
+#include <QStandardItemModel>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <vector>
 
@@ -29,93 +32,6 @@
 namespace canvas::gui {
 
 namespace {
-
-// ── EQ response graph ─────────────────────────────────────────────────────
-// A hand-painted frequency-response plot: x = Hz (log), y = dB (-24..+24).
-// Only a visual reference — spin boxes drive the band values, the curve is a
-// smooth path through the six band-gain points (shelves/rolloffs simplified as
-// waypoint interpolation).
-class EqGraphWidget final : public QWidget {
-public:
-    explicit EqGraphWidget(QWidget* parent = nullptr) : QWidget(parent) {
-        bands_ = canvas::core::Clip::default_eq_bands();
-        setMinimumHeight(140);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        apply_theme_style(this, [] {
-            const ThemeTokens& t = tokens();
-            return QStringLiteral("background-color: %1; border: 1px solid %2;"
-                                  " border-radius: 8px;")
-                .arg(css(t.surface_low), css(t.border_soft));
-        });
-    }
-
-    void set_bands(const std::array<canvas::core::Clip::EqBand, 6>& bands) {
-        bands_ = bands;
-        update();
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing);
-        const QRectF r = rect().adjusted(6, 6, -6, -6);
-        constexpr double kMinDb = -24.0;
-        constexpr double kMaxDb = 24.0;
-        constexpr double kMinHz = 20.0;
-        constexpr double kMaxHz = 20000.0;
-
-        const auto x_for = [&](double hz) {
-            const double lg = std::log(hz / kMinHz) / std::log(kMaxHz / kMinHz);
-            return r.left() + lg * r.width();
-        };
-        const auto y_for = [&](double db) {
-            const double f = (std::clamp(db, kMinDb, kMaxDb) - kMinDb) / (kMaxDb - kMinDb);
-            return r.bottom() - f * r.height();
-        };
-
-        // Grid: reference Hz ticks + 0 dB axis.
-        const ThemeTokens& t = tokens();
-        p.setPen(QPen(t.border_soft, 1));
-        for (const double hz : {62.0, 250.0, 1000.0, 4000.0, 16000.0}) {
-            const double x = x_for(hz);
-            p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()));
-        }
-        p.setPen(QPen(t.border, 1));
-        p.drawLine(QPointF(r.left(), y_for(0.0)), QPointF(r.right(), y_for(0.0)));
-
-        // Axes labels.
-        p.setPen(t.ink_faint);
-        p.setFont(QFont(QStringLiteral("DejaVu Sans"), 7));
-        p.drawText(QPointF(r.left() + 1, r.bottom() - 1), QStringLiteral("20"));
-        p.drawText(QPointF(r.right() - 14, r.bottom() - 1), QStringLiteral("20K"));
-        p.drawText(QPointF(r.left() + 1, y_for(-24.0) + 6), QStringLiteral("-24"));
-        p.drawText(QPointF(r.left() + 1, y_for(24.0) - 2), QStringLiteral("+24"));
-
-        // Response curve through the six bands.
-        QPainterPath path;
-        bool first = true;
-        for (const auto& b : bands_) {
-            const QPointF pt(x_for(b.frequency), y_for(b.gain));
-            if (first) {
-                path.moveTo(pt);
-                first = false;
-            } else {
-                path.lineTo(pt);
-            }
-        }
-        p.setPen(QPen(t.accent, 2));
-        p.drawPath(path);
-
-        // Band markers.
-        p.setBrush(t.accent);
-        p.setPen(Qt::NoPen);
-        for (const auto& b : bands_)
-            p.drawEllipse(QPointF(x_for(b.frequency), y_for(b.gain)), 3.0, 3.0);
-    }
-
-private:
-    std::array<canvas::core::Clip::EqBand, 6> bands_{};
-};
 
 // ── Slider + numeric spin composite row ───────────────────────────────────
 QWidget* make_slider_spin(double min, double max, int decimals, QWidget* parent,
@@ -219,12 +135,24 @@ struct AudioControls {
 
     InspectorCategory* eq_cat = nullptr;
     EqGraphWidget* eq_graph = nullptr;
+    QButtonGroup* eq_view_group = nullptr;  // Curve / Faders view switch
+    QToolButton* eq_view_curve = nullptr;
+    QToolButton* eq_view_bands = nullptr;
     std::vector<QDoubleSpinBox*> eq_freq;
     std::vector<QDoubleSpinBox*> eq_gain;
     std::vector<QDoubleSpinBox*> eq_q;
     std::vector<QComboBox*> eq_type;
+    std::vector<QToolButton*> eq_enable;  // per-band bypass dots (mirror EqBand.enabled)
+    std::vector<QLabel*> eq_labels;       // B1..B6 labels, recoloured on selection
 
-    InspectorCategory* ai_vocal = nullptr;
+    // AI Voice Isolation: per-clip engine picker. Backed by the real model
+    // field (None / RNNoise / DeepFilterNet) and applied before the clip's
+    // gains/mix in both playback and export. Engine entries whose backend is
+    // not compiled in (voice_isolation_supported()==false, i.e. DeepFilterNet)
+    // are listed but disabled.
+    InspectorCategory* iso_cat = nullptr;
+    QComboBox* iso_combo = nullptr;
+
     InspectorCategory* ai_leveler = nullptr;
     InspectorCategory* ai_remix = nullptr;
     QDoubleSpinBox* ai_amount = nullptr;
@@ -253,7 +181,24 @@ void set_processing_enabled(AudioControls& ac, bool on) {
     for (QDoubleSpinBox* s : ac.eq_gain) s->setEnabled(on);
     for (QDoubleSpinBox* s : ac.eq_q) s->setEnabled(on);
     for (QComboBox* c : ac.eq_type) c->setEnabled(on);
-    for (InspectorCategory* cat : {ac.speed_cat, ac.eq_cat})
+    for (QToolButton* b : ac.eq_enable) if (b) b->setEnabled(on);
+    if (ac.eq_view_group) {
+        for (QAbstractButton* b : ac.eq_view_group->buttons()) b->setEnabled(on);
+    }
+    if (ac.eq_graph) {
+        ac.eq_graph->setEnabled(on);
+        // LP/HP rows have no gain control — greyed even when the section is on.
+        for (std::size_t i = 0; i < ac.eq_type.size() && i < ac.eq_gain.size(); ++i) {
+            if (!ac.eq_type[i] || !ac.eq_gain[i]) continue;
+            ac.eq_gain[i]->setEnabled(
+                on && ac.eq_type[i]->currentIndex() !=
+                          static_cast<int>(canvas::core::Clip::EqBand::Type::LowPass) &&
+                ac.eq_type[i]->currentIndex() !=
+                    static_cast<int>(canvas::core::Clip::EqBand::Type::HighPass));
+        }
+    }
+    if (ac.iso_combo) ac.iso_combo->setEnabled(on);
+    for (InspectorCategory* cat : {ac.speed_cat, ac.eq_cat, ac.iso_cat})
         if (cat) {
             cat->set_feature_toggle_enabled(on);
             cat->setEnabled(on);
@@ -277,8 +222,16 @@ void populate_from_clip(AudioControls& ac, const canvas::core::Clip& clip) {
         if (i < ac.eq_freq.size() && ac.eq_freq[i]) ac.eq_freq[i]->setValue(b.frequency);
         if (i < ac.eq_gain.size() && ac.eq_gain[i]) ac.eq_gain[i]->setValue(b.gain);
         if (i < ac.eq_q.size() && ac.eq_q[i]) ac.eq_q[i]->setValue(b.q);
+        if (i < ac.eq_enable.size() && ac.eq_enable[i])
+            ac.eq_enable[i]->setChecked(b.enabled);
     }
-    if (ac.eq_graph) ac.eq_graph->set_bands(clip.eq_bands);
+    if (ac.eq_graph) {
+        ac.eq_graph->set_bands(clip.eq_bands);
+        // Entering a new clip clears the node/row selection.
+        ac.eq_graph->set_selected(-1);
+    }
+    if (ac.iso_combo)
+        ac.iso_combo->setCurrentIndex(static_cast<int>(clip.voice_isolation));
     ac.updating = false;
 }
 
@@ -380,8 +333,24 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
                                        2, host, &s3, &sp3);
     ac.speed_slider = s3;
     ac.speed_factor = sp3;
-    add_property_row(ac.speed_cat->body_layout(), tr("Factor"), speed_row);
+    QToolButton* speed_row_reset = nullptr;
+    add_property_row(ac.speed_cat->body_layout(), tr("Factor"), speed_row,
+                     /*with_reset=*/true, &speed_row_reset);
     audio_layout->addWidget(ac.speed_cat);
+
+    // "Reset to default": the category-header reset AND the Factor-row reset
+    // both restore the speed to 1.00 (disabled tempo) and commit one undoable
+    // edit. spin->setValue() keeps the linked slider in sync.
+    const auto reset_speed = [&mw]() {
+        AudioControls* acc = audio_lookup(mw);
+        if (!acc || !acc->speed_factor) return;
+        acc->speed_factor->setValue(1.0);
+        apply_inspector_audio_processing(mw);
+    };
+    if (auto* rb = ac.speed_cat->reset_button())
+        QObject::connect(rb, &QToolButton::clicked, &mw, reset_speed);
+    if (speed_row_reset)
+        QObject::connect(speed_row_reset, &QToolButton::clicked, &mw, reset_speed);
 
     // --- Equalizer ------------------------------------------------------------
     // Open by default so the bands are immediately editable — no collapsed/
@@ -391,17 +360,90 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     // The EQ section sits at the bottom of the audio tab and gets generous
     // spacing so every value/suffix stays fully visible at any dock width.
     ac.eq_cat->body_layout()->setSpacing(12);
+
+    // View toggle: Curve (node graph) vs Faders (band gain columns). A
+    // lightweight segmented pair, identical to the page-bar pills in style.
+    {
+        auto* view_row = new QWidget(host);
+        auto* view_lay = new QHBoxLayout(view_row);
+        view_lay->setContentsMargins(0, 0, 0, 0);
+        view_lay->setSpacing(4);
+        auto* seg = new QWidget(view_row);
+        auto* seg_lay = new QHBoxLayout(seg);
+        seg_lay->setContentsMargins(0, 0, 0, 0);
+        seg_lay->setSpacing(0);
+        auto* curve_btn = new QToolButton(seg);
+        curve_btn->setCheckable(true);
+        curve_btn->setChecked(true);
+        curve_btn->setText(tr("Curve"));
+        auto* bands_btn = new QToolButton(seg);
+        bands_btn->setCheckable(true);
+        bands_btn->setText(tr("Faders"));
+        ac.eq_view_group = new QButtonGroup(seg);
+        ac.eq_view_group->setExclusive(true);
+        ac.eq_view_group->addButton(curve_btn, 0);
+        ac.eq_view_group->addButton(bands_btn, 1);
+        ac.eq_view_curve = curve_btn;
+        ac.eq_view_bands = bands_btn;
+        curve_btn->setFixedHeight(20);
+        bands_btn->setFixedHeight(20);
+        const auto seg_style = [] {
+            const ThemeTokens& t = tokens();
+            return QStringLiteral(
+                       "QToolButton { background: %1; color: %2; border: none;"
+                       "  padding: 1px 10px; font-size: 10px;"
+                       "  border-right: 1px solid %3; }"
+                       "QToolButton:first { border-top-left-radius: 8px;"
+                       "  border-bottom-left-radius: 8px; }"
+                       "QToolButton:last { border-right: none;"
+                       "  border-top-right-radius: 8px;"
+                       "  border-bottom-right-radius: 8px; }"
+                       "QToolButton:checked { background: %4; color: %5; }")
+                .arg(css(t.surface_raised), css(t.ink_muted), css(t.border_soft),
+                     css(t.surface_highest), css(t.ink));
+        };
+        apply_theme_style(curve_btn, seg_style);
+        apply_theme_style(bands_btn, seg_style);
+        seg_lay->addWidget(curve_btn);
+        seg_lay->addWidget(bands_btn);
+        auto* view_lbl = new QLabel(tr("View"), view_row);
+        apply_theme_style(view_lbl, [] {
+            return QStringLiteral("color: %1; font-size: 10px;")
+                .arg(css(tokens().ink_muted));
+        });
+        view_lay->addWidget(view_lbl);
+        view_lay->addWidget(seg);
+        view_lay->addStretch(1);
+        ac.eq_cat->body_layout()->addWidget(view_row);
+    }
+
     ac.eq_graph = new EqGraphWidget(host);
     ac.eq_cat->body_layout()->addWidget(ac.eq_graph);
 
-    // Band rows: B1..B6 | type | freq | gain | Q. All five columns are always
-    // shown — never folded away per filter type — so the row layout is stable
-    // and no label/value is ever hidden.
+    // Band rows: [dot] B1..B6 | type | freq | gain | Q. All six columns are
+    // always shown — never folded away per filter type — so the row layout is
+    // stable and no label/value is ever hidden. The leading dot is the per-band
+    // bypass toggle (EqBand.enabled): the same rule the graph's double-click
+    // uses. The band label picks up the band hue while its node is selected,
+    // mirroring the graph's selection ring.
     for (int i = 0; i < canvas::core::audio_processing::kEqBandCount; ++i) {
         auto* row = new QWidget(host);
         auto* lay = new QHBoxLayout(row);
         lay->setContentsMargins(0, 0, 0, 0);
         lay->setSpacing(8);
+        auto* dot = new QToolButton(row);
+        dot->setCheckable(true);
+        dot->setChecked(true);
+        dot->setFixedSize(14, 14);
+        apply_theme_style(dot, [i] {
+            const QColor hue = EqGraphWidget::band_hue(i);
+            const ThemeTokens& t = tokens();
+            return QStringLiteral(
+                       "QToolButton { border-radius: 7px; border: 1px solid %1;"
+                       "  background-color: %2; }"
+                       "QToolButton:checked { background-color: %3; border: 1px solid %3; }")
+                .arg(css(with_alpha(hue, 120)), css(t.surface_low), css(hue));
+        });
         auto* lbl = new QLabel(QStringLiteral("B%1").arg(i + 1), row);
         lbl->setFixedWidth(22);
         apply_theme_style(lbl, [] {
@@ -419,18 +461,59 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         gain->setSuffix(QStringLiteral("dB"));
         auto* q = make_band_spin(canvas::core::audio_processing::kEqQMin,
                                  canvas::core::audio_processing::kEqQMax, 1, 1.0, row, 54);
+        lay->addWidget(dot);
         lay->addWidget(lbl);
         lay->addWidget(type, 1);
         lay->addWidget(freq);
         lay->addWidget(gain);
         lay->addWidget(q);
 
+        ac.eq_enable.push_back(dot);
+        ac.eq_labels.push_back(lbl);
         ac.eq_type.push_back(type);
         ac.eq_freq.push_back(freq);
         ac.eq_gain.push_back(gain);
         ac.eq_q.push_back(q);
         ac.eq_cat->body_layout()->addWidget(row);
     }
+
+    // --- AI Voice Isolation --------------------------------------------------
+    // Real per-clip engine picker (model-backed, applied before the gains/mix
+    // in playback AND export). A dropdown row = the engine list; "None" is the
+    // default/off state. Modes whose backend isn't compiled in this build stay
+    // listed but greyed (DeepFilterNet voice-from-music — seam reserved).
+    ac.iso_cat = new InspectorCategory(tr("AI Voice Isolation"), true, /*has_enable=*/false, host);
+    {
+        auto* row = new QWidget(host);
+        auto* lay = new QHBoxLayout(row);
+        lay->setContentsMargins(0, 0, 0, 0);
+        lay->setSpacing(6);
+        auto* combo = make_dark_combo(row);
+        // Index i == VoiceIsolationMode i (None=0, RnNoise=1, DeepFilterNet=2);
+        // keep this aligned with the enum order.
+        combo->addItem(tr("None"));
+        combo->addItem(tr("RNNoise — Noise Suppression"));
+        combo->addItem(tr("DeepFilterNet — Voice from Music"));
+        combo->setItemData(2, tr("Engine not built into this build"),
+                           Qt::ToolTipRole);
+        if (!canvas::core::voice_isolation_supported(
+                canvas::core::VoiceIsolationMode::DeepFilterNet)) {
+            if (auto* model_ = qobject_cast<QStandardItemModel*>(combo->model())) {
+                if (QStandardItem* item = model_->item(2)) {
+                    item->setEnabled(false);
+                    item->setToolTip(MainWindow::tr(
+                        "DeepFilterNet is not built into this build — RNNoise is the "
+                        "shipped engine."));
+                }
+            }
+        }
+        lay->addWidget(combo, 1);
+        ac.iso_combo = combo;
+        add_property_row(ac.iso_cat->body_layout(), tr("Isolate"), row);
+        QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw,
+                         [&mw]() { apply_inspector_voice_isolation(mw); });
+    }
+    audio_layout->addWidget(ac.iso_cat);
 
     // --- AI sections (UI placeholders, not wired to the model) ---------------
     const auto make_ai = [&](const QString& title, bool with_amount) -> InspectorCategory* {
@@ -463,7 +546,6 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         audio_layout->addWidget(cat);
         return cat;
     };
-    ac.ai_vocal = make_ai(tr("AI Voice Isolation"), /*with_amount=*/true);
     ac.ai_leveler = make_ai(tr("AI Dialogue Leveler"), /*with_amount=*/false);
     ac.ai_remix = make_ai(tr("AI Music Remixer"), /*with_amount=*/false);
 
@@ -499,10 +581,13 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         QObject::connect(spin, &QDoubleSpinBox::editingFinished, &mw, commit_processing);
     for (QComboBox* combo : ac.eq_type)
         QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw, commit_processing);
+    for (QToolButton* dot : ac.eq_enable)
+        QObject::connect(dot, &QToolButton::toggled, &mw, commit_processing);
     QObject::connect(ac.speed_cat, &InspectorCategory::feature_toggled, &mw, commit_processing);
     QObject::connect(ac.eq_cat, &InspectorCategory::feature_toggled, &mw, commit_processing);
 
-    // Keep the EQ graph in sync with gain/freq edits live.
+    // Live graph <-> rows echo (no commit): any spin/type/dot edit repaints the
+    // curve from the widgets, preserving each band's enabled dot.
     const auto refresh_graph = [&ac]() {
         if (!ac.eq_graph) return;
         std::array<canvas::core::Clip::EqBand, 6> bands;
@@ -514,13 +599,72 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
                                 ? static_cast<canvas::core::Clip::EqBand::Type>(
                                       ac.eq_type[i]->currentIndex())
                                 : canvas::core::Clip::EqBand::Type::Bell;
+            bands[i].enabled = i < static_cast<int>(ac.eq_enable.size()) &&
+                               ac.eq_enable[i] && ac.eq_enable[i]->isChecked();
         }
         ac.eq_graph->set_bands(bands);
     };
+    for (QDoubleSpinBox* spin : ac.eq_freq)
+        QObject::connect(spin, &QDoubleSpinBox::valueChanged, &mw, refresh_graph);
     for (QDoubleSpinBox* spin : ac.eq_gain)
+        QObject::connect(spin, &QDoubleSpinBox::valueChanged, &mw, refresh_graph);
+    for (QDoubleSpinBox* spin : ac.eq_q)
         QObject::connect(spin, &QDoubleSpinBox::valueChanged, &mw, refresh_graph);
     for (QComboBox* combo : ac.eq_type)
         QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw, refresh_graph);
+    // View toggle: Curve ↔ Faders gain columns. The graph paints from
+    // whatever mode is selected; selection is shared across both views.
+    if (ac.eq_view_group) {
+        QObject::connect(
+            ac.eq_view_group, qOverload<int>(&QButtonGroup::idClicked), &mw,
+            [&ac](int id) {
+                if (!ac.eq_graph) return;
+                ac.eq_graph->set_view(id == 1 ? EqGraphWidget::View::Bands
+                                              : EqGraphWidget::View::Curve);
+            });
+    }
+    // LP/HP bands carry no gain: grey the row spin as the graph disables its
+    // vertical drag, and keep it in lock-step with a type change.
+    const auto refresh_band_gain_editable = [&ac]() {
+        for (std::size_t i = 0; i < ac.eq_type.size() && i < ac.eq_gain.size(); ++i) {
+            if (!ac.eq_type[i] || !ac.eq_gain[i]) continue;
+            const auto ty = static_cast<canvas::core::Clip::EqBand::Type>(
+                ac.eq_type[i]->currentIndex());
+            ac.eq_gain[i]->setEnabled(ty != canvas::core::Clip::EqBand::Type::LowPass &&
+                                      ty != canvas::core::Clip::EqBand::Type::HighPass);
+        }
+    };
+    for (QComboBox* combo : ac.eq_type)
+        QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw, refresh_band_gain_editable);
+
+    // Graph gestures → live row echo + one settled commit.
+    ac.eq_graph->on_edit = [&ac](int idx) {
+        if (idx < 0 || idx >= static_cast<int>(ac.eq_freq.size())) return;
+        const auto& b = ac.eq_graph->bands()[idx];
+        ac.eq_freq[idx]->setValue(b.frequency);
+        ac.eq_gain[idx]->setValue(b.gain);
+        ac.eq_q[idx]->setValue(b.q);
+        ac.eq_enable[idx]->setChecked(b.enabled);
+    };
+    ac.eq_graph->on_commit = [&mw]() { apply_inspector_audio_processing(mw); };
+    ac.eq_graph->on_selection_changed = [&ac](int idx) {
+        // The numeric row echoes the selected node: the B-label takes the band's
+        // hue + weight, the others fall back to muted ink.
+        for (std::size_t i = 0; i < ac.eq_labels.size(); ++i) {
+            const bool sel = static_cast<int>(i) == idx;
+            apply_theme_style(ac.eq_labels[i], [sel, i] {
+                if (sel) {
+                    return QStringLiteral("color: %1; font-size: 10px; font-weight: 600;")
+                        .arg(css(EqGraphWidget::band_hue(i)));
+                }
+                return QStringLiteral("color: %1; font-size: 10px;")
+                    .arg(css(tokens().ink_muted));
+            });
+        }
+    };
+    // A cell click (or Escape) on the row widgets re-syncs the graph; the
+    // selection ring itself is drawn by the graph and echoed here above.
+    ac.eq_graph->set_selected(-1);  // harmless no-op initial state
 }
 
 void attach_inspector_audio(MainWindow& mw, TimelineWidget* timeline) {
@@ -578,11 +722,18 @@ void apply_inspector_audio_processing(MainWindow& mw) {
 
     std::array<canvas::core::Clip::EqBand, 6> bands{};
     for (int i = 0; i < 6; ++i) {
-        bands[i].type = static_cast<canvas::core::Clip::EqBand::Type>(
-            ac->eq_type[i] ? ac->eq_type[i]->currentIndex() : 0);
-        bands[i].frequency = static_cast<float>(ac->eq_freq[i]->value());
-        bands[i].gain = static_cast<float>(ac->eq_gain[i]->value());
-        bands[i].q = static_cast<float>(ac->eq_q[i]->value());
+        const bool has = i < static_cast<int>(ac->eq_type.size()) &&
+                         i < static_cast<int>(ac->eq_freq.size()) &&
+                         i < static_cast<int>(ac->eq_gain.size()) &&
+                         i < static_cast<int>(ac->eq_q.size());
+        bands[i].type = has ? static_cast<canvas::core::Clip::EqBand::Type>(
+                                  ac->eq_type[i]->currentIndex())
+                            : canvas::core::Clip::EqBand::Type::Bell;
+        bands[i].frequency = has ? static_cast<float>(ac->eq_freq[i]->value()) : 1000.0f;
+        bands[i].gain = has ? static_cast<float>(ac->eq_gain[i]->value()) : 0.0f;
+        bands[i].q = has ? static_cast<float>(ac->eq_q[i]->value()) : 1.0f;
+        bands[i].enabled = i < static_cast<int>(ac->eq_enable.size()) && ac->eq_enable[i] &&
+                           ac->eq_enable[i]->isChecked();
     }
 
     const bool same = clip.pitch_semitones == semi && clip.pitch_cents == cents &&
@@ -601,6 +752,36 @@ void apply_inspector_audio_processing(MainWindow& mw) {
                << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                << "track=" << index << "clip=" << clip.id << "semi=" << semi << "cents=" << cents
                << "speed=" << speed << "eq_on=" << eq_on;
+}
+
+void apply_inspector_voice_isolation(MainWindow& mw) {
+    AudioControls* ac = audio_lookup(mw);
+    if (!ac || ac->updating || !ac->iso_combo) return;
+
+    canvas::core::Track::Kind kind;
+    std::size_t index;
+    canvas::core::Clip clip;
+    // Target the selected audio clip, or the linked audio mate of a video clip.
+    if (!mw.find_audio_target(kind, index, clip)) return;
+
+    const auto mode = static_cast<canvas::core::VoiceIsolationMode>(
+        ac->iso_combo->currentIndex());
+    // An unsupported engine (DeepFilterNet) must never be selectable at commit
+    // time even if the entry was force-enabled somehow.
+    if (!canvas::core::voice_isolation_supported(mode)) return;
+    if (clip.voice_isolation == mode) return;
+
+    auto cmd = canvas::core::set_clip_voice_isolation(mw.project_->sequence, kind, index,
+                                                      clip.id, mode);
+    if (!cmd) return;
+    mw.undo_.record(std::move(cmd));
+    mw.has_unsaved_changes_ = true;
+    mw.refresh_timeline();
+    mw.push_audio_mix_snapshot();
+    qWarning() << "[edit] CLIP-VOICE-ISOLATION kind="
+               << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
+               << "track=" << index << "clip=" << clip.id
+               << "mode=" << canvas::core::voice_isolation_mode_name(mode);
 }
 
 }  // namespace canvas::gui

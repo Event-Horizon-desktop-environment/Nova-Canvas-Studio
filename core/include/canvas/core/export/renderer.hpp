@@ -1,9 +1,13 @@
 #pragma once
 
+#include "canvas/core/grade_graph/lut.hpp"
 #include "canvas/core/media/audio_decoder.hpp"
+#include "canvas/core/media/equalizer.hpp"
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/media/video_decoder.hpp"
+#include "canvas/core/media/voice_isolation.hpp"
 #include "canvas/core/timeline/model.hpp"
+#include "canvas/core/timeline/time_stretch.hpp"
 #include "canvas/core/project/project.hpp"
 
 #include <cstdint>
@@ -77,6 +81,15 @@ public:
         // Whole-canvas edge-fade gain toward black (same law as the CPU
         // compositor's single-clip transition factor; 1.0 = no fade).
         float fade = 1.0f;
+        // Baked grade LUT for the single graded clip at this frame (null when
+        // the clip is ungraded). The GPU grade kernel consumes it via
+        // grade_lut_upload; ungraded frames take the plain nv12Resize path.
+        grade_graph::GradeLutPtr grade;
+        // Resolved source color spec (ColorMatrix: 0=601,1=709,2=2020; ColorRange:
+        // 0=limited,1=full) from the decoder's ColorSpec so the grade kernel
+        // decodes with the file's actual matrix/range, mirroring swscale.
+        int matrix = 1;
+        int range = 0;
         bool valid = false;
     };
 
@@ -100,6 +113,12 @@ private:
         int64_t active_tl_in = INT64_MIN;  // tl_in of the clip the decoder maps
         int active_media = -1;             // media id the decoder was opened for
         std::unique_ptr<VideoDecoder> dec;
+        // Baked LUT cache: one entry per active clip, invalidated when the clip
+        // pointer changes (each Project snapshot owns fresh Clips), so a graded
+        // clip bakes once per session instead of once per frame.
+        const Clip* lut_clip = nullptr;
+        grade_graph::GradeLutPtr lut;
+        grade_graph::GradeLutPtr lut_for(const Clip* clip);
     };
 
     // Persistent per-audio-track state, kept so sequential audio_chunk() calls
@@ -114,6 +133,22 @@ private:
 
     std::vector<TrackDecoder> tracks_;
     std::vector<AudioTrackDecoder> audio_tracks_;
+    // Per-clip AI voice-isolation state (RNNoise bank), streamed across
+    // audio_chunk() calls within a clip and dropped whenever a clip's decoder
+    // re-opens (tracked by the AudioTrackDecoder reset). Only used at 48 kHz
+    // (the RNNoise rate); other export rates bypass the stage with a warning.
+    canvas::core::VoiceIsolationBank iso_bank_;
+    // Per-clip parametric EQ state (6-band RBJ biquad bank), streamed across
+    // audio_chunk() calls within a clip and dropped whenever a clip's decoder
+    // re-opens, mirroring iso_bank_. Rate-independent (unlike the 48 kHz
+    // RNNoise stage), so it runs at every export rate without a bypass.
+    canvas::core::EqualizerBank eq_bank_;
+    // Per-clip pitch-preserving Speed Change state (WSOLA time-stretch bank),
+    // streamed across audio_chunk() calls within a clip and dropped whenever a
+    // clip's decoder re-opens, mirroring iso_bank_. Consumes
+    // `effective_rate` source frames per output frame, locked to the video
+    // path's clip_src_frame law.
+    canvas::core::TimeStretchBank stretch_bank_;
     const Project* project_ = nullptr;
     int width_ = 0;
     int height_ = 0;

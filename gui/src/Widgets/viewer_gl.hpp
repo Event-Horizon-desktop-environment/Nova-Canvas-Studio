@@ -8,9 +8,14 @@
 #include <QOpenGLBuffer>
 #include <QOpenGLVertexArrayObject>
 
+#include <chrono>
 #include <memory>
 
 #include "canvas/core/media/frame.hpp"
+
+namespace canvas::core::grade_graph {
+struct GradeLut3D;
+}  // namespace canvas::core::grade_graph
 
 namespace canvas::gui {
 
@@ -30,11 +35,28 @@ public:
     enum class ScaleMode { Fit, Fill };
 
     explicit ViewerGL(QWidget* parent = nullptr);
+    ~ViewerGL() override;
 
     void set_frame(canvas::core::RenderFramePtr frame);
     void clear();
     void set_mode(ViewerMode mode);
     void set_scale_mode(ScaleMode mode);
+
+    // Optional editor overlays drawn over the presented frame: action/title
+    // safe areas, a rule-of-thirds grid, and a live playback indicator. They
+    // are toggled from the viewer's right-click menu and persisted in QSettings
+    // (see ShellCenter.cpp), and are purely cosmetic — never baked to export.
+    enum class Overlay : unsigned {
+        SafeAreas = 1u << 0,   // 90% action-safe / 80% title-safe boxes
+        ThirdsGrid = 1u << 1,  // rule-of-thirds guides
+        PlaybackBadge = 1u << 2,
+    };
+    void set_overlay(Overlay overlay, bool on);
+    [[nodiscard]] bool overlay_enabled(Overlay overlay) const;
+    // Drives the playback indicator badge (MainWindow's on_playback_changed
+    // keeps it in lockstep with the SequenceController's real state).
+    void set_playing(bool playing);
+    [[nodiscard]] bool playing() const { return playing_; }
 
     [[nodiscard]] ViewerMode mode() const { return mode_; }
     [[nodiscard]] ScaleMode scale_mode() const { return scale_mode_; }
@@ -47,10 +69,19 @@ protected:
 private:
     void upload_frame();
     void draw_blank();
+    // Paints the monitor overlays (safe areas / thirds grid / playback badge)
+    // after the frame quad, in widget coordinates and clipped to the widget.
+    void draw_viewer_overlays();
 
     canvas::core::RenderFramePtr frame_;
     ViewerMode mode_ = ViewerMode::Program;
     ScaleMode scale_mode_ = ScaleMode::Fit;
+    // All overlays default OFF: the monitor stays a clean picture unless the
+    // operator opts in (Guides button in the top bar, or the viewer's
+    // right-click menu). ShellCenter reads QSettings and overrides before
+    // first paint.
+    unsigned overlay_flags_ = 0;
+    bool playing_ = false;
 
     std::unique_ptr<QOpenGLTexture> texture_;
     std::unique_ptr<QOpenGLTexture> texture_b_;
@@ -65,6 +96,13 @@ private:
     std::unique_ptr<QOpenGLTexture> texture_nv12_b_uv_;
     std::unique_ptr<QOpenGLShaderProgram> program_nv12_;
     std::unique_ptr<QOpenGLShaderProgram> program_nv12_trans_;
+    // Resolve-style 3D grade LUTs: RGB32F textures (N^3 cells) uploaded when a
+    // clip's baked LUT pointer changes (decode-side bake, cached). Unit 4/5
+    // hold A's and B's LUTs for the NV12 shaders; u_grade_*_size = 0 disables.
+    std::unique_ptr<QOpenGLTexture> grade_tex_a_;
+    std::unique_ptr<QOpenGLTexture> grade_tex_b_;
+    const canvas::core::grade_graph::GradeLut3D* grade_a_uploaded_ = nullptr;
+    const canvas::core::grade_graph::GradeLut3D* grade_b_uploaded_ = nullptr;
     QOpenGLBuffer vbo_{QOpenGLBuffer::VertexBuffer};
     QOpenGLVertexArrayObject vao_;
     GLint attr_pos_ = -1;
@@ -81,6 +119,22 @@ private:
     bool texture_dirty_ = false;
     bool nv12_valid_ = false;
     bool nv12_b_valid_ = false;
+    // GUI-thread delivery health (see set_frame): wall time of the previous
+    // set_frame, so the always-on `[viewer]` line can report the receive
+    // interval. A healthy worker→widget handoff tracks the controller cadence;
+    // a receive interval far above it means the GUI thread is busy between
+    // frames (paint/log/other) even though the decode worker kept up.
+    std::chrono::steady_clock::time_point last_frame_arrival_{};
+    bool have_last_arrival_ = false;
+
+    // Last NV12 spec + grade-attachment state drawn, so color.log records a
+    // [viewer] line exactly once per change (not per frame at playback rate).
+    // The grade toggle here is the correlation key for "touch a wheel -> the
+    // preview changes" (commit -> bake -> upload -> draw chain).
+    canvas::core::gpu::ColorMatrix last_spec_matrix_ = canvas::core::gpu::ColorMatrix::BT709;
+    canvas::core::gpu::ColorRange last_spec_range_ = canvas::core::gpu::ColorRange::Limited;
+    int last_grade_attached_ = -1;
+    bool last_spec_set_ = false;
 };
 
 }

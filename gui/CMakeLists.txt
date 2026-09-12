@@ -22,10 +22,15 @@ qt_add_executable(canvas
     src/UX/MainWindowShell.cpp
     src/UX/ShellMenus.cpp
     src/UX/ShellTopBar.cpp
-    src/UX/ShellDocks.cpp
+    src/UX/ShellPageBar.cpp
+    src/UX/ShellTransportBar.cpp
+    src/UX/ShellMediaDock.cpp
+    src/UX/ShellInspectorDock.cpp
+    src/UX/ShellDeliverPage.cpp
     src/UX/ShellCenter.cpp
     src/UX/InspectorVisual.cpp
     src/UX/InspectorAudio.cpp
+    src/UX/InspectorAudioEq.cpp
     src/UX/InspectorTransition.cpp
     src/UX/InspectorFile.cpp
     src/UX/InspectorShared.hpp
@@ -38,7 +43,12 @@ qt_add_executable(canvas
     src/Widgets/timeline_drag.cpp
     src/Widgets/transition_handle_editor.cpp
     src/Widgets/timeline_volume_line.cpp
-    src/UX/theme.cpp
+    src/UX/theme_clip_colors.cpp
+    src/UX/theme_icons.cpp
+    src/UX/theme_menu.cpp
+    src/UX/theme_state.cpp
+    src/UX/theme_styles.cpp
+    src/UX/theme_tokens.cpp
     src/UX/horizon_style.cpp
     ui/MainWindow.ui
 
@@ -58,6 +68,23 @@ qt_add_executable(canvas
     src/features/deliver/deliver_settings_panel.cpp
     src/features/deliver/deliver_settings_model.cpp
     src/features/deliver/render_queue_panel.cpp
+    src/features/deliver/DeliverActions.cpp
+
+    src/features/source_preview/source_preview_model.cpp
+    src/features/source_preview/source_preview_controller.cpp
+    src/features/source_preview/source_viewer_panel.cpp
+
+    src/features/color/color_widgets.cpp
+    src/features/color/curves/curves_panel.cpp
+    src/features/color/mini_timeline_strip.cpp
+    src/features/color/node_graph_canvas.cpp
+    src/features/color/scopes/common/scope_common.cpp
+    src/features/color/scopes/parade/parade_scope.cpp
+    src/features/color/scopes/waveform/waveform_scope.cpp
+    src/features/color/scopes/vectorscope/vectorscope_scope.cpp
+    src/features/color/scopes/histogram/histogram_scope.cpp
+    src/features/color/scopes/chromaticity/chromaticity_widget.cpp
+    src/features/color/color_page.cpp
 
     src/Widgets/viewer_gl.cpp
     src/Widgets/media_pool_widget.cpp

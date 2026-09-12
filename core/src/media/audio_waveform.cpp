@@ -93,8 +93,9 @@ bool decode_audio_waveform(const std::string& path, std::size_t buckets, AudioWa
         return false;
     }
 
-    const int64_t total_seconds = fmt->duration > 0 ? fmt->duration / AV_TIME_BASE : 0;
-    out->duration_seconds = total_seconds > 0 ? static_cast<double>(total_seconds) : 0.0;
+    const double total_seconds =
+        fmt->duration > 0 ? fmt->duration / static_cast<double>(AV_TIME_BASE) : 0.0;
+    out->duration_seconds = total_seconds > 0.0 ? total_seconds : 0.0;
 
     const AVCodec* codec = nullptr;
     AVStream* stream = nullptr;
@@ -159,8 +160,8 @@ bool decode_audio_waveform(const std::string& path, std::size_t buckets, AudioWa
                 for (int i = 0; i < n; ++i) {
                     const double t = frame_t0 + static_cast<double>(i) / rate;
                     std::size_t bi = 0;
-                    if (total_seconds > 0) {
-                        bi = static_cast<std::size_t>((t / static_cast<double>(total_seconds)) * buckets);
+                    if (total_seconds > 0.0) {
+                        bi = static_cast<std::size_t>((t / total_seconds) * buckets);
                     } else {
                         bi = static_cast<std::size_t>(((i + n) / static_cast<double>(n)) * buckets);
                     }

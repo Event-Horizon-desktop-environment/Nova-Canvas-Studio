@@ -1,3 +1,35 @@
+# Build
+build*/
+cmake-build-*/
+build-debug-*/
 
-/build-release
-/build
+# Python cache
+__pycache__
+
+# Compiled binary (local meson build dir)
+EventHorizon
+
+# Editor / IDE
+.vscode/
+.idea/
+.cache/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+subprojects/jemalloc/
+subprojects/libjpeg-turbo/
+subprojects/libpng/
+subprojects/libwebp/
+subprojects/lz4/
+third_party/wayland-protocols/
+third_party/nanosvg/
+
+CODE_AUDIT.md
+disk.md
+files.md
+ROADMAP.md

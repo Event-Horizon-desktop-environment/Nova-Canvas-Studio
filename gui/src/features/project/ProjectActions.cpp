@@ -5,6 +5,7 @@
 #include "Logging.hpp"
 
 #include "Widgets/media_pool_widget.hpp"
+#include "features/color/mini_timeline_strip.hpp"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -46,6 +47,7 @@ void MainWindow::new_untitled_project() {
     undo_.clear();
     current_bin_.clear();
     project_->bins.clear();
+    if (color_mini_strip_) color_mini_strip_->set_sequence(&project_->sequence);
 }
 
 void MainWindow::ensure_tracks_at(canvas::core::Track::Kind kind, std::size_t index) {
@@ -75,6 +77,12 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
                                 canvas::core::Placement mode,
                                 std::optional<double> drop_scene_y) {
     if (!project_) return false;
+    // A drop over the track header (or anywhere left of the timeline's first
+    // frame) yields a negative frame from the widget's pixel→frame map; clamp
+    // it so the placed clip flushes against the timeline start instead of
+    // painting on top of the header strip. frame_at_x callers elsewhere floor
+    // ≥0 themselves; this funnel guards every placement path.
+    frame = std::max<int64_t>(0, frame);
     const canvas::core::MediaEntry* found = nullptr;
     for (const auto& m : project_->media) {
         if (m.id == media_id) { found = &m; break; }
@@ -155,6 +163,16 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
 
 void MainWindow::refresh_media_pool() {
     if (!media_pool_) return;
+    // The Dual-Viewer source preview can point at a pooled entry that just got
+    // removed (or the whole pool rebuilt): drop the stale preview so it can't
+    // read an orphaned snapshot anymore.
+    if (src_preview_.has_media() &&
+        std::find_if(project_->media.begin(), project_->media.end(),
+                     [&](const canvas::core::MediaEntry& m) {
+                         return m.path == src_preview_.media_path();
+                     }) == project_->media.end()) {
+        clear_source_preview();
+    }
     media_pool_->clear();
     const QString bin = current_bin_;
     for (std::size_t i = 0; i < project_->media.size(); ++i) {
@@ -172,6 +190,7 @@ void MainWindow::refresh_media_pool() {
 
         const bool is_video = m.width > 0 && m.height > 0;
         item->setData(kPoolIsVideoRole, is_video);
+        item->setData(kPoolHasAudioRole, m.has_audio);
         item->setData(kPoolResolutionRole,
                       is_video
                           ? QStringLiteral("%1×%2 · %3")
@@ -191,10 +210,11 @@ void MainWindow::refresh_media_pool() {
         }
         media_pool_->addItem(item);
 
-        if (m.has_audio || (m.width <= 0 && m.height <= 0)) {
-            // Audio-bearing media (audio-only files or video with an audio
-            // stream): paint its spectrum (waveform) as the pool preview so the
-            // pool shows the sound rather than a video frame.
+        if (m.width <= 0 && m.height <= 0) {
+            // Audio-only media: paint its spectrum (waveform) as the pool
+            // preview so the pool shows the sound rather than a video frame.
+            // Video-bearing files request an actual frame below so the pool
+            // shows the picture, not a spectrum.
             thumbnails_.request_waveform(static_cast<uint64_t>(i), m.path, 240, 136, 0.0f, 1.0f);
             continue;
         }
@@ -206,12 +226,22 @@ void MainWindow::refresh_media_pool() {
         req.target_width = 240;
         req.max_height = 136;
         thumbnails_.request(req);
+        if (m.has_audio) {
+            // Video+audio media get a hybrid tile: the frame top + this
+            // audio-spectrum strip bottom, composed by the tile delegate.
+            thumbnails_.request_waveform(static_cast<uint64_t>(i), m.path, 116, 24, 0.0f, 1.0f);
+        }
     }
 
     std::unordered_map<canvas::core::MediaId, canvas::gui::MediaMeta> paths;
     for (const auto& m : project_->media)
-        paths[m.id] = canvas::gui::MediaMeta{m.path, m.total_frames};
+        paths[m.id] = canvas::gui::MediaMeta{m.path, m.total_frames, m.fps};
     if (timeline_) timeline_->set_media_paths(std::move(paths));
+
+    std::unordered_map<canvas::core::MediaId, canvas::gui::MiniMediaMeta> strip_paths;
+    for (const auto& m : project_->media)
+        strip_paths[m.id] = canvas::gui::MiniMediaMeta{m.path, m.total_frames, m.fps};
+    if (color_mini_strip_) color_mini_strip_->set_media_paths(std::move(strip_paths));
 }
 
 void MainWindow::delete_selected_media() {
@@ -384,6 +414,36 @@ int MainWindow::import_media_paths(const QStringList& paths) {
             entry.total_frames = probe.total_frames();
             entry.bin = current_bin_.toStdString();
             entry.has_audio = probe.has_audio();
+
+            // A fresh (untitled) project starts at the default 30fps; adopt the
+            // first video's own rate so a 60fps clip plays at 60fps cadence
+            // instead of a halved 30fps scrub/present. Guarded to the untouched
+            // sequence (default fps, no media, no placed clips). The default
+            // V1/A1 tracks always exist but are empty, so "untouched" must mean
+            // no clips anywhere — a project whose user picked a rate or already
+            // has media/placed content keeps it.
+            const bool any_clips =
+                std::any_of(project_->sequence.video_tracks.begin(),
+                            project_->sequence.video_tracks.end(),
+                            [](const canvas::core::Track& t) { return !t.clips.empty(); }) ||
+                std::any_of(project_->sequence.audio_tracks.begin(),
+                            project_->sequence.audio_tracks.end(),
+                            [](const canvas::core::Track& t) { return !t.clips.empty(); });
+            if (project_->sequence.fps == 30.0 && project_->media.empty() && !any_clips) {
+                const double first_fps = probe.frame_rate();
+                if (first_fps > 0.0) {
+                    project_->sequence.fps = first_fps;
+                    qWarning().nospace() << "[seq] adopted fps="
+                                         << QString::number(first_fps, 'f', 3)
+                                         << " from first media: " << path;
+                    if (timeline_) timeline_->set_fps(first_fps);
+                    update_fps_label();
+                    // Re-anchor the playback worker on the adopted fps (it caches
+                    // the last snapshot's rate for pacing).
+                    push_snapshot(current_frame_);
+                }
+            }
+
             project_->media.push_back(entry);
             controller_.add_media(entry);
 
@@ -518,6 +578,11 @@ void MainWindow::open_file(const QString& path) {
         project_path_ = path;
         remember_recent_project(path);
         current_bin_.clear();
+        // The Color page's mini-strip caches a raw pointer into the project's
+        // sequence; re-point it now that the old Project (and its Sequence) is
+        // gone, so a repaint on an already-open Color page can't dereference
+        // the freed object.
+        if (color_mini_strip_) color_mini_strip_->set_sequence(&project_->sequence);
         media_pool_->clear();
         for (const auto& m : project_->media) {
             controller_.add_media(m);

@@ -15,7 +15,12 @@ namespace canvas::core {
 // GPU device instead of creating one per decode session.
 class HwDeviceManager {
 public:
-    HwDeviceManager();
+    // `owner` names the subsystem that created this manager (e.g. "playback",
+    // "thumbs", "render", "main") so the probe/teardown census in the log can
+    // attribute which client created (and destroyed) a CUDA context. A fresh
+    // ~300ms "cuda: selected" probe spiking mid-session points at whatever owner
+    // is constructing new managers on that path. Default is empty (unknown).
+    explicit HwDeviceManager(const char* owner = nullptr);
     ~HwDeviceManager();
     HwDeviceManager(const HwDeviceManager&) = delete;
     HwDeviceManager& operator=(const HwDeviceManager&) = delete;
@@ -36,6 +41,7 @@ private:
     mutable AVBufferRef* device_ctx_ = nullptr;
     mutable std::string device_name_;
     mutable bool tried_ = false;
+    std::string owner_;
 };
 
 }  // namespace canvas::core

@@ -5,18 +5,14 @@
 #include "ui_MainWindow.h"
 
 #include "Widgets/media_pool_widget.hpp"
+#include "Widgets/viewer_gl.hpp"
 
-#include <QDir>
 #include <QElapsedTimer>
-#include <QFileDialog>
+#include <QFileInfo>
 #include <QIcon>
 #include <QImage>
-#include <QKeyEvent>
-#include <QMessageBox>
 #include <QPixmap>
-#include <QStandardPaths>
 #include <QStatusBar>
-#include <QStyle>
 #include <QTimer>
 
 #include <algorithm>
@@ -26,31 +22,6 @@
 #include "core/timecode.hpp"
 
 namespace canvas::gui {
-
-namespace {
-
-// Best-effort file extension for a Deliver format display name.
-QString extension_for_format(const std::string& format) {
-    const std::string f = format;
-    const auto has = [&](const char* s) { return f.find(s) != std::string::npos; };
-    if (has("MKV")) return QStringLiteral("mkv");
-    if (has("MP4")) return QStringLiteral("mp4");
-    if (has("QuickTime")) return QStringLiteral("mov");
-    if (has("WebM")) return QStringLiteral("webm");
-    if (has("AVI")) return QStringLiteral("avi");
-    if (has("GIF")) return QStringLiteral("gif");
-    if (has("PNG")) return QStringLiteral("png");
-    if (has("TIFF")) return QStringLiteral("tif");
-    if (has("JPEG")) return QStringLiteral("jpg");
-    if (has("WebP")) return QStringLiteral("webp");
-    if (has("DPX")) return QStringLiteral("dpx");
-    if (has("EXR")) return QStringLiteral("exr");
-    if (has("MXF")) return QStringLiteral("mxf");
-    if (has("MPEG")) return QStringLiteral("mpeg");
-    return QStringLiteral("mkv");
-}
-
-}  // namespace
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     new_untitled_project();
@@ -96,6 +67,69 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&controller_, &SequenceController::position_changed, this, &MainWindow::on_position_changed);
     connect(&controller_, &SequenceController::playback_changed, this, &MainWindow::on_playback_changed);
 
+    // Dual-Viewer source preview: the source controller presents straight into
+    // its own ViewerGL (created in build_center_workspace). Cross-pause keeps
+    // audio exclusive — only one controller holds the output device, so one
+    // starting playback releases the other's device (see release_audio).
+    connect(&src_preview_, &source_preview::SourcePreviewController::frame_ready, this,
+            [this](canvas::core::RenderFramePtr frame) {
+                if (source_panel_) source_panel_->viewer()->set_frame(std::move(frame));
+            });
+    connect(&src_preview_, &source_preview::SourcePreviewController::position_changed, this,
+            [this](int64_t frame) {
+                if (source_panel_) source_panel_->set_media_position(frame, src_preview_.fps());
+            });
+    connect(&src_preview_, &source_preview::SourcePreviewController::playback_changed, this,
+            [this](bool playing) {
+                if (source_panel_) source_panel_->set_playing(playing);
+                if (playing) controller_.release_audio();
+            });
+    connect(&src_preview_, &source_preview::SourcePreviewController::media_changed, this,
+            [this](bool has_media) {
+                if (!source_panel_) return;
+                if (!has_media) {
+                    source_panel_->clear_media();
+                } else {
+                    source_panel_->set_media_info(
+                        QFileInfo(QString::fromStdString(src_preview_.media_path())).completeBaseName(),
+                        src_preview_.is_video(), src_preview_.is_audio(),
+                        src_preview_.total_frames());
+                }
+            });
+    connect(&controller_, &SequenceController::playback_changed, this, [this](bool playing) {
+        if (playing) src_preview_.release_audio();
+    });
+    connect(media_pool_, &MediaPoolWidget::clipScrubbed, this,
+            [this](int media_index, double fraction) {
+                // Hover-skim a pool tile: Live Media Preview only while the
+                // Dual-Viewer source pane is actually visible (single mode
+                // still paints the hover playhead, but decodes nothing).
+                if (!source_panel_ || !source_panel_->isVisible()) return;
+                if (!project_ || media_index < 0 ||
+                    static_cast<std::size_t>(media_index) >= project_->media.size())
+                    return;
+                if (!source_hovering_) {
+                    // Audible hover session start. A paused timeline still
+                    // HOLDS the output device open, which would block the
+                    // source's scrub grains — free it, but never cut a playing
+                    // timeline (its playback keeps the device and the pool
+                    // hover only previews video alongside it, Resolve-style).
+                    if (!controller_.is_playing()) controller_.release_audio();
+                    src_preview_.begin_hover_scrub();
+                    source_hovering_ = true;
+                }
+                open_source_preview(project_->media[static_cast<std::size_t>(media_index)]);
+                src_preview_.scrub_fraction(fraction);
+            });
+    connect(media_pool_, &MediaPoolWidget::clipScrubEnded, this,
+            [this](int /*media_index*/) {
+                if (!source_hovering_) return;
+                source_hovering_ = false;
+                // Audible-scrub session over: end_scrub CLOSES the source's
+                // output device so the timeline can reopen it on its next Play.
+                src_preview_.end_hover_scrub();
+            });
+
     connect(&thumbnails_, &ThumbnailService::thumbnail_ready, this,
             [this](uint64_t id, QImage image) {
                 const int idx = static_cast<int>(id);
@@ -107,7 +141,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             [this](uint64_t id, QImage image) {
                 const int idx = static_cast<int>(id);
                 if (media_pool_ && idx >= 0 && idx < media_pool_->count()) {
-                    media_pool_->item(idx)->setIcon(QIcon(QPixmap::fromImage(image)));
+                    QListWidgetItem* item = media_pool_->item(idx);
+                    // Hybrid video+audio tiles keep the frame as the icon (top)
+                    // and stash this spectrum for the bottom strip; audio-only
+                    // media still use it as the whole-tile preview.
+                    if (item->data(kPoolIsVideoRole).toBool() &&
+                        item->data(kPoolHasAudioRole).toBool()) {
+                        item->setData(kPoolWaveformImageRole, image);
+                    } else {
+                        item->setIcon(QIcon(QPixmap::fromImage(image)));
+                    }
                 }
             });
 
@@ -134,6 +177,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 MainWindow::~MainWindow() { delete ui; }
 
 void MainWindow::refresh_timeline() {
+    // Every edit (and project load) resyncs the time basis: total length AND
+    // the frame-rate used to render that length. fps_ is the readout rate for
+    // the transport/labels/Deliver — leaving it at the constructor default of
+    // 30 while the sequence adopts the media's own rate made the time read
+    // wrong after edits against the video and the ruler.
+    fps_ = project_->sequence.fps > 0.0 ? project_->sequence.fps : 30.0;
     timeline_->set_sequence(&project_->sequence);
     total_frames_ = project_->sequence.duration_frames();
     scrub_->setRange(0, static_cast<int>(std::max<int64_t>(total_frames_ - 1, 0)));
@@ -154,7 +203,7 @@ void MainWindow::push_snapshot(const int64_t initial_frame) {
     // Always-on: the copy cost lands on the UI thread on every edit. A big
     // timeline pushing multi-ms copies per keystroke shows up as edit lag even
     // when the worker keeps up, so this is the first place to look at.
-    qWarning().nospace()
+    qDebug().nospace()
         << "[proj] snapshot push anchor=" << initial_frame
         << " copy_ms=" << QString::number(copy_ms, 'f', 1)
         << " undo_depth=" << undo_.count()
@@ -172,6 +221,25 @@ void MainWindow::push_audio_mix_snapshot() {
     controller_.update_audio_mix(std::move(snapshot));
 }
 
+void MainWindow::push_grade_snapshot() {
+    if (!project_) return;
+    // Grade-only snapshot for the Color page. A plain push_snapshot() would fire
+    // SetProject, which tears down + rebuilds the entire decode stack (~217ms per
+    // tick — the reason the page's preview used to run at ~4Hz). swap_project
+    // keeps the decoders warm and just re-presents the current frame with the new
+    // 3D-LUT grade, making wheel/curve previews effectively realtime.
+    auto snapshot = std::make_shared<canvas::core::Project>(*project_);
+    controller_.swap_project(std::move(snapshot));
+}
+
+void MainWindow::open_source_preview(const canvas::core::MediaEntry& media) {
+    src_preview_.open_media(media, project_ ? project_->sequence.fps : 30.0);
+}
+
+void MainWindow::clear_source_preview() {
+    src_preview_.close_media();
+}
+
 void MainWindow::on_position_changed(const int64_t frame_number) {
     current_frame_ = frame_number;
     viewer_->set_mode(ViewerGL::ViewerMode::Program);
@@ -186,6 +254,7 @@ void MainWindow::on_playback_changed(const bool playing) {
     // the playhead is centered under it again (per-frame position updates do
     // NOT re-enable follow, so a plain scroll mid-playback stays put).
     if (playing) timeline_->set_follow_playhead(true);
+    viewer_->set_playing(playing);
     const QString icon_path = playing ? QStringLiteral(":/icons/pause.svg")
                                       : QStringLiteral(":/icons/play.svg");
     play_button_->setIcon(QIcon(icon_path));
@@ -232,7 +301,7 @@ void MainWindow::on_fps_tick() {
         const auto now = std::chrono::steady_clock::now();
         if (s_n == 1 || now - s_at >= std::chrono::seconds(2)) {
             s_at = now;
-            qWarning().nospace()
+            qDebug().nospace()
                 << "[eventloop] lag_avg_ms=" << QString::number(s_ms / s_n, 'f', 1)
                 << " lag_max_ms=" << QString::number(s_max, 'f', 1)
                 << " n=" << s_n;
@@ -270,135 +339,6 @@ void MainWindow::on_fps_tick() {
 void MainWindow::update_time_label() {
     const int64_t pos = current_frame_;
     time_label_->setText(timecode(pos, fps_) + QStringLiteral(" / ") + timecode(total_frames_, fps_));
-}
-
-void MainWindow::enter_deliver_page() {
-    deliver_active_ = true;
-    if (media_dock_) media_dock_->hide();
-    if (inspector_dock_) inspector_dock_->hide();
-    if (deliver_settings_dock_) deliver_settings_dock_->show();
-    if (deliver_queue_dock_) deliver_queue_dock_->show();
-    reflect_render_queue();
-    status_->showMessage(tr("Deliver: configure settings and add to the render queue."));
-}
-
-void MainWindow::enter_edit_page() {
-    deliver_active_ = false;
-    if (deliver_settings_dock_) deliver_settings_dock_->hide();
-    if (deliver_queue_dock_) deliver_queue_dock_->hide();
-    if (media_dock_) media_dock_->show();
-    if (inspector_dock_ && inspector_dock_->isVisible()) { /* keep user state */ }
-    status_->showMessage(tr("Import media with File > Import Media (Ctrl+I)"));
-}
-
-void MainWindow::reflect_render_queue() {
-    if (deliver_queue_panel_) deliver_queue_panel_->refresh();
-    // Flag the top-bar fps readout for render-speed mode while a job runs;
-    // on_fps_tick picks it up on its next pulse. The count comes straight from
-    // the queue — no duplicated label in the settings panel anymore.
-    render_fps_ = 0.0;
-    for (const auto& j : render_queue_.jobs()) {
-        if (j.status == canvas::core::RenderJob::Status::Rendering) {
-            render_fps_ = j.render_fps;
-            break;
-        }
-    }
-}
-
-void MainWindow::add_current_to_render_queue() {
-    if (!project_) return;
-
-    canvas::core::DeliverSettings ds = deliver_settings_->settings();
-
-    // Resolve "Timeline Resolution" / "Timeline Frame Rate" to concrete values.
-    if (ds.video.resolution == "Timeline Resolution") {
-        int w = 0, h = 0;
-        for (const auto& track : project_->sequence.video_tracks) {
-            for (const auto& clip : track.clips) {
-                if (!clip.enabled) continue;
-                if (const canvas::core::MediaEntry* m = project_->media_by_id(clip.media)) {
-                    if (m->width > w && m->height > h) { w = m->width; h = m->height; }
-                }
-            }
-        }
-        ds.video.custom_width = w > 0 ? w : 1920;
-        ds.video.custom_height = h > 0 ? h : 1080;
-    }
-    if (ds.video.frame_rate == "Auto") {
-        // Auto-detect the source media frame rate (the highest fps among the
-        // enabled clips on the timeline), so e.g. 60fps sources render at 60fps
-        // without the user having to set it manually.
-        double f = 0.0;
-        for (const auto& track : project_->sequence.video_tracks) {
-            for (const auto& clip : track.clips) {
-                if (!clip.enabled) continue;
-                if (const canvas::core::MediaEntry* m = project_->media_by_id(clip.media))
-                    f = std::max(f, m->fps);
-            }
-        }
-        if (f <= 0.0) f = project_->sequence.fps;
-        if (f <= 0.0) f = 30.0;
-        ds.video.custom_fps = f;
-    }
-
-    canvas::core::ExportSettings es = canvas::core::to_export_settings(ds);
-
-    QString dir = QString::fromStdString(ds.file.location);
-    if (dir.trimmed().isEmpty())
-        dir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
-    const QString ext = extension_for_format(ds.video.format);
-    const QString out_path =
-        QDir(dir).filePath(QString::fromStdString(ds.file.file_name) + QStringLiteral(".") + ext);
-
-    render_queue_.set_active_project(std::make_shared<const canvas::core::Project>(*project_), {});
-
-    if (ds.render_scope == canvas::core::RenderScope::IndividualClips) {
-        // Enqueue one job per video clip on the timeline.
-        int index = 0;
-        for (const auto& track : project_->sequence.video_tracks) {
-            for (const auto& clip : track.clips) {
-                if (!clip.enabled || clip.media < 0) continue;
-                canvas::core::RenderJob job;
-                job.name = (QString::fromStdString(ds.file.file_name) +
-                            QStringLiteral("_clip%1").arg(index + 1))
-                               .toStdString();
-                job.settings = ds;
-                job.output_path =
-                    QDir(dir).filePath(QString::fromStdString(job.name) + QStringLiteral(".") + ext)
-                        .toStdString();
-                job.total_frames = clip.duration();
-                render_queue_.enqueue(std::move(job));
-                ++index;
-            }
-        }
-    } else {
-        canvas::core::RenderJob job;
-        job.name = ds.file.file_name;
-        job.settings = ds;
-        job.output_path = out_path.toStdString();
-        job.total_frames = controller_.total_frames();
-        render_queue_.enqueue(std::move(job));
-    }
-
-    reflect_render_queue();
-    has_unsaved_changes_ = true;
-    status_->showMessage(tr("Added render job(s) to the queue."));
-}
-
-void MainWindow::render_all_from_queue() {
-    // Explicit user action: start draining every queued job. Enqueueing alone
-    // only stages work; rendering begins here.
-    int queued = 0;
-    const auto jobs = render_queue_.jobs();
-    for (const auto& j : jobs)
-        if (j.status == canvas::core::RenderJob::Status::Queued) ++queued;
-    if (queued > 0) {
-        render_queue_.start();
-        status_->showMessage(tr("Rendering %1 queued job(s)...").arg(queued));
-    } else {
-        status_->showMessage(tr("Nothing queued to render. Add a job to the queue first."));
-    }
-    reflect_render_queue();
 }
 
 }  // namespace canvas::gui

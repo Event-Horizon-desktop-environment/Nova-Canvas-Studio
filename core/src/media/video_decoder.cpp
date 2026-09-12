@@ -1,4 +1,5 @@
 #include "canvas/core/media/video_decoder.hpp"
+#include "canvas/core/util/color_log.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <algorithm>
@@ -9,7 +10,13 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <sys/stat.h>
 #include <thread>
+#include <tuple>
+
+extern "C" {
+#include <libavutil/pixdesc.h>
+}
 
 namespace canvas::core {
 
@@ -56,9 +63,305 @@ void decode_ok() {
     burst = 0;
 }
 
+// Compact single-token rendering of an AVCodecParameters color trio for the
+// always-on [dec] open line. These are the raw tags the SOURCE file declares
+// (range/matrix/trc within its container); everything downstream in the app
+// currently assumes a fixed "bt709 limited" regardless of what these say, so
+// this line is the ground truth a log-trace is compared against.
+const char* color_tag_str(int c) {
+    switch (c) {
+        case AVCOL_RANGE_MPEG: return "mpeg";
+        case AVCOL_RANGE_JPEG: return "jpeg";
+        case AVCOL_RANGE_UNSPECIFIED: return "unspec";
+        default: return "?";
+    }
+}
+const char* matrix_tag_str(int c) {
+    switch (c) {
+        case AVCOL_SPC_BT709: return "bt709";
+        case AVCOL_SPC_BT470BG: return "bt601";
+        case AVCOL_SPC_SMPTE170M: return "smpte170m";
+        case AVCOL_SPC_BT2020_NCL: return "bt2020ncl";
+        case AVCOL_SPC_RGB: return "rgb";
+        case AVCOL_SPC_UNSPECIFIED: return "unspec";
+        default: return "?";
+    }
+}
+const char* trc_tag_str(int c) {
+    switch (c) {
+        case AVCOL_TRC_BT709: return "bt709";
+        case AVCOL_TRC_GAMMA22: return "gamma22";
+        case AVCOL_TRC_SMPTEST2084: return "pq";
+        case AVCOL_TRC_UNSPECIFIED: return "unspec";
+        case AVCOL_TRC_RESERVED0: return "res0";
+        default: return "?";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Full-range liar-tag detection (OBS-family recorders).
+// OBS can stamp `color_range=tv` while writing FULL-range (0..255) data.
+// Trusting that tag over-scales every frame — blowing out highlights, lifting
+// blacks, over-saturating chroma; the lavender thread. A limited-range encode
+// can never produce luma below ~6 or above ~246 (it floors at 16 and caps at
+// 235), so decoding frames on a throwaway software context and watching RAW
+// luma separates the two: seeing such an extreme upgrades the range to full.
+//
+// The probe samples SEVERAL positions across the file (~2 frames at ~7 spots),
+// not just the head — a file can keep its full-white / full-black evidence
+// until late in the reel (both recordings this hunts carry YMAX=255 / YMIN<8
+// only in the final minutes), so a head-only scan wrongly keeps `tv`. Each
+// position decodes at a stride of 4 px/row: ~1/16 of the pixels, more than
+// enough to catch any out-of-limited-range sample. The verdict is cached per
+// (path, size, mtime) so the per-second thumbnail-service decoder reopens
+// don't re-run the probe.
+std::mutex g_range_mu;
+std::map<std::string, gpu::ColorRange> g_range_cache;
+
+namespace {
+
+// Scans one decoded frame's luma plane at stride 4. Returns true as soon as a
+// sample sits outside the limited-range envelope (<=6 or >=246).
+bool frame_shows_full_range(const AVFrame* fr, int& min_y, int& max_y) {
+    if (!fr->data[0]) return false;
+    for (int r = 0; r < fr->height; r += 4) {
+        const uint8_t* row = fr->data[0] + std::size_t(r) * fr->linesize[0];
+        for (int c = 0; c < fr->width; c += 4) {
+            const int v = row[c];
+            if (v < min_y) min_y = v;
+            if (v > max_y) max_y = v;
+        }
+    }
+    return min_y <= 6 || max_y >= 246;
+}
+
+}  // namespace
+
+gpu::ColorRange probe_file_range(const std::string& path) {
+    AVFormatContext* fc = nullptr;
+    AVCodecContext* cc = nullptr;
+    AVPacket* pkt = nullptr;
+    int min_y = 256, max_y = -1;
+    if (avformat_open_input(&fc, path.c_str(), nullptr, nullptr) < 0) return gpu::ColorRange::Limited;
+    if (avformat_find_stream_info(fc, nullptr) < 0) {
+        avformat_close_input(&fc);
+        return gpu::ColorRange::Limited;
+    }
+    const int vs = av_find_best_stream(fc, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (vs >= 0) {
+        const AVCodec* codec = avcodec_find_decoder(fc->streams[vs]->codecpar->codec_id);
+        if (codec) {
+            cc = avcodec_alloc_context3(codec);
+            const AVPixFmtDescriptor* desc = nullptr;
+            if (cc && avcodec_parameters_to_context(cc, fc->streams[vs]->codecpar) >= 0) {
+                desc = av_pix_fmt_desc_get(cc->pix_fmt);
+            }
+            // Only probe formats whose first plane is 8-bit luma; 10-bit or
+            // packed sources keep the tag verdict (their tags are reliable).
+            if (desc && desc->comp[0].depth == 8 &&
+                !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+                if (avcodec_open2(cc, codec, nullptr) >= 0) {
+                    pkt = av_packet_alloc();
+// Sample positions across the reel (head, quarters, tail).
+                    // Note: fc->duration is in AV_TIME_BASE units (microseconds);
+                    // the stream's own duration is in stream time_base. Mixing
+                    // them up overshoots the seek targets by ~1000x and lands at
+                    // EOF, so the probe decodes nothing. Prefer the stream
+                    // duration, fall back to fc->duration scaled by AV_TIME_BASE_Q.
+                    const int64_t dur_fmt = fc->duration;
+                    const int64_t dur_str = fc->streams[vs]->duration;
+                    const double sec_base =
+                        dur_str > 0
+                            ? static_cast<double>(dur_str) *
+                                  av_q2d(fc->streams[vs]->time_base)
+                            : dur_fmt > 0 ? static_cast<double>(dur_fmt) * av_q2d(AV_TIME_BASE_Q)
+                                          : 60.0;
+                    // 0.0 first: capture the reel head, where capture prefixes
+                    // and OBS color "flash" the most (the old head-only probe
+                    // caught these; a pure mid-reel sweep misses them).
+                    static const double kFractions[] = {0.00, 0.10, 0.20, 0.35, 0.50,
+                                                        0.65, 0.80, 0.90, 0.95};
+                    for (const double frac : kFractions) {
+                        if (min_y <= 6 || max_y >= 246) break;
+                        // The 0.0 position walks sequentially from the reel head
+                        // (no seek): a capture-header flash lands a few frames
+                        // into the opening GOP, and a seek decoding only
+                        // immediately after a keyframe would miss it. Mid-reel
+                        // positions seek, then decode the frames after the
+                        // backward keyframe.
+                        if (frac > 0.0) {
+                            const double target_s = sec_base * frac;
+                            if (av_seek_frame(fc, vs,
+                                              static_cast<int64_t>(target_s / av_q2d(fc->streams[vs]->time_base)),
+                                              AVSEEK_FLAG_BACKWARD) < 0)
+                                continue;
+                            // Reset the decoder for the new position. (avcodec_
+                            // send_packet(cc, nullptr) + drain would leave the
+                            // codec in EOF state and every later send_packet would
+                            // return AVERROR_EOF, silently skipping the position.)
+                            avcodec_flush_buffers(cc);
+                        }
+                        const int kFrames = frac > 0.0 ? 3 : 8;
+                        // Decode up to kFrames VIDEO frames at this position (0
+                        // tolerance for a seek landing on an unusable frame).
+                        // The budget counts video frames, not packets: MKV
+                        // interleaves audio between video blocks, so a packet
+                        // budget would drain on audio and miss a head flash.
+                        int got = 0;
+                        while (got < kFrames && av_read_frame(fc, pkt) >= 0) {
+                            if (pkt->stream_index != vs) {
+                                av_packet_unref(pkt);
+                                continue;
+                            }
+                            const int send = avcodec_send_packet(cc, pkt);
+                            av_packet_unref(pkt);
+                            if (send < 0) break;
+                            bool fired = false;
+                            for (;;) {
+                                AVFrame* fr = av_frame_alloc();
+                                if (!fr) break;
+                                const int ret = avcodec_receive_frame(cc, fr);
+                                if (ret < 0) {
+                                    av_frame_free(&fr);
+                                    break;
+                                }
+                                fired = frame_shows_full_range(fr, min_y, max_y);
+                                av_frame_free(&fr);
+                                if (fired) break;
+                            }
+                            ++got;
+                            if (fired || min_y <= 6 || max_y >= 246) break;
+                        }
+                    }
+                    av_packet_free(&pkt);
+                }
+            }
+            if (cc) avcodec_free_context(&cc);
+        }
+    }
+    avformat_close_input(&fc);
+    return (min_y <= 6 || max_y >= 246) ? gpu::ColorRange::Full : gpu::ColorRange::Limited;
+}
+
+gpu::ColorRange cached_color_range_probe(const std::string& path) {
+    struct stat st;
+    if (::stat(path.c_str(), &st) != 0) return gpu::ColorRange::Limited;
+    const std::string key = path + '#' + std::to_string(static_cast<long long>(st.st_size)) +
+                            '#' + std::to_string(static_cast<long long>(st.st_mtime));
+    {
+        std::lock_guard<std::mutex> lk(g_range_mu);
+        const auto it = g_range_cache.find(key);
+        if (it != g_range_cache.end()) return it->second;
+    }
+    const gpu::ColorRange range = probe_file_range(path);
+    {
+        std::lock_guard<std::mutex> lk(g_range_mu);
+        g_range_cache.emplace(key, range);
+    }
+    return range;
+}
+
 }  // namespace
 
 VideoDecoder::~VideoDecoder() { close(); }
+
+VideoDecoder::VideoDecoder(VideoDecoder&& o) noexcept { *this = std::move(o); }
+
+VideoDecoder& VideoDecoder::operator=(VideoDecoder&& o) noexcept {
+    if (this == &o) return *this;
+    close();
+    // Steal the FFmpeg/resource contexts; every pointer taken from `o` is nulled
+    // there so its destructor's close() is a safe no-op on the moved-from state.
+    fmt_ctx_ = o.fmt_ctx_;
+    o.fmt_ctx_ = nullptr;
+    codec_ctx_ = o.codec_ctx_;
+    o.codec_ctx_ = nullptr;
+    sws_ctx_ = o.sws_ctx_;
+    o.sws_ctx_ = nullptr;
+    av_frame_ = o.av_frame_;
+    o.av_frame_ = nullptr;
+    packet_ = o.packet_;
+    o.packet_ = nullptr;
+    hold_hw_ = o.hold_hw_;
+    o.hold_hw_ = nullptr;
+    hold_hw_src_ = o.hold_hw_src_;
+    o.hold_hw_src_ = -1;
+    retain_hw_ = o.retain_hw_;
+    o.retain_hw_ = nullptr;
+    retain_hw_src_ = o.retain_hw_src_;
+    o.retain_hw_src_ = -1;
+    hold_rgba_ = std::move(o.hold_rgba_);
+    hold_rgba_src_ = o.hold_rgba_src_;
+    o.hold_rgba_src_ = -1;
+    hold_rgba_dim_ = o.hold_rgba_dim_;
+    o.hold_rgba_dim_ = -1;
+    audio_fmt_ctx_ = o.audio_fmt_ctx_;
+    o.audio_fmt_ctx_ = nullptr;
+    audio_codec_ = o.audio_codec_;
+    o.audio_codec_ = nullptr;
+    swr_ctx_ = o.swr_ctx_;
+    o.swr_ctx_ = nullptr;
+    audio_frame_ = o.audio_frame_;
+    o.audio_frame_ = nullptr;
+    audio_packet_ = o.audio_packet_;
+    o.audio_packet_ = nullptr;
+    audio_sample_rate_ = o.audio_sample_rate_;
+    o.audio_sample_rate_ = 0;
+    audio_channels_ = o.audio_channels_;
+    o.audio_channels_ = 0;
+    audio_samples_total_ = o.audio_samples_total_;
+    o.audio_samples_total_ = 0;
+    audio_next_sample_ = o.audio_next_sample_;
+    o.audio_next_sample_ = 0;
+    audio_tb_ = o.audio_tb_;
+    // Decode/stream state.
+    hw_pix_fmt_ = o.hw_pix_fmt_;
+    o.hw_pix_fmt_ = AV_PIX_FMT_NONE;
+    hw_avail_ = o.hw_avail_;
+    o.hw_avail_ = false;
+    hw_engaged_ = o.hw_engaged_;
+    o.hw_engaged_ = false;
+    soft_only_ = o.soft_only_;
+    o.soft_only_ = false;
+    video_stream_ = o.video_stream_;
+    o.video_stream_ = -1;
+    stream_tb_ = o.stream_tb_;
+    width_ = o.width_;
+    o.width_ = 0;
+    height_ = o.height_;
+    o.height_ = 0;
+    frame_rate_ = o.frame_rate_;
+    o.frame_rate_ = 0.0;
+    duration_seconds_ = o.duration_seconds_;
+    o.duration_seconds_ = 0.0;
+    total_frames_ = o.total_frames_;
+    o.total_frames_ = -1;
+    matrix_ = o.matrix_;
+    range_ = o.range_;
+    last_frame_ = o.last_frame_;
+    o.last_frame_ = -1;
+    next_frame_ = o.next_frame_;
+    o.next_frame_ = 0;
+    draining_ = o.draining_;
+    o.draining_ = false;
+    out_max_dim_ = o.out_max_dim_;
+    o.out_max_dim_ = 0;
+    // Path amounts to the keyframe-index cache key (s_iframe_cache), shared with
+    // any decoder that has opened the same file: moving it carries the index
+    // along, so the adopted session keeps its built index.
+    path_ = std::move(o.path_);
+    path_seq_ = o.path_seq_;
+    o.path_seq_ = 0;
+    path_seeks_ = o.path_seeks_;
+    o.path_seeks_ = 0;
+    path_seq_ms_ = o.path_seq_ms_;
+    o.path_seq_ms_ = 0.0;
+    path_seek_ms_ = o.path_seek_ms_;
+    o.path_seek_ms_ = 0.0;
+    convert_ms_ = o.convert_ms_;
+    o.convert_ms_ = 0.0;
+    return *this;
+}
 
 bool VideoDecoder::open(const std::string& path, std::string* error,
                         const AVBufferRef* hw_device_ctx) {
@@ -250,16 +553,80 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
     CANVAS_LOG("decode open: audio=%s rate=%d ch=%d",
            audio_stream_ >= 0 ? "yes" : "no", audio_sample_rate_, audio_channels_);
 
+    // --- Resolve the per-file color spec from the codecpar tags ------------
+    // matrix: the color_space tag, falling back to color_primaries when missing.
+    // range:  the color_range tag, then a luma probe upgrades Limited->Full for
+    // OBS-family files that stamp `tv` while writing full-range data.
+    switch (stream->codecpar->color_space) {
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M:
+            matrix_ = gpu::ColorMatrix::BT601;
+            break;
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL:
+            matrix_ = gpu::ColorMatrix::BT2020;
+            break;
+        default:
+            matrix_ = gpu::ColorMatrix::BT709;
+            break;
+    }
+    if (stream->codecpar->color_space == AVCOL_SPC_UNSPECIFIED) {
+        switch (stream->codecpar->color_primaries) {
+            case AVCOL_PRI_BT470BG:
+            case AVCOL_PRI_SMPTE170M:
+                matrix_ = gpu::ColorMatrix::BT601;
+                break;
+            case AVCOL_PRI_BT2020:
+                matrix_ = gpu::ColorMatrix::BT2020;
+                break;
+            default:
+                break;
+        }
+    }
+    range_ = (stream->codecpar->color_range == AVCOL_RANGE_JPEG) ? gpu::ColorRange::Full
+                                                                 : gpu::ColorRange::Limited;
+    const char* range_origin = "tags";
+    if (range_ == gpu::ColorRange::Limited) {
+        const gpu::ColorRange probed = cached_color_range_probe(path);
+        if (probed == gpu::ColorRange::Full) {
+            range_ = gpu::ColorRange::Full;
+            range_origin = "probe";
+        }
+    }
+
     // Always-on: per-media open cost. Media that takes seconds to open (giant
     // mp4 index, slow disk, network mount) is the #1 "paused scrub hangs when it
     // first touches a clip" cause; the [dec] ms number below is whole-file.
+    // The color trio is what the SOURCE declares (range/matrix/trc) — the app
+    // currently assumes fixed bt709/limited everywhere regardless, so trace
+    // this line against the shader/swscale assumptions when chasing hue errors.
     const double open_ms = std::chrono::duration<double, std::milli>(
                                std::chrono::steady_clock::now() - open_t0).count();
     ::canvas::core::log::log_warning(
-        "[dec] open media=%s ms=%.0f dims=%dx%d fps=%.3f frames=%lld hw=%s audio=%s",
+        "[dec] open media=%s ms=%.0f dims=%dx%d fps=%.3f frames=%lld hw=%s audio=%s "
+        "tags=range:%s/matrix:%s/trc:%s",
         path.c_str(), open_ms, width_, height_, frame_rate_,
         static_cast<long long>(total_frames_), hw_avail_ ? "hw" : "sw",
-        audio_stream_ >= 0 ? "yes" : "no");
+        audio_stream_ >= 0 ? "yes" : "no",
+        color_tag_str(stream->codecpar->color_range),
+        matrix_tag_str(stream->codecpar->color_space),
+        trc_tag_str(stream->codecpar->color_trc));
+    log::log_warning(
+        "[dec] color spec resolved: matrix=%s range=%s (%s)",
+        gpu::color_matrix_name(matrix_), gpu::color_range_name(range_), range_origin);
+
+    // Always-on color archive (color.log, no gate, not canvas_debug.log): the
+    // per-media baseline gathered BEFORE any grading — what the source
+    // declared versus what the probe resolved, so a later wheel/curve change
+    // can be judged against the frame's actual color spec.
+    CANVAS_COLOR_LOG(
+        "[media] open path=%s codec=%s dims=%dx%d tags=range:%s/matrix:%s/trc:%s "
+        "resolved=matrix:%s/range:%s verdict=%s",
+        path.c_str(), avcodec_get_name(stream->codecpar->codec_id), width_, height_,
+        color_tag_str(stream->codecpar->color_range),
+        matrix_tag_str(stream->codecpar->color_space),
+        trc_tag_str(stream->codecpar->color_trc), gpu::color_matrix_name(matrix_),
+        gpu::color_range_name(range_), range_origin);
 
     next_frame_ = 0;
     draining_ = false;
@@ -275,6 +642,8 @@ void VideoDecoder::close() {
     if (av_frame_) av_frame_free(&av_frame_);
     if (hold_hw_) av_frame_free(&hold_hw_);
     hold_hw_src_ = -1;
+    if (retain_hw_) av_frame_free(&retain_hw_);
+    retain_hw_src_ = -1;
     hold_rgba_.reset();
     hold_rgba_src_ = -1;
     hold_rgba_dim_ = -1;
@@ -510,7 +879,7 @@ VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int ma
                     next_frame_ = last_number + 1;
                     const double df_ms = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - df_t0).count();
-::canvas::core::log::log_error(
+CANVAS_LOG(
                     "vdecode forward target=%lld got=%lld CAPPED fast_over_frames=%d max=%d ms=%.2f",
                     (long long)target, (long long)last_number, fast_over, max_over, df_ms);
                     decode_ok();
@@ -525,7 +894,7 @@ VideoFramePtr VideoDecoder::decode_forward_to(const int64_t target, const int ma
             next_frame_ = number + 1;
             const double df_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - df_t0).count();
-            ::canvas::core::log::log_error(
+            CANVAS_LOG(
                 "vdecode forward target=%lld got=%lld fast_over_frames=%d ms=%.2f",
                 (long long)target, (long long)number, fast_over, df_ms);
             decode_ok();
@@ -607,6 +976,33 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
         return hold_hw_;  // nullptr on failure -> caller falls back to CPU RGBA
     }
     CANVAS_LOG("video_decoder: decode_to_hw target=%lld max_over=%d", (long long)target, max_over);
+    // Far-jump re-anchor, mirroring decode_to_frame's sequential-vs-seek rule.
+    // A fresh decoder starts at the container head, so a deep target reached by
+    // fast-overing every frame is a multi-second stall (seen in GPU exports that
+    // re-open after a clip change). Seek to the owning keyframe instead so the
+    // forward walk spans a single GOP. The common +1 sequential step never
+    // crosses the 64-frame cutoff and stays on the walk path.
+    //
+    // Bounds the check on BOTH sides of the stream position: re-anchoring only
+    // on `target < next_frame_` would re-fire on a plain 1-frame timestamp
+    // overshoot (the fast-over walk returns the frame just past target, so
+    // next_frame_ legitimately reads target+2 and the very next +1 request
+    // looks "behind"), turning a sequential GPU export into a per-GOP re-seek.
+    // A seek is only worthwhile when the requested position is far from where
+    // the walk currently sits; small overshoots are absorbed by walking.
+    const int64_t delta = target - next_frame_;
+    if (delta >= 64 || -delta >= 64) {
+        const int64_t prev_next = next_frame_;
+        const IframeEntry* entry = iframe_at_or_before(target);
+        if (entry) {
+            container_seek_seconds(entry->pts_seconds);
+        } else if (frame_rate_ > 0.0 && target > 0) {
+            container_seek_seconds(static_cast<double>(target) / frame_rate_);
+        }
+        log::log_warning("[dec] hw far-jump target=%lld next=%lld delta=%lld iframe=%lld",
+                         (long long)target, (long long)prev_next, (long long)delta,
+                         entry ? (long long)entry->frame : -1LL);
+    }
     // A CUDA decode session is primed by the bitstream's owning keyframe (the
     // AV1 sequence header). Entering mid-GOP makes FFmpeg transparently emit
     // SOFTWARE frames from a hardware-configured decoder; the NV12 composite
@@ -652,7 +1048,7 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
                         // frame just reached on the device as an approximate teaser;
                         // the next move resumes from here. Borrowed like the exact
                         // target path (caller must consume before the next decode).
-                        ::canvas::core::log::log_error(
+                        CANVAS_LOG(
                             "vdecode hw-forward target=%lld got=%lld CAPPED fast_over_frames=%d max=%d",
                             (long long)target, (long long)number, fast_over, max_over);
                         next_frame_ = number + 1;
@@ -685,6 +1081,19 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
                 CANVAS_LOG("video_decoder: decode_to_hw OK target=%lld got=%lld",
                        (long long)target, (long long)number);
                 decode_ok();
+                if (!retain_hw_) retain_hw_ = av_frame_alloc();
+                // av_frame_ref() requires a CLEAN destination (it neither unrefs
+                // nor overwrites existing buffer refs); re-ref'ing the retained
+                // copy without av_frame_unref() first leaked one NVDEC device
+                // surface per decode here — ~5.5MB × 30fps ≈ 166MB/s of VRAM,
+                // enough to fill the card in ~90s of playback.
+                if (retain_hw_) av_frame_unref(retain_hw_);
+                if (retain_hw_ && av_frame_ref(retain_hw_, av_frame_) == 0) {
+                    retain_hw_src_ = number;
+                } else {
+                    av_frame_free(&retain_hw_);
+                    retain_hw_src_ = -1;
+                }
                 return av_frame_;
             }
             if (ret == AVERROR_EOF) {
@@ -751,18 +1160,45 @@ const AVFrame* VideoDecoder::decode_to_hw_indexed(const int64_t target, const in
     refine_last_frame();
     int64_t t = clamp_target(target);
 
+    // One-frame sequential lookback: when consecutive timeline frames re-target
+    // the same source (the B side of a 2:1 transition round-trips onto one
+    // frame), the repeat arrives here with src < next_frame_ and would trigger
+    // a container seek below — which resets next_frame_ to 0 and re-walks a
+    // whole GOP (~54ms on 2K60). If decode_to_hw just served this exact frame,
+    // return that retained copy and leave next_frame_ where the walk parked it,
+    // so the next DISTINCT target keeps riding the cheap sequential path.
+    if (retain_hw_ && t == retain_hw_src_ && next_frame_ > t) {
+        CANVAS_LOG("video_decoder: retain-hit target=%lld (no re-seek)", (long long)t);
+        return retain_hw_;
+    }
+
     // Jump to the keyframe that owns this target so the forward walk only
     // traverses one Group of Pictures. Uses the built keyframe index; without
     // one, a plain container seek to the target's presentation time lands on
     // the keyframe at-or-before, which also anchors backward scrubs.
-    const IframeEntry* entry = iframe_at_or_before(t);
-    if (entry) {
-        container_seek_seconds(entry->pts_seconds);
-        ::canvas::core::log::log_error(
-            "vdecode hw-indexed target=%lld iframe=%lld gop_secs=%.3f max=%d",
-            (long long)t, (long long)entry->frame, entry->pts_seconds, max_over);
-    } else if (frame_rate_ > 0.0) {
-        container_seek_seconds(static_cast<double>(t) / frame_rate_);
+    //
+    // Sequential lookback: a near-forward target (at-or-ahead of the in-flight
+    // walk, within the same window decode_to_hw treats as "sequential") keeps
+    // riding that walk instead of re-anchoring — the unconditional pre-seek
+    // used to reset next_frame_=0 and re-walk the whole GOP for a +1 step,
+    // pinning every small forward scrub move at ~full-GOP cost. Rules:
+    //   delta < 0  -> behind the walk: must re-anchor (a forward walk cannot go
+    //                backward), keep the seek.
+    //   delta >= 64 -> same stride decode_to_hw considers far: re-anchor on the
+    //                owning I-frame so the walk stays bounded.
+    //   else -> serve from / continue the in-flight walk; decode_to_hw's own
+    //           window checks cannot disagree (identical 64 threshold).
+    const int64_t delta = t - next_frame_;
+    if (delta < 0 || delta >= 64) {
+        const IframeEntry* entry = iframe_at_or_before(t);
+        if (entry) {
+            container_seek_seconds(entry->pts_seconds);
+            CANVAS_LOG(
+                "vdecode hw-indexed target=%lld iframe=%lld gop_secs=%.3f max=%d",
+                (long long)t, (long long)entry->frame, entry->pts_seconds, max_over);
+        } else if (frame_rate_ > 0.0) {
+            container_seek_seconds(static_cast<double>(t) / frame_rate_);
+        }
     }
     const AVFrame* hw = decode_to_hw(t, max_over == 0 ? kFullResMaxOver : max_over);  // sets next_frame_ internally
     return hw;
@@ -815,6 +1251,17 @@ VideoFramePtr VideoDecoder::make_rgba_frame(const AVFrame* src, const int64_t ti
 
     const bool scaled = (out_w != cvt->width) || (out_h != cvt->height);
     const auto conv_t0 = std::chrono::steady_clock::now();
+    // NOTE on colorspace/range: previously this swscale conversion passed NO
+    // SWS_CS_* / range flag, so libswscale silently applied SWS_CS_DEFAULT == 5 ==
+    // ITU601 (BT.601) to BT.709 sources — the two-matrix mismatch in issue #1.
+    // Now pin the coefficients to BT.709 (matching the GPU shader and the tagged
+    // streams) and honor the frame's real source range, producing full-range RGB
+    // (the internal convention colorspace.hpp and the consumer shaders expect).
+    // Pin the coefficients to the per-file color matrix and honor the file's
+    // RESOLVED source range (tags reconciled with the luma probe), producing
+    // full-range RGB — the internal convention colorspace.hpp and the consumer
+    // shaders expect. dstRange is always 1 so the RGBA held in VideoFrame is
+    // full-range regardless of the sample's quantization.
     sws_ctx_ = sws_getCachedContext(sws_ctx_, cvt->width, cvt->height,
                                     static_cast<AVPixelFormat>(cvt->format),
                                     out_w, out_h, AV_PIX_FMT_RGBA,
@@ -825,6 +1272,33 @@ VideoFramePtr VideoDecoder::make_rgba_frame(const AVFrame* src, const int64_t ti
                         cvt->width, cvt->height, cvt->format, out_w, out_h);
         av_frame_free(&sw);
         return nullptr;
+    }
+    const int src_range = (range_ == gpu::ColorRange::Full) ? 1 : 0;
+    int sws_matrix = SWS_CS_ITU709;
+    switch (matrix_) {
+        case gpu::ColorMatrix::BT601: sws_matrix = SWS_CS_ITU601; break;
+        case gpu::ColorMatrix::BT2020: sws_matrix = SWS_CS_BT2020; break;
+        default: break;
+    }
+    const int* cs_coefs = sws_getCoefficients(sws_matrix);
+    sws_setColorspaceDetails(sws_ctx_, cs_coefs, src_range, cs_coefs, 1,
+                             0, 1 << 16, 1 << 16);
+    // One line per (src format, src size) actually converted: enough to see the
+    // resolved matrix/range pin on the CPU path without spamming per frame.
+    static std::mutex sws_log_mu;
+    static std::set<std::tuple<int, int, int>> sws_logged;  // fmt, w, h
+    const bool first_cvt = [&] {
+        std::lock_guard<std::mutex> lk(sws_log_mu);
+        return sws_logged.insert({static_cast<int>(cvt->format), cvt->width, cvt->height}).second;
+    }();
+    if (first_cvt) {
+        log::log_warning(
+            "[decode] sws_rgba src_fmt=%d (%dx%d) flags=%s => sws_cs_id=%d srcRange=%d dstRange=1: "
+            "resolved per-file spec matrix=%s range=%s (tags+probe)",
+            static_cast<int>(cvt->format), cvt->width, cvt->height,
+            scaled ? "scaled" : "unscaled",
+            sws_matrix, src_range,
+            gpu::color_matrix_name(matrix_), gpu::color_range_name(range_));
     }
     uint8_t* dst_data[] = {out->rgba.data()};
     int dst_linesize[] = {static_cast<int>(out->stride)};
@@ -885,8 +1359,8 @@ VideoFramePtr VideoDecoder::seek_to_frame(int64_t target, int max_output_dim) {
     VideoFramePtr frame = decode_forward_to(target, kFullResMaxOver);
     const double st_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - st_t0).count();
-    ::canvas::core::log::log_error("vdecode container-seek target=%lld ms=%.2f ok=%d",
-                               (long long)target, st_ms, frame != nullptr);
+CANVAS_LOG("vdecode container-seek target=%lld ms=%.2f ok=%d",
+           static_cast<long long>(target), st_ms, frame != nullptr);
     if (!frame) return nullptr;
     next_frame_ = frame->frame_number + 1;
     return frame;
@@ -1099,9 +1573,10 @@ VideoFramePtr VideoDecoder::seek_to_frame_indexed(int64_t target, int max_output
     VideoFramePtr frame = decode_forward_to(target, max_over);
     const double idx_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - idx_t0).count();
-    ::canvas::core::log::log_error("vdecode scrub indexed-seek target=%lld iframe=%lld gop_secs=%.3f max=%d ms=%.2f ok=%d",
-                               (long long)target, (long long)entry->frame,
-                               entry->pts_seconds, max_over, idx_ms, frame != nullptr);
+    CANVAS_LOG(
+                       "vdecode scrub indexed-seek target=%lld iframe=%lld gop_secs=%.3f max=%d ms=%.2f ok=%d",
+                       (long long)target, (long long)entry->frame,
+                       entry->pts_seconds, max_over, idx_ms, frame != nullptr);
     if (!frame) return nullptr;
     next_frame_ = frame->frame_number + 1;
     return frame;
