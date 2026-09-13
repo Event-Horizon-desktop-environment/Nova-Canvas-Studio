@@ -97,7 +97,7 @@ void build_left_dock(MainWindow& mw) {
 
     // Bins column.
     auto* bins_column = new QWidget(pool_body);
-    bins_column->setFixedWidth(104);
+    bins_column->setFixedWidth(88);
     auto* bins_layout = new QVBoxLayout(bins_column);
     bins_layout->setContentsMargins(0, 0, 0, 0);
     bins_layout->setSpacing(0);
