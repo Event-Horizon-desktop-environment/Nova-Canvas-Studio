@@ -84,4 +84,16 @@ QString css(const QColor& c);
 // whose hue is mode-dependent but whose opacity is fixed.
 QColor with_alpha(const QColor& c, int alpha);
 
+// User theme-token overrides (Settings dialog). An invalid color (default-
+// constructed QColor) clears the override and keeps the designed value.
+// Overriding accent recolors the whole accent family (hover/press/soft/line/
+// text/focus/state-selected) to the same hue, preserving each member's
+// lightness/alpha offset over the base accent, so the palette stays coherent.
+// Call refresh_theme() (theme_state.hpp) after changing to re-apply palette +
+// stylesheet live.
+void set_accent_override(const QColor& color);
+void set_playhead_override(const QColor& color);
+QColor accent_override();
+QColor playhead_override();
+
 }  // namespace canvas::gui

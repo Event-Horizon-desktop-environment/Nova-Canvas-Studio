@@ -12,6 +12,7 @@
 #include <QIcon>
 #include <QImage>
 #include <QPixmap>
+#include <QSettings>
 #include <QStatusBar>
 #include <QTimer>
 
@@ -30,6 +31,10 @@ namespace canvas::gui {
 static constexpr std::uint64_t kSourcePreviewWaveformId = 0xF000000000000001ULL;
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+    // The controller defaults to audible scrubbing on; the Settings dialog
+    // persists the off-state, so honor it once here on startup.
+    controller_.set_scrub_audio_enabled(
+        QSettings().value(QStringLiteral("scrubAudioEnabled"), true).toBool());
     new_untitled_project();
     build_ui();
     rebuild_recent_menu();

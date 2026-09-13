@@ -1,4 +1,5 @@
 #include "UX/MainWindow.hpp"
+#include "UX/SettingsDialog.hpp"
 #include "UX/theme.hpp"
 #include "ui_MainWindow.h"
 
@@ -86,20 +87,10 @@ void build_app_menus(MainWindow& mw) {
     // App-level settings belong in the app menu, not the Edit menu (HIG: the
     // app menu lists items that apply to the app as a whole).
     const auto show_preferences = [&mw]() {
-        // Audible-scrubbing preference. A small popup menu keeps the option
-        // discoverable without a dedicated settings dialog.
-        QMenu menu;
-        apply_rounded_menu(&menu);
-        const bool saved = QSettings().value(QStringLiteral("scrubAudioEnabled"), true).toBool();
-        mw.controller_.set_scrub_audio_enabled(saved);
-        auto* scrub_audio = menu.addAction(MainWindow::tr("Audible Scrubbing"));
-        scrub_audio->setCheckable(true);
-        scrub_audio->setChecked(saved);
-        QObject::connect(scrub_audio, &QAction::toggled, &mw, [&mw](bool on) {
-            mw.controller_.set_scrub_audio_enabled(on);
-            QSettings().setValue(QStringLiteral("scrubAudioEnabled"), on);
-        });
-        menu.exec(mw.mapToGlobal(QPoint(0, 0)));
+        auto* dialog = new SettingsDialog(
+            &mw, [&mw](bool on) { mw.controller_.set_scrub_audio_enabled(on); });
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->open();
     };
     canvas_menu->addAction(MainWindow::tr("&Preferences..."), QKeySequence::Preferences,
                            &mw, show_preferences);

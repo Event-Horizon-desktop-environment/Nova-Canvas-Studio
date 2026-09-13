@@ -124,6 +124,18 @@ QString res_summary(const canvas::core::DeliverSettings& s) {
     return r;
 }
 
+// "60", "29.97", ... — friendly frame-rate label; empty when unset.
+QString fps_label(const canvas::core::DeliverSettings& s) {
+    const double fps = s.video.custom_fps;
+    if (fps <= 0.0) return {};
+    // Drop a noisy trailing fraction (29.970... -> 29.97).
+    const double rounded = std::round(fps * 100.0) / 100.0;
+    QString text = QString::number(rounded, 'f', 2);
+    while (text.endsWith(QStringLiteral("0"))) text.chop(1);
+    if (text.endsWith(QChar('.'))) text.chop(1);
+    return text;
+}
+
 // Grip-dots drag affordance (3x2 dot grid), row-reorder cue.
 QPixmap grip_pixmap() {
     QPixmap pm(14, 20);
@@ -296,6 +308,11 @@ void RenderQueuePanel::set_queue(canvas::core::RenderQueue* queue) {
     refresh();
 }
 
+void RenderQueuePanel::set_project_name(const QString& name) {
+    project_name_ = name;
+    refresh();
+}
+
 void RenderQueuePanel::refresh() {
     if (!queue_) return;
     const auto jobs = queue_->jobs();
@@ -334,7 +351,15 @@ void RenderQueuePanel::refresh() {
         }
         r.path->setToolTip(QString::fromStdString(j.output_path));
         r.path->setText(QString::fromStdString(j.output_path));
-        r.primary->setText(res_summary(j.settings) + QStringLiteral("  |  Timeline 1"));
+        QString primary = res_summary(j.settings);
+        const QString fps = fps_label(j.settings);
+        if (!fps.isEmpty()) primary += QStringLiteral("  ·  %1fps").arg(fps);
+        // Timeline label: the owning project's name when it has one (opened from
+        // a file), else the Resolve-style default.
+        const QString timeline_label = project_name_.isEmpty()
+            ? QStringLiteral("Timeline 1")
+            : project_name_;
+        r.primary->setText(primary + QStringLiteral("  |  ") + timeline_label);
         if (auto* w = list_->itemWidget(r.item))
             r.item->setSizeHint(w->sizeHint());
         next_rows.insert(j.id, r);

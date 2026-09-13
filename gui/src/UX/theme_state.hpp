@@ -35,6 +35,12 @@ void set_light(bool light);
 // `enabled` equals the current HyprDark state.
 void set_hypr_dark(bool enabled);
 
+// Forces a full theme re-apply (swaps the palette + stylesheet, clears icon
+// pixmaps, repolishes every widget, runs re-apply callbacks) WITHOUT flipping
+// the appearance mode. Used by live token overrides from the Settings dialog,
+// whose state lives outside light/dark/hypr.
+void refresh_theme();
+
 // Registers `fn` to be invoked after every single-light flip (see set_light).
 void register_theme_reapply(std::function<void()> fn);
 

@@ -2,6 +2,7 @@
 
 #include "canvas/core/export/renderer.hpp"
 #include "canvas/core/export/vaapi_encode.hpp"
+#include "canvas/core/export/qsv_encode.hpp"
 #include "canvas/core/gpu/colorspace.hpp"
 #include "canvas/core/gpu/cuda_convert.hpp"
 #include "canvas/core/util/log.hpp"
@@ -279,6 +280,33 @@ std::string nv_preset_for(const std::string& codec, const std::string& preset) {
     return preset;
 }
 
+// QSV presets are the x264-style INT 0..7 speed consts (veryslow=1 .. veryfast=7),
+// NOT NVENC's p1..p7 strings — that is what `preset` on h264_qsv/hevc_qsv/av1_qsv
+// accepts (see docs/vaapi.md §8). Unknown spellings fall through to the numeric
+// passthrough: an already-numeric preset is handed to the encoder as-is
+// (av_opt_set_int rejects out-of-range values rather than aborting).
+int qsv_preset_for(const std::string& codec, const std::string& preset) {
+    (void)codec;  // the QSV speed constants are shared across h264/hevc/av1
+    const std::string p = [&] {
+        std::string q = preset;
+        for (auto& c : q) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return q;
+    }();
+
+    if (p == "ultrafast" || p == "superfast" || p == "veryfast") return 7;
+    if (p == "faster") return 6;
+    if (p == "fast") return 5;
+    if (p == "medium") return 4;
+    if (p == "slow") return 3;
+    if (p == "slower") return 2;
+    if (p == "veryslow" || p == "placebo") return 1;
+    try {
+        return std::stoi(preset);
+    } catch (...) {
+        return 4;  // unnamed fallback: medium
+    }
+}
+
 bool export_project(const Project& project, const ExportSettings& s, ExportControl* control,
                     std::string* error) {
     const auto fail = [&](const std::string& m) {
@@ -386,6 +414,11 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         if (is_vaapi_codec(s.video_codec)) {
             apply_vaapi_rate_control(vctx, vaapi_rate_control_from(
                 s.video_codec, s.crf, s.vid_rc_mode, s.video_bitrate_kbps));
+        } else if (is_qsv_codec(s.video_codec)) {
+            // QSV has no `crf` priv (silent no-op) — its CRF analog is ICQ,
+            // driven by avctx->global_quality (see docs/qsv.md §8.2).
+            apply_qsv_rate_control(vctx, qsv_rate_control_from(
+                s.video_codec, s.crf, s.vid_rc_mode, s.video_bitrate_kbps));
         } else {
             av_opt_set_int(vctx->priv_data, "crf", s.crf, 0);
         }
@@ -414,6 +447,11 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             else if (is_vaapi_codec(s.video_codec))
                 // VAAPI needs rc_mode too, else VBR/CBR requests are ignored.
                 av_opt_set(vctx->priv_data, "rc_mode", cbr ? "CBR" : "VBR", 0);
+            else if (is_qsv_codec(s.video_codec))
+                // QSV picks CBR/VBR from the global_quality vs. bitrate seam —
+                // no rc_mode option, so route CBR intent through the ICQ/CBR
+                // quality law instead (docs/qsv.md §8.2).
+                av_opt_set_int(vctx->priv_data, "rc_mode", cbr ? 42 : 0, 0);
         }
     }
     // NVENC constant-QP: set rc + cq so quality is honored instead of the
@@ -423,7 +461,19 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         av_opt_set_int(vctx->priv_data, "cq", s.crf, 0);
     }
     if (!s.preset.empty())
-        av_opt_set(vctx->priv_data, "preset", nv_preset_for(s.video_codec, s.preset).c_str(), 0);
+    {
+        // QSV presets are the x264-style INT 0..7 consts (veryfast=7..veryslow=1=1),
+        // NOT NVENC's p1..p7 strings. Push the INT law / name const; if no
+        // spelling matches, fall through to nv_preset_for's numeric-passthrough.
+        const std::string p = s.preset;
+        if (is_qsv_codec(s.video_codec)) {
+            if (!p.empty())
+                av_opt_set_int(vctx->priv_data, "preset",
+                               qsv_preset_for(s.video_codec, p), 0);
+        } else {
+            av_opt_set(vctx->priv_data, "preset", nv_preset_for(s.video_codec, p).c_str(), 0);
+        }
+    }
     apply_codec_extra(vctx, s.extra);
 
     // Split-frame encoding: multi-engine GPUs (RTX 5070 Ti/5080/5090) encode
@@ -454,7 +504,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     // NVENC needs roughly rc_lookahead + max_b_frames + 8 surfaces; hardcoding
     // too few makes FFmpeg bump it at open ("Defined rc_lookahead requires more
     // surfaces"). Derive it from whatever rc-lookahead is in the extra options.
-    if (v_use_hw) {
+    if (v_use_hw && !is_qsv_codec(s.video_codec)) {
         int rc_lookahead = 0;
         const std::string& ex = s.extra;
         const std::string key = "rc-lookahead=";

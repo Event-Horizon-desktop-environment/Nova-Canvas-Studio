@@ -16,7 +16,7 @@ A note on modifiers: "CTRL" means the Control key (on Linux that's Ctrl). Where 
 | `CTRL+Q` | Quit |
 | `CTRL+,` | Preferences (opens the dialog; more on that below) |
 
-The recent-files list is under File > Open Recent. The `CTRL+,` Preferences entry currently opens a small popup holding just the Audible Scrubbing toggle — there is no full settings dialog yet.
+The recent-files list is under File > Open Recent. The `CTRL+,` Preferences entry opens the Settings dialog (Nova Canvas > Preferences...), which groups the app-level settings: audible scrubbing, the hardware-decoder backend preference, and live accent / playhead colour overrides that persist across launches.
 
 ## Editing
 

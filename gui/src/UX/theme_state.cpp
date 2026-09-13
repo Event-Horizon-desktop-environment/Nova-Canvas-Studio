@@ -202,6 +202,15 @@ void set_hypr_dark(bool enabled) {
     }
 }
 
+void refresh_theme() {
+    if (g_app) {
+        reapply_theme();
+    } else {
+        for (const auto& fn : g_reapply)
+            fn();
+    }
+}
+
 void register_theme_reapply(std::function<void()> fn) {
     g_reapply.push_back(std::move(fn));
 }

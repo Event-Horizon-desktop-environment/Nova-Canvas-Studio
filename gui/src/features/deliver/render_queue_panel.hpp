@@ -33,6 +33,11 @@ public:
     // Reflect the given queue into the list.
     void set_queue(canvas::core::RenderQueue* queue);
 
+    // Name of the owning project, shown as the timeline label in each job row
+    // ("My Movie | ..." instead of the default "Timeline 1"). Empty means the
+    // project is unnamed — the default label is kept.
+    void set_project_name(const QString& name);
+
     // Called whenever the queue changes; reads jobs() and repaints. Updates
     // existing job rows in place (no flicker during progress ticks).
     void refresh();
@@ -51,6 +56,7 @@ private:
     void build();
 
     canvas::core::RenderQueue* queue_ = nullptr;
+    QString project_name_;
     QListWidget* list_ = nullptr;
     QProgressBar* overall_ = nullptr;
     QLabel* overall_pct_ = nullptr;

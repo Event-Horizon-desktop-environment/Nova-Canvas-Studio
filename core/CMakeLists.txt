@@ -134,6 +134,7 @@ add_library(canvas_core STATIC
     src/export/exporter.cpp
     src/export/deliver_preset.cpp
     src/export/vaapi_encode.cpp
+    src/export/qsv_encode.cpp
     src/export/render_queue.cpp
 )
 # canvas_core is deliberately Qt-free; the root CMakeLists enables AUTOMOC globally,
@@ -251,3 +252,7 @@ add_executable(canvas_vaapi_encode_test tests/vaapi_encode_test.cpp)
 target_link_libraries(canvas_vaapi_encode_test PRIVATE canvas_core)
 set_target_properties(canvas_vaapi_encode_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME vaapi_encode COMMAND canvas_vaapi_encode_test)
+add_executable(canvas_qsv_encode_test tests/qsv_encode_test.cpp)
+target_link_libraries(canvas_qsv_encode_test PRIVATE canvas_core)
+set_target_properties(canvas_qsv_encode_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME qsv_encode COMMAND canvas_qsv_encode_test)

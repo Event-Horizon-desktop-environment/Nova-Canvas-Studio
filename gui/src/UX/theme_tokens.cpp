@@ -4,6 +4,7 @@
 
 #include <QDebug>
 
+#include <optional>
 #include <utility>
 
 namespace canvas::gui {
@@ -156,9 +157,94 @@ const ThemeTokens& builtTokens() {
     return is_hypr_dark() ? hypr_dark : dark;
 }
 
+// User overrides (Settings dialog). Invalid = designed value kept. Applied on
+// top of the mode's base token set, so they survive mode toggles (the user's
+// accent rides along into Light/Dark/HyprDark rather than being reset).
+std::optional<QColor> g_accent_override;
+std::optional<QColor> g_playhead_override;
+
+// Accent-family members whose look is derived from the base accent: recoloring
+// `accent` should recolor all of them, so an override never leaves a blue
+// accent with gold hover states. The offset law: accent_hover is the base
+// accent lightened a tick, pressed a tick darker, etc. Each derived color is
+// re-derived from the override accent with the SAME offset the mode's base
+// design used (see the `offset` helper below).
+QColor offset(const QColor& base, const QColor& design, const QColor& override) {
+    if (!design.isValid()) return override;
+    const int dR = design.red() - base.red();
+    const int dG = design.green() - base.green();
+    const int dB = design.blue() - base.blue();
+    auto c = [&](int v) { return qBound(0, v, 255); };
+    return QColor(c(override.red() + dR), c(override.green() + dG),
+                  c(override.blue() + dB), design.alpha());
+}
+
+ThemeTokens apply_overrides(const ThemeTokens& base) {
+    ThemeTokens t = base;
+    if (g_accent_override) {
+        const QColor& a = *g_accent_override;
+        t.accent = a;
+        t.accent_hover = offset(base.accent, base.accent_hover, a);
+        t.accent_press = offset(base.accent, base.accent_press, a);
+        t.on_accent = offset(base.accent, base.on_accent, a);
+        t.accent_text = offset(base.accent, base.accent_text, a);
+        t.accent_soft = offset(base.accent, base.accent_soft, a);
+        t.accent_line = offset(base.accent, base.accent_line, a);
+        t.state_selected = offset(base.accent, base.state_selected, a);
+        t.focus_ring = offset(base.accent, base.focus_ring, a);
+    }
+    if (g_playhead_override) {
+        t.playhead = *g_playhead_override;
+        t.playhead_soft = offset(base.playhead, base.playhead_soft,
+                                 *g_playhead_override);
+    }
+    return t;
+}
+
 }  // namespace
 
-const ThemeTokens& tokens() { return builtTokens(); }
+void set_accent_override(const QColor& color) {
+    g_accent_override = color.isValid()
+        ? std::optional<QColor>(color)
+        : std::nullopt;
+}
+
+void set_playhead_override(const QColor& color) {
+    g_playhead_override = color.isValid()
+        ? std::optional<QColor>(color)
+        : std::nullopt;
+}
+
+QColor accent_override() {
+    return g_accent_override ? *g_accent_override : QColor();
+}
+
+QColor playhead_override() {
+    return g_playhead_override ? *g_playhead_override : QColor();
+}
+
+const ThemeTokens& tokens() {
+    // Compose the active token set from the mode base + any user overrides on
+    // every cache build. Recompute when the mode's base object changes address
+    // (builtTokens returns one of three static sets) or when either override
+    // value changes.
+    static const ThemeTokens* cached_base = nullptr;
+    static QColor cached_accent;
+    static QColor cached_playhead;
+    static ThemeTokens cached;
+    const ThemeTokens& base = builtTokens();
+    const QColor accent = accent_override();
+    const QColor playhead = playhead_override();
+    if (std::addressof(base) != cached_base
+        || accent != cached_accent
+        || playhead != cached_playhead) {
+        cached = apply_overrides(base);
+        cached_base = std::addressof(base);
+        cached_accent = accent;
+        cached_playhead = playhead;
+    }
+    return cached;
+}
 
 QString css(const QColor& c) {
     if (c.alpha() >= 255)

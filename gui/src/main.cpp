@@ -91,6 +91,19 @@ int main(int argc, char* argv[]) {
     QApplication::setApplicationDisplayName(QStringLiteral("Nova Canvas Studio"));
     QApplication::setOrganizationName(QStringLiteral("Nova Canvas"));
 
+    // Persisted hardware-decode preference (Settings dialog). Apply BEFORE the
+    // env-probe manager below (and every later one) so the probe order honors
+    // the user's pin. "software" disables hardware probing entirely.
+    {
+        const QSettings settings;
+        const std::string backend = settings
+            .value(QStringLiteral("settings/hw_backend"), QStringLiteral(""))
+            .toString()
+            .toStdString();
+        if (!backend.empty())
+            canvas::core::HwDeviceManager::set_preferred_backend(backend);
+    }
+
     // Startup env report (always-on): the exact FFmpeg build and the hardware
     // decode surface so playback/export failures can be blamed on a stale ABI
     // or the absence of a GPU without digging. ALSA/PipeWire presence is
@@ -144,6 +157,22 @@ int main(int argc, char* argv[]) {
             ? appearance_settings.value(QStringLiteral("appearance/hypr_dark")).toBool()
             : (!light_theme && on_hyprland
                && app.platformName() == QLatin1String("wayland"));
+
+    // Persisted theme-token overrides (Settings dialog). Applied on top of the
+    // base palette by tokens()/log_theme_tokens(), so setting them here makes
+    // every element (palette + stylesheet + log) reflect the user's colors from
+    // the first frame. Invalid strings (cleared) are ignored -> designed value.
+    {
+        const QSettings settings;
+        const QColor accent(settings
+            .value(QStringLiteral("settings/accent_color"), QStringLiteral(""))
+            .toString());
+        const QColor playhead(settings
+            .value(QStringLiteral("settings/playhead_color"), QStringLiteral(""))
+            .toString());
+        canvas::gui::set_accent_override(accent);
+        canvas::gui::set_playhead_override(playhead);
+    }
     canvas::gui::apply_theme(app, light_theme, hypr_dark);
 
     qWarning().nospace()

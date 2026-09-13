@@ -69,7 +69,11 @@ void MainWindow::enter_edit_page() {
 }
 
 void MainWindow::reflect_render_queue() {
-    if (deliver_queue_panel_) deliver_queue_panel_->refresh();
+    if (deliver_queue_panel_)
+        deliver_queue_panel_->set_project_name(
+            project_ && project_->name != "Untitled Project"
+                ? QString::fromStdString(project_->name)
+                : QString());
     // Flag the top-bar fps readout for render-speed mode while a job runs;
     // on_fps_tick picks it up on its next pulse. The count comes straight from
     // the queue — no duplicated label in the settings panel anymore.
@@ -100,6 +104,11 @@ void MainWindow::add_current_to_render_queue() {
         }
         ds.video.custom_width = w > 0 ? w : 1920;
         ds.video.custom_height = h > 0 ? h : 1080;
+        // Persist the concrete dimensions on the job so the render-queue panel
+        // can summarize the actual resolution instead of the "Timeline
+        // Resolution" placeholder (which is meaningless once enqueued).
+        ds.video.resolution = std::to_string(ds.video.custom_width) + " x "
+                            + std::to_string(ds.video.custom_height);
     }
     if (ds.video.frame_rate == "Auto") {
         // Auto-detect the source media frame rate (the highest fps among the
@@ -116,6 +125,13 @@ void MainWindow::add_current_to_render_queue() {
         if (f <= 0.0) f = project_->sequence.fps;
         if (f <= 0.0) f = 30.0;
         ds.video.custom_fps = f;
+        // Persist the concrete fps on the job too, so the render-queue panel can
+        // summarize "1440p · 60fps" instead of the "Auto" placeholder.
+        {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%.4g", f);
+            ds.video.frame_rate = buf;
+        }
     }
 
     canvas::core::ExportSettings es = canvas::core::to_export_settings(ds);

@@ -35,6 +35,15 @@ public:
     [[nodiscard]] const std::string& device_name() const { return device_name_; }
     [[nodiscard]] bool is_hardware() const { return device_ctx_ != nullptr; }
 
+    // Preferred hardware decode backend, honored by every probe on this
+    // process. "" = the default order (cuda, vaapi, qsv, vulkan); one of
+    // "cuda"/"vaapi"/"qsv"/"vulkan" pins that type first (the rest stay as
+    // fallbacks); "software" disables hardware decode entirely. Set once at
+    // startup from the persisted preference (main.cpp); not thread-safe — call
+    // before any device_ctx() probe creates the device.
+    static void set_preferred_backend(const std::string& backend);
+    [[nodiscard]] static const std::string& preferred_backend();
+
 private:
     void init() const;
 

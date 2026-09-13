@@ -50,6 +50,7 @@ qt_add_executable(canvas
     src/UX/theme_styles.cpp
     src/UX/theme_tokens.cpp
     src/UX/horizon_style.cpp
+    src/UX/SettingsDialog.cpp
     ui/MainWindow.ui
 
     src/features/app/AppActions.cpp
