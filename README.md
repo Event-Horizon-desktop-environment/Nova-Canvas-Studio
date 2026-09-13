@@ -1,6 +1,7 @@
 # Nova Canvas Studio
 
-A Linux-only, source-built **nonlinear video editor** with a dark, tool-grade
+A Linux-only, and will stay linux only! Windows has too many windows and it's time for linux to have it's own software
+source-built **nonlinear video editor** with a dark, tool-grade
 flavor: a proper timeline with a pinned ruler/minimap/timecode strip,
 linked A/V editing, hardware-accelerated decode and encode, and a headless
 engine tested separately from the GUI.
