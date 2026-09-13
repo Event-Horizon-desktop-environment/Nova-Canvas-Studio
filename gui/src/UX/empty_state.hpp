@@ -7,6 +7,7 @@
 
 #include <QLabel>
 #include <QPixmap>
+#include <QPointer>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -29,9 +30,13 @@ inline QWidget* build_empty_state(QWidget* parent, const char* icon_name,
 
     auto* brand_icon = new QLabel(host);
     brand_icon->setAlignment(Qt::AlignCenter);
-    const auto retint = [brand_icon, icon_name] {
+    // QPointer-guarded so a destroyed empty state (transient placeholder pages)
+    // auto-nulls out of the re-apply walk instead of being retinted.
+    const auto retint = [wp = QPointer<QLabel>(brand_icon), icon_name] {
+        if (!wp)
+            return;
         const ThemeTokens& t = tokens();
-        brand_icon->setPixmap(icon(icon_name, with_alpha(t.accent, 170)).pixmap(48, 48));
+        wp->setPixmap(icon(icon_name, with_alpha(t.accent, 170)).pixmap(48, 48));
     };
     retint();
     register_theme_reapply(retint);

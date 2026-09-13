@@ -139,11 +139,12 @@ private:
         switch (mode) {
             case QIcon::Normal:
             case QIcon::Selected:
-                // Full-strength ink, not ink_muted: toolbar glyphs should read
-                // bold and bright against the dark surfaces, not washed out.
-                return t.ink;
+                // The dedicated icon token: toolbar glyphs should read bold and
+                // bright against the dark surfaces, and can be recolored
+                // independently of the text ink (Settings > Theme > Icon).
+                return t.icon;
             case QIcon::Active:
-                return t.ink;
+                return t.icon;
             case QIcon::Disabled:
                 return t.ink_faint;
         }

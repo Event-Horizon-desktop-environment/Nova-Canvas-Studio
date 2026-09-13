@@ -16,6 +16,7 @@
 #include <QMenu>
 #include <QPalette>
 #include <QPoint>
+#include <QPointer>
 #include <QPushButton>
 #include <QSize>
 #include <QTabWidget>
@@ -121,17 +122,21 @@ void build_left_dock(MainWindow& mw) {
     {
         // Palette-driven surfaces so viewport/text/selection follow tokens
         // (kept alive across appearance switches via the re-apply hook).
-        const auto retint_bins = [bin_tree] {
+        // QPointer-guarded: the callback outlives the tree if the dock contents
+        // are ever rebuilt, and would otherwise dereference freed memory.
+        const auto retint_bins = [wp = QPointer<QTreeWidget>(bin_tree)] {
+            if (!wp)
+                return;
             const ThemeTokens& t = tokens();
-            QPalette bp = bin_tree->palette();
+            QPalette bp = wp->palette();
             bp.setColor(QPalette::Base, t.surface);
             bp.setColor(QPalette::AlternateBase, t.surface);
             bp.setColor(QPalette::Window, t.surface);
             bp.setColor(QPalette::Text, t.ink);
             bp.setColor(QPalette::Highlight, t.state_selected);
             bp.setColor(QPalette::HighlightedText, t.ink);
-            bin_tree->setPalette(bp);
-            if (QWidget* vp = bin_tree->viewport()) {
+            wp->setPalette(bp);
+            if (QWidget* vp = wp->viewport()) {
                 vp->setAutoFillBackground(true);
                 QPalette vpp = vp->palette();
                 vpp.setColor(QPalette::Base, t.surface);

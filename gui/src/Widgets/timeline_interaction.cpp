@@ -736,7 +736,7 @@ void TimelineWidget::rebuild_transition_handle() {
         p.end();
     }
     QPixmap tinted(kIconPx, kIconPx);
-    QColor glyph_tint = tokens().ink;
+    QColor glyph_tint = tokens().icon;
     glyph_tint.setAlpha(235);
     tinted.fill(glyph_tint);
     {

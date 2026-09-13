@@ -260,3 +260,34 @@ set_target_properties(wheel_panel_roundtrip_qt_test PROPERTIES AUTOMOC ON AUTORC
 add_test(NAME wheel_panel_roundtrip_qt_test COMMAND wheel_panel_roundtrip_qt_test)
 set_tests_properties(wheel_panel_roundtrip_qt_test PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# theme_roundtrip_qt_test: Qt regression test for the Theme-tab foundation —
+# the generalized token-override API and the shareable theme file. Pins the
+# field<->name<->QSettings-key law, override-clear semantics, the derived-family
+# recoloring (accent/playhead/ink/border recolor their hover/soft/state
+# members while preserving designed alpha), the JSON export/import round-trip,
+# and foreign-format rejection. Qt-linked on purpose (QColor/QJson/QFile).
+qt_add_executable(theme_roundtrip_qt_test
+    qt/theme_roundtrip_qt_test.cpp
+    ../src/UX/theme_clip_colors.cpp
+    ../src/UX/theme_icons.cpp
+    ../src/UX/theme_menu.cpp
+    ../src/UX/theme_state.cpp
+    ../src/UX/theme_styles.cpp
+    ../src/UX/theme_tokens.cpp
+    ../src/UX/horizon_style.cpp
+)
+target_include_directories(theme_roundtrip_qt_test PRIVATE
+    ${CANVAS_GUI_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../core/include
+)
+target_link_libraries(theme_roundtrip_qt_test PRIVATE
+    Qt6::Widgets
+    Qt6::Svg
+    canvas_core
+)
+set_target_properties(theme_roundtrip_qt_test PROPERTIES AUTOMOC ON AUTORCC ON AUTOUIC OFF)
+add_test(NAME theme_roundtrip_qt_test COMMAND theme_roundtrip_qt_test)
+set_tests_properties(theme_roundtrip_qt_test PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+

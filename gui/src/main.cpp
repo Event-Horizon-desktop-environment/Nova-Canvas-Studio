@@ -158,20 +158,60 @@ int main(int argc, char* argv[]) {
             : (!light_theme && on_hyprland
                && app.platformName() == QLatin1String("wayland"));
 
-    // Persisted theme-token overrides (Settings dialog). Applied on top of the
+    // Persisted theme-token overrides (Settings > Theme). Applied on top of the
     // base palette by tokens()/log_theme_tokens(), so setting them here makes
     // every element (palette + stylesheet + log) reflect the user's colors from
-    // the first frame. Invalid strings (cleared) are ignored -> designed value.
+    // the first frame. Invalid/empty strings (cleared) are ignored -> designed
+    // value. Legacy pre-tab keys (settings/accent_color, settings/playhead_color)
+    // are honored as a fallback and migrated to the per-field keys.
     {
         const QSettings settings;
-        const QColor accent(settings
+        int restored = 0;
+        for (int i = 0; i < canvas::gui::kThemeTokenFieldCount; ++i) {
+            const auto f = static_cast<canvas::gui::ThemeTokenField>(i);
+            const QString raw = settings
+                .value(canvas::gui::theme_setting_key(f), QStringLiteral(""))
+                .toString();
+            const QColor c(raw);
+            if (c.isValid()) {
+                canvas::gui::set_token_override(f, c);
+                ++restored;
+            }
+        }
+        const QString legacy_accent = settings
             .value(QStringLiteral("settings/accent_color"), QStringLiteral(""))
-            .toString());
-        const QColor playhead(settings
+            .toString();
+        if (!legacy_accent.isEmpty()
+            && !canvas::gui::token_override(canvas::gui::ThemeTokenField::Accent).isValid()) {
+            const QColor c(legacy_accent);
+            if (c.isValid()) {
+                canvas::gui::set_token_override(
+                    canvas::gui::ThemeTokenField::Accent, c);
+                qWarning().nospace()
+                    << "[theme] legacy settings/accent_color -> accent override ("
+                    << legacy_accent << ")";
+                ++restored;
+            }
+        }
+        const QString legacy_playhead = settings
             .value(QStringLiteral("settings/playhead_color"), QStringLiteral(""))
-            .toString());
-        canvas::gui::set_accent_override(accent);
-        canvas::gui::set_playhead_override(playhead);
+            .toString();
+        if (!legacy_playhead.isEmpty()
+            && !canvas::gui::token_override(canvas::gui::ThemeTokenField::Playhead).isValid()) {
+            const QColor c(legacy_playhead);
+            if (c.isValid()) {
+                canvas::gui::set_token_override(
+                    canvas::gui::ThemeTokenField::Playhead, c);
+                qWarning().nospace()
+                    << "[theme] legacy settings/playhead_color -> playhead override ("
+                    << legacy_playhead << ")";
+                ++restored;
+            }
+        }
+        qWarning().nospace()
+            << "[theme] restored " << restored << "/"
+            << canvas::gui::kThemeTokenFieldCount
+            << " field override(s) from QSettings";
     }
     canvas::gui::apply_theme(app, light_theme, hypr_dark);
 

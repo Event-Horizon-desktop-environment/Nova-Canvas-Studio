@@ -9,6 +9,7 @@
 #include <QGraphicsDropShadowEffect>
 #include <QPalette>
 #include <QPixmapCache>
+#include <QPointer>
 #include <QStyle>
 #include <QStyleFactory>
 #include <QWidget>
@@ -217,7 +218,13 @@ void register_theme_reapply(std::function<void()> fn) {
 
 void apply_theme_style(QWidget* w, const std::function<QString()>& style) {
     w->setStyleSheet(style());
-    register_theme_reapply([w, style] { w->setStyleSheet(style()); });
+    // QPointer-guarded: the re-apply callback must outlive a transient widget
+    // (menus and popups register here), so a destroyed widget auto-nulls instead
+    // of being dereferenced on the next theme switch.
+    register_theme_reapply([wp = QPointer<QWidget>(w), style] {
+        if (wp)
+            wp->setStyleSheet(style());
+    });
 }
 
 // Popover shadow — the only place the flat language keeps a drop shadow is
@@ -230,8 +237,13 @@ void apply_panel_shadow(QWidget* w) {
     effect->setOffset(0, 8);
     effect->setColor(QColor(0, 0, 0, is_light() ? 70 : 130));
     w->setGraphicsEffect(effect);
-    register_theme_reapply([w] {
-        if (auto* e = qobject_cast<QGraphicsDropShadowEffect*>(w->graphicsEffect()))
+    // The widget is typically a transient popup menu (see theme_menu.cpp), which
+    // Qt destroys on dismissal. Guard with a QPointer so a later theme re-apply
+    // skips the freed widget instead of crashing inside graphicsEffect().
+    register_theme_reapply([wp = QPointer<QWidget>(w)] {
+        if (!wp)
+            return;
+        if (auto* e = qobject_cast<QGraphicsDropShadowEffect*>(wp->graphicsEffect()))
             e->setColor(QColor(0, 0, 0, is_light() ? 70 : 130));
     });
 }

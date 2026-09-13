@@ -8,6 +8,9 @@
 #include <QColor>
 #include <QString>
 
+#include <cstdint>
+#include <cstddef>
+
 namespace canvas::gui {
 
 // Design tokens for one appearance mode. Used both for the QPalette and, via
@@ -25,6 +28,7 @@ struct ThemeTokens {
     QColor ink;            // primary text
     QColor ink_muted;      // secondary text
     QColor ink_faint;      // tertiary text
+    QColor icon;           // SVG glyph tint (independent of text ink)
     QColor accent;         // brand accent (Nova gold)
     QColor accent_hover;
     QColor accent_press;
@@ -84,16 +88,60 @@ QString css(const QColor& c);
 // whose hue is mode-dependent but whose opacity is fixed.
 QColor with_alpha(const QColor& c, int alpha);
 
-// User theme-token overrides (Settings dialog). An invalid color (default-
-// constructed QColor) clears the override and keeps the designed value.
-// Overriding accent recolors the whole accent family (hover/press/soft/line/
-// text/focus/state-selected) to the same hue, preserving each member's
-// lightness/alpha offset over the base accent, so the palette stays coherent.
-// Call refresh_theme() (theme_state.hpp) after changing to re-apply palette +
+// Overridable theme fields (Settings > Theme). Each entry maps to one primary
+// design token. Derived members are NOT independently editable: an accent
+// override recomputes its direct button states (accent_hover/press, on_accent)
+// so a command button reads as one family, while the wider chrome — selection
+// fills (state_selected), accent_text/soft/line, focus_ring, playhead_soft,
+// danger_soft, border_hi, state_hover/press — keeps its designed color so a
+// custom accent never flushes the whole UI into a single tint.
+enum class ThemeTokenField : uint8_t {
+    Surface, SurfaceLow, SurfaceRaised, SurfaceHigher, SurfaceHighest,
+    Border, BorderSoft, Ink, InkMuted, InkFaint, Icon,
+    Accent, Playhead,
+    ClipVideo, ClipAudio, ClipLabel, ClipBorderVideo, ClipBorderAudio,
+    Danger, Warn,
+    COUNT_
+};
+inline constexpr int kThemeTokenFieldCount =
+    static_cast<int>(ThemeTokenField::COUNT_);
+
+// Stable name for a field ("surface_low", "accent", ...). Used for the
+// QSettings key (theme_setting_key), the shareable theme JSON, and the UI.
+const char* theme_token_field_name(ThemeTokenField field);
+
+// QSettings key a field's override persists under ("settings/theme/<name>").
+QString theme_setting_key(ThemeTokenField field);
+
+// QSS/JSON-safe hex string for a color (HexRgb when opaque, HexArgb when not).
+// Returns an empty string for an invalid color.
+QString theme_color_string(const QColor& c);
+
+// User theme-token overrides (Settings > Theme). An invalid (default
+// constructed) QColor clears the override and keeps the designed value.
+// Overriding accent recolors its direct button states (accent_hover/press,
+// on_accent); the wider chrome keeps its designed colors. Overriding playhead,
+// ink, danger or border recomputes only their tight derived member
+// (playhead_soft / state layers / danger_soft / border_hi). Call
+// refresh_theme() (theme_state.hpp) after changing to re-apply palette +
 // stylesheet live.
-void set_accent_override(const QColor& color);
-void set_playhead_override(const QColor& color);
-QColor accent_override();
-QColor playhead_override();
+void set_token_override(ThemeTokenField field, const QColor& color);
+QColor token_override(ThemeTokenField field);
+
+// The active mode's designed value for a field (before any override) — the
+// Reset target and the picker's seed color.
+QColor designed_token_value(ThemeTokenField field);
+
+// Saves the current override set as a shareable JSON theme file. `name` is
+// stored as metadata. The appearance mode is recorded for reference but NOT
+// applied on import — overrides ride along whatever mode the receiver is in.
+// Returns false when the file cannot be written.
+bool export_theme_file(const QString& path, const QString& name);
+
+// Loads and applies a theme file's overrides (merging over whatever is already
+// set; the appearance mode is left untouched). `name_out`, if non-null,
+// receives the stored theme name. Returns false when `path` is not a valid
+// Nova Canvas theme file.
+bool import_theme_file(const QString& path, QString* name_out);
 
 }  // namespace canvas::gui
