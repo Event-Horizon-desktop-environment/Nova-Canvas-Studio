@@ -134,10 +134,11 @@ detect_distro() {
 # pipewire-devel                             — PipeWire
 # alsa-lib-devel                             — ALSA
 # nlohmann-json-devel                        — JSON
-# cmake, ninja-build, gcc-c++, pkgconf       — Build toolchain
+# cmake, ninja-build, meson, gcc-c++, pkgconf  — Build toolchain
 FEDORA_DEPS=(
     cmake
     ninja-build
+    meson
     gcc-c++
     pkgconf
     qt6-qtbase-devel
@@ -154,10 +155,11 @@ FEDORA_DEPS=(
 # pipewire                                    — PipeWire
 # alsa-lib                                    — ALSA
 # nlohmann-json                               — JSON
-# cmake, ninja, gcc, pkgconf                  — Build toolchain
+# cmake, ninja, meson, gcc, pkgconf            — Build toolchain
 ARCH_DEPS=(
     cmake
     ninja
+    meson
     gcc
     pkgconf
     qt6-base
@@ -176,11 +178,12 @@ ARCH_DEPS=(
 # libasound2-dev                              — ALSA
 # nlohmann-json3-dev                          — JSON
 # build-essential, cmake, ninja-build,        — Build toolchain
-#   pkg-config
+#   meson, pkg-config
 DEBIAN_DEPS=(
     build-essential
     cmake
     ninja-build
+    meson
     pkg-config
     qt6-base-dev
     libqt6svg6-dev
@@ -265,6 +268,34 @@ install_deps() {
     ok "All dependencies installed."
 }
 
+# ── System Install ─────────────────────────────────────────────────────────
+# Mirrors the justfile's `sudo just install-release`: configure a dedicated
+# release build with CMAKE_INSTALL_PREFIX=/usr, compile it as your user, then
+# elevate (pkexec) only for the final `cmake --install --strip`.
+install_system() {
+    step "Installing Nova Canvas Studio to the system"
+
+    pick_elevator
+
+    local rel_dir="build-release"
+    local rel_args=("-DCMAKE_BUILD_TYPE=Release" "-G" "Ninja" "-DCMAKE_INSTALL_PREFIX=/usr")
+
+    info "Configuring release build: cmake -B $rel_dir ${rel_args[*]}"
+    cmake -B "$rel_dir" "${rel_args[@]}" 2>&1 | while IFS= read -r line; do
+        printf "    ${DIM}%s${RESET}\n" "$line"
+    done
+
+    info "cmake --build $rel_dir -j$JOBS"
+    cmake --build "$rel_dir" -j"$JOBS" 2>&1 | while IFS= read -r line; do
+        printf "    ${DIM}%s${RESET}\n" "$line"
+    done
+
+    info "Installing to /usr (you may be prompted for your password)..."
+    run_elevated cmake --install "$rel_dir" --strip
+
+    ok "Installed. Launch it from your app menu or run: ${BOLD}canvas${RESET}"
+}
+
 # ── Build ───────────────────────────────────────────────────────────────────
 do_build() {
     step "Building Nova Canvas Studio"
@@ -334,6 +365,18 @@ do_build() {
         fail "check_qtdep FAILED — a headless module includes Qt"
     fi
     ok "check_qtdep: headless modules are Qt-free"
+
+    # Optional system-wide install, mirroring `sudo just install-release`.
+    printf "\n    ${CYAN}Install Nova Canvas Studio system-wide?${RESET} (installs to /usr via pkexec)"
+    read -r -p " [y/N] " answer
+    case "${answer,,}" in
+        y|yes)
+            install_system
+            ;;
+        *)
+            info "System install skipped."
+            ;;
+    esac
 
     printf "\n    ${CYAN}Binary:${RESET} ./$BUILD_DIR/gui/canvas\n"
     printf "    ${CYAN}Run:${RESET}    ./$BUILD_DIR/gui/canvas [file]\n\n"
