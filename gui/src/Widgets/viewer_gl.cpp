@@ -1482,6 +1482,68 @@ void ViewerGL::paintGL() {
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
+    // Always-on pixel probe (throttled ~1/s): samples the CPU RGBA source and
+    // the composited framebuffer center, plus any GL error from the draw. The
+    // line decides WHERE a persistent black viewer originates without needing
+    // CANVAS_DEBUG (all `[viewer] set_frame/upload/paint` lines are gated):
+    //   src avg/max > 0 but fb == 0    -> upload/shaders/draw broken (driver)
+    //   src avg/max == 0               -> decode/swscale produced black pixels
+    //   fb mirrors src brightness      -> the GL viewer path painted fine
+    static int64_t px_probe_ = 0;
+    if ((px_probe_++ % 60) == 0) {
+        const auto err_name = [](GLenum e) -> const char* {
+            switch (e) {
+                case GL_NO_ERROR: return "none";
+                case GL_INVALID_ENUM: return "invalid-enum";
+                case GL_INVALID_VALUE: return "invalid-value";
+                case GL_INVALID_OPERATION: return "invalid-op";
+                case GL_INVALID_FRAMEBUFFER_OPERATION: return "invalid-fbo";
+                case GL_OUT_OF_MEMORY: return "oom";
+                default: return "other";
+            }
+        };
+        const GLenum err = glGetError();
+        uint8_t fbpx[4] = {0, 0, 0, 0};
+        GLint vp[4] = {0, 0, 0, 0};
+        glGetIntegerv(GL_VIEWPORT, vp);
+        if (vp[2] > 0 && vp[3] > 0)
+            glReadPixels(vp[2] / 2, vp[3] / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fbpx);
+        int s00[4] = {0, 0, 0, 0};
+        int scc[4] = {0, 0, 0, 0};
+        int src_avg = -1;
+        if (frame_ && frame_->a && !frame_->a->rgba.empty() &&
+            frame_->a->stride >= static_cast<std::size_t>(frame_->a->width) * 4) {
+            const uint8_t* d = frame_->a->rgba.data();
+            const int w = frame_->a->width;
+            const int h = frame_->a->height;
+            const std::size_t srow = frame_->a->stride;
+            const auto px = [d, srow](int x, int y, int out[4]) {
+                const std::size_t off =
+                    static_cast<std::size_t>(y) * srow + static_cast<std::size_t>(x) * 4;
+                for (int c = 0; c < 4; ++c) out[c] = d[off + c];
+            };
+            px(0, 0, s00);
+            px(w / 2, h / 2, scc);
+            long long sum = 0;
+            int n = 0;
+            for (int y = 0; y < h; y += 64) {
+                const std::size_t row = static_cast<std::size_t>(y) * srow;
+                for (int x = 0; x < w; x += 64) {
+                    const std::size_t o = row + static_cast<std::size_t>(x) * 4;
+                    sum += d[o] + d[o + 1] + d[o + 2];
+                    ++n;
+                }
+            }
+            src_avg = n ? static_cast<int>(sum / (3LL * n)) : 0;
+        }
+        // src_avg == -1 => no CPU slice this probe tick (NV12-only or blank).
+        ::canvas::core::log::log_warning(
+            "[viewer] pixels err=%s fb=(%d,%d,%d,%d) src00=(%d,%d,%d,%d) "
+            "srcc=(%d,%d,%d,%d) src_avg=%d",
+            err_name(err), fbpx[0], fbpx[1], fbpx[2], fbpx[3],
+            s00[0], s00[1], s00[2], s00[3], scc[0], scc[1], scc[2], scc[3], src_avg);
+    }
+
     if (nv12_blend) {
         if (grade_a_uploaded_ && frame_->grade) grade_tex_a_->release();
         if (grade_b_uploaded_ && frame_->grade_b) grade_tex_b_->release();
