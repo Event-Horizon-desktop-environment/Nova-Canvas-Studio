@@ -4,7 +4,8 @@ A Linux-only, and will stay linux only! Windows has too many windows and it's ti
 source-built **nonlinear video editor** with a dark, tool-grade
 flavor: a proper timeline with a pinned ruler/minimap/timecode strip,
 linked A/V editing, hardware-accelerated decode and encode, and a headless
-engine tested separately from the GUI.
+engine tested separately from the GUI. LTS distro's will not support this video editor unless it's modern. 
+
 
 C++20, Qt 6, FFmpeg. No network builds, no vendored code in the build — it
 compiles from your system packages.
