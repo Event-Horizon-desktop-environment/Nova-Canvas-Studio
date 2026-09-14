@@ -1504,10 +1504,30 @@ void ViewerGL::paintGL() {
         };
         const GLenum err = glGetError();
         uint8_t fbpx[4] = {0, 0, 0, 0};
+        int fb_nz = 0;
+        int fb_n = 0;
+        long long fb_sum = 0;
         GLint vp[4] = {0, 0, 0, 0};
         glGetIntegerv(GL_VIEWPORT, vp);
-        if (vp[2] > 0 && vp[3] > 0)
-            glReadPixels(vp[2] / 2, vp[3] / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fbpx);
+        if (vp[2] > 0 && vp[3] > 0) {
+            const double q = vp[2] / 4.0;
+            const double r = vp[3] / 4.0;
+            for (int c = 1; c <= 3; ++c) {
+                for (int i = 1; i <= 3; ++i) {
+                    uint8_t px[4] = {0, 0, 0, 0};
+                    const int x = c == 2 ? vp[2] / 2 : static_cast<int>(q * c);
+                    const int y = i == 2 ? vp[3] / 2 : static_cast<int>(r * i);
+                    glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                    const int lum = px[0] + px[1] + px[2];
+                    fb_sum += lum;
+                    ++fb_n;
+                    if (lum > 12) ++fb_nz;
+                    if (c == 2 && i == 2)
+                        for (int k = 0; k < 4; ++k) fbpx[k] = px[k];
+                }
+            }
+        }
+        const int fb_avg = fb_n ? static_cast<int>(fb_sum / (3LL * fb_n)) : -1;
         int s00[4] = {0, 0, 0, 0};
         int scc[4] = {0, 0, 0, 0};
         int src_avg = -1;
@@ -1538,9 +1558,10 @@ void ViewerGL::paintGL() {
         }
         // src_avg == -1 => no CPU slice this probe tick (NV12-only or blank).
         ::canvas::core::log::log_warning(
-            "[viewer] pixels err=%s fb=(%d,%d,%d,%d) src00=(%d,%d,%d,%d) "
-            "srcc=(%d,%d,%d,%d) src_avg=%d",
-            err_name(err), fbpx[0], fbpx[1], fbpx[2], fbpx[3],
+            "[viewer] pixels err=%s tex=%dx%d win=%dx%d fb_avg=%d fb_nz=%d/%d "
+            "fb=(%d,%d,%d,%d) src00=(%d,%d,%d,%d) srcc=(%d,%d,%d,%d) src_avg=%d",
+            err_name(err), tex_w_, tex_h_, width(), height(), fb_avg, fb_nz, fb_n,
+            fbpx[0], fbpx[1], fbpx[2], fbpx[3],
             s00[0], s00[1], s00[2], s00[3], scc[0], scc[1], scc[2], scc[3], src_avg);
     }
 
