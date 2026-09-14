@@ -11,7 +11,7 @@
 // Message routing: a line whose body starts with a bracketed tag (or a known
 // tag-less prefix) is routed to a per-category file in the same directory as the
 // default log. Audited 2026-09-11 call-site inventory -> destination:
-//     [dec]/[decode]/[media]/[hw]/[io]/[trans-bake]/[viewer]                         -> Canvas-Video.log
+//     [dec]/[decode]/[media]/[hw]/[io]/[trans-bake]/[viewer]/[vaapi]                         -> Canvas-Video.log
 //       + tag-less video_decoder:/decode:/decode open:/vdecode/video:/viewer:/
 //         transition: preview|playhead
 //     [render]/[render:q]/[export]/[gpu]/[wrh]/[TIMING]/[FRAME-DIAG]/[AUDIO-DIAG]/[dbg]
@@ -23,6 +23,7 @@
 //     [grade]/[curve]/[wheels]/[knob]/[knobmaster]/[tone]/[target]/[preview]/[graph]/
 //         [page]/[ministrip]/[scope]/[hist]/[vectorscope]/[chromaticity]             -> Canvas-Color.log
 //     [thumb]/[wave] + tag-less thumb:                                               -> Canvas-Thumbs.log
+//     [srcprv]/[pool] + tag-less srcprv:/pool:                                       -> Canvas-Source.log
 //     [audio]/[audio:feed]/[avsync]/[eq]/[diag:cut] + tag-less audio:/audio_decoder:/
 //         audio decode:                                                              -> canvas-Audio.log
 //     [proj]/[import]/[seq]/[env]/[build]/[font]/[eventloop]/[ui:*] + tag-less project:
@@ -101,7 +102,7 @@ inline FILE*& file() {
 // Message category used to choose the destination log file. Lines routed to a
 // category are written ONLY to that category's file (and stderr); Default keeps
 // every line that doesn't match any category.
-enum class Route : unsigned char { Default, Video, Render, Ux, Playback, Timeline, Color, Thumbs, Audio };
+enum class Route : unsigned char { Default, Video, Render, Ux, Playback, Timeline, Color, Thumbs, Audio, SourcePreview };
 
 namespace tag_tables {
 
@@ -127,7 +128,7 @@ constexpr Entry kTags[] = {
     {"AUDIO-DIAG", Route::Render},
     {"TIMING", Route::Render},
     {"dec", Route::Video}, {"decode", Route::Video}, {"media", Route::Video},
-    {"hw", Route::Video}, {"io", Route::Video}, {"viewer", Route::Video},
+    {"hw", Route::Video}, {"io", Route::Video}, {"viewer", Route::Video}, {"vaapi", Route::Video},
     {"render", Route::Render}, {"export", Route::Render}, {"gpu", Route::Render},
     {"wrh", Route::Render}, {"dbg", Route::Render},
     {"play", Route::Playback}, {"playback", Route::Playback}, {"transport", Route::Playback},
@@ -139,6 +140,7 @@ constexpr Entry kTags[] = {
     {"ministrip", Route::Color}, {"scope", Route::Color}, {"hist", Route::Color},
     {"color:scrub", Route::Color},
     {"thumb", Route::Thumbs}, {"wave", Route::Thumbs},
+    {"srcprv", Route::SourcePreview}, {"pool", Route::SourcePreview},
     {"audio", Route::Audio}, {"avsync", Route::Audio}, {"eq", Route::Audio},
     {"proj", Route::Ux}, {"import", Route::Ux}, {"seq", Route::Ux}, {"env", Route::Ux},
     {"build", Route::Ux}, {"font", Route::Ux}, {"eventloop", Route::Ux},
@@ -179,6 +181,8 @@ constexpr Entry kPrefixes[] = {
     {"video:", Route::Video},
     {"viewer:", Route::Video},
     {"thumb:", Route::Thumbs},
+    {"srcprv:", Route::SourcePreview},
+    {"pool:", Route::SourcePreview},
 };
 
 }  // namespace tag_tables
@@ -220,6 +224,7 @@ inline const char* route_log_path(Route r) {
     static const std::string color = dir + "Canvas-Color.log";
     static const std::string thumbs = dir + "Canvas-Thumbs.log";
     static const std::string audio = dir + "canvas-Audio.log";
+    static const std::string source = dir + "Canvas-Source.log";
     switch (r) {
         case Route::Video: return video.c_str();
         case Route::Render: return render.c_str();
@@ -229,6 +234,7 @@ inline const char* route_log_path(Route r) {
         case Route::Color: return color.c_str();
         case Route::Thumbs: return thumbs.c_str();
         case Route::Audio: return audio.c_str();
+        case Route::SourcePreview: return source.c_str();
         case Route::Default: break;
     }
     return default_log_path();
@@ -280,6 +286,11 @@ inline FILE*& route_file_handle(Route r) {
         case Route::Audio:
             // Reuse the dedicated audio sink (honors CANVAS_AUDIO_LOG_FILE).
             return audio_file();
+        case Route::SourcePreview: {
+            static FILE* f = nullptr;
+            if (!f) f = std::fopen(route_log_path(r), "a");
+            return f;
+        }
         case Route::Default:
         default:
             return file();
@@ -338,7 +349,8 @@ inline void reset_file() {
 // them lazily re-open the freshly-removed files).
 inline void reset_route_files() {
     for (Route r : {Route::Video, Route::Render, Route::Ux, Route::Playback,
-                    Route::Timeline, Route::Color, Route::Thumbs, Route::Audio}) {
+                    Route::Timeline, Route::Color, Route::Thumbs, Route::Audio,
+                    Route::SourcePreview}) {
         FILE*& h = route_file_handle(r);
         if (h) {
             std::fclose(h);

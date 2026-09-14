@@ -235,6 +235,14 @@ int TimelineWidget::desired_timeline_height() const {
 
 double TimelineWidget::tracks_stack_top() const { return tracks_origin_y(); }
 
+double TimelineWidget::empty_state_top() const {
+    // Anchor to the ruler's bottom edge (the ticks/grid) rather than to the
+    // full tracks_origin_y() which includes pan_down_room_ + track_v_pad_top_.
+    // With no content those offsets float the panel ~247px below the ruler.
+    return tracks_origin_y() - pan_down_room_ - track_v_pad_top_
+           + static_cast<double>(kSceneMargin);
+}
+
 double TimelineWidget::tracks_stack_bottom(int v_count, int a_count) const {
     const int band = (v_count > 0 && a_count > 0) ? 1 : 0;
     const int total_elems = v_count + a_count + band;

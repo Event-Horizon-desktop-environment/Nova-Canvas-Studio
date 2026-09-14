@@ -7,6 +7,20 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libswresample
 )
 
+# Optional direct libva use: the zero-copy VAAPI playback path exports decoded
+# NV12 surfaces via vaExportSurfaceHandle() and reads the driver identity via
+# vaQueryDriverName(). FFmpeg's avcodec already load libva, but OUR *direct*
+# calls need a real link — add it when libva dev headers/pc are present. The
+# vendor/registry modules (amd/intel/nvidia) and the surface type always
+# compile; the descriptor export itself is gated on CANVAS_HAVE_VAAPI so a
+# libva-less build falls back to the CPU download path (as it does today).
+pkg_check_modules(LIBVA IMPORTED_TARGET libva)
+set(CANVAS_VAAPI_ENABLED OFF)
+if(LIBVA_FOUND)
+    set(CANVAS_VAAPI_ENABLED ON)
+endif()
+message(STATUS "Nova Canvas VAAPI zero-copy: ${CANVAS_VAAPI_ENABLED}")
+
 # Vendored xiph/rnnoise (BSD-3-Clause) — the real-time speech noise-suppression
 # engine behind Clip::voice_isolation = RnNoise. Self-contained: the model
 # weights are compiled in via src/rnn_data.c, so no external .rnnn file ships.
@@ -136,6 +150,13 @@ add_library(canvas_core STATIC
     src/export/vaapi_encode.cpp
     src/export/qsv_encode.cpp
     src/export/render_queue.cpp
+
+    src/media/vaapi/surface.cpp
+    src/media/vaapi/driver.cpp
+    src/media/vaapi/amd.cpp
+    src/media/vaapi/intel.cpp
+    src/media/vaapi/nvidia.cpp
+    src/media/vaapi/export.cpp
 )
 # canvas_core is deliberately Qt-free; the root CMakeLists enables AUTOMOC globally,
 # which would otherwise try (and fail) to run moc over these files. Disable it
@@ -156,6 +177,11 @@ if(CANVAS_CUDA_ENABLED)
     if(CANVAS_CUDA_INCLUDE_DIR)
         target_include_directories(canvas_core PUBLIC "${CANVAS_CUDA_INCLUDE_DIR}")
     endif()
+endif()
+
+if(CANVAS_VAAPI_ENABLED)
+    target_compile_definitions(canvas_core PUBLIC CANVAS_HAVE_VAAPI=1)
+    target_link_libraries(canvas_core PUBLIC PkgConfig::LIBVA)
 endif()
 
 add_executable(canvas_roundtrip_test tests/roundtrip_test.cpp)

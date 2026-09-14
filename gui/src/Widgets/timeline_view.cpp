@@ -96,7 +96,7 @@ void TimelineWidget::rebuild_timeline() {
     const bool has_content = has_timeline_content();
     const double content_height = has_content
         ? tracks_content_height(v_count, a_count)
-        : (tracks_stack_top() - static_cast<double>(kSceneMargin)) + kEmptyStateHeight
+        : (empty_state_top() - static_cast<double>(kSceneMargin)) + kEmptyStateHeight
               + track_v_pad_bottom_;
 // Grab-and-follow panning: pulling the divider UP parks the channels flush
     // under the ruler strip (that parked scroll value is the UP LIMIT); pulling
@@ -151,10 +151,13 @@ void TimelineWidget::rebuild_timeline() {
     const bool content_transitioned = has_content != last_had_content_;
     const bool structural = track_count_changed_ || content_transitioned;
     last_had_content_ = has_content;
-    const int park = static_cast<int>(lround(pan_down_room_ + track_v_pad_top_));
+    const int park = has_content
+        ? static_cast<int>(lround(pan_down_room_ + track_v_pad_top_))
+        : 0;  // nothing to seat under the ruler when the timeline is empty
     const int reach = std::max(park, static_cast<int>(lround(kSceneMargin + content_height - vp_h)));
     verticalScrollBar()->setRange(0, std::max(reach, 0));
     if (structural || follow_playhead_) verticalScrollBar()->setValue(park);
+    if (!has_content) verticalScrollBar()->setValue(0);  // panel hugs the ticks
     if (top_pinned_) top_pinned_->setPos(0.0, static_cast<double>(verticalScrollBar()->value()));
     // Refit the dock only on structural changes: a channel-count change or the
     // empty->content transition. Track-height drags (rebuild per pixel with the
@@ -219,7 +222,7 @@ void TimelineWidget::relayout_scene() {
     const bool has_content = has_timeline_content();
     const double content_height = has_content
         ? tracks_content_height(v_count, a_count)
-        : (tracks_stack_top() - static_cast<double>(kSceneMargin)) + kEmptyStateHeight
+        : (empty_state_top() - static_cast<double>(kSceneMargin)) + kEmptyStateHeight
               + track_v_pad_bottom_;
     const double vp_h = static_cast<double>(viewport()->height());
     pan_down_room_ = kPanDownRoomMin;
@@ -274,10 +277,13 @@ void TimelineWidget::relayout_scene() {
     // The re-park is follow-only: a pure resize must not stomp the vertical
     // scroll of a user who has scrolled away.
     update_playhead_position(playhead_frame_);
-    const int park = static_cast<int>(lround(pan_down_room_ + track_v_pad_top_));
+    const int park = has_content
+        ? static_cast<int>(lround(pan_down_room_ + track_v_pad_top_))
+        : 0;
     const int reach = std::max(park, static_cast<int>(lround(kSceneMargin + content_height - vp_h)));
     verticalScrollBar()->setRange(0, std::max(reach, 0));
     if (follow_playhead_) verticalScrollBar()->setValue(park);
+    if (!has_content) verticalScrollBar()->setValue(0);
     if (top_pinned_) top_pinned_->setPos(0.0, static_cast<double>(verticalScrollBar()->value()));
 
     // Per-relayout cost of the chrome-only resize fast path. This is the number
@@ -1214,7 +1220,7 @@ bool TimelineWidget::has_timeline_content() const {
 void TimelineWidget::draw_empty_state() {
     const ThemeTokens& t = tokens();
     const double x = kSceneMargin;
-    const double top = tracks_stack_top();
+    const double top = empty_state_top();
     const double w = std::max(0.0, scene_.sceneRect().right() - x);
 
     scene_.addRect(QRectF(x, top, w, kEmptyStateHeight),

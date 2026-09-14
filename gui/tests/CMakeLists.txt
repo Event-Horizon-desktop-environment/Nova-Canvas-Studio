@@ -30,6 +30,7 @@ canvas_add_headless_test(sync_constants_test
 canvas_add_headless_test(timeline_decoder_test
     timeline_decoder_test.cpp
     ../src/features/playback/timeline_decoder.cpp
+    ../src/features/playback/vaapi_import_state.cpp
 )
 
 # transition_bake_test: exercises the off-thread transition pre-render's pure
@@ -40,6 +41,7 @@ canvas_add_headless_test(timeline_decoder_test
 canvas_add_headless_test(transition_bake_test
     transition_bake_test.cpp
     ../src/features/playback/timeline_decoder.cpp
+    ../src/features/playback/vaapi_import_state.cpp
 )
 
 # audio_pipeline_test: exercises AudioPipeline headless against an in-memory
@@ -284,6 +286,7 @@ target_include_directories(theme_roundtrip_qt_test PRIVATE
 target_link_libraries(theme_roundtrip_qt_test PRIVATE
     Qt6::Widgets
     Qt6::Svg
+    Qt6::Test
     canvas_core
 )
 set_target_properties(theme_roundtrip_qt_test PROPERTIES AUTOMOC ON AUTORCC ON AUTOUIC OFF)

@@ -179,7 +179,7 @@ void TimelineWidget::update_drop_lane(const QPointF& scene_pos) {
         QColor fill = t.accent;
         fill.setAlpha(40);
         set_rect_highlight(drop_lane_highlight_,
-                           QRectF(kSceneMargin, tracks_stack_top(),
+                           QRectF(kSceneMargin, empty_state_top(),
                                   scene_.sceneRect().right() - kSceneMargin, kEmptyStateHeight),
                            fill, QPen(t.accent, 2.0));
         return;

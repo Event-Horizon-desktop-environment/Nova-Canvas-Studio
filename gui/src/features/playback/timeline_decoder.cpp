@@ -1,6 +1,7 @@
 #include "timeline_decoder.hpp"
 
 #include "sync_constants.hpp"
+#include "vaapi_import_state.hpp"
 
 #include "canvas/core/gpu/cuda_convert.hpp"
 #include "canvas/core/timeline/clip_rate.hpp"
@@ -513,8 +514,11 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
         g_last_nv12_null_reason = "clip-disabled";
         return nullptr;
     }
-    if (!canvas::core::gpu::cuda_available()) {
-        g_last_nv12_null_reason = "no-cuda";
+    // GPU NV12 fast path requires a device that can hand a texture to GL:
+    // CUDA (host_nv12_from_hw) or the zero-copy VAAPI backend (vaapi_export_surface).
+    const std::string& dev = hw_.device_name();
+    if (!canvas::core::gpu::cuda_available() && dev != "vaapi") {
+        g_last_nv12_null_reason = "no-cuda-no-vaapi";
         return nullptr;
     }
 
@@ -536,10 +540,26 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
     // fallback is a plain container seek + forward decode on every position
     // change (~520ms/scrub observed vs a tens-of-ms one-GOP walk indexed).
     if (!slot->decoder.has_iframe_index()) slot->decoder.build_iframe_index();
-    // decode_to_hw serves only the CUDA device and the composite kernel consumes
-    // CUDA device pointers, so require hardware decode + a CUDA device.
-    if (!slot->decoder.is_hardware() || hw_.device_name() != "cuda") {
-        g_last_nv12_null_reason = "not-hardware-or-device-not-cuda";
+    // Hardware fast path dispatch: decode_to_hw serves either the CUDA device
+    // (host_nv12_from_hw consumes CUDA device pointers) or, when the zero-copy
+    // VAAPI backend is live, VAAPI surface frames (vaapi_export_surface exports
+    // the dmabufs the GL viewer imports).
+    const std::string& dev = hw_.device_name();
+    const bool is_cuda = dev == "cuda";
+    const bool is_vaapi = dev == "vaapi";
+    if (!slot->decoder.is_hardware() || !(is_cuda || is_vaapi)) {
+        g_last_nv12_null_reason = "not-hardware-or-unsupported-device";
+        return nullptr;
+    }
+
+    // A VAAPI surface frame is GPU-only (dmabufs, zero CPU planes), so it can
+    // only be produced when the viewer can actually import it — EGLImage dmabuf
+    // import is not guaranteed (GLX-only session, no dma_buf extension, missing
+    // glEGLImageTargetTexture2DOES). ViewerGL publishes the one-time probe
+    // result; until then and when it fails, fall back to the CPU RGBA path
+    // instead of handing the viewer a frame it cannot display.
+    if (is_vaapi && !canvas::gui::vaapi_viewer_import_available()) {
+        g_last_nv12_null_reason = "vaapi-viewer-import-unavailable";
         return nullptr;
     }
 
@@ -596,13 +616,35 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
     // (longest edge capped at max_dim, 0 = native, even dims), same on-GPU
     // resize/download, same resolved color spec. The viewer letterboxes the
     // quad, so the composite needs no bars (dst == full canvas).
+    //
+    // VAAPI zero-copy: instead of resize+download, export the surface's dmabufs
+    // and let the GL viewer import them directly (no CPU copy at all, native
+    // resolution — `max_dim` only bounds CPU traffic, which there is none of).
     const canvas::core::gpu::ColorSpec spec = slot->decoder.color_spec();
     const auto gpu_t0 = std::chrono::steady_clock::now();
-    auto frame = host_nv12_from_hw(hw, src_frame, spec, max_dim);
-    if (!frame) {
-        g_last_nv12_null_reason = "host-nv12-staging-null";
-        g_last_nv12_null_ms = 0;
-        return nullptr;
+    canvas::core::Nv12FramePtr frame;
+    if (is_vaapi) {
+        auto surf = slot->decoder.vaapi_export_surface(hw, src_frame);
+        if (!surf) {
+            g_last_nv12_null_reason = "vaapi-export-null";
+            g_last_nv12_null_ms = 0;
+            return nullptr;
+        }
+        auto vf = std::make_shared<canvas::core::Nv12Frame>();
+        vf->frame_number = src_frame;
+        vf->width = surf->width;
+        vf->height = surf->height;
+        vf->matrix = surf->matrix;
+        vf->range = surf->range;
+        vf->gpu = std::move(surf);
+        frame = std::move(vf);
+    } else {
+        frame = host_nv12_from_hw(hw, src_frame, spec, max_dim);
+        if (!frame) {
+            g_last_nv12_null_reason = "host-nv12-staging-null";
+            g_last_nv12_null_ms = 0;
+            return nullptr;
+        }
     }
     const double gpu_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gpu_t0).count();

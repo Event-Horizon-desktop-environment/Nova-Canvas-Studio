@@ -1,6 +1,7 @@
 #pragma once
 
 #include "canvas/core/gpu/colorspace.hpp"
+#include "canvas/core/media/vaapi/surface.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -33,6 +34,12 @@ using VideoFramePtr = std::shared_ptr<const VideoFrame>;
 // decode -> nv12Resize on the device -> download) so the viewer can upload the
 // small Y/UV planes as textures and convert to RGB in a shader, instead of
 // paying for a full-res CPU RGBA round-trip during playback/scrub.
+//
+// A frame carries either CPU planes (`y`/`uv` plus pitches) — see has_cpu() —
+// or a GPU-backed zero-copy payload (`gpu`, a VAAPI-exported dmabuf surface)
+// — see has_gpu(). Exactly one of the two is usually populated, but a frame
+// may carry both (a VAAPI export that also downloaded the planes); consumers
+// pick by their capability.
 struct Nv12Frame {
     int64_t frame_number = 0;
     int width = 0;       // luma dims (chroma is subsampled by 2)
@@ -49,7 +56,16 @@ struct Nv12Frame {
     gpu::ColorMatrix matrix = gpu::ColorMatrix::BT709;
     gpu::ColorRange range = gpu::ColorRange::Limited;
 
+    // Zero-copy VAAPI payload: the exported dmabufs + plane geometry + pool pin
+    // of the source VA surface. When set, the viewer (vaapi_viewer) imports the
+    // planes as EGLImages and samples them directly instead of uploading `y`/`uv`.
+    // Thread-safety: the pin (an AVBufferRef) keeps the VA surface reserved for
+    // the lifetime of this shared_ptr, so handing it to the GL thread is safe.
+    vaapi::VaapiSurfacePtr gpu;
+
     [[nodiscard]] std::size_t bytes() const noexcept { return y.size() + uv.size(); }
+    [[nodiscard]] bool has_cpu() const noexcept { return !y.empty() && !uv.empty(); }
+    [[nodiscard]] bool has_gpu() const noexcept { return gpu && gpu->valid(); }
 };
 
 using Nv12FramePtr = std::shared_ptr<const Nv12Frame>;

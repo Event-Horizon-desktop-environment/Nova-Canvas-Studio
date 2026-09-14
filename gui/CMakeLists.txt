@@ -7,6 +7,12 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
 pkg_check_modules(ALSA IMPORTED_TARGET alsa)
 
+# EGLImage dmabuf import for the zero-copy VAAPI playback path (vaapi_viewer).
+# Qt/widgets apps on X11/GLX or Wayland all drag EGL in via the compositor;
+# when the dev headers are absent the import path compiles out and the viewer
+# falls back to the CPU NV12 upload (as before).
+pkg_check_modules(EGL IMPORTED_TARGET egl)
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
@@ -63,6 +69,7 @@ qt_add_executable(canvas
     src/features/playback/sequence_controller.cpp
     src/features/playback/audio_pipeline.cpp
     src/features/playback/timeline_decoder.cpp
+    src/features/playback/vaapi_import_state.cpp
     src/features/playback/audio_output.cpp
     src/features/playback/sonicsync.cpp
     src/features/playback/playback_controller.cpp
@@ -96,6 +103,7 @@ qt_add_executable(canvas
     src/Widgets/timeline_interaction.cpp
     src/Widgets/timeline_thumbnails.cpp
     src/Widgets/viewport_selector.cpp
+    src/Widgets/vaapi_viewer.cpp
 )
 
 target_include_directories(canvas PRIVATE src ui)
@@ -114,6 +122,10 @@ endif()
 if(ALSA_FOUND)
     target_link_libraries(canvas PRIVATE PkgConfig::ALSA)
     target_compile_definitions(canvas PRIVATE CANVAS_HAVE_ALSA)
+endif()
+if(EGL_FOUND)
+    target_link_libraries(canvas PRIVATE PkgConfig::EGL)
+    target_compile_definitions(canvas PRIVATE CANVAS_HAVE_EGL)
 endif()
 
 # ── System install ────────────────────────────────────────────────────────

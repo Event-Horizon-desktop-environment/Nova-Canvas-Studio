@@ -420,6 +420,11 @@ private:
     double tracks_content_height(int v_count, int a_count) const;
     // Scene Y of the spacer divider above the top-most track row.
     double tracks_stack_top() const;
+    // Scene Y of the empty-state placeholder panel's top edge: directly under
+    // the ruler strip (a kSceneMargin gap below the ticks), NOT at
+    // tracks_stack_top() — that includes the pan room + top pad that exist to
+    // seat real channels, which would float the panel far down the scene.
+    double empty_state_top() const;
     // Scene Y just below the bottom-most track row; the bottom padding hangs
     // below it.
     double tracks_stack_bottom(int v_count, int a_count) const;

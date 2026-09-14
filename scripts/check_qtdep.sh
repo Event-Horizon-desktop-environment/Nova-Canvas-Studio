@@ -42,6 +42,8 @@ HEADLESS=(
     "gui/src/features/playback/sonicsync.cpp"
     "gui/src/features/playback/timeline_decoder.hpp"
     "gui/src/features/playback/timeline_decoder.cpp"
+    "gui/src/features/playback/vaapi_import_state.hpp"
+    "gui/src/features/playback/vaapi_import_state.cpp"
     "gui/src/features/timeline/audio_targets.hpp"
     "gui/src/features/timeline/audio_targets.cpp"
     "gui/src/features/deliver/deliver_settings_model.hpp"

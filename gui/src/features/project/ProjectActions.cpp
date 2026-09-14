@@ -216,6 +216,9 @@ void MainWindow::refresh_media_pool() {
             // Video-bearing files request an actual frame below so the pool
             // shows the picture, not a spectrum. Ids are namespaced (kPoolThumbNs)
             // so the timeline's own filmstrip/waveform ids can't land here.
+            qWarning().nospace() << "[thumb] pool waveform REQUEST idx=" << i
+                                 << " path=" << QString::fromStdString(m.path)
+                                 << " (audio-only 240x136)";
             thumbnails_.request_waveform(kPoolThumbNs | static_cast<uint64_t>(i), m.path, 240, 136, 0.0f, 1.0f);
             continue;
         }
@@ -226,10 +229,16 @@ void MainWindow::refresh_media_pool() {
         req.frame = std::max<int64_t>(0, std::min<int64_t>(m.total_frames / 2, m.total_frames - 1));
         req.target_width = 240;
         req.max_height = 136;
+        qWarning().nospace() << "[thumb] pool thumb REQUEST idx=" << i
+                             << " path=" << QString::fromStdString(m.path)
+                             << " frame=" << req.frame << " (240x136)";
         thumbnails_.request(req);
         if (m.has_audio) {
             // Video+audio media get a hybrid tile: the frame top + this
             // audio-spectrum strip bottom, composed by the tile delegate.
+            qWarning().nospace() << "[thumb] pool waveform REQUEST idx=" << i
+                                 << " path=" << QString::fromStdString(m.path)
+                                 << " (hybrid strip 116x24)";
             thumbnails_.request_waveform(kPoolThumbNs | static_cast<uint64_t>(i), m.path, 116, 24, 0.0f, 1.0f);
         }
     }

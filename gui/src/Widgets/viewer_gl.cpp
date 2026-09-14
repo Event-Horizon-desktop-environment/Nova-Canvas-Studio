@@ -1,6 +1,7 @@
 #include "viewer_gl.hpp"
 #include "Logging.hpp"
 #include "UX/theme.hpp"
+#include "features/playback/vaapi_import_state.hpp"
 
 #include "canvas/core/gpu/colorspace.hpp"
 #include "canvas/core/grade_graph/lut.hpp"
@@ -367,6 +368,8 @@ ViewerGL::~ViewerGL() {
         texture_nv12_b_uv_.reset();
         grade_tex_a_.reset();
         grade_tex_b_.reset();
+        if (vaapi_importer_) vaapi_importer_->release();
+        if (vaapi_importer_b_) vaapi_importer_b_->release();
         program_.reset();
         program_nv12_.reset();
         program_nv12_trans_.reset();
@@ -376,10 +379,38 @@ ViewerGL::~ViewerGL() {
     }
 }
 
+// NV12 texture binding hides the VAAPI zero-copy vs CPU-upload split: raw GL
+// texture ids (EGLImage-targeted — Qt's QOpenGLTexture cannot wrap them) when
+// the frame's planes are imported VAAPI dmabufs, else the QOpenGLTexture
+// wrappers the CPU upload path fills.
+void ViewerGL::bind_nv12_a(const int y_unit, const int uv_unit) {
+    if (vaapi_valid_) {
+        glActiveTexture(static_cast<GLenum>(GL_TEXTURE0 + y_unit));
+        glBindTexture(GL_TEXTURE_2D, vaapi_tex_y_);
+        glActiveTexture(static_cast<GLenum>(GL_TEXTURE0 + uv_unit));
+        glBindTexture(GL_TEXTURE_2D, vaapi_tex_uv_);
+    } else {
+        texture_nv12_y_->bind(y_unit);
+        texture_nv12_uv_->bind(uv_unit);
+    }
+}
+
+void ViewerGL::bind_nv12_b(const int y_unit, const int uv_unit) {
+    if (vaapi_b_valid_) {
+        glActiveTexture(static_cast<GLenum>(GL_TEXTURE0 + y_unit));
+        glBindTexture(GL_TEXTURE_2D, vaapi_tex_b_y_);
+        glActiveTexture(static_cast<GLenum>(GL_TEXTURE0 + uv_unit));
+        glBindTexture(GL_TEXTURE_2D, vaapi_tex_b_uv_);
+    } else {
+        texture_nv12_b_y_->bind(y_unit);
+        texture_nv12_b_uv_->bind(uv_unit);
+    }
+}
+
 void ViewerGL::set_frame(canvas::core::RenderFramePtr frame) {
     if (!frame) return;
     const bool has_rgba = frame->a && !frame->a->rgba.empty();
-    const bool has_nv12 = frame->nv12 && !frame->nv12->y.empty();
+    const bool has_nv12 = frame->nv12 && (frame->nv12->has_cpu() || frame->nv12->has_gpu());
     if (!has_rgba && !has_nv12) return;
     if (debug_enabled())
         qDebug() << "viewer: set_frame"
@@ -420,7 +451,11 @@ void ViewerGL::set_frame(canvas::core::RenderFramePtr frame) {
                      << "frame=" << fw << "x" << fh
                        << "nv12=" << nw << "x" << nh
                        << "widget=" << std::max(1, width()) << "x" << std::max(1, height())
-                       << "path=" << (frame->nv12 && !frame->nv12->y.empty() ? "nv12" : "rgba")
+                       << "path=" << (frame->nv12 && frame->nv12->has_gpu()
+                                          ? "vaapi"
+                                          : (frame->nv12 && frame->nv12->has_cpu()
+                                                 ? "nv12"
+                                                 : "rgba"))
                        << "small=" << ((fw < width() || fh < height()) ? "yes" : "no")
                        << "last_tex=" << tex_w_ << "x" << tex_h_
                        << "recv_ms=" << QString::number(recv_ms, 'f', 1);
@@ -439,6 +474,8 @@ void ViewerGL::clear() {
     texture_second_valid_ = false;
     nv12_valid_ = false;
     nv12_b_valid_ = false;
+    vaapi_valid_ = false;
+    vaapi_b_valid_ = false;
     grade_a_uploaded_ = nullptr;
     grade_b_uploaded_ = nullptr;
     texture_dirty_ = false;
@@ -599,6 +636,19 @@ void ViewerGL::initializeGL() {
     texture_nv12_b_uv_->setMinificationFilter(QOpenGLTexture::Linear);
     texture_nv12_b_uv_->setMagnificationFilter(QOpenGLTexture::Linear);
     texture_nv12_b_uv_->setWrapMode(QOpenGLTexture::ClampToEdge);
+
+    // Zero-copy VAAPI capability probe: can THIS session import exported
+    // dmabufs as EGL images (EGL display current + EGL_EXT_image_dma_buf_import
+    // + glEGLImageTargetTexture2DOES)? The result gates the decode side (see
+    // vaapi_import_state) so GPU-only VAAPI frames are only produced when the
+    // viewer can display them. Runs once with the context current.
+    vaapi_importer_ = std::make_unique<VaapiViewerImporter>();
+    const bool vaapi_ok = vaapi_importer_->available();
+    canvas::gui::set_vaapi_viewer_import_available(vaapi_ok);
+    ::canvas::core::log::log_warning(
+        "[viewer] vaapi zero-copy import %s (need EGL+dma_buf ext; CPU NV12 path "
+        "kept when unavailable)",
+        vaapi_ok ? "available" : "unavailable");
 
     if (frame_) upload_frame();
 }
@@ -852,6 +902,67 @@ qDebug() << "[viewer] UPSCALE"
             }
         }
     };
+
+    // Zero-copy VAAPI fast path: the frame carries exported dmabufs and no CPU
+    // planes (gpu payload). Import them as EGL images into raw GL textures and
+    // draw exactly like the CPU NV12 path (same two-sampler shaders). The
+    // surface carries the resolved color spec, so u_matrix/u_range stay
+    // per-frame correct. On import failure (odd driver export) log and fall
+    // through to whichever CPU representation exists — none for a GPU-only
+    // frame, whose producer is gated on this import being available.
+    if (frame_->nv12 && frame_->nv12->has_gpu()) {
+        vaapi_valid_ = false;
+        vaapi_b_valid_ = false;
+        const canvas::core::Nv12Frame* nv = frame_->nv12.get();
+        if (nv->gpu && nv->gpu->valid()) {
+            if (!vaapi_importer_) vaapi_importer_ = std::make_unique<VaapiViewerImporter>();
+            GLuint yt = 0, uv = 0;
+            if (vaapi_importer_->import(*nv->gpu, &yt, &uv)) {
+                vaapi_tex_y_ = yt;
+                vaapi_tex_uv_ = uv;
+                vaapi_valid_ = true;
+                if (nv->width > 0) {
+                    tex_w_ = nv->width;
+                    tex_h_ = nv->height;
+                }
+            } else {
+                ::canvas::core::log::log_warning(
+                    "[viewer] vaapi A import failed frame=%lld",
+                    static_cast<long long>(nv->frame_number));
+            }
+        }
+        // Incoming (B) clip during a GPU-composited transition: import it on its
+        // own importer (a shared pool would thrash A's live images every frame).
+        if (frame_->b_nv12 && frame_->b_nv12->gpu && frame_->b_nv12->gpu->valid()) {
+            if (!vaapi_importer_b_) vaapi_importer_b_ = std::make_unique<VaapiViewerImporter>();
+            GLuint by = 0, buv = 0;
+            if (vaapi_importer_b_->import(*frame_->b_nv12->gpu, &by, &buv)) {
+                vaapi_tex_b_y_ = by;
+                vaapi_tex_b_uv_ = buv;
+                vaapi_b_valid_ = true;
+            } else {
+                ::canvas::core::log::log_warning(
+                    "[viewer] vaapi B import failed frame=%lld",
+                    static_cast<long long>(frame_->b_nv12->frame_number));
+            }
+        }
+        nv12_b_valid_ = vaapi_b_valid_;
+        if (vaapi_valid_) {
+            // Clip's grade rides the same per-side 3D LUTs as the CPU paths.
+            upload_grades(frame_.get());
+            texture_valid_ = false;
+            texture_second_valid_ = false;
+            nv12_valid_ = true;
+            texture_dirty_ = false;
+            up_mark("n");
+            return;
+        }
+        // Import failed: fall through. A CPU-plane frame re-uploads below; a
+        // GPU-only frame draws blank for this frame (logged above). Clear the
+        // stale draw state so a previous frame's textures can't leak through.
+        nv12_valid_ = false;
+        texture_valid_ = false;
+    }
 
     // NV12 GPU fast path: upload the two planes as R8 (luma) + RG8 (CbCr)
     // textures; the per-frame-spec YUV->RGB conversion (u_matrix/u_range) is
@@ -1291,19 +1402,16 @@ void ViewerGL::paintGL() {
     if (nv12_blend) {
         program_nv12_trans_->bind();
         vao_.bind();
-        texture_nv12_y_->bind(0);
-        texture_nv12_uv_->bind(1);
+        bind_nv12_a(0, 1);
         program_nv12_trans_->setUniformValue("u_tex_y", 0);
         program_nv12_trans_->setUniformValue("u_tex_uv", 1);
         const bool have_b = nv12_b_valid_ && frame_->b_nv12;
         if (have_b) {
-            texture_nv12_b_y_->bind(2);
-            texture_nv12_b_uv_->bind(3);
+            bind_nv12_b(2, 3);
         } else {
             // Single-clip fade (no B frame): bind A's planes to the B slots so
             // MODE_FADEIN_A/FADEOUT never sample an unallocated texture.
-            texture_nv12_y_->bind(2);
-            texture_nv12_uv_->bind(3);
+            bind_nv12_a(2, 3);
         }
         program_nv12_trans_->setUniformValue("u_tex_b_y", 2);
         program_nv12_trans_->setUniformValue("u_tex_b_uv", 3);
@@ -1356,8 +1464,7 @@ void ViewerGL::paintGL() {
     } else if (nv12_cur) {
         program_nv12_->bind();
         vao_.bind();
-        texture_nv12_y_->bind(0);
-        texture_nv12_uv_->bind(1);
+        bind_nv12_a(0, 1);
         program_nv12_->setUniformValue("u_tex_y", 0);
         program_nv12_->setUniformValue("u_tex_uv", 1);
         // This clip decodes with its own resolved matrix/range (see the trans

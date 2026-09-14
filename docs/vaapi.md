@@ -100,7 +100,7 @@ driver  radeonsi_drv_video.so  (AMD, Mesa — this app's AMD route)
         │  iHD_drv_video.so     (Intel, intel-media-driver, Broadwell+)
         │  i965_drv_video.so    (Intel, libva-intel-driver, GMA4500→Coffee Lake, legacy)
         │  nouveau_drv_video.so (NVIDIA open driver, GeForce 8→GTX 750, needs nouveau-fw)
-        │  libva-nvidia-driver  (nvidia-vaapi-driver: VAAPI → NVDEC/NVENC via CUDA)
+        │  libva-nvidia-driver  (elFarto nvidia-vaapi-driver: VAAPI → NVDEC decode via VDPAU interop, no CUDA)
         ▼
 hardware  AMD UVD (GCN-era) / VCN (Vega+), Intel QuickSync/GFX codec engines,
           NVIDIA NVDEC/NVENC (via the adapter or Vulkan Video)
@@ -121,7 +121,7 @@ path in the engine handles it.
 | `iHD` (intel-media-driver) | Broadwell + (incl. Arc) | Broadwell+ full stack incl. AV1 (TGL+) | Full stack (AV1 Arc+) | Gen9/G12 iGPUs; see §7.A init bugs. |
 | `i965` (libva-intel-driver) | GMA 4500 → Coffee Lake | H.264/VC1/MPEG2, VP8, HEVC (SKL+) | As supported | **Deprecated**, last release 2.4.1; no AV1; collision with `crocus`. |
 | `nouveau` (Mesa) | GeForce 8 → GTX 750 | MPEG2/VC-1/H.264 | none | Needs `nouveau-fw` (fw extracted from NVIDIA binary driver); firmware bugs noted upstream. Mostly historical. |
-| `libva-nvidia-driver` (elFarto) | NVIDIA Fermi+ | NVDEC via VAAPI shim | NVENC via VAAPI shim | CUDA-backed VA-API adapter; default power draw *higher* than CPU decode; `CUDA_DISABLE_PERF_BOOST=1` (NVIDIA ≥580.105.08) fixes. |
+| `libva-nvidia-driver` (elFarto) | NVIDIA Fermi+ | NVDEC via VAAPI shim | **none** | Decode-only; VA-API is not first-party NVIDIA. NVDEC via VDPAU interop, **no CUDA**. Notably higher power draw than CPU decode historically (`CUDA_DISABLE_PERF_BOOST=1` on NVIDIA ≥580.105.08); main purpose is Firefox. VA-API encode on NVIDIA exists only in unofficial forks (`nvidia-vaapi-driver-nvenc`). |
 | Mesa 25.3+ | — | — | — | **Removed VDPAU from open drivers** (`radeonsi` included). Any doc/snippet telling AMD users to set `VDPAU_DRIVER=radeonsi` is obsolete; use VAAPI. |
 
 **Distro packaging traps (§7.E):**

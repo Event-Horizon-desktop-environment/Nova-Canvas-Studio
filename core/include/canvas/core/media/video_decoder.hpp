@@ -1,6 +1,7 @@
 #pragma once
 
 #include "canvas/core/media/frame.hpp"
+#include "canvas/core/media/vaapi/surface.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -176,6 +177,17 @@ public:
     // approximate frame. Larger = more accurate but slower on sparse-keyframe
     // media; 0 = exact/uncapped.
     static const int kPreviewMaxOver = 1200;
+
+    // Exports a decoded VAAPI hardware frame (as returned by decode_to_hw /
+    // decode_to_hw_indexed on a VAAPI-configured decoder) into an owning
+    // VaapiSurface: dup'd dmabuf fds + per-plane geometry + a pool pin that
+    // keeps the source VA surface reserved while the surface lives. The GL
+    // viewer imports the planes via EGLImage for zero-copy NV12 playback.
+    // Returns null when the decoder isn't VAAPI-hardware-active, or when the
+    // export fails (memory/layout); callers fall back to the CPU NV12/RGBA
+    // paths. `frame_number` is recorded on the surface for diagnostics only.
+    [[nodiscard]] vaapi::VaapiSurfacePtr vaapi_export_surface(const AVFrame* hw,
+                                                              int64_t frame_number) const;
 
     // Fast-over budget for FULL-RES decodes. Steady playback advances 0-1 frames
     // (sequential), so this only binds far-forward seeks into ultra-sparse GOPs

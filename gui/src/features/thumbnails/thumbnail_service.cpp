@@ -248,12 +248,16 @@ void ThumbnailService::submit(ThumbRequest req) {
             }
         }
 
-        if (debug_enabled())
-            qDebug() << "thumb: enqueue id=" << req.id
-                     << (audio ? "waveform" : "thumb")
-                     << "path=" << QString::fromStdString(req.path)
-                     << "frame=" << req.frame << "w=" << req.target_width
-                     << "h=" << req.max_height << "qlen=" << (queue_.size() + 1);
+        // Always-on (miss): the pool/timeline asked for a generation. Keeping
+        // this ungated means Canvas-Thumbs.log always records every request that
+        // actually had to do work — a dead pool tile with no line here is a
+        // request that never arrived.
+        qWarning().nospace()
+            << "thumb: enqueue id=" << req.id
+            << (audio ? "waveform" : "thumb")
+            << "path=" << QString::fromStdString(req.path)
+            << "frame=" << req.frame << "w=" << req.target_width
+            << "h=" << req.max_height << "qlen=" << (queue_.size() + 1);
         // Audio waveform requests are cheap (one full-file decode, then cached)
         // but the first one can take ~1s. Put them at the front of the queue so
         // they're handled immediately and don't wait behind a long video
@@ -339,7 +343,10 @@ void ThumbnailService::worker_loop() {
                     std::lock_guard<std::mutex> lock(waveform_mutex_);
                     wc = waveform_cache_.size();
                 }
-                qDebug().nospace()
+                // Always-on (~1/s): team-wide generate throughput and backlog.
+                // A queue that keeps growing past kWorkers with slow took_ms means
+                // imports/scrubs are feeding faster than the decode workers drain.
+                qWarning().nospace()
                     << "[thumb] generated=" << agg_n
                     << " avg_ms=" << QString::number(avg_ms, 'f', 0)
                     << " last_ms=" << QString::number(ms, 'f', 0)
@@ -393,7 +400,7 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
                 // Rare (one per unique audio file per session), so always-on: a
                 // raw cached waveform makes first-paint instant; a miss means the
                 // next block incurs the full-file decode.
-                qDebug().nospace() << "thumb: waveform loaded RAW from disk path="
+                qWarning().nospace() << "thumb: waveform loaded RAW from disk path="
                                      << QString::fromStdString(req.path);
             } else {
                 const auto t0 = std::chrono::steady_clock::now();
@@ -403,23 +410,24 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
                 // Always-on: the first waveform for a file is a full-file decode
                 // (can be seconds on a long take); repeated slow ones point at a
                 // painful disk or a format that defeats the cached raw.
-                qDebug().nospace() << "thumb: waveform full-file DECODE took_ms="
+                qWarning().nospace() << "thumb: waveform full-file DECODE took_ms="
                                      << QString::number(ms, 'f', 0)
                                      << " buckets=" << kWaveformRawBuckets
                                      << " path=" << QString::fromStdString(req.path);
                 save_raw_waveform(raw_file, raw);
             }
             if (!ok) {
-                if (debug_enabled())
-                    qWarning() << "thumb: WAVEFORM DECODE FAIL path="
-                               << QString::fromStdString(req.path)
-                               << "error=" << QString::fromStdString(error);
+                qWarning() << "thumb: WAVEFORM DECODE FAIL path="
+                           << QString::fromStdString(req.path)
+                           << "error=" << QString::fromStdString(error);
                 return QImage();
             }
             if (raw.peak.empty()) {
-                if (debug_enabled())
-                    qWarning() << "thumb: WAVEFORM EMPTY path="
-                               << QString::fromStdString(req.path);
+                // Always-on: a silent empty-waveform (no peaks, no failure) is
+                // how a broken audio decode hides itself — the killer path for
+                // the missing pool audio-spectrum bug.
+                qWarning() << "thumb: WAVEFORM EMPTY path="
+                           << QString::fromStdString(req.path);
                 return QImage();
             }
             std::lock_guard<std::mutex> lock(waveform_mutex_);
@@ -540,11 +548,12 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
     const bool opened = decoder.open(req.path, &error, hw.device_ctx());
     const auto t_open1 = std::chrono::steady_clock::now();
     if (!opened) {
-        if (debug_enabled())
-            qWarning() << "thumb: VIDEO DECODE FAIL (open) path="
-                       << QString::fromStdString(req.path)
-                       << "frame=" << req.frame
-                       << "error=" << QString::fromStdString(error);
+        // Always-on: a thumbnail that can't even open its source media is how a
+        // video tile stays blank with no decode ever attempted.
+        qWarning() << "thumb: VIDEO DECODE FAIL (open) path="
+                   << QString::fromStdString(req.path)
+                   << "frame=" << req.frame
+                   << "error=" << QString::fromStdString(error);
         return QImage();
     }
 
@@ -557,11 +566,12 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
     auto frame = decoder.decode_to_frame(source_frame, kPreviewMaxDim);
     const auto t_dec1 = std::chrono::steady_clock::now();
     if (!frame || frame->rgba.empty()) {
-        if (debug_enabled())
-            qWarning() << "thumb: VIDEO DECODE FAIL (frame) path="
-                       << QString::fromStdString(req.path)
-                       << "frame=" << source_frame
-                       << "got_null=" << (frame ? "no" : "yes");
+        // Always-on: decode succeeded but produced nothing — a HW-decode/import
+        // regression shows up here as a battery of these with ok=NO upstream.
+        qWarning() << "thumb: VIDEO DECODE FAIL (frame) path="
+                   << QString::fromStdString(req.path)
+                   << "frame=" << source_frame
+                   << "got_null=" << (frame ? "no" : "yes");
         return QImage();
     }
     if (debug_enabled())

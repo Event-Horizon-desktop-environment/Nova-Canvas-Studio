@@ -2,6 +2,8 @@
 
 #include "features/source_preview/source_preview_model.hpp"
 
+#include <QDebug>
+
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPainter>
@@ -17,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "Logging.hpp"
 #include "UX/theme.hpp"
 #include "Widgets/viewer_gl.hpp"
 #include "core/timecode.hpp"
@@ -185,6 +188,11 @@ void SourceViewerPanel::set_media_info(const QString& name, const bool is_video,
     // spectrum page (ThumbnailService feeds the full-file image via
     // set_audio_waveform) with a scrub playhead instead of an empty GL pane.
     audio_mode_ = is_audio && !is_video;
+    qWarning().nospace() << "[srcprv] panel set_media_info name=" << name
+                         << " video=" << is_video
+                         << " audio=" << is_audio
+                         << " total_frames=" << total_frames
+                         << " audio_mode=" << audio_mode_;
     if (audio_mode_) {
         audio_spectrum_->set_playhead_fraction(0.0);
         stacked_->setCurrentWidget(audio_spectrum_);
@@ -194,6 +202,8 @@ void SourceViewerPanel::set_media_info(const QString& name, const bool is_video,
 }
 
 void SourceViewerPanel::set_media_position(const int64_t frame, const double fps) {
+    if (debug_enabled())
+        qDebug().nospace() << "[srcprv] panel position frame=" << frame << " fps=" << fps;
     update_time_label(frame, fps);
     if (audio_mode_ && total_frames_ > 1)
         audio_spectrum_->set_playhead_fraction(frame_to_fraction(frame, total_frames_));
@@ -205,6 +215,11 @@ void SourceViewerPanel::set_media_position(const int64_t frame, const double fps
 }
 
 void SourceViewerPanel::set_audio_waveform(const QImage& image) {
+    // Always-on: a null waveform landing here means the audio-only source pane
+    // shows "Audio spectrum" text forever — the exact "missing spectrum" report.
+    qWarning().nospace() << "[srcprv] panel audio_waveform set"
+                         << " sz=" << image.width() << "x" << image.height()
+                         << " null=" << image.isNull();
     if (audio_spectrum_) audio_spectrum_->set_waveform(image);
 }
 
@@ -217,6 +232,7 @@ void SourceViewerPanel::update_time_label(const int64_t frame, const double fps)
 }
 
 void SourceViewerPanel::set_playing(const bool playing) {
+    qWarning().nospace() << "[srcprv] panel playing=" << playing;
     viewer_->set_playing(playing);
     play_button_->setIcon(icon(playing ? "pause" : "play"));
     play_button_->setToolTip(playing ? tr("Pause source preview (Space)")
@@ -224,6 +240,7 @@ void SourceViewerPanel::set_playing(const bool playing) {
 }
 
 void SourceViewerPanel::clear_media() {
+    qWarning() << "[srcprv] panel clear_media";
     total_frames_ = 0;
     audio_mode_ = false;
     audio_spectrum_->clear();

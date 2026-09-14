@@ -14,6 +14,7 @@
 
 #include "canvas/core/media/frame.hpp"
 #include "features/timeline/timeline_view_options.hpp"
+#include "Widgets/vaapi_viewer.hpp"
 
 namespace canvas::core::grade_graph {
 struct GradeLut3D;
@@ -75,6 +76,12 @@ protected:
 
 private:
     void upload_frame();
+    // Binds the A-side Y/UV textures for the NV12 fragment shaders. The VAAPI
+    // zero-copy path targets EGL images at raw GL texture ids (Qt 6's
+    // QOpenGLTexture cannot wrap them); the CPU upload path uses the
+    // QOpenGLTexture wrappers. These helpers hide which one is live.
+    void bind_nv12_a(int y_unit, int uv_unit);
+    void bind_nv12_b(int y_unit, int uv_unit);
     void draw_blank();
     // Paints the monitor overlays (safe areas / thirds grid / playback badge)
     // after the frame quad, in widget coordinates and clipped to the widget.
@@ -132,6 +139,19 @@ private:
     bool texture_dirty_ = false;
     bool nv12_valid_ = false;
     bool nv12_b_valid_ = false;
+    // Zero-copy VAAPI path: when `vaapi_valid_`, the A-side luma/chroma
+    // textures live as raw GL texture ids (`vaapi_tex_y_/vaapi_tex_uv_`)
+    // targeted at EGLImage-imported dmabufs rather than the QOpenGLTexture
+    // wrappers; bind_nv12_a/b pick whichever is current. `vaapi_b_valid_` is
+    // the same for the incoming (B) clip during a GPU-composited transition.
+    std::unique_ptr<VaapiViewerImporter> vaapi_importer_;
+    std::unique_ptr<VaapiViewerImporter> vaapi_importer_b_;
+    GLuint vaapi_tex_y_ = 0;
+    GLuint vaapi_tex_uv_ = 0;
+    GLuint vaapi_tex_b_y_ = 0;
+    GLuint vaapi_tex_b_uv_ = 0;
+    bool vaapi_valid_ = false;
+    bool vaapi_b_valid_ = false;
     // False when the RGBA viewer program (`program_`) failed to link — the
     // driver-GLSL-rejection case that makes the quad path draw nothing (black
     // viewer) while decode/audio run fine (seen on non-CUDA/AMD machines, which

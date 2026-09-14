@@ -1,8 +1,11 @@
 #include "canvas/core/media/video_decoder.hpp"
+#include "canvas/core/media/vaapi/driver.hpp"
+#include "canvas/core/media/vaapi/export.hpp"
 #include "canvas/core/util/color_log.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -17,6 +20,13 @@
 extern "C" {
 #include <libavutil/pixdesc.h>
 }
+
+#ifdef CANVAS_HAVE_VAAPI
+extern "C" {
+#include <libavutil/hwcontext_vaapi.h>
+#include <va/va.h>
+}
+#endif
 
 namespace canvas::core {
 
@@ -57,6 +67,28 @@ void decode_fail(const char* where) {
     static int burst = 0;
     if (++burst == 3)
         ::canvas::core::log::log_warning("[dec] fail_burst=%d where=%s", burst, where);
+}
+
+// Driver identity for a VAAPI display (an empty string on failure). Only
+// meaningful when the zero-copy VAAPI backend is compiled in.
+#ifdef CANVAS_HAVE_VAAPI
+std::string va_driver_name(VADisplay dpy) {
+    if (!dpy) return {};
+    const char* raw = vaQueryVendorString(dpy);
+    if (!raw || !raw[0]) return {};
+    return raw;
+}
+#endif
+
+// Whether `pix_fmt` is a device-memory format the GPU NV12 fast path can hand
+// to the display directly (CUDA device frames, and VAAPI surfaces when the
+// zero-copy backend is built).
+bool hw_fast_path_pixfmt(const int pix_fmt) noexcept {
+#ifdef CANVAS_HAVE_VAAPI
+    return pix_fmt == AV_PIX_FMT_CUDA || pix_fmt == AV_PIX_FMT_VAAPI;
+#else
+    return pix_fmt == AV_PIX_FMT_CUDA;
+#endif
 }
 void decode_ok() {
     static int burst = 0;
@@ -956,13 +988,14 @@ CANVAS_LOG(
 const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_over) {
     if (!codec_ctx_ || frame_rate_ <= 0.0) return nullptr;
     refine_last_frame();
-    // This path only serves hardware-decoded frames (device NV12 on CUDA); software
-    // decode must use the CPU RGBA path. hw_pix_fmt_ is the *hwaccel* format
-    // negotiated in open() (AV_PIX_FMT_CUDA) — the tag AVFrame::format carries
+    // This path only serves hardware-decoded frames (device memory: NV12 on
+    // CUDA, or a VAAPI surface frame); software decode must use the CPU RGBA
+    // path. hw_pix_fmt_ is the *hwaccel* format negotiated in open()
+    // (AV_PIX_FMT_CUDA / AV_PIX_FMT_VAAPI) — the tag AVFrame::format carries
     // for device-memory frames. AV_PIX_FMT_NV12 is the nested sw_format inside
     // hw_frames_ctx, never the frame's own format, so comparing against it here
     // used to fail and this function returned null before decoding at all.
-    if (!hw_avail_ || hw_pix_fmt_ != AV_PIX_FMT_CUDA) return nullptr;
+    if (!hw_avail_ || !hw_fast_path_pixfmt(hw_pix_fmt_)) return nullptr;
 
     // Frozen-tail hold: once the stream's final frame is known (last_frame_),
     // a request past it must not re-walk to EOF and fail on every call — the
@@ -1174,7 +1207,7 @@ const AVFrame* VideoDecoder::decode_to_hw(const int64_t target, const int max_ov
 
 const AVFrame* VideoDecoder::decode_to_hw_indexed(const int64_t target, const int max_over) {
     if (!codec_ctx_ || frame_rate_ <= 0.0) return nullptr;
-    if (!hw_avail_ || hw_pix_fmt_ != AV_PIX_FMT_CUDA) return nullptr;
+    if (!hw_avail_ || !hw_fast_path_pixfmt(hw_pix_fmt_)) return nullptr;
     refine_last_frame();
     int64_t t = clamp_target(target);
 
@@ -1220,6 +1253,44 @@ const AVFrame* VideoDecoder::decode_to_hw_indexed(const int64_t target, const in
     }
     const AVFrame* hw = decode_to_hw(t, max_over == 0 ? kFullResMaxOver : max_over);  // sets next_frame_ internally
     return hw;
+}
+
+vaapi::VaapiSurfacePtr VideoDecoder::vaapi_export_surface(const AVFrame* hw,
+                                                          const int64_t frame_number) const {
+#ifdef CANVAS_HAVE_VAAPI
+    // Only a VAAPI-hardware-configured decoder has something to export; CUDA
+    // frames are consumed by the host_nv12_from_hw path instead.
+    if (!hw_avail_ || hw_pix_fmt_ != AV_PIX_FMT_VAAPI) return nullptr;
+    if (!hw || hw->format != AV_PIX_FMT_VAAPI || !hw->buf[0] || !codec_ctx_->hw_device_ctx) {
+        ::canvas::core::log::log_warning(
+            "[vaapi] export: unexpected hw frame (fmt=%d buf=%p hwdev=%p) frame=%lld",
+            hw ? hw->format : -1, (void*)(hw ? hw->buf[0] : nullptr),
+            (void*)codec_ctx_->hw_device_ctx, static_cast<long long>(frame_number));
+        return nullptr;
+    }
+    const auto* hwdev = reinterpret_cast<const AVHWDeviceContext*>(codec_ctx_->hw_device_ctx->data);
+    if (!hwdev || hwdev->type != AV_HWDEVICE_TYPE_VAAPI) return nullptr;
+    const auto* vactx = reinterpret_cast<const AVVAAPIDeviceContext*>(hwdev->hwctx);
+    if (!vactx || !vactx->display) return nullptr;
+
+    const VASurfaceID surface = static_cast<VASurfaceID>(reinterpret_cast<uintptr_t>(hw->data[3]));
+    VADRMPRIMESurfaceDescriptor desc{};
+    const VAStatus st = vaExportSurfaceHandle(vactx->display, surface, VA_EXPORT_SURFACE_READ_ONLY,
+                                              VA_EXPORT_SURFACE_COMPOSED_LAYERS, &desc);
+    if (st != VA_STATUS_SUCCESS) {
+        ::canvas::core::log::log_warning(
+            "[vaapi] vaExportSurfaceHandle FAILED st=%d surface=%u frame=%lld (falling back to CPU)",
+            static_cast<int>(st), static_cast<unsigned>(surface),
+            static_cast<long long>(frame_number));
+        return nullptr;
+    }
+    const vaapi::Vendor vendor = vaapi::identify_vendor(va_driver_name(vactx->display));
+    return vaapi::translate_descriptor(desc, frame_number, color_spec(), vendor, hw->buf[0]);
+#else
+    (void)hw;
+    (void)frame_number;
+    return nullptr;
+#endif
 }
 
 VideoFramePtr VideoDecoder::make_rgba_frame(const AVFrame* src, const int64_t ticks,

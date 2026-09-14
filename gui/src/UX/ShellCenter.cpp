@@ -10,6 +10,7 @@
 #include "features/timeline/view_options_menu.hpp"
 
 #include <QAction>
+#include <QDebug>
 #include <QDockWidget>
 #include <QDir>
 #include <QFrame>
@@ -389,6 +390,10 @@ void build_center_workspace(MainWindow& mw) {
     monitor_split->setStretchFactor(0, 1);
     monitor_split->setStretchFactor(1, 1);
     if (mw.source_panel_->isVisible()) monitor_split->setSizes({1, 1});
+    // Always-on startup marker: whether Dual-View starts collapsed depends on a
+    // persisted QSettings flag, and a hidden pane silently disables hover scratch.
+    qWarning() << "[srcprv] dual-view startup source_panel_visible="
+               << mw.source_panel_->isVisible();
     viewer_frame_layout->addWidget(monitor_split, 1);
 
     // Transport bar (playback) + overview scrub slider — ShellTransportBar.cpp.
@@ -442,6 +447,11 @@ void build_center_workspace(MainWindow& mw) {
             [&mw, dual_view, monitor_split](bool on) {
                 mw.source_panel_->setVisible(on);
                 QSettings().setValue(QStringLiteral("dualViewer"), on);
+                // Always-on: this is the master switch that makes pool hover
+                // decodes actually happen (or silently no-op). Top diagnostic
+                // for any "source preview is dead" report.
+                qWarning() << "[srcprv] dual-view toggle on=" << on
+                           << " (persisted)";
                 if (on) {
                     // Half-and-half: source preview and timeline viewer start
                     // as equal partners in the monitor on Dual-View.

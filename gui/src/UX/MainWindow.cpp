@@ -84,7 +84,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // starting playback releases the other's device (see release_audio).
     connect(&src_preview_, &source_preview::SourcePreviewController::frame_ready, this,
             [this](canvas::core::RenderFramePtr frame) {
-                if (source_panel_) source_panel_->viewer()->set_frame(std::move(frame));
+                if (source_panel_) {
+                    if (debug_enabled()) {
+                        const bool has_a = frame && frame->a && !frame->a->rgba.empty();
+                        qDebug().nospace() << "[srcprv] frame_ready"
+                                           << " has_a=" << has_a;
+                    }
+                    source_panel_->viewer()->set_frame(std::move(frame));
+                }
             });
     connect(&src_preview_, &source_preview::SourcePreviewController::position_changed, this,
             [this](int64_t frame) {
@@ -93,6 +100,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&src_preview_, &source_preview::SourcePreviewController::playback_changed, this,
             [this](bool playing) {
                 if (source_panel_) source_panel_->set_playing(playing);
+                // Always-on: source playback state is a top-level lifecycle event;
+                // critical for diagnosing "hover scrub broke audio".
+                qWarning().nospace() << "[srcprv] playback playing=" << playing;
                 if (playing) controller_.release_audio();
             });
     connect(&src_preview_, &source_preview::SourcePreviewController::media_changed, this,
@@ -100,16 +110,31 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 if (!source_panel_) return;
                 if (!has_media) {
                     source_panel_->clear_media();
+                    qWarning() << "[srcprv] media_changed has_media=0 clear";
                 } else {
+                    const QString name = QFileInfo(QString::fromStdString(src_preview_.media_path())).completeBaseName();
                     source_panel_->set_media_info(
-                        QFileInfo(QString::fromStdString(src_preview_.media_path())).completeBaseName(),
+                        name,
                         src_preview_.is_video(), src_preview_.is_audio(),
                         src_preview_.total_frames());
+                    const bool need_waveform = src_preview_.is_audio() && !src_preview_.is_video();
+                    // Always-on: this is the moment a source tile becomes
+                    // visible — the single most important diagnostic for
+                    // "source preview is blank" reports.
+                    qWarning().nospace()
+                        << "[srcprv] media_changed has_media=1"
+                        << " path=" << QString::fromStdString(src_preview_.media_path())
+                        << " name=" << name
+                        << " video=" << src_preview_.is_video()
+                        << " audio=" << src_preview_.is_audio()
+                        << " total_frames=" << src_preview_.total_frames()
+                        << " fps=" << src_preview_.fps()
+                        << " need_waveform=" << need_waveform;
                     // Audio-only media present as a spectrum, not a video frame:
                     // feed the panel the full-file waveform once per open (the
                     // worker reuses the cached raw buckets, so this is a cheap
                     // re-bucket+paint). The scrub playhead on top is live.
-                    if (src_preview_.is_audio() && !src_preview_.is_video())
+                    if (need_waveform)
                         thumbnails_.request_waveform(kSourcePreviewWaveformId,
                                                      src_preview_.media_path(),
                                                      2048, 260, 0.0f, 1.0f);
@@ -123,7 +148,22 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 // Hover-skim a pool tile: Live Media Preview only while the
                 // Dual-Viewer source pane is actually visible (single mode
                 // still paints the hover playhead, but decodes nothing).
-                if (!source_panel_ || !source_panel_->isVisible()) return;
+                if (!source_panel_ || !source_panel_->isVisible()) {
+                    // Throttled always-on: the single most common cause of
+                    // "source preview doesn't work" — Dual-View is OFF (or the
+                    // pane is collapsed), so every hover decodes nothing. Log at
+                    // most once per second so normal single-mode browsing doesn't
+                    // spiral, but one line proves the early-return was hit.
+                    static auto last_ignored = std::chrono::steady_clock::now();
+                    const auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_ignored).count() >= 1000) {
+                        qWarning() << "[srcprv] pool hover IGNORED (source panel hidden) idx="
+                                   << media_index
+                                   << " frac=" << fraction;
+                        last_ignored = now;
+                    }
+                    return;
+                }
                 if (!project_ || media_index < 0 ||
                     static_cast<std::size_t>(media_index) >= project_->media.size())
                     return;
@@ -136,8 +176,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                     if (!controller_.is_playing()) controller_.release_audio();
                     src_preview_.begin_hover_scrub();
                     source_hovering_ = true;
+                    qWarning() << "[srcprv] hover begin idx=" << media_index
+                               << " path=" << QString::fromStdString(project_->media[static_cast<std::size_t>(media_index)].path);
                 }
                 open_source_preview(project_->media[static_cast<std::size_t>(media_index)]);
+                if (debug_enabled())
+                    qDebug().nospace() << "[srcprv] hover move idx=" << media_index
+                                       << " frac=" << fraction;
                 src_preview_.scrub_fraction(fraction);
             });
     connect(media_pool_, &MediaPoolWidget::clipScrubEnded, this,
@@ -147,6 +192,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 // Audible-scrub session over: end_scrub CLOSES the source's
                 // output device so the timeline can reopen it on its next Play.
                 src_preview_.end_hover_scrub();
+                qWarning() << "[srcprv] hover end (device released)";
             });
 
     connect(&thumbnails_, &ThumbnailService::thumbnail_ready, this,
@@ -155,6 +201,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 // pool-namespaced ids may touch pool tiles (kPoolThumbNs).
                 if (!(id & kPoolThumbNs)) return;
                 const int idx = static_cast<int>(id & ~kPoolThumbNs);
+                qWarning().nospace() << "[thumb] pool thumbnail ready idx=" << idx
+                                     << " sz=" << image.width() << "x" << image.height();
                 if (media_pool_ && idx >= 0 && idx < media_pool_->count())
                     media_pool_->item(idx)->setIcon(QIcon(QPixmap::fromImage(image)));
             });
@@ -163,6 +211,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 // Source-preview spectrum (audio-only media) comes back on its
                 // own sentinel id — never a pool cell or timeline clip.
                 if (id == kSourcePreviewWaveformId) {
+                    qWarning().nospace() << "[thumb] source-preview waveform ready"
+                                         << " sz=" << image.width() << "x" << image.height()
+                                         << " null=" << image.isNull();
                     if (source_panel_) source_panel_->set_audio_waveform(image);
                     return;
                 }
@@ -170,6 +221,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 // connection; only pool-namespaced ids route to pool tiles.
                 if (!(id & kPoolThumbNs)) return;
                 const int idx = static_cast<int>(id & ~kPoolThumbNs);
+                qWarning().nospace() << "[thumb] pool waveform ready idx=" << idx
+                                     << " sz=" << image.width() << "x" << image.height()
+                                     << " null=" << image.isNull();
                 if (media_pool_ && idx >= 0 && idx < media_pool_->count()) {
                     QListWidgetItem* item = media_pool_->item(idx);
                     // Hybrid video+audio tiles keep the frame as the icon (top)
