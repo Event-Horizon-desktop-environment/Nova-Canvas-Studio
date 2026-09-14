@@ -269,29 +269,21 @@ install_deps() {
 }
 
 # ── System Install ─────────────────────────────────────────────────────────
-# Mirrors the justfile's `sudo just install-release`: configure a dedicated
-# release build with CMAKE_INSTALL_PREFIX=/usr, compile it as your user, then
-# elevate (pkexec) only for the final `cmake --install --strip`.
+# Installs the build that was just compiled (no second rebuild) into /usr.
+# The install prefix is overridden at install time via --prefix (CMake >= 3.15),
+# so the build dir stays untouched; only the final install elevates (pkexec).
 install_system() {
     step "Installing Nova Canvas Studio to the system"
 
     pick_elevator
 
-    local rel_dir="build-release"
-    local rel_args=("-DCMAKE_BUILD_TYPE=Release" "-G" "Ninja" "-DCMAKE_INSTALL_PREFIX=/usr")
+    # Absolute path: pkexec runs as root from a different cwd, so a relative
+    # "$BUILD_DIR" would resolve against /root instead of the repo.
+    local abs_build_dir
+    abs_build_dir="$(cd "$BUILD_DIR" && pwd)"
 
-    info "Configuring release build: cmake -B $rel_dir ${rel_args[*]}"
-    cmake -B "$rel_dir" "${rel_args[@]}" 2>&1 | while IFS= read -r line; do
-        printf "    ${DIM}%s${RESET}\n" "$line"
-    done
-
-    info "cmake --build $rel_dir -j$JOBS"
-    cmake --build "$rel_dir" -j"$JOBS" 2>&1 | while IFS= read -r line; do
-        printf "    ${DIM}%s${RESET}\n" "$line"
-    done
-
-    info "Installing to /usr (you may be prompted for your password)..."
-    run_elevated cmake --install "$rel_dir" --strip
+    info "Installing the freshly built binary to /usr (you may be prompted for your password)..."
+    run_elevated cmake --install "$abs_build_dir" --prefix /usr --strip
 
     ok "Installed. Launch it from your app menu or run: ${BOLD}canvas${RESET}"
 }
