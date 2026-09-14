@@ -1087,6 +1087,20 @@ void ViewerGL::paintGL() {
     glViewport(0, 0, std::max(1, static_cast<int>(std::lround(width() * dpr))),
                std::max(1, static_cast<int>(std::lround(height() * dpr))));
 
+    // Drain any GL errors left over from earlier frames so the per-stage probe
+    // below attributes errors to THIS frame's draw calls only.
+    while (glGetError() != GL_NO_ERROR) {}
+    GLenum first_err = GL_NO_ERROR;
+    int err_stage = -1;
+    const auto note_err = [&](int s) {
+        if (first_err != GL_NO_ERROR) return;
+        const GLenum e = glGetError();
+        if (e != GL_NO_ERROR) {
+            first_err = e;
+            err_stage = s;
+        }
+    };
+
     const QColor bg = viewer_background_color();
     glClearColor(bg.redF(), bg.greenF(), bg.blueF(), 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -1377,8 +1391,11 @@ void ViewerGL::paintGL() {
         }
     } else {
         program_->bind();
+        note_err(0);
         vao_.bind();
+        note_err(1);
         texture_->bind(0);
+        note_err(2);
         program_->setUniformValue("u_tex", 0);
 
         if (single_fade) {
@@ -1420,6 +1437,7 @@ void ViewerGL::paintGL() {
             program_->setUniformValue("u_grade_b_size", 0);
         }
         program_->setUniformValue("u_aspect", aspect);
+        note_err(3);
     }
 
     // Scale the unit quad's X/Y by the letterbox factor by re-buffering the
@@ -1479,8 +1497,10 @@ void ViewerGL::paintGL() {
     }
     vbo_.bind();
     vbo_.write(0, s.data(), sizeof(float) * s.size());
+    note_err(4);
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    note_err(5);
 
     // Always-on pixel probe (throttled ~1/s): samples the CPU RGBA source and
     // the composited framebuffer center, plus any GL error from the draw. The
@@ -1502,7 +1522,9 @@ void ViewerGL::paintGL() {
                 default: return "other";
             }
         };
-        const GLenum err = glGetError();
+        // Per-stage attribution from THIS frame's draw (see note_err markers):
+        // 0=rgba program bind, 1=vao, 2=texture bind, 3=rgba uniforms,
+        // 4=vbo write, 5=glDrawArrays.
         uint8_t fbpx[4] = {0, 0, 0, 0};
         int fb_nz = 0;
         int fb_n = 0;
@@ -1558,10 +1580,11 @@ void ViewerGL::paintGL() {
         }
         // src_avg == -1 => no CPU slice this probe tick (NV12-only or blank).
         ::canvas::core::log::log_warning(
-            "[viewer] pixels err=%s tex=%dx%d win=%dx%d fb_avg=%d fb_nz=%d/%d "
-            "fb=(%d,%d,%d,%d) src00=(%d,%d,%d,%d) srcc=(%d,%d,%d,%d) src_avg=%d",
-            err_name(err), tex_w_, tex_h_, width(), height(), fb_avg, fb_nz, fb_n,
-            fbpx[0], fbpx[1], fbpx[2], fbpx[3],
+            "[viewer] pixels errstage=%d err=%s tex=%dx%d win=%dx%d fb_avg=%d "
+            "fb_nz=%d/%d fb=(%d,%d,%d,%d) src00=(%d,%d,%d,%d) "
+            "srcc=(%d,%d,%d,%d) src_avg=%d",
+            err_stage, err_name(first_err), tex_w_, tex_h_, width(), height(),
+            fb_avg, fb_nz, fb_n, fbpx[0], fbpx[1], fbpx[2], fbpx[3],
             s00[0], s00[1], s00[2], s00[3], scc[0], scc[1], scc[2], scc[3], src_avg);
     }
 
