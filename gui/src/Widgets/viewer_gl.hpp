@@ -132,6 +132,13 @@ private:
     bool texture_dirty_ = false;
     bool nv12_valid_ = false;
     bool nv12_b_valid_ = false;
+    // False when the RGBA viewer program (`program_`) failed to link — the
+    // driver-GLSL-rejection case that makes the quad path draw nothing (black
+    // viewer) while decode/audio run fine (seen on non-CUDA/AMD machines, which
+    // always render the RGBA path; NVIDIA/CUDA sessions use the NV12 programs
+    // instead). paintGL then blits RGBA frames via QPainter so a broken link
+    // degrades to a software picture rather than a silent black screen.
+    bool rgba_gl_ok_ = true;
     // GUI-thread delivery health (see set_frame): wall time of the previous
     // set_frame, so the always-on `[viewer]` line can report the receive
     // interval. A healthy worker→widget handoff tracks the controller cadence;

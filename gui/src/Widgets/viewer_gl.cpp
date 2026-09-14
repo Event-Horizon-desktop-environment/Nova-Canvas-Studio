@@ -514,6 +514,38 @@ void ViewerGL::initializeGL() {
     program_nv12_trans_->addShaderFromSourceCode(QOpenGLShader::Fragment, fragHdr + kFragNv12Trans);
     program_nv12_trans_->link();
 
+    // Always-on GL health report: pin context flavor + driver + program link
+    // state. A black viewer with healthy decode is usually a GL program that
+    // failed to link (driver GLSL translator rejects the shader); that turns
+    // attr_pos_/attr_uv_ into -1 and the quad draws NOTHING — silent in logs
+    // until the link status itself is recorded. Non-CUDA/AMD sessions always
+    // render through the RGBA path, so `rgba=0` here is exactly the AMD black
+    // viewer. paintGL recovers from it with a QPainter blit.
+    rgba_gl_ok_ = program_->isLinked();
+    const bool nv12_ok = program_nv12_->isLinked();
+    const bool trans_ok = program_nv12_trans_->isLinked();
+    const auto gl_str = [](const GLubyte* s) -> const char* {
+        return s ? reinterpret_cast<const char*>(s) : "(null)";
+    };
+    ::canvas::core::log::log_warning(
+        "[viewer] gl context=%s programs rgba=%d nv12=%d trans=%d "
+        "vendor=%s renderer=%s version=%s",
+        context()->isOpenGLES() ? "es" : "desktop", rgba_gl_ok_ ? 1 : 0,
+        nv12_ok ? 1 : 0, trans_ok ? 1 : 0, gl_str(glGetString(GL_VENDOR)),
+        gl_str(glGetString(GL_RENDERER)), gl_str(glGetString(GL_VERSION)));
+    if (!rgba_gl_ok_) {
+        const std::string l = program_->log().toStdString();
+        ::canvas::core::log::log_warning("[viewer] rgba program link: %s", l.c_str());
+    }
+    if (!nv12_ok) {
+        const std::string l = program_nv12_->log().toStdString();
+        ::canvas::core::log::log_warning("[viewer] nv12 program link: %s", l.c_str());
+    }
+    if (!trans_ok) {
+        const std::string l = program_nv12_trans_->log().toStdString();
+        ::canvas::core::log::log_warning("[viewer] nv12-trans program link: %s", l.c_str());
+    }
+
     // Unit quad covering NDC in [-1,1]; aspect/letterboxing is handled by
     // adjusting the quad positions each frame from the texture aspect.
     static const float kQuad[] = {
@@ -1058,6 +1090,52 @@ void ViewerGL::paintGL() {
     const QColor bg = viewer_background_color();
     glClearColor(bg.redF(), bg.greenF(), bg.blueF(), 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+
+    // Software fallback for a broken RGBA program. If program_ failed to link
+    // (driver GLSL rejection — the AMD black-viewer case, where decode and
+    // audio both run), the textured-quad path draws nothing silently, so blit
+    // the latest RGBA frame through QPainter instead. NV12 sessions (CUDA
+    // machines, hardware composite path) keep the GL path: their programs are
+    // independent and never black in practice. See the `[viewer] gl` health
+    // line in initializeGL for the link state that routes here.
+    if (!rgba_gl_ok_) {
+        const canvas::core::VideoFrame* a = frame_ ? frame_->a.get() : nullptr;
+        if (a && !a->rgba.empty() && a->width > 0 && a->height > 0 &&
+            a->stride > 0 && a->rgba.size() >=
+                                 static_cast<std::size_t>(a->stride) * a->height) {
+            tex_w_ = a->width;
+            tex_h_ = a->height;
+            const float vw = static_cast<float>(width());
+            const float vh = static_cast<float>(height());
+            if (vw >= 8.0f && vh >= 8.0f) {
+                const float fa = static_cast<float>(tex_w_) / static_cast<float>(tex_h_);
+                const float va = vw / vh;
+                const float qw = (scale_mode_ == ScaleMode::Fill)
+                                     ? std::max(fa / va, 1.0f)
+                                     : std::min(fa / va, 1.0f);
+                const float qh = (scale_mode_ == ScaleMode::Fill)
+                                     ? std::max(va / fa, 1.0f)
+                                     : std::min(va / fa, 1.0f);
+                const QRectF target((vw - qw * vw) / 2.0, (vh - qh * vh) / 2.0,
+                                    qw * vw, qh * vh);
+                QPainter p(this);
+                if (viewer_background_ == ViewerBackground::Checkerboard)
+                    paint_checkerboard(p, rect());
+                p.setRenderHint(QPainter::SmoothPixmapTransform);
+                // VIEW the decode buffer directly (no copy) — RGBA8888 is the
+                // same layout the GL quad uploads; the frame outlives this
+                // paint, so the borrowed data stays valid.
+                const QImage img(a->rgba.data(), a->width, a->height, a->stride,
+                                 QImage::Format_RGBA8888);
+                p.drawImage(target, img);
+                p.end();
+                draw_viewer_overlays();
+                return;
+            }
+        }
+        // No RGBA frame available (yet): fall through so the normal path keeps
+        // painting the letterbox background / blank instead of a stale clear.
+    }
 
     if (debug_enabled() && texture_dirty_)
         qDebug() << "viewer: paintGL dirty, uploading frame"
