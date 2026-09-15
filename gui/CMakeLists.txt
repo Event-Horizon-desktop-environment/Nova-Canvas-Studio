@@ -39,11 +39,13 @@ qt_add_executable(canvas
     src/UX/InspectorAudioEq.cpp
     src/UX/InspectorTransition.cpp
     src/UX/InspectorFile.cpp
+    src/UX/InspectorSubtitles.cpp
     src/UX/InspectorShared.hpp
     src/UX/InspectorVisual.hpp
     src/UX/InspectorAudio.hpp
     src/UX/InspectorTransition.hpp
     src/UX/InspectorFile.hpp
+    src/UX/InspectorSubtitles.hpp
     src/Widgets/timeline_snap.cpp
     src/Widgets/timeline_selection.cpp
     src/Widgets/timeline_drag.cpp
@@ -63,6 +65,8 @@ qt_add_executable(canvas
     src/features/project/ProjectActions.cpp
     src/features/timeline/TimelineActions.cpp
     src/features/timeline/audio_targets.cpp
+    src/features/timeline/SubtitleActions.cpp
+    src/features/timeline/subtitle_dialog.cpp
     src/features/timeline/timeline_view_options.cpp
     src/features/timeline/view_options_menu.cpp
 
@@ -102,6 +106,7 @@ qt_add_executable(canvas
     src/Widgets/timeline_view.cpp
     src/Widgets/timeline_interaction.cpp
     src/Widgets/timeline_thumbnails.cpp
+    src/Widgets/toolbox_widget.cpp
     src/Widgets/viewport_selector.cpp
     src/Widgets/vaapi_viewer.cpp
 )

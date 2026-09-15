@@ -396,9 +396,11 @@ VideoDecoder& VideoDecoder::operator=(VideoDecoder&& o) noexcept {
 }
 
 bool VideoDecoder::open(const std::string& path, std::string* error,
-                        const AVBufferRef* hw_device_ctx) {
+                        const AVBufferRef* hw_device_ctx,
+                        const char* gpu_label) {
     close();
     path_ = path;
+    hw_gpu_label_ = gpu_label ? gpu_label : "";
     const auto open_t0 = std::chrono::steady_clock::now();
 
     AVFormatContext* ctx = nullptr;
@@ -433,6 +435,10 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
     const AVHWDeviceType dev_type = hw_device_ctx
         ? reinterpret_cast<const AVHWDeviceContext*>(hw_device_ctx->data)->type
         : AV_HWDEVICE_TYPE_NONE;
+    const char* dev_type_name = dev_type != AV_HWDEVICE_TYPE_NONE
+        ? av_hwdevice_get_type_name(dev_type)
+        : nullptr;
+    hw_type_name_ = dev_type_name ? dev_type_name : "";
     const AVCodec* codec = nullptr;
     if (dev_type != AV_HWDEVICE_TYPE_NONE) {
         bool found_hw = false;
@@ -539,7 +545,7 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
     last_frame_ = total_frames_ > 0 ? total_frames_ - 1 : -1;
     CANVAS_LOG("decode open: '%s' %dx%d fps=%.3f dur=%.3fs hw=%s hw_pix=%d",
            path.c_str(), width_, height_, frame_rate_, duration_seconds_,
-           hw_avail_ ? "yes" : "no", hw_pix_fmt_);
+           hw_avail_ ? hw_type_name_.c_str() : "sw", hw_pix_fmt_);
 
     // --- Optional audio stream ---
     audio_stream_ = -1;
@@ -634,11 +640,13 @@ bool VideoDecoder::open(const std::string& path, std::string* error,
     // this line against the shader/swscale assumptions when chasing hue errors.
     const double open_ms = std::chrono::duration<double, std::milli>(
                                std::chrono::steady_clock::now() - open_t0).count();
+    const bool gpu_tag = hw_avail_ && !hw_gpu_label_.empty();
     ::canvas::core::log::log_warning(
-        "[dec] open media=%s ms=%.0f dims=%dx%d fps=%.3f frames=%lld hw=%s audio=%s "
-        "tags=range:%s/matrix:%s/trc:%s",
+        "[dec] open media=%s ms=%.0f dims=%dx%d fps=%.3f frames=%lld hw=%s%s%s "
+        "audio=%s tags=range:%s/matrix:%s/trc:%s",
         path.c_str(), open_ms, width_, height_, frame_rate_,
-        static_cast<long long>(total_frames_), hw_avail_ ? "hw" : "sw",
+        static_cast<long long>(total_frames_), hw_avail_ ? hw_type_name_.c_str() : "sw",
+        gpu_tag ? " gpu=\"" : "", gpu_tag ? hw_gpu_label_.c_str() : "",
         audio_stream_ >= 0 ? "yes" : "no",
         color_tag_str(stream->codecpar->color_range),
         matrix_tag_str(stream->codecpar->color_space),

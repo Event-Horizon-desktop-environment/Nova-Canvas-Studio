@@ -1,14 +1,19 @@
 #include "UX/InspectorVisual.hpp"
 
 #include "UX/InspectorShared.hpp"
+#include "UX/InspectorSubtitles.hpp"
 #include "UX/MainWindow.hpp"
 
 #include "canvas/core/timeline/edit_ops.hpp"
+#include "canvas/core/timeline/title.hpp"
 #include "canvas/core/timeline/visual.hpp"
 
+#include <QColor>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QSlider>
 #include <QToolButton>
 
@@ -36,6 +41,9 @@ struct VisualControls {
     QComboBox* blend = nullptr;
     QSlider* opacity_slider = nullptr;
     QLabel* opacity_value = nullptr;
+    QLineEdit* title_text = nullptr;
+    QDoubleSpinBox* title_size = nullptr;
+    QToolButton* title_color = nullptr;
     bool updating = false;   // guards against commit/re-sync during refresh
     bool attached = false;   // selection signals already connected
 };
@@ -48,6 +56,21 @@ std::map<MainWindow*, VisualControls>& visual_registry() {
 VisualControls* lookup(MainWindow& mw) {
     const auto it = visual_registry().find(&mw);
     return it == visual_registry().end() ? nullptr : &it->second;
+}
+
+// Paints the title-colour button from a QColor and stashes the colour as a
+// dynamic property so apply_inspector_visual can read it back without a global
+// colour state.
+void set_title_color_button(QToolButton* btn, const QColor& c) {
+    btn->setProperty("titleColor", c);
+    const bool light =
+        (c.redF() * 0.299 + c.greenF() * 0.587 + c.blueF() * 0.114) > 0.6;
+    btn->setStyleSheet(QStringLiteral("QToolButton { background-color: %1; color: %2;"
+                                      " border: 1px solid #555; border-radius: 4px;"
+                                      " padding: 2px 8px; font-size: 11px; }")
+                           .arg(c.name(),
+                                light ? QStringLiteral("#141414") : QStringLiteral("#ffffff")));
+    btn->setText(c.name());
 }
 
 }  // namespace
@@ -134,6 +157,21 @@ void build_inspector_visual(MainWindow& mw, QVBoxLayout* video_layout) {
     add_property_row(transform->body_layout(), tr("Flip"), flip_row, /*with_reset=*/false);
     video_layout->addWidget(transform);
 
+    // --- Title --------------------------------------------------------------
+    auto* title_cat = new InspectorCategory(tr("Title"), true, host);
+    vc.title_text = new QLineEdit(host);
+    vc.title_text->setPlaceholderText(tr("Title text (centre-aligned)"));
+    add_property_row(title_cat->body_layout(), tr("Text"), vc.title_text, /*with_reset=*/false);
+    vc.title_size = make_numeric(canvas::core::title::kSizeMin, canvas::core::title::kSizeMax,
+                                 canvas::core::title::kSizeDefault, host);
+    vc.title_size->setSuffix(QStringLiteral("  h"));
+    add_property_row(title_cat->body_layout(), tr("Size"), vc.title_size);
+    vc.title_color = new QToolButton(host);
+    vc.title_color->setCursor(Qt::PointingHandCursor);
+    set_title_color_button(vc.title_color, QColor(255, 255, 255));
+    add_property_row(title_cat->body_layout(), tr("Colour"), vc.title_color);
+    video_layout->addWidget(title_cat);
+
     // --- Cropping / Dynamic Zoom (reference placeholders, unwired) ------------
     video_layout->addWidget(new InspectorCategory(tr("Cropping"), false, host));
     video_layout->addWidget(new InspectorCategory(tr("Dynamic Zoom"), false, host));
@@ -206,6 +244,22 @@ void build_inspector_visual(MainWindow& mw, QVBoxLayout* video_layout) {
     QObject::connect(vc.opacity_slider, &QSlider::sliderReleased, &mw, [&mw]() {
         apply_inspector_visual(mw, VisualPartComposite);
     });
+    QObject::connect(vc.title_text, &QLineEdit::editingFinished, &mw, [&mw]() {
+        apply_inspector_visual(mw, VisualPartTitle);
+    });
+    QObject::connect(vc.title_size, &QDoubleSpinBox::editingFinished, &mw, [&mw]() {
+        apply_inspector_visual(mw, VisualPartTitle);
+    });
+    QObject::connect(vc.title_color, &QToolButton::clicked, &mw, [&mw]() {
+        VisualControls* color_vc = lookup(mw);
+        if (!color_vc || !color_vc->title_color) return;
+        const QColor cur = color_vc->title_color->property("titleColor").value<QColor>();
+        const QColor pick = QColorDialog::getColor(
+            cur.isValid() ? cur : QColor(Qt::white), &mw, MainWindow::tr("Title Colour"));
+        if (!pick.isValid()) return;
+        set_title_color_button(color_vc->title_color, pick);
+        apply_inspector_visual(mw, VisualPartTitle);
+    });
 }
 
 void attach_inspector_visual(MainWindow& mw, TimelineWidget* timeline) {
@@ -239,6 +293,10 @@ void update_inspector_visual(MainWindow& mw) {
     vc->blend->setCurrentIndex(static_cast<int>(clip.blend_mode));
     vc->opacity_slider->setValue(std::lround(clip.opacity * 100.0));
     vc->opacity_value->setText(QString::number(clip.opacity, 'f', 2));
+    vc->title_text->setText(QString::fromStdString(clip.title.text));
+    vc->title_size->setValue(clip.title.size);
+    set_title_color_button(vc->title_color,
+                           QColor::fromRgbF(clip.title.r, clip.title.g, clip.title.b, clip.title.a));
     vc->updating = false;
 }
 
@@ -274,6 +332,7 @@ void apply_inspector_visual(MainWindow& mw, unsigned parts) {
                 mw.has_unsaved_changes_ = true;
                 mw.refresh_timeline();
                 mw.push_snapshot();
+                update_inspector_subtitles(mw);  // Subtitles position sliders follow
                 qWarning() << "[edit] CLIP-TRANSFORM kind="
                            << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                            << "track=" << index << "clip=" << clip.id
@@ -305,6 +364,44 @@ void apply_inspector_visual(MainWindow& mw, unsigned parts) {
                            << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                            << "track=" << index << "clip=" << clip.id
                            << "opacity=" << opacity << "blend=" << static_cast<int>(blend);
+            }
+        }
+    }
+
+    if (parts & VisualPartTitle) {
+        if (!vc->title_text) return;
+        canvas::core::Track::Kind kind;
+        std::size_t index = 0;
+        canvas::core::Clip clip;
+        if (!mw.find_selected_clip(kind, index, clip)) return;
+
+        canvas::core::Clip::Title t = clip.title;
+        // Only the fields the Video tab actually edits change; everything set
+        // on the Subtitles tab (typeface, faux styles, shadow, background box)
+        // rides through untouched.
+        t.text = vc->title_text->text().trimmed().toStdString();
+        t.size = static_cast<float>(vc->title_size->value());
+        const QColor c = vc->title_color->property("titleColor").value<QColor>();
+        if (c.isValid()) {
+            t.r = static_cast<float>(c.redF());
+            t.g = static_cast<float>(c.greenF());
+            t.b = static_cast<float>(c.blueF());
+            t.a = static_cast<float>(c.alphaF());
+        }
+        // Field-wise (snapshot-exact) comparison decides whether to commit.
+        const bool same = clip.title == t;
+        if (!same) {
+            auto cmd = canvas::core::set_clip_title(mw.project_->sequence, kind, index, clip.id, t);
+            if (cmd) {
+                mw.undo_.record(std::move(cmd));
+                mw.has_unsaved_changes_ = true;
+                mw.refresh_timeline();
+                mw.push_snapshot();
+                update_inspector_subtitles(mw);  // Subtitles tab slider follows
+                qWarning() << "[edit] CLIP-TITLE kind="
+                           << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
+                           << "track=" << index << "clip=" << clip.id << "text='"
+                           << t.text.c_str() << "' size=" << t.size;
             }
         }
     }

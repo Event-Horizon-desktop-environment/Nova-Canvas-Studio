@@ -1,6 +1,7 @@
 #include "UX/SettingsDialog.hpp"
 
 #include "UX/theme.hpp"
+#include "canvas/core/media/gpu_select.hpp"
 #include "canvas/core/media/hw_device.hpp"
 
 #include <QButtonGroup>
@@ -129,44 +130,131 @@ QGroupBox* SettingsDialog::build_playback_section() {
 }
 
 QGroupBox* SettingsDialog::build_hardware_section() {
-    auto* box = new QGroupBox(tr("Hardware Decoding"), this);
+    auto* box = new QGroupBox(tr("Hardware Acceleration"), this);
     auto* form = new QFormLayout(box);
     form->setContentsMargins(12, 16, 12, 12);
 
+    // GPU picker: which physical device the app should drive. Its data is the
+    // PCI slot id (empty = automatic), the same identity persisted under
+    // settings/hw_gpu and resolved at startup by main.cpp.
+    gpu_combo_ = new QComboBox(box);
+    gpu_combo_->addItem(tr("Automatic (best available)"), QStringLiteral(""));
+    const auto gpus = canvas::core::gpu_select::detect_gpus();
+    for (const auto& g : gpus) {
+        QString label = QString::fromUtf8(g.name.c_str());
+        if (!g.backend.empty())
+            label += QStringLiteral(" \u00b7 ") +
+                     QString::fromUtf8(g.backend.c_str());
+        gpu_combo_->addItem(label, QString::fromUtf8(g.pci_slot.c_str()));
+    }
+    const QSettings settings;
+    const QString gpu_now = settings
+        .value(QStringLiteral("settings/hw_gpu"), QStringLiteral(""))
+        .toString();
+    const int gpu_idx = gpu_combo_->findData(gpu_now);
+    gpu_combo_->setCurrentIndex(gpu_idx >= 0 ? gpu_idx : 0);
+    const bool gpu_pinned = gpu_idx > 0;  // a real GPU (not "Automatic")
+    const canvas::core::gpu_select::GpuDevice* pinned = nullptr;
+    if (gpu_pinned)
+        for (const auto& g : gpus)
+            if (g.pci_slot == gpu_now.toStdString()) pinned = &g;
+
     backend_combo_ = new QComboBox(box);
     // Order mirrors the app's default probe order (auto) plus the software cap.
-    struct Backend {
-        const char* label;
-        const char* value;
-    };
-    constexpr std::array<Backend, 6> kBackends = {{
-        {"Automatic (probe order)", ""},
-        {"NVIDIA CUDA", "cuda"},
-        {"AMD / Intel VAAPI", "vaapi"},
-        {"Intel QSV", "qsv"},
-        {"Vulkan Video", "vulkan"},
-        {"Software (no GPU decode)", "software"},
-    }};
-    for (const auto& b : kBackends)
-        backend_combo_->addItem(QString::fromUtf8(b.label),
-                                QString::fromUtf8(b.value));
+    // Only backends this machine can actually drive are listed: NVIDIA CUDA
+    // only when an NVIDIA GPU is present, VAAPI labelled with the vendors that
+    // expose it (AMD and/or Intel), QSV when an Intel GPU is present, Vulkan
+    // Video when any GPU exists (it rides the same render nodes). Software
+    // decode is always possible, so it is always listed.
+    backend_combo_->addItem(tr("Automatic (probe order)"), QStringLiteral(""));
 
-    const QSettings settings;
-    const QString current = settings
+    bool have_amd = false, have_intel = false, have_nvidia = false, any_gpu = false;
+    for (const auto& g : gpus) {
+        any_gpu = true;
+        if (g.vendor == "AMD") have_amd = true;
+        else if (g.vendor == "Intel") have_intel = true;
+        else if (g.vendor == "NVIDIA") have_nvidia = true;
+    }
+    if (have_nvidia)
+        backend_combo_->addItem(tr("NVIDIA CUDA"), QStringLiteral("cuda"));
+    if (have_amd || have_intel) {
+        QString vaapi_label = have_amd ? QStringLiteral("AMD") : QString();
+        if (have_intel)
+            vaapi_label += vaapi_label.isEmpty() ? QStringLiteral("Intel")
+                                                 : QStringLiteral(" / Intel");
+        backend_combo_->addItem(vaapi_label + tr(" VAAPI"),
+                                QStringLiteral("vaapi"));
+    }
+    if (have_intel)
+        backend_combo_->addItem(tr("Intel QSV"), QStringLiteral("qsv"));
+    if (any_gpu)
+        backend_combo_->addItem(tr("Vulkan Video"), QStringLiteral("vulkan"));
+    backend_combo_->addItem(tr("Software (no GPU decode)"),
+                            QStringLiteral("software"));
+
+    // While a specific GPU is pinned its backend drives the decoder row (the
+    // combo stays populated but shows the pinned GPU's backend, not a stale
+    // backend-family preference); re-activates on "Automatic". A pinned GPU
+    // whose backend isn't in the list (e.g. a Vulkan-pinned device) falls back
+    // to the saved backend-family value unchanged.
+    QString backend_now = settings
         .value(QStringLiteral("settings/hw_backend"), QStringLiteral(""))
         .toString();
-    const int idx = backend_combo_->findData(current);
+    if (pinned)
+        backend_now = QString::fromStdString(pinned->backend);
+    const int idx = backend_combo_->findData(backend_now);
     backend_combo_->setCurrentIndex(idx >= 0 ? idx : 0);
+    backend_combo_->setEnabled(!gpu_pinned);
 
     auto* hint = new QLabel(
-        tr("Preferred hardware decoder. \"Automatic\" uses the built-in probe "
-           "order; the rest pin that backend first. Applies on the next decode "
-           "session (a device already open keeps working until it closes)."),
+        tr("Preferred hardware accelerator. \"GPU\" pins one physical device; "
+           "its backend is chosen for you. \"Decoder\" pins a backend family "
+           "when the GPU is Automatic. Applies on the next decode session (a "
+           "device already open keeps working until it closes)."),
         box);
     hint->setWordWrap(true);
     hint->setEnabled(false);
+    form->addRow(tr("GPU"), gpu_combo_);
     form->addRow(tr("Decoder"), backend_combo_);
     form->addRow(QString(), hint);
+
+    // Shared policy: applying a selection means persisting the key and
+    // re-pinning the HwDeviceManager. GPU=Automatic delegates to the backend
+    // combo; a specific GPU pins backend+device together.
+    connect(gpu_combo_, &QComboBox::currentIndexChanged, this, [this](int i) {
+        const QString slot = gpu_combo_->itemData(i).toString();
+        QSettings().setValue(QStringLiteral("settings/hw_gpu"), slot);
+        if (slot.isEmpty()) {
+            // Back to automatic: the decoder row re-activates and falls back to
+            // its own backend-family selection.
+            backend_combo_->setEnabled(true);
+            const QString backend = backend_combo_->currentData().toString();
+            canvas::core::HwDeviceManager::set_preferred_backend(
+                backend.toStdString());
+            return;
+        }
+        // A concrete GPU: reflect its backend in the decoder row immediately so
+        // the screen mirrors what is actually pinned, then pin it live.
+        backend_combo_->setEnabled(false);
+        const auto gpus = canvas::core::gpu_select::detect_gpus();
+        for (const auto& g : gpus) {
+            if (g.pci_slot == slot.toStdString()) {
+                const int b_idx = backend_combo_->findData(
+                    QString::fromStdString(g.backend));
+                if (b_idx >= 0) backend_combo_->setCurrentIndex(b_idx);
+                canvas::core::HwDeviceManager::set_preferred_gpu(
+                    g.backend, g.device_arg);
+                return;
+            }
+        }
+        // GPU disappeared between populating and selection — degrade to the
+        // backend combo rather than pinning nothing. Settings were already
+        // cleared above, so re-apply from the combo like the Automatic path.
+        backend_combo_->setEnabled(true);
+        const QString backend = backend_combo_->currentData().toString();
+        canvas::core::HwDeviceManager::set_preferred_backend(
+            backend.toStdString());
+    });
 
     connect(backend_combo_, &QComboBox::currentIndexChanged, this, [this](int i) {
         const QString value = backend_combo_->itemData(i).toString();

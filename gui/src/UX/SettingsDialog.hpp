@@ -15,13 +15,16 @@
 // Keys written:
 //   scrubAudioEnabled        bool   (also used by the old popup; kept)
 //   settings/hw_backend      string "" (auto) | "cuda"|"vaapi"|"qsv"|"vulkan"|"software"
+//   settings/hw_gpu          string "" (auto) | PCI slot ("0000:7a:00.0")
 //   appearance/theme         string "light" | "dark"      (theme-tab mode row)
 //   appearance/hypr_dark     bool                         (theme-tab mode row)
 //   settings/theme/<field>   string hex, empty = designed (see theme_tokens)
 //
-// The hardware-decode preference is handed to the core HwDeviceManager as a
-// process-wide pin (see set_preferred_backend), so startup probes and every
-// manager created afterwards honor it. A manager that already opened a device
+// The hardware preference is handed to the core HwDeviceManager as a
+// process-wide pin (see set_preferred_backend / set_preferred_gpu). When a
+// specific GPU is chosen, its natural backend + device argument (render node
+// / CUDA ordinal, from gpu_select) are pinned together; picking "Automatic"
+// falls back to the backend-only combo. A manager that already opened a device
 // keeps it until it closes (project switch); the note in the UI says so.
 
 #include <QDialog>
@@ -91,6 +94,7 @@ private:
     std::function<void(bool)> audible_scrubbing_cb_;
     QCheckBox* scrub_audio_ = nullptr;
     QComboBox* backend_combo_ = nullptr;
+    QComboBox* gpu_combo_ = nullptr;
     std::vector<std::function<void()>> theme_resyncs_;
 };
 

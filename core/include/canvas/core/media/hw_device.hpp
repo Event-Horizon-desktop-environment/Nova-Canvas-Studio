@@ -33,6 +33,11 @@ public:
     // Human-readable device type string (e.g. "cuda", "vaapi", "qsv",
     // "vulkan") or an empty string when software decoding. Useful for logging.
     [[nodiscard]] const std::string& device_name() const { return device_name_; }
+    // Physical GPU the selected device belongs to ("AMD Radeon (Granite
+    // Ridge)" / "NVIDIA GeForce RTX 5070 Ti"), or "" when software decode or
+    // the backend cannot be resolved to a known GPU name. Lets the decode
+    // logs name the actual hardware, not just the generic backend.
+    [[nodiscard]] const std::string& device_label() const { return device_label_; }
     [[nodiscard]] bool is_hardware() const { return device_ctx_ != nullptr; }
 
     // Preferred hardware decode backend, honored by every probe on this
@@ -44,11 +49,24 @@ public:
     static void set_preferred_backend(const std::string& backend);
     [[nodiscard]] static const std::string& preferred_backend();
 
+    // Optionally pin a specific GPU behind the backend: `device_arg` is the
+    // device string passed to av_hwdevice_ctx_create() for the pinned type —
+    // a DRM render node path ("/dev/dri/renderD128") for vaapi, a CUDA device
+    // ordinal ("0") for cuda. It only applies to the backend it was set with;
+    // all other probed types still fall through with the FFmpeg default device.
+    // Empty device_arg with a backend = backend-only pin (current behavior).
+    // `backend` must be one of "cuda"/"vaapi"/"qsv"/"vulkan" (not ""/"software").
+    static void set_preferred_gpu(const std::string& backend,
+                                  const std::string& device_arg);
+    [[nodiscard]] static const std::string& preferred_device_arg();
+    [[nodiscard]] static const std::string& preferred_gpu_backend();
+
 private:
     void init() const;
 
     mutable AVBufferRef* device_ctx_ = nullptr;
     mutable std::string device_name_;
+    mutable std::string device_label_;
     mutable bool tried_ = false;
     std::string owner_;
 };

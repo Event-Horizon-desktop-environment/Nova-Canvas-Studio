@@ -40,8 +40,8 @@ public:
     QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override {
         // Wider than the 120px cell so the caption line has room for a real
         // filename before the ElideRight ellipsis kicks in; the height keeps
-        // the 16:9 well + caption strip identical to the old proportions.
-        return QSize(148, 124);
+        // the 16:9 well + caption strip at the same proportions.
+        return QSize(192, 164);
     }
 
     void paint(QPainter* p, const QStyleOptionViewItem& opt,
@@ -253,7 +253,7 @@ private:
 MediaPoolWidget::MediaPoolWidget(QWidget* parent) : QListWidget(parent) {
     setViewMode(QListView::IconMode);
     setIconSize(QSize(0, 0));
-    setGridSize(QSize(152, 128));
+    setGridSize(QSize(196, 168));
     setUniformItemSizes(true);
     setResizeMode(QListView::Adjust);
     setMovement(QListView::Static);

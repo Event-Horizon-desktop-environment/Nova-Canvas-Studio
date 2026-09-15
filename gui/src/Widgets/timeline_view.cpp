@@ -899,15 +899,23 @@ void TimelineWidget::draw_tracks() {
             }
 
             // Filmstrip thumbnails butted together to fill the body region edge
-            // to edge. The pitch is 42px/cell at most: long clips at extreme zoom
-            // would otherwise queue hundreds of decodes per zoom step, so cap the
-            // cell count (cells then just widen, the strip stays fully covered).
-            // The "Thumbnail View" submenu drives how many cells render: Off
-            // shows none (the tinted shell fills the body), SingleFrame asks for
-            // exactly one full-width frame, Filmstrip uses the zoom pitch.
+            // to edge. The pitch is fixed (kFilmstripCellWidth) so the strip
+            // packs many distinct frame samples per clip at any track height; a
+            // 16:9 clip tiles ~24px-wide cells all the way to the clip's end,
+            // never a handful of wide frames. The cell count is capped
+            // (kFilmstripMaxCells) so pathological zoom-in widths can't queue
+            // thousands of decodes — but the cap is deliberately far above the
+            // count where a 16:9 picture stops spanning a whole-frame cell, so
+            // the strip keeps reading edge to edge instead of showing wide gaps
+            // of shell between thumbnails (the old 320-cell cap made cells
+            // widen to ~128px at deep zoom-in and the pictures floated centered
+            // in them). The "Thumbnail View" submenu drives how many cells
+            // render: Off shows none (the tinted shell fills the body),
+            // SingleFrame asks for exactly one full-width frame, Filmstrip uses
+            // the fixed pitch.
             int num_cells = 0;
             if (vopts.thumbnails == ThumbnailMode::Filmstrip)
-                num_cells = std::min(std::max(1, static_cast<int>(cw / kFilmstripCellWidth)), 320);
+                num_cells = std::min(std::max(1, static_cast<int>(cw / kFilmstripCellWidth)), kFilmstripMaxCells);
             else if (vopts.thumbnails == ThumbnailMode::SingleFrame)
                 num_cells = 1;
             const double cell_w = num_cells > 0 ? cw / num_cells : 0.0;

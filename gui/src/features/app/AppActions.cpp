@@ -307,7 +307,7 @@ void MainWindow::toggle_transition_on_selected() {
                                                 id, canvas::core::TransitionType::CrossDissolve, 6);
     }
     if (cmd) {
-        qDebug() << "[edit] TOGGLE-TRANSITION id=" << static_cast<quint64>(id)
+        qWarning() << "[transition] TOGGLE id=" << static_cast<quint64>(id)
                    << "clearing=" << clearing;
         undo_.record(std::move(cmd));
         has_unsaved_changes_ = true;

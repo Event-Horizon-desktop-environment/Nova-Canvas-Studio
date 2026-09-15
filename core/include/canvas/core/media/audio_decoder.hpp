@@ -29,6 +29,12 @@ public:
     // own; returns 0.0 when unknown.
     [[nodiscard]] double duration_seconds() const;
 
+    // True once the sequential decode walk has reached the physical end of the
+    // stream. After this point decode() serves synthetic silence (so playback
+    // never strands), so a whole-file drain should stop when this flips true
+    // rather than keep consuming those fabricated silence chunks.
+    [[nodiscard]] bool at_stream_end() const;
+
     // Decodes up to `max_frames` interleaved float frames at `out_sample_rate`
     // starting at `start_sample` (output sample units: seconds * out_sample_rate).
     // Returns empty when no audio is available.

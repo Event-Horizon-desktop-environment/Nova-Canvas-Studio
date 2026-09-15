@@ -257,7 +257,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     });
 }
 
-MainWindow::~MainWindow() { delete ui; }
+MainWindow::~MainWindow() {
+    // A subtitle worker past the dialog close must never outlive the window:
+    // join before the members it reports into are destroyed.
+    if (subtitle_worker_.joinable()) subtitle_worker_.join();
+    delete ui;
+}
 
 void MainWindow::refresh_timeline() {
     // Every edit (and project load) resyncs the time basis: total length AND
@@ -311,6 +316,16 @@ void MainWindow::push_grade_snapshot() {
     // tick — the reason the page's preview used to run at ~4Hz). swap_project
     // keeps the decoders warm and just re-presents the current frame with the new
     // 3D-LUT grade, making wheel/curve previews effectively realtime.
+    auto snapshot = std::make_shared<canvas::core::Project>(*project_);
+    controller_.swap_project(std::move(snapshot));
+}
+
+void MainWindow::push_live_snapshot() {
+    if (!project_) return;
+    // Live inspector-preview snapshot (Subtitles page slider drags): like
+    // push_grade_snapshot, push via swap_project so the current frame re-presents
+    // through the warm decoders instead of paying set_project()'s decode teardown
+    // per slider tick — that is what makes the preview feel realtime mid-drag.
     auto snapshot = std::make_shared<canvas::core::Project>(*project_);
     controller_.swap_project(std::move(snapshot));
 }

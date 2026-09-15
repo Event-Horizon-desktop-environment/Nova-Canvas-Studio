@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <chrono>
@@ -72,6 +73,38 @@ json clip_to_json(const Clip& c) {
                      return arr;
                  }()}};
     if (c.has_grade()) j["grade"] = grade_graph::grade_graph_to_json(c.grade);
+    if (c.has_title()) {
+        json title{{"text", c.title.text}, {"size", c.title.size},
+                   {"r", c.title.r},       {"g", c.title.g},
+                   {"b", c.title.b},       {"a", c.title.a}};
+        // Only written when set: older files (and older readers) never see it.
+        if (!c.title.font_family.empty()) title["font"] = c.title.font_family;
+        // Style flags only when set: older files (and older readers) never see them.
+        if (c.title.bold) title["bold"] = true;
+        if (c.title.italic) title["italic"] = true;
+        if (c.title.underline) title["underline"] = true;
+        // Effect blocks only when enabled: older files (and older readers)
+        // never see them.
+        if (c.title.shadow) {
+            title["shadow"] = {{"dx", c.title.shadow_dx},
+                               {"dy", c.title.shadow_dy},
+                               {"blur", c.title.shadow_blur},
+                               {"opacity", c.title.shadow_opacity},
+                               {"r", c.title.shadow_r},
+                               {"g", c.title.shadow_g},
+                               {"b", c.title.shadow_b}};
+        }
+        if (c.title.box) {
+            title["box"] = {{"pad_x", c.title.box_pad_x},
+                            {"pad_y", c.title.box_pad_y},
+                            {"radius", c.title.box_radius},
+                            {"opacity", c.title.box_opacity},
+                            {"r", c.title.box_r},
+                            {"g", c.title.box_g},
+                            {"b", c.title.box_b}};
+        }
+        j["title"] = std::move(title);
+    }
     return j;
 }
 
@@ -160,6 +193,47 @@ Clip clip_from_json(const json& j) {
         } catch (const std::exception& e) {
             CANVAS_LOG("project: dropping malformed grade on clip %lld (%s)",
                        (long long)c.id, e.what());
+        }
+    }
+    // Title overlay block (text/size/colour); optional, so legacy clips load
+    // untouched. Fields are individually optional for forward tolerance.
+    if (j.contains("title")) {
+        const json& t = j.at("title");
+        if (!t.is_object()) {
+            CANVAS_LOG("project: malformed title block on clip %lld", (long long)c.id);
+        } else {
+            if (t.contains("text")) t.at("text").get_to(c.title.text);
+            if (t.contains("size")) t.at("size").get_to(c.title.size);
+            if (t.contains("r")) t.at("r").get_to(c.title.r);
+            if (t.contains("g")) t.at("g").get_to(c.title.g);
+            if (t.contains("b")) t.at("b").get_to(c.title.b);
+            if (t.contains("a")) t.at("a").get_to(c.title.a);
+            if (t.contains("font")) t.at("font").get_to(c.title.font_family);
+            if (t.contains("bold")) t.at("bold").get_to(c.title.bold);
+            if (t.contains("italic")) t.at("italic").get_to(c.title.italic);
+            if (t.contains("underline")) t.at("underline").get_to(c.title.underline);
+            if (t.contains("shadow") && t.at("shadow").is_object()) {
+                const json& s = t.at("shadow");
+                c.title.shadow = true;
+                c.title.shadow_dx = s.value("dx", c.title.shadow_dx);
+                c.title.shadow_dy = s.value("dy", c.title.shadow_dy);
+                c.title.shadow_blur = s.value("blur", c.title.shadow_blur);
+                c.title.shadow_opacity = s.value("opacity", c.title.shadow_opacity);
+                c.title.shadow_r = s.value("r", c.title.shadow_r);
+                c.title.shadow_g = s.value("g", c.title.shadow_g);
+                c.title.shadow_b = s.value("b", c.title.shadow_b);
+            }
+            if (t.contains("box") && t.at("box").is_object()) {
+                const json& b = t.at("box");
+                c.title.box = true;
+                c.title.box_pad_x = b.value("pad_x", c.title.box_pad_x);
+                c.title.box_pad_y = b.value("pad_y", c.title.box_pad_y);
+                c.title.box_radius = b.value("radius", c.title.box_radius);
+                c.title.box_opacity = b.value("opacity", c.title.box_opacity);
+                c.title.box_r = b.value("r", c.title.box_r);
+                c.title.box_g = b.value("g", c.title.box_g);
+                c.title.box_b = b.value("b", c.title.box_b);
+            }
         }
     }
     return c;
@@ -385,6 +459,95 @@ RenderJobSnapshot job_from_json(const json& j) {
 
 }  // namespace
 
+namespace {
+
+// Strict UTF-8 decoder for project strings. Returns a byte-strictly-validated
+// copy: every invalid sequence (truncated lead byte, missing continuation,
+// overlong/surrogate/codepoint-over-U+10FFFF) is replaced with U+FFFD so the
+// nlohmann strict dump (which throws type_error.316 on any invalid byte) can
+// never abort a save. A bad byte is logged once per field by the caller.
+std::string sanitize_utf8(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    const auto cont = [](char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; };
+    std::size_t i = 0;
+    while (i < s.size()) {
+        const unsigned char c0 = static_cast<unsigned char>(s[i]);
+        int len = 0;
+        if (c0 < 0x80) {
+            len = 1;
+        } else if (c0 >= 0xC2 && c0 <= 0xDF) {
+            len = 2;
+        } else if (c0 >= 0xE0 && c0 <= 0xEF) {
+            len = 3;
+        } else if (c0 >= 0xF0 && c0 <= 0xF4) {
+            len = 4;
+        }
+        bool ok = len > 0 && i + len <= s.size();
+        if (ok) {
+            for (int k = 1; k < len; ++k)
+                ok = ok && cont(s[i + static_cast<std::size_t>(k)]);
+            // Reject overlongs, surrogates and > U+10FFFF.
+            if (ok) {
+                const unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+                if (len == 3 && c0 == 0xE0 && c1 < 0xA0) ok = false;       // overlong
+                if (len == 3 && c0 == 0xED && c1 > 0x9F) ok = false;       // surrogate
+                if (len == 4 && c0 == 0xF0 && c1 < 0x90) ok = false;       // overlong
+                if (len == 4 && c0 == 0xF4 && c1 > 0x8F) ok = false;       // > U+10FFFF
+            }
+        }
+        if (!ok) {
+            // An isolated bad byte is logged at the string level, not here:
+            // replace this byte (or a mis-lead) with U+FFFD and resync.
+            out.append("\xEF\xBF\xBD");
+            ++i;
+        } else {
+            out.append(s, i, static_cast<std::size_t>(len));
+            i += static_cast<std::size_t>(len);
+        }
+    }
+    return out;
+}
+
+// Recursively validate every string + float in the serialized project doc so a
+// strict nlohmann dump can never abort a save. Offending fields are logged via
+// [proj] → project.log with the first bad byte and its path, so a data-corrupt
+// source (a non-UTF-8 path from the filesystem, a pasted clip comment, an EQ
+// drag that produced a non-finite gain, ...) is identified immediately.
+void repair_project_doc(json& doc, const std::string& path = {}) {
+    if (doc.is_string()) {
+        const std::string& s = doc.get_ref<const std::string&>();
+        std::string clean = sanitize_utf8(s);
+        if (clean != s) {
+            canvas::core::log::log_warning("[proj] non-UTF-8 sequence in '%s' (byte 0x%02X…%zu/%zu) — replaced with U+FFFD",
+                        path.c_str(),
+                        static_cast<unsigned char>(s.empty() ? 0 : s[0]),
+                        s.size(), clean.size());
+            doc = std::move(clean);
+        }
+        return;
+    }
+    if (doc.is_number_float()) {
+        const double d = doc.get<double>();
+        if (!std::isfinite(d)) {
+            canvas::core::log::log_warning("[proj] non-finite float at '%s' (%f) — reset to 0.0", path.c_str(), d);
+            doc = 0.0;
+        }
+        return;
+    }
+    if (doc.is_object()) {
+        for (json::iterator it = doc.begin(); it != doc.end(); ++it)
+            repair_project_doc(it.value(), path + (path.empty() ? "" : ".") + it.key());
+        return;
+    }
+    if (doc.is_array()) {
+        std::size_t idx = 0;
+        for (json& v : doc) repair_project_doc(v, path + "[" + std::to_string(idx++) + "]");
+    }
+}
+
+}  // namespace
+
 const MediaEntry* Project::media_by_id(const MediaId id) const noexcept {
     for (const auto& m : media)
         if (m.id == id) return &m;
@@ -418,6 +581,12 @@ bool save_project(const Project& project, const std::string& path, std::string* 
         json render_jobs = json::array();
         for (const auto& j : project.render_jobs) render_jobs.push_back(job_to_json(j));
         doc["render_jobs"] = std::move(render_jobs);
+
+        // Sanitize before opening the file: a strict dump() throws
+        // type_error.316 on non-UTF-8 strings / non-finite floats, and with the
+        // ofstream already open that leaves a 0-byte project file behind. Repair
+        // in place (fixed values ARE what gets persisted) and log each fix.
+        repair_project_doc(doc);
 
         const auto t_ser0 = std::chrono::steady_clock::now();
         std::ofstream out(path);

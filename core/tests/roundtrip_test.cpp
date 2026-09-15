@@ -10,6 +10,7 @@
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/audio_fade.hpp"
 #include "canvas/core/timeline/edit_ops.hpp"
+#include "canvas/core/timeline/title.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -17,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -1834,6 +1836,198 @@ int main() {
         check(cmd != nullptr, "grade: set on linked video returns command");
         check(lp.sequence.audio_tracks[0].clips[0].grade.num_nodes() == 2,
               "grade: linked audio mate inherits the grade");
+    }
+
+    // Title overlay: edit-op contract, undo/redo, and save/load round trip.
+    {
+        std::unique_ptr<ICommand> cmd;
+        Project tp = make_project();
+        Clip tv;
+        tv.media = 0;
+        tv.tl_in = 0;
+        tv.src_in = 0;
+        tv.src_out = 30;
+        cmd = place_clip(tp.sequence, Track::Kind::Video, 0, tv, Placement::Overwrite);
+        undo.record(std::move(cmd));
+        const ClipId tid = tp.sequence.video_tracks[0].clips[0].id;
+
+        Clip::Title want;
+        want.text = "Hello";
+        want.size = 0.15f;
+        want.r = 0.8f;
+        want.g = 0.1f;
+        want.b = 0.2f;
+        want.a = 0.9f;
+        want.font_family = "DejaVu Sans";
+        want.bold = true;
+        want.italic = true;
+        want.underline = true;
+        want.shadow = true;
+        want.shadow_dx = 3.5f;
+        want.shadow_dy = -2.0f;
+        want.shadow_blur = 4.0f;
+        want.shadow_opacity = 0.4f;
+        want.shadow_r = 0.5f;
+        want.shadow_g = 0.0f;
+        want.shadow_b = 0.5f;
+        want.box = true;
+        want.box_pad_x = 14.0f;
+        want.box_pad_y = 6.0f;
+        want.box_radius = 9.0f;
+        want.box_opacity = 0.25f;
+        want.box_r = 0.0f;
+        want.box_g = 0.5f;
+        want.box_b = 0.5f;
+        cmd = set_clip_title(tp.sequence, Track::Kind::Video, 0, tid, want);
+        check(cmd != nullptr, "title: set returns command");
+        undo.record(std::move(cmd));
+        check(tp.sequence.video_tracks[0].clips[0].has_title(),
+              "title: has_title after set");
+
+        Clip::Title huge = want;
+        huge.size = 9.9f;
+        cmd = set_clip_title(tp.sequence, Track::Kind::Video, 0, tid, huge);
+        check(cmd != nullptr, "title: clamped set still returns command");
+        undo.record(std::move(cmd));
+        check(tp.sequence.video_tracks[0].clips[0].title.size == title::kSizeMax,
+              "title: size clamps to max");
+        check(tp.sequence.video_tracks[0].clips[0].title.text == want.text,
+              "title: text untouched by clamp");
+
+        check(undo.undo(tp.sequence), "title: undo step");
+        check(tp.sequence.video_tracks[0].clips[0].title.text == want.text &&
+                  tp.sequence.video_tracks[0].clips[0].title.size == want.size,
+              "title: undo restores the pre-clamp title");
+        check(undo.undo(tp.sequence) && !tp.sequence.video_tracks[0].clips[0].has_title(),
+              "title: undo clears the title");
+        check(undo.redo(tp.sequence) && tp.sequence.video_tracks[0].clips[0].has_title(),
+              "title: redo restores the title");
+
+        std::string terr;
+        check(save_project(tp, "/tmp/opencode/media/title.ehproj", &terr),
+              "title: save project (v4)");
+        Project tloaded;
+        check(load_project(tloaded, "/tmp/opencode/media/title.ehproj", &terr),
+              "title: load project");
+        const Clip& tlc = tloaded.sequence.video_tracks[0].clips[0];
+        check(tlc.has_title() && tlc.title.text == want.text && tlc.title.size == want.size &&
+                  tlc.title.r == want.r && tlc.title.g == want.g && tlc.title.b == want.b &&
+                  tlc.title.a == want.a && tlc.title.font_family == want.font_family &&
+                  tlc.title.bold && tlc.title.italic && tlc.title.underline &&
+                  tlc.title.shadow && tlc.title.shadow_dx == want.shadow_dx &&
+                  tlc.title.shadow_dy == want.shadow_dy &&
+                  tlc.title.shadow_blur == want.shadow_blur &&
+                  tlc.title.shadow_opacity == want.shadow_opacity &&
+                  tlc.title.shadow_r == want.shadow_r && tlc.title.shadow_g == want.shadow_g &&
+                  tlc.title.shadow_b == want.shadow_b && tlc.title.box &&
+                  tlc.title.box_pad_x == want.box_pad_x &&
+                  tlc.title.box_pad_y == want.box_pad_y &&
+                  tlc.title.box_radius == want.box_radius &&
+                  tlc.title.box_opacity == want.box_opacity && tlc.title.box_r == want.box_r &&
+                  tlc.title.box_g == want.box_g && tlc.title.box_b == want.box_b,
+              "title: fields survive save/load");
+
+        // A no-title clip re-saves without the title key: legacy v3-style bytes.
+        std::string nt_err;
+        check(save_project(tloaded, "/tmp/opencode/media/notitle.ehproj", &nt_err),
+              "title: save project with title cleared");
+    }
+
+    {
+        // GroupCommand: a batch of child edits records as ONE undo step (used by
+        // the Subtitles tab's "select all captions" bulk styling). Undo reverts
+        // every child, redo re-applies them, and the group survives a mixed
+        // child list (here: a title change + a transform change on two clips).
+        Project gp;
+        canvas::core::Track gv1;
+        gv1.kind = canvas::core::Track::Kind::Video;
+        gv1.name = "V1";
+        Clip g1;
+        g1.id = 1;
+        g1.media = 0;
+        g1.tl_in = 0;
+        g1.src_in = 0;
+        g1.src_out = 60;
+        Clip g2;
+        g2.id = 2;
+        g2.media = 0;
+        g2.tl_in = 60;
+        g2.src_in = 0;
+        g2.src_out = 60;
+        gv1.clips.push_back(g1);
+        gv1.clips.push_back(g2);
+        gp.sequence.video_tracks.push_back(std::move(gv1));
+        UndoStack gundo;
+
+        std::vector<std::unique_ptr<ICommand>> children;
+        Clip::Title gtitle;
+        gtitle.text = "hello";
+        gtitle.size = 0.12f;
+        children.push_back(set_clip_title(gp.sequence, Track::Kind::Video, 0, 1, gtitle));
+        children.push_back(set_clip_transform(gp.sequence, Track::Kind::Video, 0, 2, 1.0, 1.0,
+                                              120.0, -60.0, 0.0, 0.0, 0.0, false, false));
+        auto group = std::make_unique<GroupCommand>("Bulk Captions", std::move(children));
+        check(group != nullptr && !group->name().empty(), "group: constructed with its name");
+        gundo.record(std::move(group));
+        check(gp.sequence.video_tracks[0].clips[0].title.text == "hello",
+              "group: redo applies child 1 (title)");
+        check(gp.sequence.video_tracks[0].clips[1].pos_x == 120.0 &&
+                  gp.sequence.video_tracks[0].clips[1].pos_y == -60.0,
+              "group: redo applies child 2 (transform)");
+
+        check(gundo.undo(gp.sequence), "group: one undo reverts the whole batch");
+        check(!gp.sequence.video_tracks[0].clips[0].has_title(),
+              "group: undo restores child 1 (title cleared)");
+        check(gp.sequence.video_tracks[0].clips[1].pos_x == 0.0 &&
+                  gp.sequence.video_tracks[0].clips[1].pos_y == 0.0,
+              "group: undo restores child 2 (transform reverted)");
+
+        check(gundo.redo(gp.sequence), "group: redo restores the whole batch");
+        check(gp.sequence.video_tracks[0].clips[0].title.text == "hello" &&
+                  gp.sequence.video_tracks[0].clips[1].pos_x == 120.0,
+              "group: redo restores both children");
+    }
+
+    {
+        // A clip comment carrying invalid UTF-8 bytes used to abort save_project
+        // with nlohmann type_error.316, leaving a 0-byte file behind: the dump
+        // runs after ofstream already created the file. The repair pass must
+        // sanitize non-UTF-8 sequences (and non-finite floats) before dumping
+        // so a bad byte in user data can never produce a silent empty save.
+        Project tp;
+        tp.name = "utf8-repair";
+        canvas::core::Track v1;
+        v1.kind = canvas::core::Track::Kind::Video;
+        v1.name = "V1";
+        Clip c;
+        c.id = 1;
+        c.media = 0;
+        c.tl_in = 0;
+        c.tl_out = 24;
+        c.src_in = 0;
+        c.src_out = 24;
+        std::string bad = "label\xFF\xFE";  // lone continuation bytes
+        c.comments = bad;
+        c.eq_bands[0].frequency = 1000.0f;
+        c.eq_bands[0].gain = std::nan("");
+        c.eq_bands[0].enabled = true;
+        v1.clips.push_back(std::move(c));
+        tp.sequence.video_tracks.push_back(std::move(v1));
+        std::string err;
+        check(save_project(tp, "/tmp/opencode/media/utf8_repair.ncs", &err),
+              "utf8: save with invalid bytes succeeds");
+        Project loaded;
+        check(load_project(loaded, "/tmp/opencode/media/utf8_repair.ncs", &err),
+              "utf8: repaired project loads");
+        const Clip& lc = loaded.sequence.video_tracks[0].clips[0];
+        check(lc.comments == "label\xEF\xBF\xBD\xEF\xBF\xBD",
+              "utf8: comments repaired to U+FFFD");
+        check(std::isfinite(lc.eq_bands[0].gain),
+              "utf8: NaN gain repaired to a finite value (dump no longer throws)");
+        check(std::ifstream("/tmp/opencode/media/utf8_repair.ncs").good() &&
+                  std::ifstream("/tmp/opencode/media/utf8_repair.ncs").peek() != EOF,
+              "utf8: output file is non-empty (no 0-byte save)");
+        std::remove("/tmp/opencode/media/utf8_repair.ncs");
     }
 
     if (failures == 0) {

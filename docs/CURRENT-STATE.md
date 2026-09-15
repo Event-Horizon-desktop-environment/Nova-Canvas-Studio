@@ -20,7 +20,7 @@ with clear explanations.
 - Undoable editing: place/unlink/link/lift/ripple-delete/blade/move/transition/
   delete-through-edit, via a snapshot-based command stack
 - Linked A/V clip pairs move, delete, and transition together
-- Timeline model (de)serialization to `.ehproj` (JSON), versioned
+- Timeline model (de)serialization to `.ncs` (JSON), versioned; legacy `.ehproj` still opens
 
 **The timeline UI**
 - Dark, tool-grade UI with pinned top strip: live timecode readout,

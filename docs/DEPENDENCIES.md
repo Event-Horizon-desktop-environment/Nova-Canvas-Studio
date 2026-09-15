@@ -15,7 +15,7 @@ your system, with one vendored-but-unused exception (see below).
 |---|---|---|---|
 | **Qt 6** (Widgets + Svg) | Yes | The whole GUI shell, timeline, viewer, icons | Tested on 6.11; any recent 6.x works |
 | **FFmpeg** (devel) | Yes | Decoding, encoding, muxing, resampling in the core engine | libavformat, libavcodec, libavutil, libswscale, libswresample |
-| **nlohmann-json** | Yes | Project file serialize/deserialize (`*.ehproj`) | Header-only; included from `/usr/include/nlohmann` |
+| **nlohmann-json** | Yes | Project file serialize/deserialize (`*.ncs`) | Header-only; included from `/usr/include/nlohmann` |
 | **CMake** ≥ 3.24 | Yes | Build system | Ninja preferred, Makefile fallback |
 | **C++20 compiler** | Yes | The codebase | GCC; `-Wall -Wextra` expected to be warning-clean |
 | **Ninja** | Recommended | Build generator | `build.sh` falls back to Unix Makefiles |

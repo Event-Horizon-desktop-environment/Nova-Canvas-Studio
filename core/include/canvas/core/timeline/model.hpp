@@ -186,6 +186,58 @@ struct Clip {
     uint8_t clip_color = 0;
     std::string comments;
 
+    // Title overlay / generator text. When `text` is non-empty the clip draws a
+    // title: `media` stays -1 for a pure title clip (its video is the rasterised
+    // text over the top media clip beneath it, or over black), and a media clip
+    // may also carry a title burned over its own footage. `size` is the glyph em
+    // height as a fraction of the output frame height (clamped to the title law
+    // bounds); `r`/`g`/`b`/`a` are the text colour, all 0..1. Stored per-clip so
+    // the track-snapshot undo machinery and the project round-trip restore it
+    // automatically.
+    struct Title {
+        std::string text;  // UTF-8; empty = no title overlay
+        float size = 0.1f;
+        float r = 1.0f;
+        float g = 1.0f;
+        float b = 1.0f;
+        float a = 1.0f;
+        // Typeface family (e.g. "DejaVu Sans"); empty = the default system
+        // font. Resolved at render time via title::find_font_path_for, so an
+        // unknown family degrades to the default face rather than to nothing.
+        std::string font_family;
+        // Faux styles synthesised by the rasteriser (embolden overdraw, slant,
+        // baseline bar) — independent of the installed faces, so they work
+        // with any family including the default face.
+        bool bold = false;
+        bool italic = false;
+        bool underline = false;
+        // Drop shadow behind the glyphs: offset (px, right/down positive),
+        // blur radius (px, 0 = hard), opacity, colour. Disabled by default.
+        bool shadow = false;
+        float shadow_dx = 2.0f;
+        float shadow_dy = 2.0f;
+        float shadow_blur = 2.0f;
+        float shadow_opacity = 0.6f;
+        float shadow_r = 0.0f;
+        float shadow_g = 0.0f;
+        float shadow_b = 0.0f;
+        // Background box behind the whole title block: padding (px), corner
+        // radius (px, 0 = square), opacity, colour. Disabled by default.
+        bool box = false;
+        float box_pad_x = 12.0f;
+        float box_pad_y = 8.0f;
+        float box_radius = 0.0f;
+        float box_opacity = 0.6f;
+        float box_r = 0.0f;
+        float box_g = 0.0f;
+        float box_b = 0.0f;
+        [[nodiscard]] bool is_title() const noexcept { return !text.empty(); }
+        // Exact field-wise equality for the undo no-op detection (floats
+        // compare exactly — snapshot semantics, not visual tolerance).
+        bool operator==(const Title&) const = default;
+    };
+    Title title;
+
     [[nodiscard]] bool is_linked() const noexcept { return linked_id != 0; }
     [[nodiscard]] int64_t duration() const { return tl_out - tl_in; }
     [[nodiscard]] bool has_transition_out() const noexcept {
@@ -208,6 +260,10 @@ struct Clip {
     // apply. Nodes alone (no wires) are a no-op tree and read as "no grade",
     // so they keep the fast path.
     [[nodiscard]] bool has_grade() const noexcept { return !grade.edges().empty(); }
+    // True when this clip draws a title overlay (burned over its own media or,
+    // for a media < 0 title clip, over the content beneath). Drives the GPU
+    // fast-path bail and the Inspector's Title category.
+    [[nodiscard]] bool has_title() const noexcept { return title.is_title(); }
     // True when the clip draws non-opaque (transparency / blend mode).
     [[nodiscard]] bool needs_compositing() const noexcept {
         return opacity != 1.0f || blend_mode != BlendMode::Normal;

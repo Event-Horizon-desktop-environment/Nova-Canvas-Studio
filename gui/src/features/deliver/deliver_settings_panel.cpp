@@ -2,6 +2,7 @@
 
 #include "features/deliver/deliver_settings_model.hpp"
 #include "UX/theme.hpp"
+#include "canvas/core/media/hw_device.hpp"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -16,6 +17,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpinBox>
+#include <QStandardItemModel>
 #include <QStringList>
 #include <QStandardPaths>
 #include <QTabWidget>
@@ -579,13 +581,48 @@ void DeliverSettingsPanel::build() {
     rebuild_codec_list();
 }
 
+void DeliverSettingsPanel::set_encoder_key(const QString& key) {
+    if (!encoder_combo_) return;
+    const int idx = encoder_combo_->findData(key);
+    encoder_combo_->setCurrentIndex(idx >= 0 ? idx : 0);  // 0 == Auto
+}
+
 void DeliverSettingsPanel::rebuild_encoder_list() {
     if (!encoder_combo_) return;
-    const QString cur = encoder_combo_->currentText();
+    const QVariant cur = encoder_combo_->currentData();
     encoder_combo_->clear();
-    for (const std::string& e : deliver_model::encoder_backends())
-        encoder_combo_->addItem(QString::fromStdString(e));
-    if (!cur.isEmpty()) encoder_combo_->setCurrentText(cur);
+    for (const auto& e : deliver_model::available_encoder_backends())
+        encoder_combo_->addItem(QString::fromStdString(e.label),
+                                QString::fromStdString(e.key));
+    // Restore the previous selection by its canonical key, not display text
+    // (labels now carry the vendor+encoder family, e.g. "AMD VAAPI").
+    if (cur.isValid()) {
+        const int idx = encoder_combo_->findData(cur);
+        if (idx >= 0) encoder_combo_->setCurrentIndex(idx);
+    }
+
+    // Strict GPU pin: only hardware backends naming the pinned GPU stay
+    // enabled. NVENC etc. are greyed out (exports on them would be demoted to
+    // software anyway, per video_encoder_name). Keys are the canonical names
+    // ("Auto"/"CPU"/"NVIDIA"/"AMD"/"Intel") carried as item data.
+    const std::string& pin = canvas::core::HwDeviceManager::preferred_gpu_backend();
+    for (int i = 0; i < encoder_combo_->count(); ++i) {
+        const QString key = encoder_combo_->itemData(i).toString();
+        bool enabled = true;
+        if (key == "Auto" || key == "CPU") {
+            enabled = true;
+        } else if (pin.empty()) {
+            enabled = true;
+        } else if (key == "NVIDIA") {
+            enabled = pin == "cuda";
+        } else if (key == "AMD") {
+            enabled = pin == "vaapi";
+        } else if (key == "Intel") {
+            enabled = pin == "qsv";
+        }
+        QStandardItemModel* m = qobject_cast<QStandardItemModel*>(encoder_combo_->model());
+        if (m && i < m->rowCount()) m->item(i)->setEnabled(enabled);
+    }
 }
 
 namespace {
@@ -698,12 +735,12 @@ canvas::core::DeliverSettings DeliverSettingsPanel::settings() const {
     ds.video.export_video = export_video_->isChecked();
     ds.video.format = format_combo_->currentText().toStdString();
     ds.video.codec = codec_combo_->currentText().toStdString();
-    const QString enc = encoder_combo_->currentText();
-    if (enc == tr("Auto")) ds.video.encoder = canvas::core::EncoderBackend::Auto;
-    else if (enc == tr("CPU")) ds.video.encoder = canvas::core::EncoderBackend::CPU;
-    else if (enc == tr("NVIDIA")) ds.video.encoder = canvas::core::EncoderBackend::NVIDIA;
-    else if (enc == tr("AMD")) ds.video.encoder = canvas::core::EncoderBackend::AMD;
-    else if (enc == tr("Intel")) ds.video.encoder = canvas::core::EncoderBackend::Intel;
+    const QString enc = encoder_combo_->currentData().toString();
+    if (enc == "Auto") ds.video.encoder = canvas::core::EncoderBackend::Auto;
+    else if (enc == "CPU") ds.video.encoder = canvas::core::EncoderBackend::CPU;
+    else if (enc == "NVIDIA") ds.video.encoder = canvas::core::EncoderBackend::NVIDIA;
+    else if (enc == "AMD") ds.video.encoder = canvas::core::EncoderBackend::AMD;
+    else if (enc == "Intel") ds.video.encoder = canvas::core::EncoderBackend::Intel;
     ds.video.network_optimization = network_opt_->isChecked();
 
     const QString res = resolution_combo_->currentText();
@@ -793,7 +830,13 @@ void DeliverSettingsPanel::set_settings(const canvas::core::DeliverSettings& ds)
     location_->setText(QString::fromStdString(ds.file.location));
     format_combo_->setCurrentText(QString::fromStdString(ds.video.format));
     codec_combo_->setCurrentText(QString::fromStdString(ds.video.codec));
-    encoder_combo_->setCurrentIndex((int)ds.video.encoder);
+    switch (ds.video.encoder) {
+        case canvas::core::EncoderBackend::Auto: set_encoder_key("Auto"); break;
+        case canvas::core::EncoderBackend::CPU: set_encoder_key("CPU"); break;
+        case canvas::core::EncoderBackend::NVIDIA: set_encoder_key("NVIDIA"); break;
+        case canvas::core::EncoderBackend::AMD: set_encoder_key("AMD"); break;
+        case canvas::core::EncoderBackend::Intel: set_encoder_key("Intel"); break;
+    }
     network_opt_->setChecked(ds.video.network_optimization);
     export_video_->setChecked(ds.video.export_video);
     export_audio_->setChecked(ds.audio.export_audio);

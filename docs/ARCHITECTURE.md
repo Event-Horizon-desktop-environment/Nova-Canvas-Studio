@@ -62,8 +62,8 @@ snapshotting. Operations include `place_clip`, `place_linked_clip`,
 ### Project, export, GPU
 
 - `project/` — `Project` JSON save/load, versioned (`kProjectVersion`). Files
-  use the `.ehproj` extension; the JSON key is `canvas_project` (the old
-  `event_horizon_project` key still reads fine).
+  use the `.ncs` extension; the JSON key is `canvas_project` (legacy
+  `.ehproj` files and the old `event_horizon_project` key still read fine).
 - `export/` — `deliver_preset` holds the high-level Deliver settings model
   mapped down to low-level `ExportSettings`; `exporter` runs the FFmpeg
   mux+encode (NVENC/VAAPI/QSV hardware encoders, CPU fallback, progress +

@@ -1,6 +1,7 @@
 #include "canvas/core/timeline/edit_ops.hpp"
 #include "canvas/core/timeline/audio_mix.hpp"
 #include "canvas/core/timeline/audio_processing.hpp"
+#include "canvas/core/timeline/title.hpp"
 #include "canvas/core/timeline/visual.hpp"
 #include "canvas/core/util/log.hpp"
 
@@ -229,7 +230,7 @@ std::unique_ptr<ICommand> set_clip_transition_edge(Sequence& seq, const Track::K
     }
 
     std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
-    CANVAS_LOG("transition: set %s kind=%d track=%zu id=%lld type=%d duration=%lld linked=%lld",
+    log::log_warning("transition: set %s kind=%d track=%zu id=%lld type=%d duration=%lld linked=%lld",
            edge == TransitionEdge::In ? "in" : "out",
            static_cast<int>(kind), track_index, (long long)id, static_cast<int>(type),
            (long long)duration, (long long)mate_id);
@@ -402,6 +403,19 @@ void EditCommand::apply(Sequence& seq, const std::vector<TrackSnapshot>& state) 
 
 void EditCommand::redo(Sequence& seq) { apply(seq, after_); }
 void EditCommand::undo(Sequence& seq) { apply(seq, before_); }
+
+GroupCommand::GroupCommand(std::string name, std::vector<std::unique_ptr<ICommand>> children)
+    : name_(std::move(name)), children_(std::move(children)) {}
+
+void GroupCommand::redo(Sequence& seq) {
+    for (auto& child : children_)
+        if (child) child->redo(seq);
+}
+
+void GroupCommand::undo(Sequence& seq) {
+    for (auto it = children_.rbegin(); it != children_.rend(); ++it)
+        if (*it) (*it)->undo(seq);
+}
 
 void UndoStack::record(std::unique_ptr<ICommand> command) {
     redo_.clear();
@@ -1601,6 +1615,50 @@ std::unique_ptr<ICommand> set_clip_composite(Sequence& seq, const Track::Kind ki
 
     std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
     return std::make_unique<EditCommand>("clip composite", std::move(before), std::move(after));
+}
+
+std::unique_ptr<ICommand> set_clip_title(Sequence& seq, const Track::Kind kind,
+                                         const std::size_t track_index, const ClipId id,
+                                         const Clip::Title& title) {
+    Track* t = seq.track(kind, track_index);
+    const Clip* c = t ? t->clip_with_id(id) : nullptr;
+    if (!c) return nullptr;
+
+    std::vector<TrackSnapshot> before = take_snapshots(seq, {{kind, track_index}});
+
+    Clip::Title n = title;
+    n.size = canvas::core::title::clamp_size(n.size);
+    n.r = std::clamp(n.r, 0.0f, 1.0f);
+    n.g = std::clamp(n.g, 0.0f, 1.0f);
+    n.b = std::clamp(n.b, 0.0f, 1.0f);
+    n.a = std::clamp(n.a, 0.0f, 1.0f);
+    n.shadow_opacity = std::clamp(n.shadow_opacity, 0.0f, 1.0f);
+    n.shadow_r = std::clamp(n.shadow_r, 0.0f, 1.0f);
+    n.shadow_g = std::clamp(n.shadow_g, 0.0f, 1.0f);
+    n.shadow_b = std::clamp(n.shadow_b, 0.0f, 1.0f);
+    n.shadow_dx = std::clamp(n.shadow_dx, -512.0f, 512.0f);
+    n.shadow_dy = std::clamp(n.shadow_dy, -512.0f, 512.0f);
+    n.shadow_blur = std::clamp(n.shadow_blur, 0.0f, 64.0f);
+    n.box_opacity = std::clamp(n.box_opacity, 0.0f, 1.0f);
+    n.box_r = std::clamp(n.box_r, 0.0f, 1.0f);
+    n.box_g = std::clamp(n.box_g, 0.0f, 1.0f);
+    n.box_b = std::clamp(n.box_b, 0.0f, 1.0f);
+    n.box_pad_x = std::clamp(n.box_pad_x, 0.0f, 512.0f);
+    n.box_pad_y = std::clamp(n.box_pad_y, 0.0f, 512.0f);
+    n.box_radius = std::clamp(n.box_radius, 0.0f, 128.0f);
+    const auto matched = [&](const Clip& cc) { return cc.title == n; };
+    if (matched(*c)) {
+        std::vector<TrackSnapshot> same = before;
+        return std::make_unique<EditCommand>("clip title", std::move(before), std::move(same));
+    }
+
+    for (auto& cc : t->clips) {
+        if (cc.id != id) continue;
+        cc.title = n;
+        break;
+    }
+    std::vector<TrackSnapshot> after = take_snapshots(seq, {{kind, track_index}});
+    return std::make_unique<EditCommand>("clip title", std::move(before), std::move(after));
 }
 
 std::unique_ptr<ICommand> set_clip_grade(Sequence& seq, const Track::Kind kind,

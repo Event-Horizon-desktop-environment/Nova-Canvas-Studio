@@ -60,12 +60,24 @@ public:
     // attempts hardware-accelerated decoding on that (shared) device, falling
     // back to software transparently if the codec/GPU don't support it. Frames
     // are always returned in CPU-accessible RGBA via `VideoFrame`.
+    // `gpu_label` (optional) is the resolved physical GPU name of the device
+    // (`HwDeviceManager::device_label()`, e.g. "AMD Radeon (Granite Ridge)")
+    // and is reported in the [dec] open line so multi-GPU logs name the actual
+    // hardware. Null = backend-only attribution ("vaapi"/"sw").
     bool open(const std::string& path, std::string* error = nullptr,
-              const AVBufferRef* hw_device_ctx = nullptr);
+              const AVBufferRef* hw_device_ctx = nullptr,
+              const char* gpu_label = nullptr);
     void close();
 
     [[nodiscard]] bool is_open() const { return fmt_ctx_ != nullptr; }
     [[nodiscard]] bool is_hardware() const { return hw_avail_; }
+    // Named accelerator this decoder decodes on ("", "vaapi", "cuda", "qsv",
+    // "vulkan" — "" = software / no hardware engaged). Same value the [dec]
+    // open line reports; exposed so slot-level logs can name the driver too.
+    [[nodiscard]] const char* hardware_name() const { return hw_avail_ ? hw_type_name_.c_str() : "sw"; }
+    // Physical GPU name this decoder is on ("AMD Radeon (Granite Ridge)"),
+    // or "" when software / not resolved.
+    [[nodiscard]] const char* gpu_label() const { return hw_gpu_label_.c_str(); }
     [[nodiscard]] int width() const { return width_; }
     [[nodiscard]] int height() const { return height_; }
     [[nodiscard]] int nb_streams() const { return fmt_ctx_ ? fmt_ctx_->nb_streams : 0; }
@@ -239,6 +251,13 @@ private:
     AVPacket* packet_ = nullptr;
     int hw_pix_fmt_ = AV_PIX_FMT_NONE;
     bool hw_avail_ = false;
+    // Named accelerator this decoder is configured for ("" sw, "vaapi", "cuda",
+    // "qsv", "vulkan"): the per-media counterpart of the [hw] probe line, so a
+    // multi-GPU box shows WHICH hardware each stream actually decoded on.
+    std::string hw_type_name_;
+    // Resolved physical GPU name ("" when unknown / software); from the
+    // optional `gpu_label` open() argument. Reported in [dec] open.
+    std::string hw_gpu_label_;
     // NV12/CUDA engagement tracking: a hardware-configured decoder can still
     // emit SOFTWARE frames when the stream is entered mid-GOP (the AV1 sequence
     // header that primes the NVDEC session lives in an earlier keyframe).

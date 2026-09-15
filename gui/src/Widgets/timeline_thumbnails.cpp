@@ -19,21 +19,19 @@
 
 namespace canvas::gui {
 
-QPixmap scaled_fill(const QImage& img, int w, int h) {
+QPixmap scaled_fit(const QImage& img, int w, int h) {
     if (w <= 0 || h <= 0 || img.isNull()) return QPixmap();
-    const double src_aspect = static_cast<double>(img.width()) / img.height();
-    const double target_aspect = static_cast<double>(w) / h;
-    QRect crop;
-    if (src_aspect > target_aspect) {
-        const int cw = static_cast<int>(img.height() * target_aspect);
-        crop = QRect((img.width() - cw) / 2, 0, cw, img.height());
-    } else {
-        const int ch = static_cast<int>(img.width() / target_aspect);
-        crop = QRect(0, (img.height() - ch) / 2, img.width(), ch);
-    }
-    const QImage clipped = img.copy(crop);
-    if (clipped.isNull()) return QPixmap();
-    return QPixmap::fromImage(clipped.scaled(w, h, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    // Show the whole frame: scale to fit inside the cell (KeepAspectRatio) and
+    // center it on a transparent canvas so the letterbox bars reveal the clip
+    // shell behind. No cropping — nothing of the picture is cut off.
+    const QImage scaled =
+        img.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    QPixmap canvas(w, h);
+    canvas.fill(Qt::transparent);
+    QPainter p(&canvas);
+    p.drawImage((w - scaled.width()) / 2, (h - scaled.height()) / 2, scaled);
+    p.end();
+    return canvas;
 }
 
 void TimelineWidget::set_thumbnail_service(ThumbnailService* service) {
@@ -106,6 +104,21 @@ void TimelineWidget::request_clip_thumbnails() {
 
         const double cw = item.rect->rect().width();
         const double cell_w = cw / num_cells;
+        // Always-on filmstrip audit: how the strip was created this rebuild.
+        // cells/cw/cell_w must match draw_tracks() exactly (cells are what the
+        // request loop fans out below); a mismatch here means the draw side
+        // created a different count and the served pixmaps cannot tile the clip.
+        const int64_t last_frame =
+            src_in + static_cast<int64_t>((num_cells - 0.5) * dur / num_cells);
+        qWarning().nospace()
+            << "[filmstrip] REQ clip=" << item.clip->id
+            << " cells=" << num_cells
+            << " cw=" << QString::number(cw, 'f', 1)
+            << " cell_w=" << QString::number(cell_w, 'f', 2)
+            << " fpp=" << QString::number(frames_per_pixel(), 'g', 4)
+            << " dur=" << dur << " src_in=" << src_in
+            << " frames=[" << src_in << "," << last_frame << "]"
+            << " track=" << item.track_index;
         // Decode at ~2-3x the on-screen cell width so deep-zoom cells stay sharp;
         // the min keeps narrow cells from falling below a useful decode size.
         const int target_w = std::max(24, std::min(192, static_cast<int>(cell_w * 2.5)));
@@ -113,6 +126,17 @@ void TimelineWidget::request_clip_thumbnails() {
             const int64_t src_frame = src_in + static_cast<int64_t>((c + 0.5) * dur / num_cells);
             const uint64_t id = next_thumb_id_++;
             item.cells[c].request_id = id;
+            // Always-on per-cell audit: every cell the draw pass created must
+            // receive a request here. The scene_x that the request PASS writes is
+            // compared against on_thumbnail_ready's actual placement, so a
+            // draw/request/place divergence (strip ending short of the clip end,
+            // overlapping cells, cells skipped) is visible in the log directly.
+            const double cell_x = item.rect->pos().x() + c * cell_w;
+            qWarning().nospace()
+                << "[filmstrip] CELL id=" << id
+                << " cell=" << c << "/" << num_cells
+                << " scene_x=" << QString::number(cell_x, 'f', 2)
+                << " frame=" << src_frame;
             ThumbRequest req;
             req.id = id;
             req.path = it->second.path;
@@ -138,11 +162,43 @@ void TimelineWidget::on_thumbnail_ready(uint64_t id, const QImage& image) {
         if (item.cells.empty()) continue;
         for (auto& cell : item.cells) {
             if (cell.request_id != id || !cell.item) continue;
-            // Full-width pixmap: cells butt together with no seams, so the strip
-            // always reads as a continuous thumbnail preview at any zoom level.
+            // Whole-frame cells: the full picture is scaled to fit inside the
+            // cell and centered, so nothing is cropped. Where the source aspect
+            // doesn't match the cell, the letterbox bars reveal the clip shell
+            // behind instead of cutting off the top/bottom or sides.
             const double cell_w = item.rect->rect().width() / item.cells.size();
             const int cell_h = std::max(1, static_cast<int>(item.rect->rect().height() - kClipLabelHeight - 4.0));
-            cell.item->setPixmap(scaled_fill(image, std::max(1, static_cast<int>(std::ceil(cell_w))), cell_h));
+            const int pw = std::max(1, static_cast<int>(std::ceil(cell_w)));
+            // Always-on placement audit: the pixmap's actual size vs the cell box
+            // it was scaled to, plus where it landed. If pw < cell_w the pixmaps
+            // would leave gaps between cells (not edge-to-edge); if the drawn
+            // image inside scaled_fit's canvas is much smaller than the box, the
+            // visible frame reads as a floating thumbnail instead of a strip.
+            const QPixmap placed = scaled_fit(image, pw, cell_h);
+            // Cells are children of the clip's ClipClipGroup (scene origin), so
+            // item pos == scene pos.
+            qWarning().nospace()
+                << "[filmstrip] PLACE id=" << id
+                << " clip=" << item.clip->id
+                << " src_dims=" << image.width() << "x" << image.height()
+                << " cell_box=" << pw << "x" << cell_h
+                << " placed_pixmap=" << placed.width() << "x" << placed.height()
+                << " cell_scene_x=" << QString::number(cell.item->pos().x(), 'f', 2)
+                << " clip_w=" << QString::number(item.rect->rect().width(), 'f', 1);
+            cell.item->setPixmap(placed);
+            // Completeness audit: how many of this clip's cells now hold a
+            // pixmap. A clip whose PLACE lines never reach filled=totals has
+            // holes — decode failures punched through to the shell and the strip
+            // reads as not-edge-to-edge (REQ/CELL enumerate the cells the draw
+            // pass created, so a missing PLACE line names the exact blank cell).
+            int filled = 0;
+            for (const auto& other : item.cells)
+                if (other.request_id != 0 && other.item && !other.item->pixmap().isNull()) filled++;
+            const int total = static_cast<int>(item.cells.size());
+            qWarning().nospace()
+                << "[filmstrip] STRIP clip=" << item.clip->id
+                << " filled=" << filled << "/" << total
+                << (filled >= total ? " COMPLETE" : " HOLES");
             return;
         }
     }

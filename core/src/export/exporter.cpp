@@ -5,6 +5,7 @@
 #include "canvas/core/export/qsv_encode.hpp"
 #include "canvas/core/gpu/colorspace.hpp"
 #include "canvas/core/gpu/cuda_convert.hpp"
+#include "canvas/core/media/hw_device.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <cctype>
@@ -470,6 +471,17 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             if (!p.empty())
                 av_opt_set_int(vctx->priv_data, "preset",
                                qsv_preset_for(s.video_codec, p), 0);
+        } else if (is_vaapi_codec(s.video_codec)) {
+            // VAAPI has NO `preset` private option (the p1..p7 nv_preset_for
+            // spelling av_opt_set'd here previously was a silent no-op). The
+            // real speed knobs are `async_depth` and h264-only `quality`, with
+            // a measured law that differs from FFmpeg's help text — route the
+            // x264-style name through the VAAPI mapping.
+            const VaapiSpeed spd = vaapi_speed_for(s.video_codec, p);
+            if (spd.async_depth > 0)
+                av_opt_set_int(vctx->priv_data, "async_depth", spd.async_depth, 0);
+            if (spd.quality > 0)
+                av_opt_set_int(vctx->priv_data, "quality", spd.quality, 0);
         } else {
             av_opt_set(vctx->priv_data, "preset", nv_preset_for(s.video_codec, p).c_str(), 0);
         }
@@ -527,8 +539,18 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     if (v_use_hw) {
         const AVHWDeviceType dt = av_hwdevice_find_type_by_name(hw_device.c_str());
         ::AVBufferRef* dev = nullptr;
-        if (dt != AV_HWDEVICE_TYPE_NONE)
-            av_hwdevice_ctx_create(&dev, dt, nullptr, nullptr, 0);
+        if (dt != AV_HWDEVICE_TYPE_NONE) {
+            // Same GPU pin the playback probes honor: a Settings-selected GPU
+            // passes its render node / CUDA ordinal to the encoder device so
+            // export lands on the same accelerator the user picked.
+            const std::string& gpu_arg =
+                (hw_device == canvas::core::HwDeviceManager::preferred_gpu_backend())
+                    ? canvas::core::HwDeviceManager::preferred_device_arg()
+                    : std::string{};
+            av_hwdevice_ctx_create(&dev, dt,
+                                   gpu_arg.empty() ? nullptr : gpu_arg.c_str(),
+                                   nullptr, 0);
+        }
         dec_dev = dev;
         if (dev) {
             ::AVBufferRef* fr = av_hwframe_ctx_alloc(dev);
@@ -554,6 +576,24 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         }
         if (!hw_frames) v_use_hw = false;
     }
+
+    // Which hw-frame format the ENCODER actually consumes. `cuda_available()` is
+    // a machine-global property (any NVIDIA GPU present), NOT a property of this
+    // export's encoder frames — on a dual-vendor box where the only encoder is
+    // VAAPI (AMD iGPU) but an NVIDIA GPU is also present, it used to fire the
+    // CUDA composite kernels against AV_PIX_FMT_VAAPI encoder surfaces: the
+    // encoder frame's data[] is a VASurfaceID, `frame_gpu` boxed that as
+    // srcY/srcUV, and the kernels faulted asynchronously. The async fault read as
+    // "landed" in telemetry while the surface was never written (garbage encoded
+    // at ~4 fps), and the CPU fallback's cudaDeviceSynchronize surfaced the fault
+    // as a per-frame alloc_miss. Both vendor paths therefore pick the encode-side
+    // feed by the hw-frames FORMAT, never by machine-wide CUDA presence.
+    const AVPixelFormat enc_hw_fmt = hw_frames
+        ? reinterpret_cast<AVHWFramesContext*>(hw_frames->data)->format
+        : AV_PIX_FMT_NONE;
+    const bool enc_is_cuda = v_use_hw && hw_frames && enc_hw_fmt == AV_PIX_FMT_CUDA &&
+                             canvas::core::gpu::cuda_available();
+    const bool enc_is_vaapi = v_use_hw && hw_frames && enc_hw_fmt == AV_PIX_FMT_VAAPI;
 
     if (avcodec_open2(vctx, vcodec, nullptr) < 0) {
         if (hw_frames) av_buffer_unref(&hw_frames);
@@ -713,78 +753,21 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     int64_t audio_sample = 0;
     bool ended = false;
 
-    // Always-on producer cadence (~1/s): frames encoded per second, ETA, and the
-    // number of non-sequential source decodes (GPU path only; see render_stalls).
-    // A render grinding at far below the timeline fps with a big pct gap is
-    // decode-bound; stalls climbing between lines mean the compositor keeps
-    // reseeking instead of walking frames forward.
-    int64_t render_stalls = 0;
-    double render_enc_ms = 0.0, render_enc_samples = 0.0;
-    // Windowed fast-path coverage: how many frames went through the GPU single-
-    // clip composite (`render_fast`) vs the CPU compositor (`render_cpu`). A low
-    // fast_pct with many overlapping clips is expected; a low fast_pct on a
-    // solo-clip export means the GPU path keeps bailing (see `[gpu]` lines).
-    int64_t render_fast = 0, render_cpu = 0;
-    // CPU compositing time per frame (session.frame / render_video_frame), driver
-    // of software-limited exports.
-    double render_comp_ms = 0.0, render_comp_n = 0.0;
-    // Per-frame audio mix time (session.audio_chunk). Rises with track count and
-    // is the budget to watch when audio_avg_ms approaches 1/fps of the timeline.
-    double render_audio_ms = 0.0, render_audio_n = 0.0;
-    // av_hwframe_get_buffer / av_frame_alloc failures in the RGBA->hw upload
-    // path: GPU device-memory pressure mid-export.
-    int64_t render_hw_alloc_miss = 0;
-    // Max producer->consumer queue depth observed this window. A steady 64
-    // (full) means composite/decode outruns encode; a steady 1 means the
-    // producer lags and encode idles.
-    std::size_t render_q_max = 0;
-    const auto render_tick0 = std::chrono::steady_clock::now();
-    auto last_render_log = render_tick0;
-    int64_t frames_at_last_log = 0;
-    auto log_render_tick = [&]() {
-        const auto now = std::chrono::steady_clock::now();
-        const double since_s = std::chrono::duration<double>(now - last_render_log).count();
-        if (since_s < 1.0) return;
-        const double since_start_s = std::chrono::duration<double>(now - render_tick0).count();
-        const int64_t done = frame;
-        const double fps =
-            since_s > 0.0 ? static_cast<double>(done - frames_at_last_log) / since_s : 0.0;
-        const int64_t rem = total_video - std::min<int64_t>(done, total_video);
-        const double eta_s = fps > 0.0 ? static_cast<double>(rem) / fps : 0.0;
-        const double pct = total_video > 0
-            ? 100.0 * static_cast<double>(std::min<int64_t>(done, total_video)) /
-                  static_cast<double>(total_video)
-            : 0.0;
-        const double enc_avg = render_enc_samples > 0.0
-            ? render_enc_ms / render_enc_samples : 0.0;
-        const int64_t win_total = render_fast + render_cpu;
-        const double fast_pct = win_total > 0
-            ? 100.0 * static_cast<double>(render_fast) / static_cast<double>(win_total) : 0.0;
-        const double comp_avg = render_comp_n > 0.0
-            ? render_comp_ms / render_comp_n : 0.0;
-        const double audio_avg = render_audio_n > 0.0
-            ? render_audio_ms / render_audio_n : 0.0;
-        const uint64_t stalls = canvas::core::gpu::cuda_available()
-            ? canvas::core::gpu::nv12_pool_stalls() : 0;
-        ::canvas::core::log::log_warning(
-            "[render] frame=%lld/%lld pct=%.1f%% fps=%.2f eta_s=%.0f stalls=%lld "
-            "fast=%.1f%% (gpu=%lld cpu=%lld) comp_avg_ms=%.1f audio_avg_ms=%.1f "
-            "enc_avg_ms=%.1f alloc_miss=%lld qmax=%zu pool_stalls=%llu elaps_s=%.0f",
-            static_cast<long long>(done), static_cast<long long>(total_video), pct, fps, eta_s,
-            static_cast<long long>(render_stalls), fast_pct,
-            static_cast<long long>(render_fast), static_cast<long long>(render_cpu),
-            comp_avg, audio_avg, enc_avg,
-            static_cast<long long>(render_hw_alloc_miss), render_q_max, stalls, since_start_s);
-        last_render_log = now;
-        frames_at_last_log = done;
-        render_stalls = 0;
-        render_enc_ms = render_enc_samples = 0.0;
-        render_fast = render_cpu = 0;
-        render_comp_ms = render_comp_n = 0.0;
-        render_audio_ms = render_audio_n = 0.0;
-        render_hw_alloc_miss = 0;
-        render_q_max = 0;
-    };
+    // Always-on per-export telemetry (~1/s lines): frames encoded per second,
+    // ETA, the number of non-sequential source decodes, the CPU-vs-GPU fast-path
+    // split, composite/audio/encode averages, alloc misses, queue depth, and the
+    // GPU fast-path attempt aggregates from frame_gpu() — all in ONE window so
+    // the numbers reconcile (render.fast == gpu.landed on a solo-clip GPU
+    // export). A render grinding at far below the timeline fps with a big pct
+    // gap is composite/decode-bound; stalls climbing between lines mean the
+    // compositor keeps reseeking instead of walking frames forward. One instance
+    // per export, shared with RenderSession via set_telemetry(), and all note_*
+    // calls are thread-safe (producer thread writes, consumer thread ticks).
+    canvas::core::log::RenderTelemetry telemetry;
+    // Per-export judder-check state (src-frame +1 walk): local + captured, not a
+    // static, so a multi-export process never compares frame N of one export to
+    // frame M of the previous one.
+    int64_t judder_prev_src = INT64_MIN;
 
     // Decoded audio chunks are per-frame sized (e.g. 800 @48k/60fps) and don't
     // align to the encoder's 1024-sample frame size, so stage them in an
@@ -797,11 +780,113 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     // Reusable render session: open sources once, reuse decoders, and decode on
     // the GPU for hw exports (removes per-frame avformat_open_input).
     RenderSession session;
+    session.set_telemetry(&telemetry);
     bool session_ok = session.begin(project, s.width, s.height, dec_dev);
 
     // Device-side grade-LUT cache for the fused GPU grade kernel (one upload per
     // graded clip per export). Released before avformat teardown below.
     GpuGradeLut s_gpu_grade;
+
+    // VAAPI encoder-surface feed: the CUDA sibling for AV_PIX_FMT_VAAPI frames.
+    // decode_to_hw() hands a VAAPI source; the feed moves it to host NV12
+    // (av_hwframe_transfer_data), re-creates the letterbox content rect with an
+    // NV12->NV12 swscale when the source isn't canvas-sized, then uploads the
+    // full-canvas host frame into a pooled encoder surface (transfer_data again).
+    // Fully synchronous — no CUDA events, no device sync — so the pipelined
+    // producer treats the result exactly like a CPU frame ({frame, null event,
+    // null source}). Only engaged when the encoder's frames format is VAAPI;
+    // grades and edge fades bail to the CPU compositor because the fused
+    // nv12GradeResize kernel is CUDA-only. All state lives on the producer
+    // thread (single-threaded), staging frames are unref'd + refilled each call.
+    AVFrame* va_scan = av_frame_alloc();
+    AVFrame* va_scaled = av_frame_alloc();
+    AVFrame* va_out = av_frame_alloc();
+    SwsContext* va_sws = nullptr;
+    int va_sws_src_w = 0, va_sws_src_h = 0, va_sws_dst_w = 0, va_sws_dst_h = 0;
+    auto vaapi_feed_frame = [&](const int64_t tl) -> AVFrame* {
+        RenderSession::GpuFrameInfo gfi;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!session.frame_gpu(tl, &gfi) || !gfi.valid) return nullptr;
+        // Grade + fade both need the CUDA fused kernel; CPU-composite them so
+        // pixels stay identical across encoder backends.
+        if (gfi.fade < 1.0f || (gfi.grade && gfi.grade->valid())) return nullptr;
+        // NV12 chroma is half-res in both axes: a non-even content offset can't
+        // be placed by plane-relative copies without re-subsampling.
+        if (gfi.dx < 0 || gfi.dy < 0 || (gfi.dx & 1) || (gfi.dy & 1)) return nullptr;
+        if (gfi.dstW <= 0 || gfi.dstH <= 0 || (gfi.dstW & 1) || (gfi.dstH & 1)) return nullptr;
+        if (!va_scan || !va_scaled || !va_out) return nullptr;
+
+        // VAAPI surface -> host NV12 at the source's native size. transfer_data
+        // stamps the decoded frame's real dims; trust those over gfi.
+        av_frame_unref(va_scan);
+        va_scan->format = AV_PIX_FMT_NV12;
+        if (av_hwframe_transfer_data(va_scan, gfi.source, 0) < 0) return nullptr;
+        const int sw = va_scan->width, sh = va_scan->height;
+        const bool identity =
+            (gfi.dx == 0 && gfi.dy == 0 && sw == s.width && sh == s.height);
+        AVFrame* feed = va_scan;
+        if (!identity) {
+            // Re-create the letterbox rect: scale source -> content size, paste
+            // onto a black full-canvas host frame, then upload that whole canvas.
+            if (va_sws_src_w != sw || va_sws_src_h != sh ||
+                va_sws_dst_w != gfi.dstW || va_sws_dst_h != gfi.dstH) {
+                if (va_sws) sws_freeContext(va_sws);
+                va_sws = sws_getContext(sw, sh, AV_PIX_FMT_NV12,
+                                        gfi.dstW, gfi.dstH, AV_PIX_FMT_NV12,
+                                        SWS_BILINEAR, nullptr, nullptr, nullptr);
+                va_sws_src_w = sw; va_sws_src_h = sh;
+                va_sws_dst_w = gfi.dstW; va_sws_dst_h = gfi.dstH;
+            }
+            if (!va_sws) return nullptr;
+            av_frame_unref(va_scaled);
+            va_scaled->format = AV_PIX_FMT_NV12;
+            va_scaled->width = gfi.dstW;
+            va_scaled->height = gfi.dstH;
+            if (av_frame_get_buffer(va_scaled, 32) < 0) return nullptr;
+            const uint8_t* srows[] = {va_scan->data[0], va_scan->data[1], nullptr, nullptr};
+            const int slines[] = {va_scan->linesize[0], va_scan->linesize[1], 0, 0};
+            sws_scale(va_sws, srows, slines, 0, sh, va_scaled->data, va_scaled->linesize);
+
+            av_frame_unref(va_out);
+            va_out->format = AV_PIX_FMT_NV12;
+            va_out->width = s.width;
+            va_out->height = s.height;
+            if (av_frame_get_buffer(va_out, 32) < 0) return nullptr;
+            for (int r = 0; r < va_out->height; ++r)
+                std::memset(va_out->data[0] + (std::size_t)r * (std::size_t)va_out->linesize[0],
+                            16, (std::size_t)va_out->linesize[0]);
+            for (int r = 0; r < va_out->height / 2; ++r)
+                std::memset(va_out->data[1] + (std::size_t)r * (std::size_t)va_out->linesize[1],
+                            128, (std::size_t)va_out->linesize[1]);
+            for (int r = 0; r < gfi.dstH; ++r)
+                std::memcpy(va_out->data[0] +
+                                (std::size_t)(gfi.dy + r) * (std::size_t)va_out->linesize[0] + gfi.dx,
+                            va_scaled->data[0] + (std::size_t)r * (std::size_t)va_scaled->linesize[0],
+                            (std::size_t)gfi.dstW);
+            for (int r = 0; r < gfi.dstH / 2; ++r)
+                std::memcpy(va_out->data[1] +
+                                (std::size_t)(gfi.dy / 2 + r) * (std::size_t)va_out->linesize[1] + gfi.dx,
+                            va_scaled->data[1] + (std::size_t)r * (std::size_t)va_scaled->linesize[1],
+                            (std::size_t)gfi.dstW);
+            feed = va_out;
+        }
+
+        AVFrame* hw = av_frame_alloc();
+        if (!hw || av_hwframe_get_buffer(hw_frames, hw, 0) != 0) {
+            telemetry.note_alloc_miss();
+            av_frame_free(&hw);
+            return nullptr;
+        }
+        if (av_hwframe_transfer_data(hw, feed, 0) != 0) {
+            telemetry.note_alloc_miss();
+            av_frame_free(&hw);
+            return nullptr;
+        }
+        telemetry.note_fast();
+        telemetry.note_resize(std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - t0).count());
+        return hw;
+    };
 
     // Pipelined render: a producer thread decodes + composites ahead of the
     // main thread, which sends + drains. GPU work overlaps NVENC; a 3-thread
@@ -824,29 +909,27 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         const int64_t tl = (int64_t)std::llround((double)f * tl_per_frame);
         // GPU fast path: composite a single clip straight into the encoder's
         // CUDA hw frame, skipping the CPU RGBA blit + upload.
-        if (v_use_hw && hw_frames && session_ok &&
-            canvas::core::gpu::cuda_available()) {
+        if (enc_is_cuda && session_ok) {
             RenderSession::GpuFrameInfo gfi;
-            auto _tf0 = std::chrono::steady_clock::now();
             const bool _gk = session.frame_gpu(tl, &gfi) && gfi.valid;
-            auto _tf1 = std::chrono::steady_clock::now();
-            static double _st_fg = 0, _st_rz = 0; static long _cnt = 0;
             if (_gk) {
-                ++render_fast;
-                _st_fg += std::chrono::duration<double, std::milli>(_tf1 - _tf0).count();
+                telemetry.note_fast();
+                // Total frame_gpu attempt cost lives in the renderer-side telemetry
+                // (note_gpu_attempt in RenderSession::frame_gpu); no static here.
                 // Sanity: output frames must map to strictly advancing source frames;
                 // a non-+1 delta means dropped/duplicated frames (judder). Only
                 // meaningful at fps == seq fps; otherwise the tl mapping itself
                 // duplicates/rounds and the +1 check would false-trip.
-                static int64_t s_prev_src = INT64_MIN;
+                // `judder_prev_src` is captured per-export (declared next to
+                // `telemetry`), so it can't bleed across exports in one process.
                 if (gfi.src_frame >= 0 && tl_per_frame == 1.0) {
-                    if (s_prev_src != INT64_MIN && gfi.src_frame != s_prev_src + 1) {
-                        ++render_stalls;
+                    if (judder_prev_src != INT64_MIN && gfi.src_frame != judder_prev_src + 1) {
+                        telemetry.note_stall();
                         fprintf(stderr, "[FRAME-DIAG] tl_frame=%lld src=+%lld (prev src=%lld) delta=%lld\n",
                                 (long long)tl, (long long)gfi.src_frame,
-                                (long long)s_prev_src, (long long)(gfi.src_frame - s_prev_src));
+                                (long long)judder_prev_src, (long long)(gfi.src_frame - judder_prev_src));
                     }
-                    s_prev_src = gfi.src_frame;
+                    judder_prev_src = gfi.src_frame;
                 }
                 AVFrame* hw = av_frame_alloc();
                 if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
@@ -898,18 +981,28 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                         void* ev = nullptr;
                         canvas::core::gpu::convert_nv12_record_event(&ev);
                         auto _tr1 = std::chrono::steady_clock::now();
-                        _st_rz += std::chrono::duration<double, std::milli>(_tr1 - _tr0).count();
-                        if (++_cnt % 90 == 0)
-                            fprintf(stderr, "[TIMING] frame=%lld fastpath: frame_gpu=%.3fms resize=%.3fms (avg over %ld)\n",
-                                    (long long)f, _st_fg / _cnt, _st_rz / _cnt, _cnt);
+                        // Async-launch cost of the resize (the event wait is consumer-side;
+                        // the wait axis shows up in the encode time there).
+                        telemetry.note_resize(
+                            std::chrono::duration<double, std::milli>(_tr1 - _tr0).count());
                         hw->pts = f;
                         return {hw, ev, src_ref};
                     }
                     if (src_ref) av_frame_unref(src_ref);
                 } else {
-                    ++render_hw_alloc_miss;
+                    telemetry.note_alloc_miss();
                 }
                 av_frame_free(&hw);
+            }
+        }
+
+        // VAAPI feed: the encoder's frames are VAAPI surfaces (AMD/Intel, or the
+        // dual-vendor case where the machine has CUDA but this export does NOT).
+        // Fully synchronous transfer both ways — no CUDA kernels, no events.
+        if (enc_is_vaapi && session_ok) {
+            if (AVFrame* hw = vaapi_feed_frame(tl)) {
+                hw->pts = f;
+                return {hw, nullptr, nullptr};
             }
         }
 
@@ -922,17 +1015,15 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         // Live preview (zero-copy: hand the shared_ptr holding the frame we are
         // about to encode; consumer threads marshal it onto the GUI).
         if (preview_throttle.due()) push_preview(vf);
-        ++render_cpu;
-        render_comp_ms += std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - comp_t0).count();
-        render_comp_n += 1.0;
+        telemetry.note_cpu(std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - comp_t0).count());
         const std::size_t bytes =
             std::min<std::size_t>(vf->rgba.size(), rgb->linesize[0] * (std::size_t)s.height);
         memcpy(rgb->data[0], vf->rgba.data(), bytes);
 
         AVFrame* to_send = nullptr;
 
-        if (v_use_hw && hw_frames && canvas::core::gpu::cuda_available()) {
+        if (enc_is_cuda) {
             AVFrame* hw = av_frame_alloc();
             if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
                 const uintptr_t base = reinterpret_cast<uintptr_t>(hw->data[0]);
@@ -947,11 +1038,11 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                     hw->pts = f;
                     to_send = hw;
                 } else {
-                    ++render_hw_alloc_miss;
+                    telemetry.note_alloc_miss();
                     av_frame_free(&hw);
                 }
             } else {
-                ++render_hw_alloc_miss;
+                telemetry.note_alloc_miss();
                 av_frame_free(&hw);
             }
         }
@@ -976,7 +1067,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                             av_frame_free(&hw);
                         }
                     } else if (hw) {
-                        ++render_hw_alloc_miss;
+                        telemetry.note_alloc_miss();
                         av_frame_free(&hw);
                     }
                 }
@@ -1041,8 +1132,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         qcv.notify_all();
     };
 
-    if (session_ok && total_video > 0 &&
-        v_use_hw && hw_frames && canvas::core::gpu::cuda_available()) {
+    if (session_ok && total_video > 0 && (enc_is_cuda || enc_is_vaapi)) {
         std::thread producer(producer_thread_fn);
 
         while (!ended && !cancelled()) {
@@ -1060,7 +1150,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                     to_send = slot.frame;
                     ev = slot.event;
                     src = slot.source;
-                    render_q_max = std::max(render_q_max, ready_frames.size());
+                    telemetry.observe_queue(ready_frames.size());
                 }
             }
             qcv.notify_all();
@@ -1076,8 +1166,9 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                 avcodec_send_frame(vctx, to_send);
                 // NVENC reads surfaces asynchronously; barrier before returning the
                 // surface to the hw pool, else a recycled in-flight surface
-                // duplicates frames.
-                canvas::core::gpu::convert_nv12_device_sync();
+                // duplicates frames. VAAPI feed frames transferred synchronously
+                // need no barrier.
+                if (enc_is_cuda) canvas::core::gpu::convert_nv12_device_sync();
                 av_frame_free(&to_send);
             }
             // One slot per timeline frame; advance in lockstep regardless.
@@ -1103,10 +1194,13 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                 }
             }
             av_packet_free(&pkt);
-            render_enc_ms += std::chrono::duration<double, std::milli>(
-                                 std::chrono::steady_clock::now() - enc_t0).count();
-            render_enc_samples += 1.0;
-            log_render_tick();
+            telemetry.note_encode(
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - enc_t0).count());
+            telemetry.set_progress(frame, total_video);
+            if (canvas::core::gpu::cuda_available())
+                telemetry.note_pool_stalls(canvas::core::gpu::nv12_pool_stalls());
+            telemetry.tick();
 
             // audio for this pass
             if (do_audio && audio_sample < total_audio) {
@@ -1115,9 +1209,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                 const auto audio_t0 = std::chrono::steady_clock::now();
                 auto ac = session.audio_chunk(audio_sample, per_frame,
                                               s.audio_sample_rate, s.audio_channels, s.fps);
-                render_audio_ms += std::chrono::duration<double, std::milli>(
-                                       std::chrono::steady_clock::now() - audio_t0).count();
-                render_audio_n += 1.0;
+                telemetry.note_audio(std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - audio_t0).count());
                 const int n = (ac && !ac->samples.empty())
                     ? (int)(ac->samples.size() / s.audio_channels)
                     : 0;
@@ -1215,11 +1308,10 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             // GPU fast path: single-clip frames composite on the GPU straight into
             // the encoder's CUDA hw frame, skipping the CPU RGBA blit + full-res
             // upload that dominate software compositing.
-            if (v_use_hw && hw_frames && session_ok &&
-                canvas::core::gpu::cuda_available()) {
+            if (enc_is_cuda && session_ok) {
                 RenderSession::GpuFrameInfo gfi;
                 if (session.frame_gpu(tl, &gfi) && gfi.valid) {
-                    ++render_fast;
+                    telemetry.note_fast();
                     AVFrame* hw = av_frame_alloc();
                     auto tb0 = std::chrono::steady_clock::now();
                     if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
@@ -1262,6 +1354,17 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                 }
             }
 
+            // VAAPI feed (legacy single-threaded loop): encoder frames are VAAPI
+            // surfaces; fully synchronous transfer both ways, no CUDA involved.
+            if (!gpu_composited && enc_is_vaapi && session_ok) {
+                if (AVFrame* hw = vaapi_feed_frame(tl)) {
+                    hw->pts = frame;
+                    avcodec_send_frame(vctx, hw);
+                    gpu_composited = true;
+                    av_frame_free(&hw);
+                }
+            }
+
             if (!gpu_composited) {
             const auto comp_t0 = std::chrono::steady_clock::now();
 auto vf = session_ok ? session.frame(tl)
@@ -1269,10 +1372,8 @@ auto vf = session_ok ? session.frame(tl)
             if (vf) {
                 // Live preview (zero-copy: the shared_ptr already holds the frame).
                 if (preview_throttle.due()) push_preview(vf);
-                ++render_cpu;
-                render_comp_ms += std::chrono::duration<double, std::milli>(
-                                      std::chrono::steady_clock::now() - comp_t0).count();
-                render_comp_n += 1.0;
+                telemetry.note_cpu(std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - comp_t0).count());
                 const std::size_t bytes =
                     std::min<std::size_t>(vf->rgba.size(), rgb->linesize[0] * (std::size_t)s.height);
                 memcpy(rgb->data[0], vf->rgba.data(), bytes);
@@ -1281,7 +1382,7 @@ auto vf = session_ok ? session.frame(tl)
 
                 // GPU path: the CUDA kernel writes resized RGBA->NV12 directly into
                 // device planes, so NVENC consumes a frame that never left the GPU.
-                if (v_use_hw && hw_frames && canvas::core::gpu::cuda_available()) {
+                if (enc_is_cuda) {
                     AVFrame* hw = av_frame_alloc();
                     if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
                         const uintptr_t base = reinterpret_cast<uintptr_t>(hw->data[0]);
@@ -1296,11 +1397,11 @@ auto vf = session_ok ? session.frame(tl)
                             hw->pts = frame;
                             to_send = hw;
                         } else {
-                            ++render_hw_alloc_miss;
+                            telemetry.note_alloc_miss();
                             av_frame_free(&hw);
                         }
                     } else if (hw) {
-                        ++render_hw_alloc_miss;
+                        telemetry.note_alloc_miss();
                         av_frame_free(&hw);
                     }
                 }
@@ -1326,7 +1427,7 @@ auto vf = session_ok ? session.frame(tl)
                                     av_frame_free(&hw);
                                 }
                             } else if (hw) {
-                                ++render_hw_alloc_miss;
+                                telemetry.note_alloc_miss();
                                 av_frame_free(&hw);
                             }
                         }
@@ -1369,9 +1470,8 @@ auto vf = session_ok ? session.frame(tl)
             const auto audio_t0 = std::chrono::steady_clock::now();
             auto ac = session.audio_chunk(audio_sample, per_frame,
                                           s.audio_sample_rate, s.audio_channels, s.fps);
-            render_audio_ms += std::chrono::duration<double, std::milli>(
-                                   std::chrono::steady_clock::now() - audio_t0).count();
-            render_audio_n += 1.0;
+            telemetry.note_audio(std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - audio_t0).count());
             const int n = (ac && !ac->samples.empty())
                 ? (int)(ac->samples.size() / s.audio_channels)
                 : 0;
@@ -1413,10 +1513,13 @@ auto vf = session_ok ? session.frame(tl)
             }
         }
         av_packet_free(&pkt);
-        render_enc_ms += std::chrono::duration<double, std::milli>(
-                             std::chrono::steady_clock::now() - cpu_enc_t0).count();
-        render_enc_samples += 1.0;
-        log_render_tick();
+        telemetry.note_encode(
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - cpu_enc_t0).count());
+        telemetry.set_progress(frame, total_video);
+        if (canvas::core::gpu::cuda_available())
+            telemetry.note_pool_stalls(canvas::core::gpu::nv12_pool_stalls());
+        telemetry.tick();
 
         if (frame >= total_video && (audio_sample >= total_audio || !do_audio)) {
             // flush any staged partial audio frame (tail < a_frame_size)
@@ -1467,6 +1570,11 @@ auto vf = session_ok ? session.frame(tl)
 
     av_write_trailer(oc);
 
+    // Flush whatever the telemetry window still holds (short exports finish with
+    // under a second of data; the 1/s cadence never fired). Also re-arms the
+    // window so the same process can export again without stale counters.
+    telemetry.flush();
+
     CANVAS_LOG("render: complete out='%s' frames=%lld audio_samples=%lld",
            s.output_path.c_str(), (long long)frame, (long long)audio_sample);
 
@@ -1478,6 +1586,10 @@ auto vf = session_ok ? session.frame(tl)
 
     if (a_src) av_frame_free(&a_src);
     av_frame_free(&rgb);
+    if (va_sws) sws_freeContext(va_sws);
+    av_frame_free(&va_out);
+    av_frame_free(&va_scaled);
+    av_frame_free(&va_scan);
     if (sws) sws_freeContext(sws);
     avcodec_free_context(&actx);
     avcodec_free_context(&vctx);

@@ -46,6 +46,55 @@ set_target_properties(rnnoise PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 
 find_package(Threads REQUIRED)
 
+# Local voice-transcription engine (the Phase A headless transcribe job).
+# FetchedContent, pinned at a tag, built with everything upstream off so only
+# the static `whisper` library target (ggml + whisper.cpp) is compiled. The
+# engine is consumed behind canvas::core::transcribe, which forces the CPU
+# backend — the CUDA cost of a BACKGROUND transcription job is not worth it,
+# and it keeps the module free of a CUDA-runtime dependency. Third-party code
+# is exempt from the repo's zero-warning discipline (same as rnnoise).
+include(FetchContent)
+# The fetched whisper project declares cmake_minimum_required below the 3.10
+# policy floor; claiming our own floor here silences its per-configure
+# "Compatibility with CMake < 3.10" deprecation without touching upstream.
+# (Raising the effective floor also snaps whisper/ggml onto the same policy set
+# as the rest of the tree, which is benign under the WHISPER_* overrides.)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.24)
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(WHISPER_OPENMP OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(whispercpp
+    GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
+    GIT_TAG v1.9.4
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(whispercpp)
+message(STATUS "Nova Canvas whisper.cpp engine: pinned v1.9.4 (transcribe seam)")
+# The root CMakeLists sets CMAKE_AUTOMOC ON globally; whisper/ggml inherited it
+# and warn "No valid Qt version found". Silence autogen on the fetched targets
+# (parakeet is the TransformerTalker backend added upstream in 1.9.x). The
+# faint -Wformat-truncation inside whisper.cpp is third-party and only provable
+# in optimized builds, so it is suppressed at the target scope rather than
+# patched in _deps (the repo's third-party zero-warning exemption).
+foreach(_w_t ggml ggml-cpu ggml-base whisper parakeet)
+    if(TARGET ${_w_t})
+        set_target_properties(${_w_t} PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+    endif()
+endforeach()
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    foreach(_w_t ggml ggml-cpu ggml-base whisper parakeet)
+        if(TARGET ${_w_t})
+            get_target_property(_w_type ${_w_t} TYPE)
+            if(NOT _w_type STREQUAL "INTERFACE_LIBRARY")
+                target_compile_options(${_w_t} PRIVATE -Wno-format-truncation)
+            endif()
+        endif()
+    endforeach()
+endif()
+
 # Optional CUDA acceleration (GPU RGBA->NV12 conversion to feed NVENC directly).
 # Works with CUDA 12 and 13. If no nvcc is found the GPU path is simply
 # disabled and the project falls back to CPU swscale — so the build still
@@ -126,12 +175,17 @@ add_library(canvas_core STATIC
     src/media/video_decoder.cpp
     src/media/audio_decoder.cpp
     src/media/hw_device.cpp
+    src/media/gpu_select.cpp
     src/media/audio_waveform.cpp
     src/media/voice_isolation.cpp
     src/media/equalizer.cpp
+    src/media/transcript.cpp
+    src/media/transcribe.cpp
     src/timeline/model.cpp
     src/timeline/edit_ops.cpp
     src/timeline/time_stretch.cpp
+    src/timeline/title.cpp
+    src/timeline/captions.cpp
     src/colorsci/wheels_ui.cpp
     src/colorsci/curves.cpp
     src/colorsci/histogram.cpp
@@ -168,6 +222,7 @@ target_link_libraries(canvas_core PUBLIC
     PkgConfig::LIBAV
     Threads::Threads
     rnnoise
+    whisper
 )
 
 if(CANVAS_CUDA_ENABLED)
@@ -274,11 +329,66 @@ target_link_libraries(canvas_equalizer_test PRIVATE canvas_core)
 set_target_properties(canvas_equalizer_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME equalizer COMMAND canvas_equalizer_test)
 
+add_executable(canvas_title_test tests/title_test.cpp)
+target_link_libraries(canvas_title_test PRIVATE canvas_core)
+set_target_properties(canvas_title_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME title COMMAND canvas_title_test)
+
+# The caption-shaping law fed by the transcript seam (AI-subtitle bars). Pure
+# math — no model, no devices → always runs.
+add_executable(canvas_captions_test tests/captions_test.cpp)
+target_link_libraries(canvas_captions_test PRIVATE canvas_core)
+set_target_properties(canvas_captions_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME captions COMMAND canvas_captions_test)
+
+add_executable(canvas_transcript_test tests/transcript_test.cpp)
+target_link_libraries(canvas_transcript_test PRIVATE canvas_core)
+set_target_properties(canvas_transcript_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME transcript COMMAND canvas_transcript_test)
+
+# The whisper.cpp engine seam. The unit portion needs NO model file (error-path
+# laws). When a real quantized model is available (CANVAS_WHISPER_MODEL env or
+# the default cache path) the same binary also exercises one live 16 kHz
+# silence transcription to prove the FetchContent wiring end-to-end; it SKIPs
+# that portion alone when no model is present.
+add_executable(canvas_transcribe_test tests/transcribe_test.cpp)
+target_link_libraries(canvas_transcribe_test PRIVATE canvas_core)
+set_target_properties(canvas_transcribe_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME transcribe COMMAND canvas_transcribe_test)
+
 add_executable(canvas_vaapi_encode_test tests/vaapi_encode_test.cpp)
 target_link_libraries(canvas_vaapi_encode_test PRIVATE canvas_core)
 set_target_properties(canvas_vaapi_encode_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME vaapi_encode COMMAND canvas_vaapi_encode_test)
+
+add_executable(canvas_vaapi_driver_test tests/vaapi_driver_test.cpp)
+target_link_libraries(canvas_vaapi_driver_test PRIVATE canvas_core)
+set_target_properties(canvas_vaapi_driver_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME vaapi_driver COMMAND canvas_vaapi_driver_test)
+
+add_executable(canvas_gpu_select_test tests/gpu_select_test.cpp)
+target_link_libraries(canvas_gpu_select_test PRIVATE canvas_core)
+set_target_properties(canvas_gpu_select_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME gpu_select COMMAND canvas_gpu_select_test)
 add_executable(canvas_qsv_encode_test tests/qsv_encode_test.cpp)
 target_link_libraries(canvas_qsv_encode_test PRIVATE canvas_core)
 set_target_properties(canvas_qsv_encode_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME qsv_encode COMMAND canvas_qsv_encode_test)
+
+# Device-bound VAAPI encode regression + speed sweep. Both SKIP (exit 2) when
+# the machine has no working VAAPI encode node (no GPU / CI / decode-only
+# adapter only). vaapi_enc is a gate (bad output = FAIL), vaapi_enc_bench is
+# informational (it validates every output decodes but never asserts speed).
+# The bench sweeps dozens of full export_project() runs, so it gets a long
+# timeout.
+add_executable(canvas_vaapi_enc_test tests/vaapi_enc_test.cpp)
+target_link_libraries(canvas_vaapi_enc_test PRIVATE canvas_core)
+set_target_properties(canvas_vaapi_enc_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME vaapi_enc COMMAND canvas_vaapi_enc_test)
+set_tests_properties(vaapi_enc PROPERTIES TIMEOUT 120)
+
+add_executable(canvas_vaapi_enc_bench tests/vaapi_enc_bench.cpp)
+target_link_libraries(canvas_vaapi_enc_bench PRIVATE canvas_core)
+set_target_properties(canvas_vaapi_enc_bench PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME vaapi_enc_bench COMMAND canvas_vaapi_enc_bench)
+set_tests_properties(vaapi_enc_bench PROPERTIES TIMEOUT 300)

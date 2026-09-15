@@ -4,21 +4,26 @@
 #include "UX/theme.hpp"
 #include "UX/empty_state.hpp"
 #include "Widgets/media_pool_widget.hpp"
+#include "Widgets/toolbox_widget.hpp"
 
 #include <QAbstractItemView>
 #include <QDockWidget>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QPainter>
 #include <QPalette>
+#include <QPen>
 #include <QPoint>
 #include <QPointer>
 #include <QPushButton>
 #include <QSize>
+#include <QSplitter>
 #include <QTabWidget>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -32,6 +37,85 @@
 #include "canvas/core/media/video_decoder.hpp"
 
 namespace canvas::gui {
+
+namespace {
+
+// Height of the media pool card's top blend ramp, in device pixels. Kept to
+// roughly the tab strip's own height (~36-40px of chrome above the content):
+// the blend finishes before the search row, so the gradient never spills a
+// half-done band between the strip and the content it anchors.
+constexpr int kMediaPoolBlendPx = 44;
+
+// 4x4 Bayer ordered-dither matrix. Tiles across the card so an 8-bit backing
+// store reads the float-computed blend as a smooth >8-bit ramp instead of
+// horizontal 8-bit bands.
+constexpr int kBayer4[4][4] = {
+    {0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+
+// Smoothstep easing so the ramp starts gently, accelerates through the
+// transition, and settles slowly into the panel tone below the blend height.
+double smoothstep(double u) {
+    return u <= 0.0 ? 0.0 : u >= 1.0 ? 1.0 : u * u * (3.0 - 2.0 * u);
+}
+
+}  // namespace
+
+// The media pool's raised card. Fully paint-coded so the top blends from the
+// surrounding workspace surface into the panel tone over a short ramp; QSS
+// qlineargradient interpolates in 8-bit per channel and bands visibly at
+// these spans, so the ramp is computed at float precision and dithered with a
+// 4x4 Bayer matrix. Repaints on theme switches via register_theme_reapply.
+class MediaPoolGlass final : public QFrame {
+public:
+    explicit MediaPoolGlass(QWidget* parent) : QFrame(parent) {
+        setObjectName(QStringLiteral("dockGlassCard"));
+        register_theme_reapply([wp = QPointer<MediaPoolGlass>(this)] {
+            if (wp) wp->update();
+        });
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        const ThemeTokens& t = tokens();
+        const int w = width();
+        const int h = height();
+        if (w <= 0 || h <= 0) return;
+
+        // The blend is purely vertical: one 4-px-wide Bayer column, stretched
+        // across the card at nearest scale (the pattern only repeats in x, so a
+        // 4xH tile tiles exactly and the dither stays crisp under the stretch).
+        QImage tile(4, h, QImage::Format_RGB32);
+        for (int y = 0; y < h; ++y) {
+            const double eased =
+                smoothstep(static_cast<double>(y) / static_cast<double>(kMediaPoolBlendPx));
+            QRgb* line = reinterpret_cast<QRgb*>(tile.scanLine(y));
+            for (int x = 0; x < 4; ++x) {
+                // Dither amplitude ~1.0 LSB in 8-bit, centered so the pattern
+                // adds no overall brightness bias.
+                const double dith =
+                    (static_cast<double>(kBayer4[x][y & 3]) - 7.5) / 16.0;
+                auto ch = [&](int a, int b) -> int {
+                    const double v = a + (b - a) * eased + dith;
+                    return v <= 0.0 ? 0 : v >= 255.0 ? 255 : static_cast<int>(v + 0.5);
+                };
+                line[x] = qRgb(ch(t.surface.red(), t.surface_raised.red()),
+                               ch(t.surface.green(), t.surface_raised.green()),
+                               ch(t.surface.blue(), t.surface_raised.blue()));
+            }
+        }
+
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, false);
+        p.drawImage(QRect(0, 0, w, h), tile);
+
+        // Hairline rim on both sides and the bottom (the top stays borderless
+        // so the blend has nothing to abut — see dock_panel_style's note).
+        p.setPen(QPen(t.border, 1));
+        p.drawLine(0, 0, 0, h - 1);
+        p.drawLine(w - 1, 0, w - 1, h - 1);
+        p.drawLine(0, h - 1, w - 1, h - 1);
+    }
+};
 
 // The left dock: Bins column + Media Pool grid, in a Resolve-style tab strip
 // with a floating glass card and a collapse sliver at the dock's outer edge.
@@ -282,7 +366,28 @@ void build_left_dock(MainWindow& mw) {
 
     pool_body_layout->addWidget(bins_column);
     pool_body_layout->addWidget(grid_column, 1);
-    pool_root_layout->addWidget(pool_body, 1);
+
+    // The pool column above, the Resolve-style Toolbox below (effects /
+    // titles / transitions catalogue, drag sources into the timeline). The
+    // splitter splits the dock so the toolbox hugs the source-preview's
+    // bottom edge the way the reference edit page lays out.
+    auto* pool_content = new QWidget(pool_tab);
+    auto* pool_content_layout = new QVBoxLayout(pool_content);
+    pool_content_layout->setContentsMargins(0, 0, 0, 0);
+    pool_content_layout->setSpacing(0);
+    pool_content_layout->addWidget(search_row);
+    pool_content_layout->addWidget(pool_body, 1);
+
+    auto* pool_split = new QSplitter(Qt::Vertical, pool_tab);
+    pool_split->setChildrenCollapsible(false);
+    pool_split->setHandleWidth(6);
+    pool_split->addWidget(pool_content);
+    pool_split->addWidget(new ToolboxWidget(pool_split));
+    pool_split->setStretchFactor(0, 1);
+    pool_split->setStretchFactor(1, 1);
+    pool_split->setSizes({560, 320});
+
+    pool_root_layout->addWidget(pool_split, 1);
 
     // Search filters the current bin's pool by clip name.
     QObject::connect(search, &QLineEdit::textChanged, &mw, [&mw](const QString& needle) {
@@ -297,37 +402,36 @@ void build_left_dock(MainWindow& mw) {
 
     left_tabs->addTab(pool_tab, MainWindow::tr("Media Pool"));
 
-    const struct { const char* tab; const char* icon; } placeholders[] = {
-        {"Sync Bin", "sync_lock"},       {"Transitions", "transition"},
-        {"Titles", "edit"},              {"Effects", "effects"},
-        {"Index", "search"},             {"Sound Library", "volume"},
-        {"Keyframes", "mode"},
-    };
-    for (const auto& p : placeholders) {
-        auto* page = build_empty_state(left_tabs, p.icon,
-                                       MainWindow::tr(p.tab),
-                                       MainWindow::tr("This panel is coming in a future update."));
-        left_tabs->addTab(page, MainWindow::tr(p.tab));
-    }
-
     mw.media_dock_ = mw.ui->mediaDock;
     mw.media_dock_->setObjectName(QStringLiteral("mediaDock"));
     // The dock backdrop paints the flat workspace surface; the glass card below
-    // floats on it (mirror of the viewer column's viewerFrame).
-    apply_theme_style(mw.media_dock_, &dock_glow_style);
+    // floats on it (mirror of the viewer column's viewerFrame). The dock's own
+    // title sub-control would otherwise paint the App-level QDockWidget::title
+    // background (surface_raised + 4/8px padding) as a light strip above the
+    // card's top blend — the collapse toggle now lives on the top status bar,
+    // so kill the title bar here: transparent paint AND a zero-height widget.
+    apply_theme_style(mw.media_dock_, [] {
+        const ThemeTokens& t = tokens();
+        return QStringLiteral(
+            "QDockWidget { background-color: %1; }"
+            "QDockWidget::title { background: transparent; border: none;"
+            " padding: 0px; text-align: left; }")
+            .arg(css(t.surface));
+    });
     auto* media_title = new QWidget(mw.media_dock_);
     media_title->setObjectName(QStringLiteral("mediaDockTitle"));
     apply_theme_style(media_title, [] {
         return QStringLiteral("QWidget#mediaDockTitle { background: transparent;"
                               " border: none; }");
     });
+    media_title->setFixedHeight(0);
     mw.media_dock_->setTitleBarWidget(media_title);
 
     // Edge-to-edge panel wrapping the tab strip: the dock content is a flat
     // square well flush against the workspace surface — no float, no shadow.
-    auto* media_glass = new QFrame(&mw);
-    media_glass->setObjectName(QStringLiteral("dockGlassCard"));
-    apply_theme_style(media_glass, &dock_panel_style);
+    // Paint-coded (MediaPoolGlass) so the card's top blends from the workspace
+    // surface down into the panel tone with a dithered >8-bit ramp.
+    auto* media_glass = new MediaPoolGlass(&mw);
     auto* media_glass_layout = new QVBoxLayout(media_glass);
     media_glass_layout->setContentsMargins(0, 0, 0, 0);
     media_glass_layout->setSpacing(0);

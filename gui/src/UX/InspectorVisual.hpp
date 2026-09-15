@@ -15,8 +15,9 @@ namespace canvas::gui {
 class MainWindow;
 
 // Builds the Video tab's property categories (Transform, Cropping, Dynamic
-// Zoom, Composite, Speed Change, Stabilization, Lens Correction, Retime and
-// Scaling) into `video_layout` and stores the control handles for refresh/apply.
+// Zoom, Composite, Title, Speed Change, Stabilization, Lens Correction, Retime
+// and Scaling) into `video_layout` and stores the control handles for
+// refresh/apply.
 void build_inspector_visual(MainWindow& mw, QVBoxLayout* video_layout);
 
 // Connects the built controls to the timeline's selection signals so the
@@ -33,7 +34,8 @@ enum VisualPart {
     VisualPartNone = 0,
     VisualPartTransform = 1 << 0,
     VisualPartComposite = 1 << 1,
-    VisualPartAll = VisualPartTransform | VisualPartComposite,
+    VisualPartTitle = 1 << 2,
+    VisualPartAll = VisualPartTransform | VisualPartComposite | VisualPartTitle,
 };
 
 // Commits `parts` of the visible control values for the selected clip as one

@@ -3,6 +3,7 @@
 
 #include "UX/InspectorAudio.hpp"
 #include "UX/InspectorFile.hpp"
+#include "UX/InspectorSubtitles.hpp"
 #include "UX/InspectorTransition.hpp"
 #include "UX/InspectorVisual.hpp"
 #include "UX/empty_state.hpp"
@@ -60,6 +61,7 @@ void build_inspector_dock(MainWindow& mw) {
     const ModePill modes[] = {
         {"Video", "settings"}, {"Audio", "volume"}, {"Effects", "mode"},
         {"Transition", "transition"}, {"Image", "viewport"}, {"File", "film-strip"},
+        {"Subtitles", "subtitle"},
     };
     auto* mode_group = new QButtonGroup(mode_row);
     mode_group->setExclusive(true);
@@ -129,8 +131,9 @@ void build_inspector_dock(MainWindow& mw) {
 
     // --- Effects / Image pages (placeholders for now) -----------------------
     // Pages are added to the stack in the SAME order as the mode pills above
-    // (Video, Audio, Effects, Transition, Image, File); the toggled handler
-    // switches by pill index, so a misplaced page surfaces under the wrong tab.
+    // (Video, Audio, Effects, Transition, Image, File, Subtitles); the toggled
+    // handler switches by pill index, so a misplaced page surfaces under the
+    // wrong tab.
     auto* effects_page = new QWidget(stack);
     {
         auto* page_layout = new QVBoxLayout(effects_page);
@@ -170,7 +173,19 @@ void build_inspector_dock(MainWindow& mw) {
     file_layout->setContentsMargins(0, 8, 0, 8);
     file_layout->setSpacing(0);
     build_inspector_file(mw, file_layout);
-    stack->addWidget(file_page);
+    stack->addWidget(file_page);  // index 5
+
+    // --- Subtitles page -------------------------------------------------------
+    // Caption styling for the selected title/caption clip: size slider, zoom
+    // in/out, system-font dropdown (InspectorSubtitles.cpp). Enabled only
+    // while the selection carries a title overlay.
+    auto* subtitles_page = new QWidget(stack);
+    auto* subtitles_layout = new QVBoxLayout(subtitles_page);
+    subtitles_layout->setContentsMargins(0, 8, 0, 8);
+    subtitles_layout->setSpacing(0);
+    build_inspector_subtitles(mw, subtitles_layout);
+    subtitles_layout->addStretch(1);
+    stack->addWidget(subtitles_page);  // index 6
 
     for (std::size_t i = 0; i < mode_buttons.size(); ++i) {
         const int idx = static_cast<int>(i);

@@ -44,6 +44,22 @@ private:
     std::vector<TrackSnapshot> after_;
 };
 
+// Batches several commands into ONE undoable step: redo()/undo() run the
+// children in order (undo reverses), so a multi-clip bulk edit — e.g. styling
+// every selected caption at once — stays a single UndoStack entry instead of N.
+class GroupCommand final : public ICommand {
+public:
+    GroupCommand(std::string name, std::vector<std::unique_ptr<ICommand>> children);
+
+    void redo(Sequence& seq) override;
+    void undo(Sequence& seq) override;
+    [[nodiscard]] const std::string& name() const noexcept override { return name_; }
+
+private:
+    std::string name_;
+    std::vector<std::unique_ptr<ICommand>> children_;
+};
+
 enum class Placement { Overwrite, Insert, AppendAtEnd, PlaceOnTop };
 
 // `media_fps` is the source media's own frame rate. Placement derives the clip's
@@ -203,6 +219,13 @@ std::unique_ptr<ICommand> set_clip_transform(Sequence& seq, Track::Kind kind,
 std::unique_ptr<ICommand> set_clip_composite(Sequence& seq, Track::Kind kind,
                                              std::size_t track_index, ClipId id,
                                              float opacity, BlendMode blend_mode);
+// Sets a clip's title overlay (text, size, colour) with the title-law clamps
+// applied. Per-clip only: unlike transform/grade, an A/V pair's audio mate
+// carries no text, so the value does NOT propagate to a linked mate. Passing
+// an empty title clears the overlay. Returns nullptr if the clip is not found.
+std::unique_ptr<ICommand> set_clip_title(Sequence& seq, Track::Kind kind,
+                                         std::size_t track_index, ClipId id,
+                                         const Clip::Title& title);
 // Replaces a clip's color grade (the node tree applied before the composite
 // blit). If the clip is linked, the mate inherits the same graph (an A/V pair
 // shares one grade; the audio half is a visual no-op). Passing an empty graph

@@ -6,9 +6,20 @@ default: build
 build:
     ./build.sh
 
-# Configure the dedicated release build dir (installs into /usr, not /usr/local)
+# Configure the dedicated release build dir (installs into /usr, not /usr/local).
+# Pointing the whisper.cpp FetchContent at the checkout already fetched into
+# build/_deps makes this deterministic: the fresh-copy `git clone` into a new
+# build dir is what used to stall `sudo just install` on a slow network.
 configure-release:
-    cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{ justfile_directory() }}"
+    extra=()
+    if [ -d build/_deps/whispercpp-src ]; then
+        extra+=( -DFETCHCONTENT_SOURCE_DIR_WHISPERCPP="$PWD/build/_deps/whispercpp-src" )
+    fi
+    cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr "${extra[@]}"
 
 # Compile the release build (no install)
 build-release:
@@ -17,11 +28,18 @@ build-release:
 # Full release build + install into /usr. Always reconfigures, recompiles and
 # installs the newest code. Run elevated: `sudo just install`.
 #     sudo just install
+# NOTE: the whole build runs as root here. Prefer `just install-release`, which
+# compiles as your user and elevates only for the final install step.
 install:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{ justfile_directory() }}"
-    cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+    extra=()
+    if [ -d build/_deps/whispercpp-src ]; then
+        extra+=( -DFETCHCONTENT_SOURCE_DIR_WHISPERCPP="$PWD/build/_deps/whispercpp-src" )
+    fi
+    cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr "${extra[@]}"
     cmake --build build-release -j"$(nproc)"
     exec cmake --install build-release --strip
 
@@ -58,3 +76,25 @@ clean:
 # Run the test suite (roundtrip + export sweep)
 test:
     ctest --test-dir build
+
+# Per-test seams. `ctest --test-dir build` re-launches the whole harness and can
+# hang on this machine, so each suite also lands as a standalone binary you can
+# run directly. Core tests land in build/core/, GUI headless tests in
+# build/gui/tests/. Run one directly: build/core/canvas_transcribe_test.
+test-core:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for bin in "{{ justfile_directory() }}"/build/core/*test; do
+        [ -x "$bin" ] || continue
+        echo "== $bin"
+        "$bin"
+    done
+
+test-gui:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for bin in "{{ justfile_directory() }}"/build/gui/tests/*test; do
+        [ -x "$bin" ] || continue
+        echo "== $bin"
+        "$bin"
+    done

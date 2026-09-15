@@ -25,6 +25,9 @@
 namespace canvas::core::vaapi::nvidia {
 
 inline constexpr std::string_view kDriverName = "nvidia";
+// The adapter's vaQueryVendorString self-identifies as "VA-API NVDEC driver
+// [direct backend]" — it carries the "NVDEC" token, not "nvidia".
+inline constexpr std::string_view kNvdecToken = "nvdec";
 
 struct Quirks {
     // The nvidia adapter exports LINEAR buffers; never pass modifier attrs.
@@ -34,7 +37,8 @@ struct Quirks {
 
 inline constexpr const char* name() noexcept { return "nvidia"; }
 
-// True for the `nvidia` driver name (case-insensitive substring).
+// True for the `nvidia` driver name (case-insensitive substring) or the
+// adapter's "NVDEC" self-identification in the full vendor string.
 [[nodiscard]] bool matches(const std::string& driver_name) noexcept;
 
 [[nodiscard]] const Quirks& quirks() noexcept;

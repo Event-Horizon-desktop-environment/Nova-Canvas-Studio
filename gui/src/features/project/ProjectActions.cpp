@@ -1,11 +1,16 @@
 #include "UX/MainWindow.hpp"
 #include "UX/InspectorAudio.hpp"
 #include "UX/InspectorFile.hpp"
+#include "UX/InspectorSubtitles.hpp"
+#include "UX/InspectorVisual.hpp"
 #include "UX/theme.hpp"
 #include "Logging.hpp"
 
 #include "Widgets/media_pool_widget.hpp"
+#include "Widgets/toolbox_widget.hpp"
 #include "features/color/mini_timeline_strip.hpp"
+
+#include "canvas/core/timeline/title.hpp"
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -48,6 +53,8 @@ void MainWindow::new_untitled_project() {
     current_bin_.clear();
     project_->bins.clear();
     if (color_mini_strip_) color_mini_strip_->set_sequence(&project_->sequence);
+    qWarning().nospace() << "[proj] NEW project created (V1+A1, fps="
+                         << project_->sequence.fps << ")";
 }
 
 void MainWindow::ensure_tracks_at(canvas::core::Track::Kind kind, std::size_t index) {
@@ -71,6 +78,153 @@ bool MainWindow::place_selected_media(canvas::core::Placement mode) {
     const int idx = static_cast<int>(v.toLongLong());
     if (static_cast<std::size_t>(idx) >= project_->media.size()) return false;
     return place_media_at(project_->media[idx].id, current_frame_, mode);
+}
+
+void MainWindow::add_title_clip() {
+    if (!project_) return;
+    const double fps = project_->sequence.fps > 0.0 ? project_->sequence.fps : 30.0;
+    const int64_t dur = std::max<int64_t>(1, static_cast<int64_t>(std::llround(3.0 * fps)));
+    const int64_t frame = std::max<int64_t>(0, current_frame_);
+
+    // Land on the topmost unlocked video track: a title composes over the
+    // picture beneath it, so placing it highest reads naturally. Fall back to
+    // the bottom lane (V1), ensured to exist below.
+    std::size_t vindex = 0;
+    for (std::size_t i = project_->sequence.video_tracks.size(); i-- > 0;) {
+        if (!project_->sequence.video_tracks[i].locked) { vindex = i; break; }
+    }
+    ensure_tracks_at(canvas::core::Track::Kind::Video, vindex);
+
+    canvas::core::Clip clip;
+    clip.media = -1;  // media-less generator: the rasterised title is the picture
+    clip.tl_in = frame;
+    clip.src_in = 0;
+    clip.src_out = dur;
+    clip.name = "Title";
+    clip.title.text = "Title";
+    clip.title.size = canvas::core::title::kSizeDefault;
+
+    auto cmd = canvas::core::place_clip(project_->sequence, canvas::core::Track::Kind::Video,
+                                        vindex, std::move(clip),
+                                        canvas::core::Placement::Overwrite, 0.0);
+    if (!cmd) return;
+    qWarning() << "[edit] ADD-TITLE at=" << frame << "track=" << vindex << "dur=" << dur;
+    undo_.record(std::move(cmd));
+    has_unsaved_changes_ = true;
+    refresh_timeline();
+    push_snapshot();
+}
+
+namespace {
+
+// Preset lookup shared by the toolbox drop and the menu/Timeline-menu path.
+const ToolboxWidget::TitlePreset* find_title_preset(const QString& id) {
+    for (const ToolboxWidget::TitlePreset& p : ToolboxWidget::title_presets())
+        if (id == QLatin1String(p.id)) return &p;
+    return nullptr;
+}
+
+canvas::core::TransitionType transition_from_toolbox_id(const QString& id) {
+    if (id == "cross") return canvas::core::TransitionType::CrossDissolve;
+    if (id == "dipblack") return canvas::core::TransitionType::DipToBlack;
+    if (id == "fadein") return canvas::core::TransitionType::FadeIn;
+    if (id == "fadeout") return canvas::core::TransitionType::FadeOut;
+    if (id == "wipelt") return canvas::core::TransitionType::WipeLeft;
+    if (id == "wipert") return canvas::core::TransitionType::WipeRight;
+    if (id == "wipeup") return canvas::core::TransitionType::WipeUp;
+    if (id == "wipedn") return canvas::core::TransitionType::WipeDown;
+    return canvas::core::TransitionType::None;
+}
+
+}  // namespace
+
+// Toolbox-title drop: a BRAND-NEW top video track (the toolbox libraries never
+// overwrite footage) hosting a media-less generator clip with the preset's
+// text/size. The placed clip becomes the selection so the Inspector's Title
+// category surfaces immediately.
+void MainWindow::place_title_at(const QString& preset_id, int64_t frame) {
+    if (!project_) return;
+    const ToolboxWidget::TitlePreset* preset = find_title_preset(preset_id);
+    const std::string label = preset ? preset->label : "Text";
+    const std::string sample = preset ? preset->sample : "Text";
+    const float size = preset ? preset->size : canvas::core::title::kSizeDefault;
+
+    const double fps = project_->sequence.fps > 0.0 ? project_->sequence.fps : 30.0;
+    const int64_t dur = std::max<int64_t>(1, static_cast<int64_t>(std::llround(3.0 * fps)));
+    frame = std::max<int64_t>(0, frame);
+
+    const std::size_t vindex = project_->sequence.video_tracks.size();
+    ensure_tracks_at(canvas::core::Track::Kind::Video, vindex);
+
+    canvas::core::Clip clip;
+    clip.media = -1;  // media-less generator: the rasterised title is the picture
+    clip.tl_in = frame;
+    clip.src_in = 0;
+    clip.src_out = dur;
+    clip.name = label;
+    clip.title.text = sample;
+    clip.title.size = size;
+
+    auto cmd = canvas::core::place_clip(project_->sequence, canvas::core::Track::Kind::Video,
+                                        vindex, std::move(clip),
+                                        canvas::core::Placement::Overwrite, 0.0);
+    if (!cmd) return;
+    qWarning() << "[edit] TOOLBOX-TITLE preset=" << qPrintable(preset_id) << "at=" << frame
+               << "track=" << vindex << "dur=" << dur;
+    undo_.record(std::move(cmd));
+    has_unsaved_changes_ = true;
+    refresh_timeline();
+    push_snapshot();
+
+    for (const canvas::core::Clip& c : project_->sequence.video_tracks[vindex].clips) {
+        if (c.tl_in >= frame) {
+            selected_clip_ = c.id;
+            selected_clip_ids_ = {c.id};
+            update_inspector_visual(*this);
+            update_inspector_file(*this);
+            update_inspector_subtitles(*this);
+            break;
+        }
+    }
+}
+
+// Toolbox-transition drop: resolves the video lane under the drop point, then
+// applies the named transition to the clip whose body contains the drop frame
+// — IN edge for "Video Fade In", the OUT boundary for everything else — at a
+// half-second default duration. Drops that miss every clip are a no-op.
+void MainWindow::apply_transition_from_toolbox(const QString& transition_id, int64_t frame,
+                                               double scene_y) {
+    if (!project_ || !timeline_) return;
+    const canvas::core::TransitionType type = transition_from_toolbox_id(transition_id);
+    if (type == canvas::core::TransitionType::None) return;
+    frame = std::max<int64_t>(0, frame);
+
+    const int lane = timeline_->resolve_drop_lane(scene_y, canvas::core::Track::Kind::Video).index;
+    if (lane < 0 || static_cast<std::size_t>(lane) >= project_->sequence.video_tracks.size())
+        return;
+    const canvas::core::Clip* clip =
+        project_->sequence.video_tracks[static_cast<std::size_t>(lane)].clip_at(frame);
+    if (!clip) return;
+
+    const double fps = project_->sequence.fps > 0.0 ? project_->sequence.fps : 30.0;
+    const int64_t dur = std::max<int64_t>(1, static_cast<int64_t>(std::llround(0.5 * fps)));
+    std::unique_ptr<canvas::core::ICommand> cmd =
+        type == canvas::core::TransitionType::FadeIn
+            ? canvas::core::set_clip_transition_in(project_->sequence,
+                                                   canvas::core::Track::Kind::Video,
+                                                   static_cast<std::size_t>(lane), clip->id,
+                                                   type, dur)
+            : canvas::core::set_clip_transition(project_->sequence,
+                                                canvas::core::Track::Kind::Video,
+                                                static_cast<std::size_t>(lane), clip->id,
+                                                type, dur);
+    if (!cmd) return;
+    qWarning() << "[transition] TOOLBOX id=" << qPrintable(transition_id)
+               << "clip=" << clip->id << "track=" << lane << "frame=" << frame << "dur=" << dur;
+    undo_.record(std::move(cmd));
+    has_unsaved_changes_ = true;
+    refresh_timeline();
+    push_snapshot();
 }
 
 bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
@@ -527,7 +681,7 @@ void MainWindow::on_new_project() { new_untitled_project(); refresh_bin_tree(); 
 
 void MainWindow::on_open_project() {
     const QString path = QFileDialog::getOpenFileName(this, tr("Open Project"), QString(),
-                                                      tr("Nova Canvas Project (*.ehproj);;All Files (*)"));
+                                                      tr("Nova Canvas Project (*.ncs);;Legacy Project (*.ehproj);;All Files (*)"));
     if (path.isEmpty()) return;
     open_file(path);
 }
@@ -544,12 +698,15 @@ bool MainWindow::save_project_to(const QString& path) {
 
     std::string error;
     if (!canvas::core::save_project(*project_, path.toStdString(), &error)) {
+        qWarning().nospace() << "[proj] SAVE FAILED '" << path << "' error="
+                             << QString::fromStdString(error);
         status_->showMessage(tr("Save failed: %1").arg(QString::fromStdString(error)), 8000);
         return false;
     }
     has_unsaved_changes_ = false;
     project_path_ = path;
     remember_recent_project(path);
+    qWarning().nospace() << "[proj] SAVED '" << path << "'";
     status_->showMessage(tr("Saved project to %1").arg(path), 5000);
     return true;
 }
@@ -571,12 +728,12 @@ void MainWindow::on_save_project_as() {
     if (suggested.isEmpty()) {
         QString name = QString::fromStdString(project_->name).trimmed();
         if (name.isEmpty()) name = tr("Untitled");
-        suggested = name + QStringLiteral(".ehproj");
+        suggested = name + QStringLiteral(".ncs");
     }
     QString path = QFileDialog::getSaveFileName(this, tr("Save Project As"), suggested,
-                                                tr("Nova Canvas Project (*.ehproj);;All Files (*)"));
+                                                tr("Nova Canvas Project (*.ncs);;All Files (*)"));
     if (path.isEmpty()) return;
-    if (!path.endsWith(QStringLiteral(".ehproj"))) path += QStringLiteral(".ehproj");
+    if (!path.endsWith(QStringLiteral(".ncs"))) path += QStringLiteral(".ncs");
     save_project_to(path);
 }
 

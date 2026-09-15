@@ -18,6 +18,7 @@
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/model.hpp"
+#include "canvas/core/timeline/title.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -293,6 +294,55 @@ int main() {
         report(preview60 && (preview60->a || preview60->nv12),
                "60fps-in-30fps: preview assembles at the mapped source frame");
         decoder.invalidate(m60.id);
+    }
+
+    // Title clips short-circuit the decode/assemble path: a media clip wearing
+    // a title overlay must force the CPU RGBA canvas (the NV12 fast path would
+    // silently drop the raster), and a bare media < 0 title clip draws its text
+    // over black. Both strings match what the export renderer does.
+    {
+        Project pt = project;
+        pt.sequence.video_tracks[0].clips[0].title.text = "OVERLAY";
+        pt.sequence.video_tracks[0].clips[0].title.size = canvas::core::title::kSizeDefault;
+        auto rf = decoder.frame(pt, 5);
+        report(rf && (rf->a || rf->nv12), "titled media clip frame() assembles pixels");
+        report(!rf || rf->nv12 == nullptr,
+               "titled media clip frame() forces the CPU path (no NV12)");
+        auto rp = decoder.preview(pt, 5, 40);
+        report(rp && (rp->a || rp->nv12), "titled media clip preview() assembles pixels");
+
+        Project tb;
+        tb.name = "title-only";
+        tb.sequence.fps = kFps;
+        tb.sequence.next_clip_id = 1;
+        Track tt;
+        tt.kind = Track::Kind::Video;
+        Clip tc;
+        tc.id = tb.sequence.next_clip_id++;
+        tc.media = -1;
+        tc.tl_in = 0;
+        tc.tl_out = kFrames;
+        tc.src_in = 0;
+        tc.src_out = kFrames;
+        tc.name = "Title";
+        tc.title.text = "T";
+        tc.title.size = canvas::core::title::kSizeDefault;
+        tt.clips.push_back(tc);
+        tb.sequence.video_tracks.push_back(std::move(tt));
+
+        auto fr = decoder.frame(tb, 5);
+        report(fr && fr->a, "bare title clip frame() returns a CPU RGBA canvas");
+        bool lit = false;
+        if (fr && fr->a)
+            for (const auto byte : fr->a->rgba)
+                if (byte > 8) { lit = true; break; }
+        report(lit, "bare title clip frame() carries title pixels");
+        auto fp2 = decoder.preview(tb, 5, 40);
+        bool plit = false;
+        if (fp2 && fp2->a)
+            for (const auto byte : fp2->a->rgba)
+                if (byte > 8) { plit = true; break; }
+        report(plit, "bare title clip preview() carries title pixels");
     }
 
     // invalidation drops the slot + preview entries; decode then yields null.

@@ -80,10 +80,12 @@ inline void reset_log_file() {
                                        canvas::core::log::Route::Ux,
                                        canvas::core::log::Route::Playback,
                                        canvas::core::log::Route::Timeline,
+                                       canvas::core::log::Route::Transition,
                                        canvas::core::log::Route::Color,
                                        canvas::core::log::Route::Thumbs,
                                        canvas::core::log::Route::Audio,
-                                       canvas::core::log::Route::SourcePreview})
+                                       canvas::core::log::Route::SourcePreview,
+                                       canvas::core::log::Route::Project})
         std::remove(canvas::core::log::route_log_path(r));
 }
 

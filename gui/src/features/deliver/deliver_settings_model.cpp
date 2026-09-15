@@ -1,9 +1,13 @@
 #include "features/deliver/deliver_settings_model.hpp"
 
 #include "canvas/core/export/deliver_preset.hpp"
+#include "canvas/core/media/gpu_select.hpp"
+#include "canvas/core/media/hw_device.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <string>
+#include <vector>
 
 namespace canvas::gui {
 namespace deliver_model {
@@ -15,6 +19,31 @@ std::string lowered(std::string s) {
         return static_cast<char>(std::tolower(c));
     });
     return s;
+}
+
+bool has_vendor(const std::string& vendor) {
+    for (const auto& g : canvas::core::gpu_select::detect_gpus()) {
+        if (g.vendor == vendor) return true;
+    }
+    return false;
+}
+
+// Resolve the Preferences GPU pin (set_preferred_gpu backend + device_arg) to
+// a vendor string. "" means no pin, so every detected vendor is offered.
+std::string pinned_vendor() {
+    const std::string& pg = canvas::core::HwDeviceManager::preferred_gpu_backend();
+    if (pg.empty()) return {};
+    const std::string& pa = canvas::core::HwDeviceManager::preferred_device_arg();
+    for (const auto& g : canvas::core::gpu_select::detect_gpus()) {
+        // A backend-only pin (empty device_arg) matches any GPU of that backend;
+        // a device pin must name the exact render node / CUDA ordinal.
+        if (g.backend == pg && (pa.empty() || g.device_arg == pa)) return g.vendor;
+    }
+    // The pinned GPU is not in the current detection (e.g. a render node that
+    // disappeared since the preference was set): don't guess a vendor, show
+    // every detected encoder — the exporter's strict-pin law still drops any
+    // backend that doesn't match the pin at encode time.
+    return {};
 }
 
 }  // namespace
@@ -29,6 +58,27 @@ const std::vector<std::string>& preset_names() {
 
 std::vector<std::string> encoder_backends() {
     return canvas::core::deliver_encoders();
+}
+
+std::vector<EncoderBackendEntry> available_encoder_backends() {
+    // Auto + CPU are always possible; the vendor entries appear only when a
+    // GPU of that vendor is present (the Settings dialog's hardware list and
+    // the exporter's encoders draw from the same detection). When Preferences
+    // has a specific GPU pinned, only that GPU's vendor appears here — an
+    // AMD-pinned user sees AMD VAAPI and no NVIDIA NVENC; Auto (no pin) shows
+    // every detected vendor.
+    std::vector<EncoderBackendEntry> out;
+    out.push_back({"Auto", "Auto"});
+    out.push_back({"CPU", "CPU"});
+    const std::string pv = pinned_vendor();
+    const bool restricted = !pv.empty();
+    if (has_vendor("NVIDIA") && (!restricted || pv == "NVIDIA"))
+        out.push_back({"NVIDIA NVENC", "NVIDIA"});
+    if (has_vendor("AMD") && (!restricted || pv == "AMD"))
+        out.push_back({"AMD VAAPI", "AMD"});
+    if (has_vendor("Intel") && (!restricted || pv == "Intel"))
+        out.push_back({"Intel QSV", "Intel"});
+    return out;
 }
 
 std::vector<std::string> video_codecs_for_format(const std::string& format) {

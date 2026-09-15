@@ -71,7 +71,11 @@ QString ThumbnailService::cache_file_name(const std::string& seed, const char* e
 
 QString ThumbnailService::disk_path_thumbnail(const std::string& path, int64_t frame, int width) const {
     if (cache_dir_.isEmpty()) return QString();
-    const std::string seed = path + "|" + std::to_string(frame) + "|" + std::to_string(width);
+    // "t2": render-format version bump (same role as "wf2" below) — the decode
+    // now scales to FIT inside the box (aspect preserved, never squashed), so
+    // every PNG written by the old IgnoreAspectRatio max_height lane is
+    // invalidated; unversioned keys would keep serving the squashed frames.
+    const std::string seed = "t2|" + path + "|" + std::to_string(frame) + "|" + std::to_string(width);
     return cache_dir_ + QLatin1Char('/') + cache_file_name(seed, "png");
 }
 
@@ -248,6 +252,27 @@ void ThumbnailService::submit(ThumbRequest req) {
             }
         }
 
+        // In-flight dedupe: a rebuild re-issues every cell while the previous
+        // pass is still decoding (each ~500ms), so the same (path, frame, width)
+        // cell was being queued ~5x and the queue ballooned to 1200 jobs for
+        // 275 unique cells — the strip never caught up. Register as a waiter on
+        // the pending decode instead of enqueueing a duplicate; the worker fans
+        // the single finished QImage out to every waiter id.
+        const CacheKey pending_key{req.path, req.frame, req.target_width, audio, req.src_lo, req.src_hi,
+                                   gain_pct};
+        const auto pending_it = pending_ids_.find(pending_key);
+        if (pending_it != pending_ids_.end()) {
+            if (debug_enabled())
+                qDebug() << "thumb: dedupe (pending) id=" << req.id
+                         << (audio ? "waveform" : "thumb")
+                         << "path=" << QString::fromStdString(req.path)
+                         << "frame=" << req.frame << "w=" << req.target_width
+                         << "waiters=" << (pending_it->second.size() + 1);
+            pending_it->second.push_back(req.id);
+            return;
+        }
+        pending_ids_[pending_key].push_back(req.id);
+
         // Always-on (miss): the pool/timeline asked for a generation. Keeping
         // this ungated means Canvas-Thumbs.log always records every request that
         // actually had to do work — a dead pool tile with no line here is a
@@ -358,7 +383,34 @@ void ThumbnailService::worker_loop() {
                 agg_ms = 0.0;
             }
         }
-        if (img.isNull()) continue;
+        if (img.isNull() && !req.is_audio) {
+            // A single-frame decode hiccup used to leave that cell permanently
+            // blank ("thumbnails every now and again", never backfilled until a
+            // rebuild). Retry a small window of adjacent frames so every cell
+            // still fills; the retries are cheap because neighbours share the
+            // decoder's sequential-seek window and land in the LRU cache. Any
+            // cell left blank shows through to the clip shell, so the strip
+            // reads as non-edge-to-edge — probe a few offsets before giving up.
+            static constexpr std::int64_t kProbeOffsets[] = {-1, 1, -2, 2, -3, 3};
+            for (const std::int64_t off : kProbeOffsets) {
+                ThumbRequest retry = req;
+                retry.frame = std::max<int64_t>(0, req.frame + off);
+                img = generate(retry, hw);
+                if (!img.isNull()) break;
+                if (debug_enabled())
+                    qDebug() << "thumb: retry-miss id=" << req.id
+                             << "frame=" << req.frame << "probe=" << (req.frame + off);
+            }
+        }
+        if (img.isNull()) {
+            // Generation failed (retry included): abandon every waiter that
+            // dedupe-parked on this key so their next rebuild re-enqueues
+            // instead of waiting on a pending entry no decoder will ever serve.
+            std::lock_guard<std::mutex> lock(mutex_);
+            const CacheKey key{req.path, req.frame, req.target_width, req.is_audio, req.src_lo, req.src_hi};
+            pending_ids_.erase(key);
+            continue;
+        }
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -371,8 +423,26 @@ void ThumbnailService::worker_loop() {
                 cache_.erase(oldest);
             }
         }
-        if (req.is_audio) emit waveform_ready(req.id, std::move(img));
-        else emit thumbnail_ready(req.id, std::move(img));
+        // Serve every request id parked on this key with the single QImage just
+        // generated (cache insert above happens BEFORE this erase, so a submit
+        // racing between generate-finish and here still hits cache_ instead of
+        // re-enqueueing — no served-waiter is ever left waiting).
+        {
+            std::vector<uint64_t> waiters;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const CacheKey key{req.path, req.frame, req.target_width, req.is_audio, req.src_lo, req.src_hi};
+                auto it = pending_ids_.find(key);
+                if (it != pending_ids_.end()) {
+                    waiters = std::move(it->second);
+                    pending_ids_.erase(it);
+                }
+            }
+            for (const uint64_t waiter : waiters) {
+                if (req.is_audio) emit waveform_ready(waiter, img);
+                else emit thumbnail_ready(waiter, img);
+            }
+        }
     }
 }
 
@@ -584,17 +654,24 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
     QImage source(frame->rgba.data(), frame->width, frame->height,
                   static_cast<qsizetype>(frame->stride), QImage::Format_RGBA8888);
     source = source.copy();
-
-    const double scale = static_cast<double>(req.target_width) / source.width();
-    const int scaled_h = std::max(1, static_cast<int>(source.height() * scale));
     QImage result;
-    if (req.max_height > 0 && scaled_h > req.max_height) {
-        const double hs = static_cast<double>(req.max_height) / scaled_h;
-        result = source.scaled(QSize(req.target_width, req.max_height),
-                             Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+
+    // Scale to FIT inside the target box, never distort: forcing the frame into
+    // a fixed (target_width, max_height) box with IgnoreAspectRatio squashed any
+    // source taller than the cap (and, worse, made filmstrip cell heights vary
+    // cell-to-cell so the strip read as "patchy thumbs every now and again").
+    const int bound_w = req.target_width;
+    const int bound_h = req.max_height > 0 ? req.max_height : req.target_width;
+    const double sx = static_cast<double>(bound_w) / source.width();
+    const double sy = static_cast<double>(bound_h) / source.height();
+    const double fit = std::min(sx, sy);
+    if (fit >= 1.0) {
+        // Already under the box (small source): keep pixels, no upscale.
+        result = source;
     } else {
-        result = source.scaled(QSize(req.target_width, scaled_h),
-                             Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        result = source.scaled(std::max(1, static_cast<int>(source.width() * fit)),
+                               std::max(1, static_cast<int>(source.height() * fit)),
+                               Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     }
     save_to_disk(disk_path_thumbnail(req.path, req.frame, req.target_width), result);
     return result;

@@ -48,6 +48,14 @@ struct AudioDecoder::Impl {
     // while the device pads).
     bool at_eof = false;
     int64_t eof_sample = 0;
+
+    // Physical end of the stream: av_read_frame reported EOF (or the codec
+    // drained after it). Distinct from `at_eof`, which is the *served* marker:
+    // `stream_eof` records the fact even when a real chunk (the stream's last
+    // frame(s)) is still handed out on the same walk, and never latches from a
+    // mid-stream packet/decoder error. `at_eof` is latched from it whenever a
+    // subsequent call has nothing real left to serve.
+    bool stream_eof = false;
     std::uint64_t resync_count = 0;
 
     ~Impl() {
@@ -65,6 +73,7 @@ AudioDecoder::~AudioDecoder() = default;
 bool AudioDecoder::has_audio() const { return impl_->stream_index >= 0; }
 int AudioDecoder::source_sample_rate() const { return impl_->sample_rate; }
 int AudioDecoder::source_channels() const { return impl_->channels; }
+bool AudioDecoder::at_stream_end() const { return impl_->at_eof; }
 
 double AudioDecoder::duration_seconds() const {
     if (!impl_->fmt_ctx || impl_->stream_index < 0) return 0.0;
@@ -130,6 +139,8 @@ bool AudioDecoder::open(const std::string& path) {
     impl_->current_out_rate = 48000;
     impl_->decoded.clear();
     impl_->decoded_at = 0;
+    impl_->at_eof = false;
+    impl_->stream_eof = false;
     const bool ok = impl_->frame && impl_->packet;
     if (ok)
         CANVAS_LOG("audio_decoder: open OK stream=%d rate=%d ch=%d tb=%d/%d",
@@ -162,6 +173,8 @@ void AudioDecoder::close() {
     impl_->next_sample = 0;
     impl_->decoded.clear();
     impl_->decoded_at = 0;
+    impl_->at_eof = false;
+    impl_->stream_eof = false;
 }
 
 void AudioDecoder::seek(const int64_t start_sample, const int out_sample_rate) {
@@ -200,6 +213,7 @@ void AudioDecoder::seek(const int64_t start_sample, const int out_sample_rate) {
     impl_->decoded_at = start_sample;
     // A real seek re-enters the stream, so a past-EOF state no longer applies.
     impl_->at_eof = false;
+    impl_->stream_eof = false;
     impl_->eof_sample = 0;
 }
 
@@ -339,6 +353,8 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
                 continue;
             }
             if (ret == AVERROR_EOF) {
+                // The codec drained: no more decoded frames will come from it.
+                impl_->stream_eof = true;
                 // Drain any residual resampler delay once.
                 if (!flushed && impl_->swr_ctx) {
                     swr_convert(impl_->swr_ctx, nullptr, 0, nullptr, 0);
@@ -354,6 +370,7 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
                 const int r = av_read_frame(impl_->fmt_ctx, impl_->packet);
                 if (r < 0) {
                     CANVAS_LOG("audio_decoder: decode packet EOF ret=%d, flushing codec", r);
+                    impl_->stream_eof = true;
                     if (!flushed) {
                         avcodec_send_packet(impl_->codec_ctx, nullptr);
                         flushed = true;
@@ -442,7 +459,11 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
     // until a manual seek re-enters the stream. Serve SILENCE instead so the
     // stream keeps flowing in lockstep with the playhead; real content resumes
     // on the next seek/resync that lands before the end.
-    if (impl_->at_eof || target > impl_->decoded_at) {
+    if (impl_->at_eof || impl_->stream_eof || target > impl_->decoded_at) {
+        // Physical EOF (stream_eof) latches at_eof even on a contiguous
+        // request that reached the codec's end exactly at the frontier
+        // (target == decoded_at) — a whole-file drain chasing the served
+        // position would otherwise keep consuming fabricated silence forever.
         impl_->at_eof = true;
         impl_->eof_sample = impl_->decoded_at;
     }

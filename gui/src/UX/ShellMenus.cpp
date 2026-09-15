@@ -126,6 +126,8 @@ void build_app_menus(MainWindow& mw) {
     auto* timeline_menu = mw.ui->menubar->addMenu(MainWindow::tr("&Timeline"));
     timeline_menu->addAction(MainWindow::tr("Add Edit"), QKeySequence(Qt::CTRL | Qt::Key_Backslash));
     timeline_menu->addAction(MainWindow::tr("Add Marker"), QKeySequence(Qt::Key_M));
+    timeline_menu->addAction(MainWindow::tr("Add Title"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_T),
+                             &mw, [&mw] { mw.add_title_clip(); });
     timeline_menu->addAction(MainWindow::tr("Zoom to Fit"), QKeySequence(Qt::SHIFT | Qt::Key_Z), &mw,
                              [&mw] { mw.timeline_->zoom_fit(); });
     const auto collapse_all = [&mw](bool collapsed) {
@@ -143,6 +145,17 @@ void build_app_menus(MainWindow& mw) {
     timeline_menu->addAction(MainWindow::tr("Expand All Tracks"),
                              QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E), &mw,
                              [collapse_all] { collapse_all(false); });
+
+    // Timeline > AI Tools: local on-machine subtitle generation from the
+    // selected audio clip's media (whisper.cpp, no uploads).
+    auto* ai_menu = timeline_menu->addMenu(MainWindow::tr("AI Tools"));
+    apply_rounded_menu(ai_menu);
+    ai_menu->addAction(MainWindow::tr("Generate Subtitles From Audio…"), &mw,
+                       [&mw] { mw.open_subtitle_dialog(); });
+    ai_menu->addSeparator();
+    auto* ai_hint = new QAction(MainWindow::tr("Transcription runs locally"), ai_menu);
+    ai_hint->setEnabled(false);
+    ai_menu->addAction(ai_hint);
 
     auto* clip_menu = mw.ui->menubar->addMenu(MainWindow::tr("&Clip"));
     clip_menu->addAction(MainWindow::tr("Add Transition"), QKeySequence(Qt::CTRL | Qt::Key_T));

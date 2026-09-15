@@ -173,6 +173,11 @@ private:
     const canvas::core::Clip* top_video_clip_at(const canvas::core::Project& project,
                                             std::int64_t seq_frame) const;
 
+    // Topmost unlocked video clip with `media >= 0` covering `seq_frame` (the
+    // picture a media-less title clip composites over), or nullptr.
+    const canvas::core::Clip* media_clip_beneath(const canvas::core::Project& project,
+                                                 std::int64_t seq_frame) const;
+
     // Shared body of the two NV12 decodes below: builds the I-frame index,
     // verifies hardware+CUDA, maps seq_frame → src_frame, decodes + resizes.
     // `slot` must already be loaded.
@@ -199,6 +204,20 @@ private:
     // while the CPU RGBA path applies the SAME LUT — preview == export by
     // construction. Also logs the always-on `[grade]` engage census on bake.
     canvas::core::grade_graph::GradeLutPtr grade_lut_for(const canvas::core::Clip& clip);
+
+    // Title clips rasterize on the forced-CPU RGBA path, whose title branch
+    // used to return the composited frame WITHOUT its transition window, so a
+    // cut-dissolve or edge fade on a titled clip never rendered in playback/
+    // scrub (export was already correct: it fades the whole composited canvas).
+    // Attaches the same window metadata the CPU media path sets: single-clip
+    // IN fade (fade_from_black + progress), OUT dissolve against the incoming
+    // clip B decoded behind it (mode + progress + out->b), or fade-to-black
+    // when no clip follows the cut. `out->a` must already hold the titled
+    // composite; this only sets the transition fields plus a decoded B.
+    void attach_title_transition(canvas::core::RenderFrame& out,
+                                 const canvas::core::Project& project,
+                                 const canvas::core::Clip& a,
+                                 std::int64_t seq_frame);
 
     std::uint64_t grade_samples_ = 0;
     double grade_ms_sum_ = 0.0;

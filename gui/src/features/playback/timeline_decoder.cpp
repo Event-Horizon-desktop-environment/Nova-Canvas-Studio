@@ -5,6 +5,7 @@
 
 #include "canvas/core/gpu/cuda_convert.hpp"
 #include "canvas/core/timeline/clip_rate.hpp"
+#include "canvas/core/timeline/title.hpp"
 #include "canvas/core/util/color_log.hpp"
 #include "canvas/core/util/log.hpp"
 
@@ -75,14 +76,18 @@ private:
 void TimelineDecoder::add_media(const canvas::core::MediaEntry& entry) {
     auto slot = std::make_unique<DecoderSlot>();
     std::string error;
-    if (slot->decoder.open(entry.path, &error, hw_.device_ctx())) slot->loaded = true;
+    if (slot->decoder.open(entry.path, &error, hw_.device_ctx(),
+                           hw_.device_label().c_str())) slot->loaded = true;
     // Always-on stream census: how many streams the container holds, which one
     // the decoder picked, and every video stream present (so two video streams
     // show up instead of silently being ignored).
     if (slot->loaded) {
+        const bool gpu_tag = slot->decoder.is_hardware() &&
+                             slot->decoder.gpu_label()[0];
         ::canvas::core::log::log_warning(
-            "[media] open id=%d hw=%s %s path=%s", entry.id,
-            slot->decoder.is_hardware() ? "yes" : "no",
+            "[media] open id=%d hw=%s%s%s %s path=%s", entry.id,
+            slot->decoder.is_hardware() ? slot->decoder.hardware_name() : "sw",
+            gpu_tag ? " gpu=\"" : "", gpu_tag ? slot->decoder.gpu_label() : "",
             slot->decoder.video_stream_summary().c_str(), entry.path.c_str());
     } else {
         const char* err = error.empty() ? "unknown" : error.c_str();
@@ -110,11 +115,16 @@ void TimelineDecoder::open_b_slot(const canvas::core::Project& project,
     if (it == project.media.end()) return;
     auto slot = std::make_unique<DecoderSlot>();
     std::string error;
-    if (slot->decoder.open(it->path, &error, hw_.device_ctx())) {
+    if (slot->decoder.open(it->path, &error, hw_.device_ctx(),
+                           hw_.device_label().c_str())) {
         slot->loaded = true;
+        const bool gpu_tag = slot->decoder.is_hardware() &&
+                             slot->decoder.gpu_label()[0];
         ::canvas::core::log::log_warning(
-            "[dec] B-slot open id=%d hw=%s path=%s", clip.media,
-            slot->decoder.is_hardware() ? "yes" : "no", it->path.c_str());
+            "[dec] B-slot open id=%d hw=%s%s%s path=%s", clip.media,
+            slot->decoder.is_hardware() ? "yes" : "no",
+            gpu_tag ? " gpu=\"" : "", gpu_tag ? slot->decoder.gpu_label() : "",
+            it->path.c_str());
     } else {
         ::canvas::core::log::log_warning("[dec] B-slot OPEN-FAILED id=%d err=%s path=%s",
                                          clip.media,
@@ -826,6 +836,19 @@ const canvas::core::Clip* TimelineDecoder::top_video_clip_at(const canvas::core:
     return nullptr;
 }
 
+const canvas::core::Clip* TimelineDecoder::media_clip_beneath(
+    const canvas::core::Project& project, std::int64_t seq_frame) const {
+    if (seq_frame < 0) return nullptr;
+    const canvas::core::Sequence& seq = project.sequence;
+    for (std::size_t i = seq.video_tracks.size(); i-- > 0;) {
+        const auto& track = seq.video_tracks[i];
+        if (track.locked) continue;
+        const canvas::core::Clip* c = track.clip_at(seq_frame);
+        if (c && c->media >= 0) return c;
+    }
+    return nullptr;
+}
+
 std::optional<TimelineDecoder::TransitionBakeCandidate>
 TimelineDecoder::next_transition_bake_candidate(const canvas::core::Project& project,
                                                 std::int64_t seq_frame) const {
@@ -975,8 +998,10 @@ void TimelineDecoder::run_transition_bake(const TransitionBakeJob& job) {
     const auto t0 = std::chrono::steady_clock::now();
     std::string error;
     canvas::core::VideoDecoder decA, decB;
-    if (!decA.open(job.a_entry.path, &error, hw_.device_ctx()) ||
-        !decB.open(job.b_entry.path, &error, hw_.device_ctx())) {
+    if (!decA.open(job.a_entry.path, &error, hw_.device_ctx(),
+                   hw_.device_label().c_str()) ||
+        !decB.open(job.b_entry.path, &error, hw_.device_ctx(),
+                   hw_.device_label().c_str())) {
         ::canvas::core::log::log_warning(
             "[trans-bake] open-FAILED win=[%lld,%lld) err=%s",
             static_cast<long long>(job.win_start), static_cast<long long>(job.win_end),
@@ -1109,6 +1134,95 @@ void TimelineDecoder::run_transition_bake(const TransitionBakeJob& job) {
         static_cast<long long>(n), static_cast<long long>(parked_at), secs);
 }
 
+void TimelineDecoder::attach_title_transition(canvas::core::RenderFrame& out,
+                                              const canvas::core::Project& project,
+                                              const canvas::core::Clip& a,
+                                              std::int64_t seq_frame) {
+    // Same window predicates the media paths use; the title composite in out.a
+    // then carries the identical decode metadata so the viewer renders the
+    // transition on the titled frame instead of dropping it at the early return.
+    const int64_t dur_out = a.transition_out_duration;
+    const int64_t tr_out_start = a.tl_out - dur_out;
+    const bool in_out_trans = a.has_transition_out() &&
+                              !canvas::core::is_audio_transition(a.transition_out) &&
+                              seq_frame >= tr_out_start && seq_frame < a.tl_out;
+    const int64_t dur_in = a.transition_in_duration;
+    const bool in_in_trans = a.has_transition_in() &&
+                             !canvas::core::is_audio_transition(a.transition_in) &&
+                             seq_frame >= a.tl_in && seq_frame < a.tl_in + dur_in;
+
+    if (in_in_trans) {
+        static int title_in_log_ = 0;
+        if ((title_in_log_++ % 30) == 0)
+            ::canvas::core::log::log_warning(
+                "transition: playhead active (title-in) seq_frame %lld clip %llu "
+                "type %d window [%lld,%lld)",
+                static_cast<long long>(seq_frame),
+                static_cast<unsigned long long>(a.id),
+                static_cast<int>(a.transition_in),
+                static_cast<long long>(a.tl_in),
+                static_cast<long long>(a.tl_in + dur_in));
+        out.mode = to_render_mode(a.transition_in);
+        if (dur_in > 0)
+            out.progress = static_cast<float>(seq_frame - a.tl_in) /
+                           static_cast<float>(dur_in);
+        out.fade_from_black = true;
+    }
+    if (!in_out_trans) return;
+
+    // OUT dissolve: the incoming clip B sits exactly at the cut (A's tl_out) on
+    // the same track and plays BEHIND the titled A. Advance B through its
+    // pre-roll handle; clamp to source 0 when trimmed tight at the media head.
+    static int title_out_log_ = 0;
+    if ((title_out_log_++ % 30) == 0)
+        ::canvas::core::log::log_warning(
+            "transition: playhead active (title-out) seq_frame %lld clip %llu "
+            "type %d window [%lld,%lld]",
+            static_cast<long long>(seq_frame), static_cast<unsigned long long>(a.id),
+            static_cast<int>(a.transition_out), static_cast<long long>(tr_out_start),
+            static_cast<long long>(a.tl_out));
+    const canvas::core::Sequence& seq = project.sequence;
+    const canvas::core::Clip* b = nullptr;
+    for (const auto& track : seq.video_tracks) {
+        if (track.locked) continue;
+        for (const auto& cc : track.clips) {
+            if (cc.tl_in == a.tl_out) {
+                b = &cc;
+                break;
+            }
+        }
+        if (b) break;
+    }
+    if (b && b != &a) {
+        const double bsf2 = project.sequence.fps;
+        const double bmf2 = media_fps_of(project, *b);
+        const double bratio = (bmf2 > 0.0 && bsf2 > 0.0) ? bsf2 / bmf2 : 1.0;
+        int64_t b_seq = b->tl_in + static_cast<int64_t>(std::llround(
+            (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
+        if (b_seq < 0) b_seq = 0;
+        const auto fbB0 = std::chrono::steady_clock::now();
+        const char* const fbB_why = g_last_nv12_null_reason;
+        const auto fbB_nv12_ms = g_last_nv12_null_ms;
+        out.b = decode(project, *b, b_seq);
+        const double fbB_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fbB0).count();
+        trace_rgba_fallback("B-title-out", b->media, b_seq, b->tl_in, fbB_why,
+                            fbB_nv12_ms, fbB_ms);
+        if (b->has_grade()) out.grade_b = grade_lut_for(*b);
+        if (dur_out > 0)
+            out.progress = static_cast<float>(seq_frame - tr_out_start) /
+                           static_cast<float>(dur_out);
+        out.mode = to_render_mode(a.transition_out);
+    } else {
+        // No incoming clip at the cut (e.g. the last clip on the track): fade the
+        // titled composite itself out to black over the transition window.
+        if (dur_out > 0)
+            out.progress = static_cast<float>(seq_frame - tr_out_start) /
+                           static_cast<float>(dur_out);
+        out.fade_to_black = true;
+    }
+}
+
 canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project& project,
                                                 std::int64_t seq_frame) {
     DecodeOriginGuard origin_frame(1);
@@ -1124,6 +1238,36 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
     const canvas::core::Clip* a = top_video_clip_at(project, seq_frame);
     if (a) apply_clip_visual(*out, *a);
     if (!a) return out;
+
+    // Title clips (media < 0) and media clips carrying a title overlay force
+    // the CPU RGBA path: the GPU/NV12 fast path only delivers decoded planes,
+    // which would silently drop the rasterised text. A media-less title
+    // composites over the top media clip beneath it (black when the sequence
+    // has nothing media-backed below). The title draw is a fully owned copy so
+    // the LRU-backed const decode frames are never mutated.
+    if (a->has_title()) {
+        canvas::core::VideoFramePtr source;
+        if (a->media >= 0) {
+            source = decode(project, *a, seq_frame);
+            if (a->has_grade()) out->grade = grade_lut_for(*a);
+        } else {
+            const canvas::core::Clip* base = media_clip_beneath(project, seq_frame);
+            if (base) {
+                source = decode(project, *base, seq_frame);
+                if (base->has_grade()) out->grade = grade_lut_for(*base);
+                apply_clip_visual(*out, *base);
+            }
+        }
+        if (!source) source = make_black_frame(*a, 0);
+        if (source) {
+            auto writable = std::make_shared<canvas::core::VideoFrame>(*source);
+            canvas::core::title::render_clip_title(*a, writable->rgba, writable->width,
+                                                   writable->height, writable->stride);
+            out->a = std::move(writable);
+        }
+        attach_title_transition(*out, project, *a, seq_frame);
+        return out;
+    }
 
     // Graded clips ride the SAME GPU/NV12 fast path as grade-free ones: the
     // grade is baked into a 3D LUT once per grade change and attached to the
@@ -1365,7 +1509,7 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
     if (in_out_trans) {
         static int transition_log_ = 0;
         if ((transition_log_++ % 30) == 0)
-            CANVAS_LOG("transition: playhead active seq_frame %lld clip %llu type %d window [%lld,%lld)",
+            ::canvas::core::log::log_warning("transition: playhead active seq_frame %lld clip %llu type %d window [%lld,%lld)",
                    static_cast<long long>(seq_frame), static_cast<unsigned long long>(a->id),
                    static_cast<int>(a->transition_out),
                    static_cast<long long>(tr_out_start), static_cast<long long>(a->tl_out));
@@ -1444,6 +1588,34 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
 
     if (a) apply_clip_visual(*out, *a);
     if (!a) return out;
+
+    // Title clips take the same forced-CPU RGBA composite as frame(): raster the
+    // text over the top media clip beneath (or black) and stop. Scrub preview at
+    // full res for the ~short title windows is acceptable — the rare case, and
+    // correctness with the export path matters more than scrub latency here.
+    if (a->has_title()) {
+        canvas::core::VideoFramePtr source;
+        if (a->media >= 0) {
+            source = decode(project, *a, seq_frame);
+            if (a->has_grade()) out->grade = grade_lut_for(*a);
+        } else {
+            const canvas::core::Clip* base = media_clip_beneath(project, seq_frame);
+            if (base) {
+                source = decode(project, *base, seq_frame);
+                if (base->has_grade()) out->grade = grade_lut_for(*base);
+                apply_clip_visual(*out, *base);
+            }
+        }
+        if (!source) source = make_black_frame(*a, 0);
+        if (source) {
+            auto writable = std::make_shared<canvas::core::VideoFrame>(*source);
+            canvas::core::title::render_clip_title(*a, writable->rgba, writable->width,
+                                                   writable->height, writable->stride);
+            out->a = std::move(writable);
+        }
+        attach_title_transition(*out, project, *a, seq_frame);
+        return out;
+    }
 
     const int64_t dur_out = a->transition_out_duration;
     const int64_t tr_out_start = a->tl_out - dur_out;
@@ -1588,7 +1760,7 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
     if (in_out_trans) {
         static int transition_preview_log_ = 0;
         if ((transition_preview_log_++ % 30) == 0)
-            CANVAS_LOG("transition: preview active seq_frame %lld clip %llu type %d max_dim %d",
+            ::canvas::core::log::log_warning("transition: preview active seq_frame %lld clip %llu type %d max_dim %d",
                    static_cast<long long>(seq_frame), static_cast<unsigned long long>(a->id),
                    static_cast<int>(a->transition_out), max_dim);
         const canvas::core::Sequence& seq = project.sequence;

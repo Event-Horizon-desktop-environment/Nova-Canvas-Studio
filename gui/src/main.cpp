@@ -11,6 +11,7 @@
 #include "UX/theme.hpp"
 #include "canvas/core/colorsci/wheels_ui.hpp"
 #include "canvas/core/gpu/colorspace.hpp"
+#include "canvas/core/media/gpu_select.hpp"
 #include "canvas/core/media/hw_device.hpp"
 
 extern "C" {
@@ -93,15 +94,30 @@ int main(int argc, char* argv[]) {
 
     // Persisted hardware-decode preference (Settings dialog). Apply BEFORE the
     // env-probe manager below (and every later one) so the probe order honors
-    // the user's pin. "software" disables hardware probing entirely.
+    // the user's pin. A specific GPU selection wins over the backend-only pin;
+    // "software" disables hardware probing entirely.
     {
         const QSettings settings;
-        const std::string backend = settings
-            .value(QStringLiteral("settings/hw_backend"), QStringLiteral(""))
+        const std::string gpu = settings
+            .value(QStringLiteral("settings/hw_gpu"), QStringLiteral(""))
             .toString()
             .toStdString();
-        if (!backend.empty())
-            canvas::core::HwDeviceManager::set_preferred_backend(backend);
+        if (!gpu.empty()) {
+            for (const auto& g : canvas::core::gpu_select::detect_gpus()) {
+                if (g.pci_slot == gpu) {
+                    canvas::core::HwDeviceManager::set_preferred_gpu(
+                        g.backend, g.device_arg);
+                    break;
+                }
+            }
+        } else {
+            const std::string backend = settings
+                .value(QStringLiteral("settings/hw_backend"), QStringLiteral(""))
+                .toString()
+                .toStdString();
+            if (!backend.empty())
+                canvas::core::HwDeviceManager::set_preferred_backend(backend);
+        }
     }
 
     // Startup env report (always-on): the exact FFmpeg build and the hardware

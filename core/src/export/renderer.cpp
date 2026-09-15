@@ -8,6 +8,7 @@
 #include "canvas/core/timeline/audio_fade.hpp"
 #include "canvas/core/timeline/audio_mix.hpp"
 #include "canvas/core/timeline/clip_rate.hpp"
+#include "canvas/core/timeline/title.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <algorithm>
@@ -305,7 +306,16 @@ VideoFramePtr render_video_frame(const Project& project, int64_t tl_frame, int w
         const auto& track = seq.video_tracks[i];
         if (track.locked) continue;
         const Clip* clip = track.clip_at(tl_frame);
-        if (!clip || !clip->enabled || clip->media < 0) continue;
+        if (!clip || !clip->enabled) continue;
+        if (clip->media < 0) {
+            // Title/generator clip: its video IS the text raster. Draw it over
+            // whatever the lower tracks composited so far (black for a bare
+            // title on its own track).
+            if (clip->has_title())
+                canvas::core::title::render_clip_title(*clip, canvas->rgba, width, height,
+                                                       canvas->stride);
+            continue;
+        }
 
         const MediaEntry* m = project.media_by_id(clip->media);
         if (!m) continue;
@@ -355,6 +365,9 @@ VideoFramePtr render_video_frame(const Project& project, int64_t tl_frame, int w
             CANVAS_LOG("render_video_frame: decode FAILED track=%zu src_frame=%lld media=%d",
                    i, (long long)src_frame, clip->media);
         }
+        if (clip->has_title())
+            canvas::core::title::render_clip_title(*clip, canvas->rgba, width, height,
+                                                   canvas->stride);
     }
     return canvas;
 }
@@ -421,9 +434,20 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
         TrackDecoder& td = tracks_[i];
         const Track& track = *td.track;
         const Clip* clip = track.clip_at(tl_frame);
-        if (!clip || !clip->enabled || clip->media < 0) {
+        if (!clip || !clip->enabled) {
             td.dec.reset();
             td.active_clip = nullptr;
+            continue;
+        }
+        if (clip->media < 0) {
+            // Title/generator clip: rasterise the text over the canvas the
+            // lower tracks composited so far. Persist no decoder (there is no
+            // media to keep open).
+            td.dec.reset();
+            td.active_clip = nullptr;
+            if (clip->has_title())
+                canvas::core::title::render_clip_title(*clip, canvas->rgba, width_, height_,
+                                                       canvas->stride);
             continue;
         }
 
@@ -481,6 +505,9 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
         dst_h = std::min(dst_h, height_);
         blit_rgba(*decoded, canvas->rgba, width_, height_, dst_w, dst_h,
                   (width_ - dst_w) / 2, (height_ - dst_h) / 2);
+        if (clip->has_title())
+            canvas::core::title::render_clip_title(*clip, canvas->rgba, width_, height_,
+                                                   canvas->stride);
     }
 
     // Per-clip edge fades applied to the composited canvas: fade-in from black at
@@ -534,52 +561,49 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
     out->valid = false;
     // Outer gate timing for the whole GPU fast-path attempt, plus the inner
     // decode_to_hw cost (the dominant, per-GOP seek often dominates here).
-    // Aggregated ~1/s so a fast-path regression (NVDEC hiccup, driver stall,
-    // hw-frames pool pressure) is visible as avg_ms climbing rather than a
-    // wall of per-frame lines. This function is also called on frames that
-    // bail early (overlap, fades) — `valid` separates landed vs rejected.
-    static auto gpu_agg_t0 = std::chrono::steady_clock::now();
-    static int gpu_agg_n = 0;
-    static double gpu_agg_ms = 0.0, gpu_decode_ms = 0.0;
-    static int gpu_bailed = 0;
-    static int gpu_fallback_reasons[5] = {0, 0, 0, 0, 0};  // clamped reason index -> count
+    // Aggregate goes to the shared per-export RenderTelemetry window (~1/s) so
+    // a fast-path regression (NVDEC hiccup, driver stall, hw-frames pool
+    // pressure) is visible as avg_ms climbing rather than a wall of per-frame
+    // lines, and so the renderer-side counts reconcile with the exporter-side
+    // fast/cpu split (landed here == fast there, bail == cpu). This function is
+    // also called on frames that bail early (overlap, fades) — `valid` separates
+    // landed vs rejected.
     const auto gpu_t0 = std::chrono::steady_clock::now();
-    const auto gpu_mark = [&](int reason_idx) {
+    double decode_ms_note = 0.0;
+    const auto gpu_note = [&](int reason_idx) {
+        if (!telemetry_) return;
         const double ms_all = std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - gpu_t0).count();
-        ++gpu_agg_n;
-        if (!out->valid) ++gpu_bailed;
-        if (reason_idx >= 0 && reason_idx < 5) ++gpu_fallback_reasons[reason_idx];
-        const auto gnow = std::chrono::steady_clock::now();
-        if (gpu_agg_n == 1 || gnow - gpu_agg_t0 >= std::chrono::seconds(1)) {
-            gpu_agg_t0 = gnow;
-            ::canvas::core::log::log_warning(
-                "[gpu] fastpath n=%d avg_ms=%.2f decode_ms=%.2f landed=%d bailed=%d "
-                "reasons={%d overlap, %d fade_nodec, %d open-fail, %d decode-fail, %d other}",
-                gpu_agg_n, gpu_agg_n > 0 ? gpu_agg_ms / gpu_agg_n : 0.0,
-                gpu_agg_n > 0 ? gpu_decode_ms / gpu_agg_n : 0.0,
-                gpu_agg_n - gpu_bailed, gpu_bailed,
-                gpu_fallback_reasons[0], gpu_fallback_reasons[1], gpu_fallback_reasons[2],
-                gpu_fallback_reasons[3], gpu_fallback_reasons[4]);
-            gpu_agg_n = 0;
-            gpu_agg_ms = 0.0;
-            gpu_decode_ms = 0.0;
-            gpu_bailed = 0;
-            for (int k = 0; k < 5; ++k) gpu_fallback_reasons[k] = 0;
-        }
+        telemetry_->note_gpu_attempt(out->valid, reason_idx, ms_all, decode_ms_note);
     };
     // Dot not update `out->valid` in the early-bail prechecks below until we
-    // actually know; mark fallbacks via gpu_mark with a reason index.
+    // actually know; mark fallbacks via gpu_note with a reason index.
     if (width_ <= 0 || height_ <= 0 || !hw_device_ctx_ || !project_) {
         CANVAS_LOG("frame_gpu: preconditions failed w=%d h=%d hw=%p proj=%p",
                width_, height_, (const void*)hw_device_ctx_, (const void*)project_);
-        gpu_mark(0);
+        gpu_note(0);
         return false;
     }
 
     // Engage only when exactly one video clip is enabled at this frame (the common
     // no-overlap export case); any overlap/transform falls back to the CPU
     // compositor to guarantee identical semantics.
+    {
+        // A title (pure title clip or a media clip carrying an overlay) must
+        // take the CPU composite path: the GPU fast path writes only the top
+        // decoder's planes, which would silently drop the rasterised text.
+        const auto& seq = project_->sequence;
+        for (const auto& track : seq.video_tracks) {
+            if (track.locked) continue;
+            const Clip* c = track.clip_at(tl_frame);
+            if (c && c->enabled && c->has_title()) {
+                CANVAS_LOG("frame_gpu: title at tl_frame=%lld -> CPU compositor",
+                       (long long)tl_frame);
+                gpu_note(0);  // title => CPU compositor
+                return false;
+            }
+        }
+    }
     const Clip* the_clip = nullptr;
     {
         int found = 0;
@@ -595,7 +619,7 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
         if (found != 1 || !the_clip) {
             CANVAS_LOG("frame_gpu: clip_count=%d at tl_frame=%lld (need exactly 1)",
                    found, (long long)tl_frame);
-            gpu_mark(0);  // overlap / multi-clip => CPU compositor
+            gpu_note(0);  // overlap / multi-clip => CPU compositor
             return false;
         }
     }
@@ -642,19 +666,19 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
     }
     if (!td) {
         CANVAS_LOG("frame_gpu: no track decoder for tl_frame=%lld", (long long)tl_frame);
-        gpu_mark(1);  // not full-res-compositable
+        gpu_note(1);  // not full-res-compositable
         return false;
     }
     const Track& track = *td->track;
     const Clip* clip = track.clip_at(tl_frame);
     if (!clip || !clip->enabled || clip->media < 0) {
-        gpu_mark(1);
+        gpu_note(1);
         return false;
     }
 
     const MediaEntry* m = project_->media_by_id(clip->media);
     if (!m) {
-        gpu_mark(1);
+        gpu_note(1);
         return false;
     }
 
@@ -666,7 +690,7 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
         if (!td->dec->open(m->path, &err, hw_device_ctx_)) {
             CANVAS_LOG("frame_gpu: decoder open FAILED path='%s' err='%s'", m->path.c_str(), err.c_str());
             td->dec.reset();
-            gpu_mark(2);  // decoder open failure
+            gpu_note(2);  // decoder open failure
             return false;
         }
         td->active_clip = clip;
@@ -677,9 +701,8 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
     const int64_t src_frame = clip_src_frame(*project_, *clip, tl_frame);
     const auto dec0 = std::chrono::steady_clock::now();
     const AVFrame* hw = td->dec->decode_to_hw(src_frame);
-    const double dec_ms = std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - dec0).count();
-    gpu_decode_ms += dec_ms;
+    decode_ms_note = std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - dec0).count();
     if (!hw || !hw->hw_frames_ctx || hw->width <= 0 || hw->height <= 0) {
         static bool logged_first_decode_fail = false;
         if (!logged_first_decode_fail) {
@@ -687,11 +710,11 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
             log::log_warning(
                 "[render] frame_gpu FIRST decode-fail tl=%lld src=%lld dec_ms=%.2f "
                 "hw=%p ctx=%p w=%d h=%d",
-                (long long)tl_frame, (long long)src_frame, dec_ms,
+                (long long)tl_frame, (long long)src_frame, decode_ms_note,
                 (const void*)hw, hw ? (const void*)hw->hw_frames_ctx : nullptr,
                 hw ? hw->width : 0, hw ? hw->height : 0);
         }
-        gpu_mark(3);  // decode failure
+        gpu_note(3);  // decode failure
         return false;
     }
     // The frame returned may overshoot src_frame (>= matching); record the true
@@ -734,7 +757,7 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
     out->matrix = static_cast<int>(spec.matrix);
     out->range = static_cast<int>(spec.range);
     out->valid = true;
-    gpu_mark(-1);  // landed: counts total ms, never increments bailed/reasons
+    gpu_note(-1);  // landed: counts total ms, never increments bailed/reasons
     return true;
 }
 

@@ -50,7 +50,9 @@
         <file alias="step_back.svg">resources/icons/step_back.svg</file>
         <file alias="step_forward.svg">resources/icons/step_forward.svg</file>
         <file alias="stop.svg">resources/icons/stop.svg</file>
+        <file alias="subtitle.svg">resources/icons/subtitle.svg</file>
         <file alias="sync_lock.svg">resources/icons/sync_lock.svg</file>
+        <file alias="text.svg">resources/icons/text.svg</file>
         <file alias="to_end.svg">resources/icons/to_end.svg</file>
         <file alias="to_start.svg">resources/icons/to_start.svg</file>
         <file alias="track_viewmode.svg">resources/icons/track_viewmode.svg</file>

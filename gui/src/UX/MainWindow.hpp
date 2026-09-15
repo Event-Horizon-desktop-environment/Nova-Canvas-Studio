@@ -2,6 +2,7 @@
 
 #include <QLabel>
 #include <QMainWindow>
+#include <QPointer>
 #include <QToolButton>
 #include <QSlider>
 #include <QStringList>
@@ -9,18 +10,24 @@
 
 #include <memory>
 #include <optional>
+#include <atomic>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "canvas/core/media/video_decoder.hpp"
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/edit_ops.hpp"
 #include "canvas/core/export/render_queue.hpp"
+#include "canvas/core/media/transcribe.hpp"
+#include "canvas/core/timeline/captions.hpp"
 #include "features/deliver/deliver_settings_panel.hpp"
 #include "features/deliver/render_queue_panel.hpp"
 #include "features/playback/sequence_controller.hpp"
 #include "features/source_preview/source_preview_controller.hpp"
 #include "features/source_preview/source_viewer_panel.hpp"
 #include "features/thumbnails/thumbnail_service.hpp"
+#include "features/timeline/subtitle_dialog.hpp"
 #include "features/timeline/timeline_view_options.hpp"
 #include "Widgets/timeline_widget.hpp"
 #include "Widgets/viewer_gl.hpp"
@@ -102,6 +109,15 @@ void attach_inspector_file(MainWindow& main_window, TimelineWidget* timeline);
 void update_inspector_file(MainWindow& main_window);
 void apply_inspector_file(MainWindow& main_window);
 
+// The Subtitles inspector page (InspectorSubtitles.cpp, splitplan refactor).
+// Caption styling for the selected title/caption clip: size slider, zoom
+// in/out, and the system-font dropdown. Friended so the page builder can drive
+// the chrome members and read the selection state.
+void build_inspector_subtitles(MainWindow& main_window, QVBoxLayout* subtitles_layout);
+void attach_inspector_subtitles(MainWindow& main_window, TimelineWidget* timeline);
+void update_inspector_subtitles(MainWindow& main_window);
+void apply_inspector_subtitles(MainWindow& main_window);
+
 // The center workspace (viewer column + contextual/toolbar chrome + the
 // timeline dock) lives in ShellCenter.cpp; the Deliver page docks (settings +
 // render queue, with all their render-queue signal plumbing) live in
@@ -152,6 +168,13 @@ public:
     [[nodiscard]] TimelineWidget* timeline() const { return timeline_; }
     [[nodiscard]] ViewerGL* viewer() const { return viewer_; }
 
+    // AI subtitles (Timeline > AI Tools > Generate Subtitles From Audio): opens
+    // the dialog against the selected audio clip, runs whisper on a worker
+    // thread, then lands one caption bar per shaped phrase on a fresh top video
+    // track. subtitle_busy() gates re-entry while a job is in flight.
+    [[nodiscard]] bool subtitle_busy() const { return subtitle_busy_.load(); }
+    void open_subtitle_dialog();
+
 protected:
     void keyPressEvent(QKeyEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
@@ -191,6 +214,10 @@ private:
     // wheel/curve previews re-present the current frame with the new 3D-LUT grade
     // instead of paying set_project()'s decode-stack teardown each tick.
     void push_grade_snapshot();
+    // Live inspector-preview snapshot (Subtitles page slider drags): the same
+    // warm swap_project path — the current frame re-presents through the cached
+    // decoders with the edited title style at mouse-move cadence, no teardown.
+    void push_live_snapshot();
     void delete_selected_clip(bool ripple);
     void delete_selected_media();
     void delete_selected_media_and_clips();
@@ -201,12 +228,27 @@ private:
     // Applies a clip colour (1-12) — or 0 for no colour — to the selected clip
     // as one undoable edit, mirroring the Inspector's metadata commit path.
     void apply_clip_color(uint8_t color);
+    // Inserts a 3-second media-less title/generator clip on the topmost unlocked
+    // video track at the playhead (Overwrite), committed as one undoable edit.
+    void add_title_clip();
     // Grows the sequence's track list of the given kind until it covers
     // `index` (inclusive), naming new channels Vn/An by their 1-based order.
     void ensure_tracks_at(canvas::core::Track::Kind kind, std::size_t index);
     bool place_selected_media(canvas::core::Placement mode);
     bool place_media_at(canvas::core::MediaId media_id, int64_t frame, canvas::core::Placement mode,
                         std::optional<double> drop_scene_y = std::nullopt);
+    // AI subtitles worker plumbing (worker half of open_subtitle_dialog; the
+    // queued finish landing is disabled once the window is destroyed).
+    void finish_subtitle_transcription(canvas::core::transcribe::Report report);
+    // Toolbox-title drop seam: places the named title preset on a BRAND-NEW
+    // top video track at `frame` (Overwrite — the toolbox never clobbers
+    // footage), selects the placed clip and refreshes the Inspector.
+    void place_title_at(const QString& preset_id, int64_t frame);
+    // Toolbox-transition drop seam: applies the named transition to the clip
+    // under the drop point — IN edge for "fade in", OUT otherwise — at the
+    // half-second default duration. No-op when the drop misses every clip.
+    void apply_transition_from_toolbox(const QString& transition_id, int64_t frame,
+                                       double scene_y);
     void refresh_media_pool();
     void new_untitled_project();
     int import_media_paths(const QStringList& paths);
@@ -310,6 +352,10 @@ private:
     friend void attach_inspector_file(MainWindow& main_window, TimelineWidget* timeline);
     friend void update_inspector_file(MainWindow& main_window);
     friend void apply_inspector_file(MainWindow& main_window);
+    friend void build_inspector_subtitles(MainWindow& main_window, QVBoxLayout* subtitles_layout);
+    friend void attach_inspector_subtitles(MainWindow& main_window, TimelineWidget* timeline);
+    friend void update_inspector_subtitles(MainWindow& main_window);
+    friend void apply_inspector_subtitles(MainWindow& main_window);
     friend void build_center_workspace(MainWindow& main_window);
     friend void apply_view_options(MainWindow& main_window);
     friend void attach_timeline_view_options_button(MainWindow& main_window, QToolButton* button);
@@ -333,6 +379,27 @@ private:
     // PRIMARY clip drives the Visual inspector, the whole set drives mixer
     // edits (Phase 4): Volume/Pan apply to every resolved audio target.
     std::vector<canvas::core::ClipId> selected_clip_ids_;
+    // AI subtitles worker state (Timeline > AI Tools > Generate Subtitles From
+    // Audio). The worker reads only the frozen media path + language code; the
+    // placement fields are captured before spawn and consumed by the queued
+    // finish callback. subtitle_busy_ gates re-entry while a job is in flight.
+    std::thread subtitle_worker_;
+    std::atomic_bool subtitle_busy_{false};
+    QPointer<SubtitleDialog> subtitle_dialog_;
+    QString subtitle_media_path_;
+    int subtitle_media_id_ = -1;
+    int64_t subtitle_tl_in_ = 0;
+    int64_t subtitle_tl_out_ = 0;
+    int64_t subtitle_src_in_ = 0;
+    double subtitle_seq_fps_ = 30.0;
+    double subtitle_media_fps_ = 30.0;
+    std::string subtitle_language_;
+    canvas::core::captions::Options subtitle_opts_;
+    // Live progress channel for the running transcription (atomics only; the
+    // dialog's poll timer reads it, the worker thread writes it).
+    std::shared_ptr<canvas::core::transcribe::Progress> subtitle_progress_;
+    QElapsedTimer subtitle_elapsed_;
+    std::string subtitle_model_name_;
     QDoubleSpinBox* inspector_audio_volume_ = nullptr;
     QDoubleSpinBox* inspector_audio_pan_ = nullptr;
 };

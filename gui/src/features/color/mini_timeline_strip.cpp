@@ -23,21 +23,19 @@ constexpr int kStripMargin = 6;
 constexpr int kBoxGap = 5;
 constexpr int kMaxBoxHeight = 200;
 
-QPixmap scaled_fill(const QImage& img, int w, int h) {
+QPixmap scaled_fit(const QImage& img, int w, int h) {
     if (w <= 0 || h <= 0 || img.isNull()) return QPixmap();
-    const double src_aspect = static_cast<double>(img.width()) / img.height();
-    const double target_aspect = static_cast<double>(w) / h;
-    QRect crop;
-    if (src_aspect > target_aspect) {
-        const int cw = static_cast<int>(img.height() * target_aspect);
-        crop = QRect((img.width() - cw) / 2, 0, cw, img.height());
-    } else {
-        const int ch = static_cast<int>(img.width() / target_aspect);
-        crop = QRect(0, (img.height() - ch) / 2, img.width(), ch);
-    }
-    const QImage clipped = img.copy(crop);
-    if (clipped.isNull()) return QPixmap();
-    return QPixmap::fromImage(clipped.scaled(w, h, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    // Show the whole frame, never a crop: scale inside the box (KeepAspectRatio)
+    // and center on a transparent canvas so the strip's box border reads, and no
+    // part of the picture is cut off.
+    const QImage scaled =
+        img.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    QPixmap canvas(w, h);
+    canvas.fill(Qt::transparent);
+    QPainter p(&canvas);
+    p.drawImage((w - scaled.width()) / 2, (h - scaled.height()) / 2, scaled);
+    p.end();
+    return canvas;
 }
 
 }  // namespace
@@ -319,7 +317,7 @@ void MiniTimelineStrip::paintEvent(QPaintEvent* event) {
         if (tit != thumbs_.end()) thumb = tit->second;
 
         if (!thumb.isNull()) {
-            p.drawPixmap(rect.toAlignedRect(), scaled_fill(thumb, bw, bh));
+            p.drawPixmap(rect.toAlignedRect(), scaled_fit(thumb, bw, bh));
         } else {
             QColor fill = t.clip_video;
             if (clip.enabled) {

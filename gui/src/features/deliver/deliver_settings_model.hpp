@@ -30,6 +30,27 @@ const std::vector<std::string>& preset_names();
 // over canvas::core::deliver_encoders().
 std::vector<std::string> encoder_backends();
 
+// One entry in the Encoder combo. `label` is the display string ("AMD VAAPI");
+// `key` is the canonical core name ("AMD") used by settings()/set_settings()
+// to round-trip into canvas::core::EncoderBackend.
+struct EncoderBackendEntry {
+    std::string label;
+    std::string key;
+};
+
+// Encoder backend choices restricted to what this machine can actually drive:
+// NVIDIA only when an NVIDIA GPU is detected, AMD only when an AMD GPU is
+// detected, Intel only when an Intel GPU is detected (gpu_select::detect_gpus,
+// same source the Settings dialog's hardware list uses). When Preferences has
+// a specific GPU pinned (HwDeviceManager::preferred_gpu_backend non-empty),
+// the list collapses to that GPU's vendor's encoder only — an NVIDIA-pinned
+// user never sees AMD VAAPI — while Auto (no pin) shows every detected vendor.
+// Auto + CPU are always present. Labels name the encoder family each entry
+// drives — "AMD VAAPI", "Intel QSV", "NVIDIA NVENC" — instead of a bare vendor
+// name, and the key keeps the settings()/set_settings() round-trip stable.
+// Order follows canvas::core::deliver_encoders().
+std::vector<EncoderBackendEntry> available_encoder_backends();
+
 // Video codecs allowed in a given container form; restricted to combos the
 // FFmpeg muxer accepts (WebM+H.264 and MP4+ProRes are rejected up front). The
 // container is the display name from canvas::core::deliver_formats() ("MKV",

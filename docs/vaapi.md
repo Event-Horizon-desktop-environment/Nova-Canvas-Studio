@@ -334,7 +334,10 @@ and H.264 unaffected."** Van Gogh = Steam Deck / Phoenix-class APUs using gfx103
 *Fix:* if the machine is gfx1033 and exports HEVC, either Mesa < 26.0 or export
 H.264 (or CPU). Add a probe-time check: `amdgpu` + `gfx1033` + HEVC-vaapi encode
 → warn and pick h264_vaapi / libx265 fallback. **2026 live regression — the most
-likely AMD export bug you will hit.**
+likely AMD export bug you will hit.** *Verified 2026-09-14 on gfx1036 (Raphael /
+Ryzen 9 9900X iGPU, Mesa 26.2.2-arch):* H.264 and HEVC (Main + **Main10/P010**)
+both encode cleanly on this part — the D1 corruption is gfx1033-specific, it does
+not bite nearby RDNA2 dies with the same Mesa.
 
 **D2. HEVC `64×16` right-edge bar bug (AMD).**
 Classic: hevc_vaapi on radeonsi produced a bar down the right edge for widths not
@@ -441,6 +444,13 @@ FIXED (2026-09-12). The exporter maps crf/rc intent onto VAAPI's
   selection, the AV1 ×5 scale (crf 23 → qp/global_quality 115), the crf<0
   CBR/VBR/auto tails, and `is_vaapi_codec` classification. No libva/avcodec
   link needed — the test asserts only the mapping law.
+- The zero-copy driver registry + surface ownership is locked by
+  `core/tests/vaapi_driver_test.cpp` (CTest `vaapi_driver`): `identify_vendor`
+  against the real vendor strings (Mesa radeonsi, iHD/i965, the "VA-API NVDEC
+  driver [direct backend]" string), `import_policy` per vendor, `VaapiSurface`
+  move/close ownership, and `translate_descriptor` on a fabricated descriptor.
+  Runnably headless (no device needed) — the fd/lifetime contract it pins is
+  the same one the decode worker depends on at runtime.
 
 Untouched (still NVENC-shaped, still fine on VAAPI):
 - `max_b_frames=0` and the `surfaces` computation (maps well on vaapi).
@@ -516,8 +526,30 @@ Any "slow preview but no [hw] error" report should be triaged with
 5. Seek-mid-GOP VAAPI: frame-accurate target comparison with the software decoder
    (the I-frame re-anchor is the fix; a regression = garbage frames).
 
-No VAAPI-targeted tests exist yet — the CUDA-only gates
+No VAAPI encode/decode tests exist yet — the CUDA-only gates
 (`gpu_grade`, `vram_leak`, `visual_render_test`) don't exercise the VAAPI path.
+*Status 2026-09-14:* `vaapi_encode` (rc mapping) and `vaapi_driver` (registry +
+surface ownership, both headless and device-free) now run on every build; the
+device-bound tests above (#1–5) still need an AMD box to stop skipping.
+Real-device smoke (ffmpeg against `/dev/dri/renderD128`, Mesa radeonsi,
+2026-09-14): H.264 nv12 → h264_vaapi and HEVC Main + Main10 p010 → hevc_vaapi
+all encode + decode back correctly on gfx1036.
+
+**§10 addendum — CUDA/VAAPI coexistence on a dual-vendor box (2026-09-14).**
+The exporter now separates the vendor feed paths instead of treating
+`cuda_available()` as export-global: the encoder feed is chosen by the
+hw-frames FORMAT (`enc_is_cuda` / `enc_is_vaapi` in `exporter.cpp`). On a box
+where an NVIDIA GPU is present but the active encoder is VAAPI, the old gate
+fired `frame_gpu` + the CUDA NV12 kernels against `AV_PIX_FMT_VAAPI` surfaces
+(`data[0]` = a `VASurfaceID`, boxed as a GPU pointer) — async faults read as
+"landed", surfaces never written, garbage encoded at ~4 fps, and the CPU
+fallback's `cudaDeviceSynchronize` surfaced as per-frame `alloc_miss`.
+Bench (`core/tests/vaapi_enc_bench.cpp`, CTest `vaapi_enc_bench`): 13 rows
+(hevc baseline / async_depth 4–64 / CBR / presets + h264 refs) at 2560×1440
+60 fps 80 Mbps now record ~84–102 fps (was ~4) and every output decodes
+in-process to the full 90 frames with non-black content (luma stats + PSNR
+56.5 dB / SSIM 0.998 vs source). `initial_pool_size` is NOT a throughput lever
+(12 vs 96 identical); the separation of the feed path is the whole fix.
 
 ---
 

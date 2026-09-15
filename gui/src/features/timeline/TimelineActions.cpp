@@ -365,15 +365,14 @@ void MainWindow::connect_timeline() {
     connect(timeline_, &TimelineWidget::transition_requested, this,
             [this](const canvas::core::Clip* clip, canvas::core::TransitionType type, int64_t duration) {
                 if (!clip || !project_) return;
-                if (debug_enabled())
-                    qDebug() << "timeline: transition_requested clip" << clip->id
-                             << "type" << static_cast<int>(type) << "dur" << duration;
+                qWarning() << "transition: requested clip" << clip->id
+                           << "type" << static_cast<int>(type) << "dur" << duration;
                 const auto apply = [&](canvas::core::Track::Kind kind, std::size_t tidx) {
                     auto cmd = canvas::core::set_clip_transition(
                         project_->sequence, kind, tidx, clip->id, type, duration);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qDebug() << "[edit] SET-TRANSITION kind="
+                        qWarning() << "[transition] SET kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id
                                    << "type=" << static_cast<int>(type) << "dur=" << duration;
@@ -400,14 +399,13 @@ void MainWindow::connect_timeline() {
     connect(timeline_, &TimelineWidget::clear_transition_requested, this,
             [this](const canvas::core::Clip* clip) {
                 if (!clip || !project_) return;
-                if (debug_enabled())
-                    qDebug() << "timeline: clear_transition_requested clip" << clip->id;
+                qWarning() << "transition: clear-requested clip" << clip->id;
                 const auto apply = [&](canvas::core::Track::Kind kind, std::size_t tidx) {
                     auto cmd =
                         canvas::core::clear_clip_transition(project_->sequence, kind, tidx, clip->id);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qDebug() << "[edit] CLEAR-TRANSITION kind="
+                        qWarning() << "[transition] CLEAR kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id;
                         has_unsaved_changes_ = true;
@@ -433,15 +431,14 @@ void MainWindow::connect_timeline() {
     connect(timeline_, &TimelineWidget::transition_in_requested, this,
             [this](const canvas::core::Clip* clip, canvas::core::TransitionType type, int64_t duration) {
                 if (!clip || !project_) return;
-                if (debug_enabled())
-                    qDebug() << "timeline: transition_in_requested clip" << clip->id
-                             << "type" << static_cast<int>(type) << "dur" << duration;
+                qWarning() << "transition: in-requested clip" << clip->id
+                           << "type" << static_cast<int>(type) << "dur" << duration;
                 const auto apply = [&](canvas::core::Track::Kind kind, std::size_t tidx) {
                     auto cmd = canvas::core::set_clip_transition_in(
                         project_->sequence, kind, tidx, clip->id, type, duration);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qDebug() << "[edit] SET-TRANSITION-IN kind="
+                        qWarning() << "[transition] SET-IN kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id
                                    << "type=" << static_cast<int>(type) << "dur=" << duration;
@@ -468,14 +465,13 @@ void MainWindow::connect_timeline() {
     connect(timeline_, &TimelineWidget::clear_transition_in_requested, this,
             [this](const canvas::core::Clip* clip) {
                 if (!clip || !project_) return;
-                if (debug_enabled())
-                    qDebug() << "timeline: clear_transition_in_requested clip" << clip->id;
+                qWarning() << "transition: clear-in-requested clip" << clip->id;
                 const auto apply = [&](canvas::core::Track::Kind kind, std::size_t tidx) {
                     auto cmd = canvas::core::clear_clip_transition_in(
                         project_->sequence, kind, tidx, clip->id);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qDebug() << "[edit] CLEAR-TRANSITION-IN kind="
+                        qWarning() << "[transition] CLEAR-IN kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id;
                         has_unsaved_changes_ = true;
@@ -501,9 +497,8 @@ void MainWindow::connect_timeline() {
     connect(timeline_, &TimelineWidget::delete_transition_requested, this,
             [this](const canvas::core::Clip* a, const canvas::core::Clip* b, bool in_edge) {
                 if (!a || !project_) return;
-                if (debug_enabled())
-                    qDebug() << "timeline: delete_transition_requested a" << a->id << "b"
-                             << (b ? static_cast<quint64>(b->id) : 0) << "in_edge" << in_edge;
+                qWarning() << "transition: delete-requested a" << a->id << "b"
+                           << (b ? static_cast<quint64>(b->id) : 0) << "in_edge" << in_edge;
                 auto& seq = project_->sequence;
                 bool changed = false;
                 const auto clear_edge = [&](const canvas::core::Clip* clip, bool in) {
@@ -545,7 +540,7 @@ void MainWindow::connect_timeline() {
                     }
                 }
                 if (changed) {
-                    qDebug() << "[edit] DELETE-TRANSITION (bubble)";
+                    qWarning() << "[transition] DELETE (bubble)";
                     has_unsaved_changes_ = true;
                     refresh_timeline();
                     push_snapshot();
@@ -555,9 +550,8 @@ void MainWindow::connect_timeline() {
     connect(timeline_, &TimelineWidget::transition_resized, this,
             [this](const canvas::core::Clip* clip, int64_t duration) {
                 if (!clip || !project_ || duration < 1) return;
-                if (debug_enabled())
-                    qDebug() << "timeline: transition_resized clip" << clip->id << "dur" << duration
-                             << "current_type" << static_cast<int>(clip->transition_out);
+                qWarning() << "transition: resized clip" << clip->id << "dur" << duration
+                           << "current_type" << static_cast<int>(clip->transition_out);
                 // Keep the clip's existing transition type; only the duration
                 // changed (via the hover editor). If the clip had none yet,
                 // default to a cross-dissolve.
@@ -569,7 +563,7 @@ void MainWindow::connect_timeline() {
                         project_->sequence, kind, tidx, clip->id, type, duration);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qDebug() << "[edit] TRANSITION-RESIZE kind="
+                        qWarning() << "[transition] RESIZE kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id
                                    << "dur=" << duration;
@@ -596,9 +590,8 @@ void MainWindow::connect_timeline() {
     connect(timeline_, &TimelineWidget::transition_in_resized, this,
             [this](const canvas::core::Clip* clip, int64_t duration) {
                 if (!clip || !project_ || duration < 1) return;
-                if (debug_enabled())
-                    qDebug() << "timeline: transition_in_resized clip" << clip->id << "dur" << duration
-                             << "current_type" << static_cast<int>(clip->transition_in);
+                qWarning() << "transition: in-resized clip" << clip->id << "dur" << duration
+                       << "current_type" << static_cast<int>(clip->transition_in);
                 // Keep the clip's existing IN transition type; only the duration
                 // changed (via the hover editor). If the clip had none yet,
                 // default to a fade-in.
@@ -610,7 +603,7 @@ void MainWindow::connect_timeline() {
                         project_->sequence, kind, tidx, clip->id, type, duration);
                     if (cmd) {
                         undo_.record(std::move(cmd));
-                        qDebug() << "[edit] TRANSITION-IN-RESIZE kind="
+                        qWarning() << "[transition] IN-RESIZE kind="
                                    << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                                    << "track=" << tidx << "clip=" << clip->id
                                    << "dur=" << duration;
@@ -868,7 +861,7 @@ void MainWindow::remove_all_transitions() {
     has_unsaved_changes_ = true;
     refresh_timeline();
     push_snapshot();
-    qDebug() << "[edit] REMOVE-ALL-TRANSITIONS cleared=" << cleared;
+    qWarning() << "[transition] REMOVE-ALL cleared=" << cleared;
 }
 
 void MainWindow::update_inspector_audio() {

@@ -44,6 +44,10 @@ private:
     void rebuild_encoder_list();
     void rebuild_codec_list();
     void connect_all();
+    // Selects the Encoder combo's item whose canonical key matches `key`
+    // ("Auto"/"CPU"/"NVIDIA"/"AMD"/"Intel"), falling back to Auto when the
+    // backend is not present in the (detection-filtered) list.
+    void set_encoder_key(const QString& key);
     // Show/hide + relabel the bitrate controls to match the selected rate
     // control mode (CBR -> one "Bit Rate" field; VBR target -> +Max; quality -> none).
     void update_bitrate_visibility();

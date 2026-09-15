@@ -1,6 +1,7 @@
 #include "UX/MainWindow.hpp"
 #include "UX/InspectorAudio.hpp"
 #include "UX/InspectorFile.hpp"
+#include "UX/InspectorSubtitles.hpp"
 #include "UX/InspectorTransition.hpp"
 #include "UX/InspectorVisual.hpp"
 #include "ui_MainWindow.h"
@@ -76,7 +77,13 @@ void build_center_workspace(MainWindow& mw) {
     // presentation is wired in MainWindow's ctor.
     mw.source_panel_ = new source_preview::SourceViewerPanel(&mw);
     mw.source_panel_->viewer()->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    if (QSettings().value(QStringLiteral("dualViewer"), false).toBool())
+    // Persisted dual-view intent. The pane, the splitter sizes and the Dual
+    // Viewer toggle button ALL derive from this one flag — NOT from
+    // isVisible(), which reads false for every widget here because the monitor
+    // isn't shown yet at build time (the toggle would start unchecked while the
+    // pane is on).
+    const bool dual_view_on = QSettings().value(QStringLiteral("dualViewer"), false).toBool();
+    if (dual_view_on)
         mw.source_panel_->setVisible(true);
     QObject::connect(mw.source_panel_, &source_preview::SourceViewerPanel::play_clicked, &mw,
             [&mw] { mw.src_preview_.toggle_play_pause(); });
@@ -389,11 +396,10 @@ void build_center_workspace(MainWindow& mw) {
     // manual resize stays proportional when the monitor-frame resizes).
     monitor_split->setStretchFactor(0, 1);
     monitor_split->setStretchFactor(1, 1);
-    if (mw.source_panel_->isVisible()) monitor_split->setSizes({1, 1});
+    if (dual_view_on) monitor_split->setSizes({1, 1});
     // Always-on startup marker: whether Dual-View starts collapsed depends on a
     // persisted QSettings flag, and a hidden pane silently disables hover scratch.
-    qWarning() << "[srcprv] dual-view startup source_panel_visible="
-               << mw.source_panel_->isVisible();
+    qWarning() << "[srcprv] dual-view startup source_panel_visible=" << dual_view_on;
     viewer_frame_layout->addWidget(monitor_split, 1);
 
     // Transport bar (playback) + overview scrub slider — ShellTransportBar.cpp.
@@ -439,7 +445,7 @@ void build_center_workspace(MainWindow& mw) {
     dual_view->setIcon(icon("Dual-View"));
     dual_view->setIconSize(QSize(14, 14));
     dual_view->setCheckable(true);
-    dual_view->setChecked(mw.source_panel_->isVisible());
+    dual_view->setChecked(dual_view_on);
     dual_view->setAutoRaise(true);
     dual_view->setToolTip(MainWindow::tr("Dual Viewer — split the monitor with a scrubbable source preview"));
     apply_theme_style(dual_view, &flat_tool_style);
@@ -656,6 +662,10 @@ void build_center_workspace(MainWindow& mw) {
             .filePath(QStringLiteral("thumbs")));
     QObject::connect(mw.timeline_, &TimelineWidget::media_dropped, &mw,
             [&mw](int media_id, int64_t frame, double scene_y) { mw.place_media_at(media_id, frame, canvas::core::Placement::Overwrite, scene_y); });
+    QObject::connect(mw.timeline_, &TimelineWidget::title_dropped, &mw,
+            [&mw](const QString& preset, int64_t frame, double) { mw.place_title_at(preset, frame); });
+    QObject::connect(mw.timeline_, &TimelineWidget::transition_dropped, &mw,
+            [&mw](const QString& id, int64_t frame, double scene_y) { mw.apply_transition_from_toolbox(id, frame, scene_y); });
 
     sync_zoom_slider();
 
@@ -737,6 +747,7 @@ void build_center_workspace(MainWindow& mw) {
     attach_inspector_audio(mw, mw.timeline_);
     attach_inspector_transition(mw, mw.timeline_);
     attach_inspector_file(mw, mw.timeline_);
+    attach_inspector_subtitles(mw, mw.timeline_);
 
     // 7c. COLOR page docks + panels (features/color/color_page.cpp) — the last
     // chrome built, so it can read the viewer/timeline/controller state.

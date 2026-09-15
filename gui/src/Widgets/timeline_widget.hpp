@@ -85,8 +85,19 @@ inline constexpr int kSceneMargin = 8;
 // The filmstrip pitch. Denser pitch = more distinct frame samples per clip,
 // and it moves continuously with zoom so each notch re-serves thumbnails.
 inline constexpr int kFilmstripCellWidth = 24;
+// Cap on the number of filmstrip cells per clip. kFilmstripCellWidth is the
+// pitch; the cap only stops clips at pathological zoom-in widths from queueing
+// thousands of decodes. It must be large enough that realistic wide clips stay
+// at the fixed pitch: at 4096 cells even a 232,650px clip keeps cells narrow
+// enough that a 16:9 whole-frame picture (limit ~56px at a 32px cell height)
+// still spans the full cell width, so consecutive pictures butt edge to edge.
+inline constexpr int kFilmstripMaxCells = 4096;
 
-QPixmap scaled_fill(const QImage& img, int w, int h);
+// Scales `img` to fit inside w x h (KeepAspectRatio), centered on a
+// transparent w x h canvas. The whole frame stays visible; the letterbox bars
+// around it reveal the clip shell behind the cell in place of the old
+// crop-to-fill (which cut off the top/bottom or sides of the picture).
+QPixmap scaled_fit(const QImage& img, int w, int h);
 
 class TimelineWidget final : public QGraphicsView {
     Q_OBJECT
@@ -292,6 +303,12 @@ signals:
     void new_upper_track_requested(canvas::core::ClipId clip_id, int64_t tl_in);
     void media_dropped(int media_id, int64_t frame, double scene_y);
     void media_files_dropped(const QStringList& paths, int64_t frame, double scene_y);
+    // Toolbox-library drops. `title_dropped` carries the stable title-preset id
+    // (application/x-eh-title); the handler places it on a new top video track.
+    // `transition_dropped` carries the toolbox transition id and is applied to
+    // the clip under the drop point (IN for fades-in, OUT otherwise).
+    void title_dropped(const QString& preset_id, int64_t frame, double scene_y);
+    void transition_dropped(const QString& transition_id, int64_t frame, double scene_y);
     void unlink_requested(canvas::core::Track::Kind kind, int track_index, canvas::core::ClipId id);
     void link_requested(canvas::core::Track::Kind kind, int track_index, canvas::core::ClipId id);
     void add_track_requested(canvas::core::Track::Kind kind);

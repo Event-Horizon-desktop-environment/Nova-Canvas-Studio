@@ -1,5 +1,7 @@
 #include "canvas/core/export/deliver_preset.hpp"
 
+#include "canvas/core/media/hw_device.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <sstream>
@@ -26,6 +28,18 @@ const char* ffmpeg_suffix(EncoderBackend b) {
         case EncoderBackend::NVIDIA: return "_nvenc";
         case EncoderBackend::AMD:    return "_vaapi";
         case EncoderBackend::Intel:  return "_qsv";
+        case EncoderBackend::Auto:
+        case EncoderBackend::CPU:
+        default: return "";
+    }
+}
+
+// EncoderBackend -> FFmpeg hw device string; "" for CPU/Auto.
+const char* backend_device(EncoderBackend b) {
+    switch (b) {
+        case EncoderBackend::NVIDIA: return "cuda";
+        case EncoderBackend::AMD:    return "vaapi";
+        case EncoderBackend::Intel:  return "qsv";
         case EncoderBackend::Auto:
         case EncoderBackend::CPU:
         default: return "";
@@ -83,6 +97,18 @@ VideoCodec video_codec_from_string(const std::string& codec) {
 std::string video_encoder_name(VideoCodec codec, EncoderBackend backend,
                                const std::string& container_format, bool* sw_fallback) {
     if (sw_fallback) *sw_fallback = false;
+
+    // Strict GPU pin: a hardware backend naming a DIFFERENT GPU than the pinned
+    // one is demoted to software here, so "AMD pinned + H.264 → NVIDIA" becomes
+    // a CPU encode instead of silently opening the CUDA device.
+    const std::string& pg = HwDeviceManager::preferred_gpu_backend();
+    if (!pg.empty()) {
+        const std::string mine = backend_device(backend);
+        if (!mine.empty() && mine != pg) {
+            if (sw_fallback) *sw_fallback = true;
+            backend = EncoderBackend::CPU;
+        }
+    }
 
     switch (codec) {
         case VideoCodec::H264: {

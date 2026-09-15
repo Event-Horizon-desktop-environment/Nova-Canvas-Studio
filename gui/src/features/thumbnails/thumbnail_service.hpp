@@ -128,6 +128,14 @@ private:
     std::deque<ThumbRequest> queue_;
     std::deque<CacheKey> lru_;
     std::unordered_map<CacheKey, QImage, CacheKeyHash> cache_;
+    // In-flight dedupe: every filmstrip rebuild re-issues one request per cell
+    // (unique ids) while the previous pass is still decoding (~500ms/cell, 4
+    // workers). Un-deduped, a clip whose cells have been requested before they
+    // generated is re-enqueued wholesale on each rebuild — the queue blew past
+    // 1200 jobs for 275 unique cells and the strip never visibly filled. Each
+    // queued key lists the request ids waiting on it; the worker fans the
+    // finished QImage out to every waiter so all cells fill from one decode.
+    std::unordered_map<CacheKey, std::vector<uint64_t>, CacheKeyHash> pending_ids_;
     // In-memory LRU of decoded thumbnails/waveforms. Sized for the full
     // filmstrip across zoom passes: every cell of every clip must stay resident
     // so zooming in/out re-fills the strip from memory instead of re-decoding.

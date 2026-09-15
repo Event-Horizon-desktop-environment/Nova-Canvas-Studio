@@ -9,6 +9,7 @@
 #include "canvas/core/timeline/model.hpp"
 #include "canvas/core/timeline/time_stretch.hpp"
 #include "canvas/core/project/project.hpp"
+#include "canvas/core/util/render_telemetry.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -99,6 +100,11 @@ public:
     // can composite on the GPU; otherwise fall back to frame()/CPU.
     bool frame_gpu(int64_t tl_frame, GpuFrameInfo* out);
 
+    // Share a per-export telemetry instance with frame_gpu() so the GPU
+    // fast-path aggregates land in the same window as the producer-side
+    // counters; null disables (no-op).
+    void set_telemetry(canvas::core::log::RenderTelemetry* t) { telemetry_ = t; }
+
     // Decodes + mixes one video-frame-duration of audio at `tl_sample` using
     // persistent per-track AudioDecoders so sequential calls advance one decode
     // stream continuously (no re-open / resampler re-prime per call). Semantics
@@ -153,6 +159,7 @@ private:
     int width_ = 0;
     int height_ = 0;
     const AVBufferRef* hw_device_ctx_ = nullptr;
+    canvas::core::log::RenderTelemetry* telemetry_ = nullptr;
 };
 
 

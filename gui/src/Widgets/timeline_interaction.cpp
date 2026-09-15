@@ -64,6 +64,16 @@ TimelineWidget::DropLane TimelineWidget::resolve_drop_lane(double scene_y,
                                                            canvas::core::Track::Kind media_kind) const {
     const int v_count = sequence_ ? static_cast<int>(sequence_->video_tracks.size()) : 0;
     const int a_count = sequence_ ? static_cast<int>(sequence_->audio_tracks.size()) : 0;
+    // A fresh timeline must never invent a channel: until BOTH base lanes V1 and
+    // A1 hold a clip, every drop clamps to lane 0 of its kind. New video/audio
+    // channels open by dragging only once the base pair is populated, so a drop
+    // that lands a few pixels into the empty spacer can't create V2/A2 the user
+    // didn't ask for.
+    const bool base_populated =
+        v_count > 0 && a_count > 0 &&
+        !sequence_->video_tracks[0].clips.empty() &&
+        !sequence_->audio_tracks[0].clips.empty();
+    if (!base_populated) return {media_kind, 0};
     if (media_kind == canvas::core::Track::Kind::Video) {
         // Video lanes are the top screen rows, stacked Vn..V1 (flat == kind index).
         for (int f = v_count - 1; f >= 0; --f) {
@@ -168,10 +178,18 @@ void TimelineWidget::update_drop_lane(const QPointF& scene_pos) {
     if (!sequence_) return;
     if (!drop_lane_highlight_) drop_lane_flat_ = -1;  // scene rebuild wiped the item
     const bool has_content = has_timeline_content();
+    // Keep the highlight honest with resolve_drop_lane: until BOTH base lanes
+    // V1/A1 hold a clip every drop clamps to lane 0 of its kind, so a fresh or
+    // partial timeline lights the whole placeholder panel, never a per-lane row.
+    const bool base_populated =
+        !sequence_->video_tracks.empty() && !sequence_->audio_tracks.empty() &&
+        !sequence_->video_tracks[0].clips.empty() &&
+        !sequence_->audio_tracks[0].clips.empty();
     // An empty timeline lights up the whole placeholder panel as the target; a
     // populated one lights the exact lane under the cursor.
-    const int flat = has_content ? flat_row_at_scene_y(scene_pos.y()) : -1;
-    const int target = has_content ? flat : -2;
+    const bool lane_precise = has_content && base_populated;
+    const int flat = lane_precise ? flat_row_at_scene_y(scene_pos.y()) : -1;
+    const int target = lane_precise ? flat : -2;
     if (target == drop_lane_flat_) return;
     drop_lane_flat_ = target;
     if (target == -2) {
@@ -2261,6 +2279,8 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
 
 void TimelineWidget::dragEnterEvent(QDragEnterEvent* event) {
     if (event->mimeData()->hasFormat("application/x-eh-media-id") ||
+        event->mimeData()->hasFormat("application/x-eh-title") ||
+        event->mimeData()->hasFormat("application/x-eh-transition") ||
         event->mimeData()->hasUrls()) {
         event->acceptProposedAction();
     } else {
@@ -2270,6 +2290,8 @@ void TimelineWidget::dragEnterEvent(QDragEnterEvent* event) {
 
 void TimelineWidget::dragMoveEvent(QDragMoveEvent* event) {
     if (event->mimeData()->hasFormat("application/x-eh-media-id") ||
+        event->mimeData()->hasFormat("application/x-eh-title") ||
+        event->mimeData()->hasFormat("application/x-eh-transition") ||
         event->mimeData()->hasUrls()) {
         // Highlight the lane the drop would land on (the resolved target for
         // Media-Pool placements; URL drops land the same way via media_files_dropped).
@@ -2283,11 +2305,27 @@ void TimelineWidget::dragMoveEvent(QDragMoveEvent* event) {
 void TimelineWidget::dropEvent(QDropEvent* event) {
     // Any landing — accepted or not — clears the drop-lane highlight.
     if (drop_lane_flat_ != -1) clear_row_highlight(drop_lane_highlight_, drop_lane_flat_);
+    const int64_t frame = frame_at_x(event->position().toPoint().x());
+    const double scene_y = mapToScene(event->position().toPoint()).y();
+
     if (event->mimeData()->hasFormat("application/x-eh-media-id")) {
         const int media_id = event->mimeData()->data("application/x-eh-media-id").toInt();
-        const int64_t frame = frame_at_x(event->position().toPoint().x());
-        const double scene_y = mapToScene(event->position().toPoint()).y();
         emit media_dropped(media_id, frame, scene_y);
+        event->acceptProposedAction();
+        return;
+    }
+
+    if (event->mimeData()->hasFormat("application/x-eh-title")) {
+        emit title_dropped(QString::fromUtf8(event->mimeData()->data("application/x-eh-title")),
+                           frame, scene_y);
+        event->acceptProposedAction();
+        return;
+    }
+
+    if (event->mimeData()->hasFormat("application/x-eh-transition")) {
+        emit transition_dropped(
+            QString::fromUtf8(event->mimeData()->data("application/x-eh-transition")),
+            frame, scene_y);
         event->acceptProposedAction();
         return;
     }
@@ -2299,8 +2337,6 @@ void TimelineWidget::dropEvent(QDropEvent* event) {
             if (url.isLocalFile()) paths.append(url.toLocalFile());
         }
         if (!paths.isEmpty()) {
-            const int64_t frame = frame_at_x(event->position().toPoint().x());
-            const double scene_y = mapToScene(event->position().toPoint()).y();
             emit media_files_dropped(paths, frame, scene_y);
         }
         event->acceptProposedAction();
