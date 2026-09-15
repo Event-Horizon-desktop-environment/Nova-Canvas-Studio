@@ -50,6 +50,9 @@ void build_page_bar(MainWindow& mw) {
                 if (other != b) other->setChecked(false);
             }
             b->setChecked(true);
+            // Page pills leave whatever page is showing, including the
+            // Project Manager (its stack page would otherwise stay current).
+            mw.leave_project_manager();
             leave_color_page(mw);
             if (deliver) mw.enter_deliver_page();
             else if (color_page) {
@@ -79,6 +82,14 @@ void build_page_bar(MainWindow& mw) {
     page_bar->addWidget(home_btn);
     page_bar->addWidget(settings_btn);
     mw.addToolBar(Qt::BottomToolBarArea, page_bar);
+
+    // Home returns to the Project Manager and drops every page-pill selection,
+    // Resolve-style; enter_project_manager handles the rest of the layout swap.
+    QObject::connect(home_btn, &QToolButton::clicked, &mw, [&mw, page_bar] {
+        for (QToolButton* other : page_bar->findChildren<QToolButton*>())
+            other->setChecked(false);
+        mw.enter_project_manager();
+    });
 }
 
 }  // namespace canvas::gui

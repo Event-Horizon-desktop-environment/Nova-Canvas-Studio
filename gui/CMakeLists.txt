@@ -63,6 +63,10 @@ qt_add_executable(canvas
 
     src/features/app/AppActions.cpp
     src/features/project/ProjectActions.cpp
+    src/features/project/new_project_dialog.cpp
+    src/features/project/new_project_dialog.hpp
+    src/features/project/project_manager_widget.cpp
+    src/features/project/project_manager_widget.hpp
     src/features/timeline/TimelineActions.cpp
     src/features/timeline/audio_targets.cpp
     src/features/timeline/SubtitleActions.cpp

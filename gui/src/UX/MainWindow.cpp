@@ -199,7 +199,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             [this](uint64_t id, QImage image) {
                 // Timeline filmstrip frames ride the same service; only
                 // pool-namespaced ids may touch pool tiles (kPoolThumbNs).
-                if (!(id & kPoolThumbNs)) return;
+                // Project-manager card frames carry their own high-bit prefix
+                // (kProjectThumbNs) and are routed by the manager's bridge.
+                if (!(id & kPoolThumbNs) || (id & kProjectThumbNs)) return;
                 const int idx = static_cast<int>(id & ~kPoolThumbNs);
                 qWarning().nospace() << "[thumb] pool thumbnail ready idx=" << idx
                                      << " sz=" << image.width() << "x" << image.height();
@@ -252,9 +254,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             "QDockWidget { background: %3; color: %4; }"
             "QDockWidget::title { background: %5; color: %4; padding: 4px 8px; "
             "border: none; text-align: center; }")
-            .arg(css(t.surface), css(t.border), css(t.surface_low), css(t.ink),
-                 css(t.surface_raised));
+.arg(css(t.surface), css(t.border), css(t.surface_low), css(t.ink),
+                  css(t.surface_raised));
     });
+
+    // First screen: the Project Manager, presented as its own floating window.
+    // Its thumbnail bridge is fully wired by enter_project_manager(), so the
+    // first refresh can resolve card thumbnails.
+    enter_project_manager();
 }
 
 MainWindow::~MainWindow() {

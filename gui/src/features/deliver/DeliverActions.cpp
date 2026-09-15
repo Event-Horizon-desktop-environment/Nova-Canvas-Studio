@@ -50,6 +50,7 @@ QString extension_for_format(const std::string& format) {
 }  // namespace
 
 void MainWindow::enter_deliver_page() {
+    leave_project_manager();
     deliver_active_ = true;
     if (media_dock_) media_dock_->hide();
     if (inspector_dock_) inspector_dock_->hide();
@@ -60,6 +61,7 @@ void MainWindow::enter_deliver_page() {
 }
 
 void MainWindow::enter_edit_page() {
+    leave_project_manager();
     deliver_active_ = false;
     if (deliver_settings_dock_) deliver_settings_dock_->hide();
     if (deliver_queue_dock_) deliver_queue_dock_->hide();

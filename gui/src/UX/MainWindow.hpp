@@ -23,6 +23,7 @@
 #include "canvas/core/timeline/captions.hpp"
 #include "features/deliver/deliver_settings_panel.hpp"
 #include "features/deliver/render_queue_panel.hpp"
+#include "features/project/project_manager_widget.hpp"
 #include "features/playback/sequence_controller.hpp"
 #include "features/source_preview/source_preview_controller.hpp"
 #include "features/source_preview/source_viewer_panel.hpp"
@@ -149,6 +150,15 @@ public:
     // render queue right) while keeping the shared viewer + timeline visible.
     void enter_deliver_page();
     void enter_edit_page();
+
+    // Project Manager (features/project/project_manager_widget.cpp): the
+    // Resolve-style first screen, shown as its own FLOATING top-level window
+    // rather than a page inside the editor. enter_* is also the startup call
+    // that raises the manager window; leave_* hides it and returns to the
+    // editor. Closing the manager window routes here too (window_closed).
+    void enter_project_manager();
+    void leave_project_manager();
+
     void add_current_to_render_queue();
     void render_all_from_queue();
     void reflect_render_queue();
@@ -324,6 +334,11 @@ private:
     QDockWidget* color_nodes_dock_ = nullptr;
     QDockWidget* color_effects_dock_ = nullptr;
     QDockWidget* color_lightbox_dock_ = nullptr;
+
+    // Project Manager window (floating, not a page): lazy-created on the
+    // first enter_project_manager() and kept for the session.
+    ProjectManagerWindow* project_manager_window_ = nullptr;
+    bool project_screen_active_ = false;
 
     friend void build_app_menus(MainWindow& main_window);
     friend QWidget* build_top_bar(MainWindow& main_window);

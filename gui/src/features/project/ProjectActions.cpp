@@ -9,9 +9,12 @@
 #include "Widgets/media_pool_widget.hpp"
 #include "Widgets/toolbox_widget.hpp"
 #include "features/color/mini_timeline_strip.hpp"
+#include "features/project/new_project_dialog.hpp"
 
 #include "canvas/core/timeline/title.hpp"
 
+#include <QDialog>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMenu>
@@ -544,8 +547,13 @@ void MainWindow::set_current_bin(const QString& bin_name) {
 
 void MainWindow::on_import_media() {
     if (!project_) return;
+    // Seed the browser from the project's media root when it's set and existent.
+    QString start_dir;
+    const QString media_root = QString::fromStdString(project_->media_root);
+    if (!media_root.isEmpty() && QDir(media_root).exists())
+        start_dir = media_root;
     const QStringList paths = QFileDialog::getOpenFileNames(
-        this, tr("Import Media"), QString(),
+        this, tr("Import Media"), start_dir,
         tr("Media Files (*.mp4 *.mov *.mkv *.mxf *.avi *.webm *.ts *.m2ts "
            "*.png *.jpg *.jpeg "
            "*.mp3 *.mp2 *.flac *.wav *.aac *.m4a *.m4b *.ogg *.oga *.opus "
@@ -677,9 +685,42 @@ int MainWindow::import_media_paths(const QStringList& paths) {
     return imported;
 }
 
-void MainWindow::on_new_project() { new_untitled_project(); refresh_bin_tree(); refresh_media_pool(); refresh_timeline(); push_snapshot(0); }
+void MainWindow::on_new_project() {
+    // Ask for the project name + media location first; "New Project" is a
+    // real creation flow now, not an untitled placeholder.
+    NewProjectDialog dlg(this);
+    if (dlg.exec() != QDialog::Accepted) return;  // stay on the manager
+    const QString name = sanitize_project_name(dlg.project_name());
+    const QString media = dlg.media_location();
+
+    // Remember the media root for the next new project too.
+    QSettings().setValue(QStringLiteral("mediaRootDir"), media);
+
+    if (!ensure_project_roots()) {
+        status_->showMessage(tr("Could not create the Nova Canvas Studio folders."), 8000);
+        return;
+    }
+
+    // Every project gets its own folder: <root>/<Name>/<Name>.ncs.
+    const QString folder = default_projects_root() + QLatin1Char('/') + name;
+    QDir().mkpath(folder);
+    const QString path = folder + QLatin1Char('/') + name + QStringLiteral(".ncs");
+
+    leave_project_manager();
+    new_untitled_project();
+    project_->name = name.toStdString();
+    project_->media_root = media.toStdString();
+    refresh_bin_tree();
+    refresh_media_pool();
+    refresh_timeline();
+    push_snapshot(0);
+    setWindowTitle(tr("Nova Canvas Studio — %1").arg(name));
+    // Save immediately so the manager's grid and "recentProjects" see it.
+    save_project_to(path);
+}
 
 void MainWindow::on_open_project() {
+    leave_project_manager();
     const QString path = QFileDialog::getOpenFileName(this, tr("Open Project"), QString(),
                                                       tr("Nova Canvas Project (*.ncs);;Legacy Project (*.ehproj);;All Files (*)"));
     if (path.isEmpty()) return;
@@ -738,6 +779,7 @@ void MainWindow::on_save_project_as() {
 }
 
 void MainWindow::open_file(const QString& path) {
+    leave_project_manager();
     std::unique_ptr<canvas::core::Project> loaded = std::make_unique<canvas::core::Project>();
     std::string error;
     if (canvas::core::load_project(*loaded, path.toStdString(), &error)) {

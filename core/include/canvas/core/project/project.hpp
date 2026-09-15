@@ -22,6 +22,10 @@ struct MediaEntry {
 
 struct Project {
     std::string name = "Untitled Project";
+    // Default directory this project's footage lives in (set from the New
+    // Project dialog; seeds the Media import browser). Empty for projects
+    // created before this field existed.
+    std::string media_root;
     Sequence sequence;
     std::vector<MediaEntry> media;
     std::vector<std::string> bins;  // user-created bin names (Master is implicit, not stored)

@@ -245,7 +245,14 @@ int main(int argc, char* argv[]) {
     canvas::gui::MainWindow window;
     QApplication::setWindowIcon(canvas::gui::raw_icon("app_icon"));
     window.setWindowIcon(canvas::gui::raw_icon("app_icon"));
-    window.show();
-    if (argc > 1) window.open_file(QString::fromLocal8Bit(argv[1]));
+    // The Project Manager is the app's gateway: only its floating window shows
+    // at startup (the editor stays hidden until a project actually opens).
+    // Launching with a project file argument jumps straight into the editor.
+    if (argc > 1) {
+        window.show();
+        window.open_file(QString::fromLocal8Bit(argv[1]));
+    } else {
+        window.enter_project_manager();
+    }
     return QApplication::exec();
 }

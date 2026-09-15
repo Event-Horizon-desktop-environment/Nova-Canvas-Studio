@@ -570,6 +570,7 @@ bool save_project(const Project& project, const std::string& path, std::string* 
         json doc{
             {"canvas_project", kProjectVersion},
             {"name", project.name},
+            {"media_root", project.media_root},
             {"fps", project.sequence.fps},
             {"next_clip_id", project.sequence.next_clip_id},
             {"media", media},
@@ -644,6 +645,7 @@ bool load_project(Project& out, const std::string& path, std::string* error) {
 
         Project p;
         p.name = doc.value("name", "Untitled Project");
+        p.media_root = doc.value("media_root", std::string());
         p.sequence.fps = doc.value("fps", 30.0);
         p.sequence.next_clip_id = doc.value("next_clip_id", ClipId{1});
 

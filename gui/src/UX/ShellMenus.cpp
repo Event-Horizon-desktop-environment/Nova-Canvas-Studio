@@ -104,6 +104,8 @@ void build_app_menus(MainWindow& mw) {
     mw.open_recent_menu_ = file->addMenu(MainWindow::tr("Open &Recent"));
     mw.open_recent_menu_->setEnabled(false);
     QObject::connect(mw.open_recent_menu_, &QMenu::triggered, &mw, &MainWindow::on_open_recent_file);
+    file->addAction(MainWindow::tr("&Project Manager"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M),
+                    &mw, &MainWindow::enter_project_manager);
     file->addAction(MainWindow::tr("&Save Project"), QKeySequence::Save, &mw, &MainWindow::on_save_project);
     file->addAction(MainWindow::tr("Save Project &As..."), QKeySequence::SaveAs, &mw, &MainWindow::on_save_project_as);
     file->addSeparator();
