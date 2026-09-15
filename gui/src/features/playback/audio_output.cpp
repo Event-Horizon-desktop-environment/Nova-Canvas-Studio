@@ -110,44 +110,47 @@ struct AudioOutput::Impl {
             return;
         }
 
-        std::size_t bytes_wanted = 0;
-        float* src = nullptr;
-        std::size_t src_len = 0;
+        // The device provides one interleaved plane; fill as much as fits.
+        std::size_t avail_bytes = static_cast<std::size_t>(d->maxsize);
+        avail_bytes = (avail_bytes / 16) * 16;  // keep alignment sane
+        const std::size_t max_samples = avail_bytes / sizeof(float);
+        std::size_t written = 0;
+        std::vector<float> to_copy;
         {
             std::lock_guard<std::mutex> lock(self->q_mutex);
             if (self->q_start >= self->q.size()) {
                 self->q.clear();
                 self->q_start = 0;
             }
-            src = self->q.data() + self->q_start;
-            src_len = self->q.size() - self->q_start;
-        }
-
-        // The device provides one interleaved plane; fill as much as fits.
-        std::size_t avail_bytes = static_cast<std::size_t>(d->maxsize);
-        avail_bytes = (avail_bytes / 16) * 16;  // keep alignment sane
-        const std::size_t wanted_samples = std::min(src_len, avail_bytes / sizeof(float));
-        std::size_t written = 0;
-        if (wanted_samples > 0) {
-            std::memcpy(d->data, src, wanted_samples * sizeof(float));
-            written = wanted_samples;
-        }
-        b->size = written / static_cast<std::size_t>(self->channels);  // frames
-
-        if (written > 0) {
-            std::lock_guard<std::mutex> lock(self->q_mutex);
-            self->q_start += written;
-            if (self->q_start == self->q.size()) {
-                self->q.clear();
-                self->q_start = 0;
+            // Copy the samples under the lock: write_float/reposition_enqueue may
+            // reallocate q's backing store the instant we release it, and any
+            // pointer kept into the queue would then dangle. The ALSA writer makes
+            // the same copy-under-lock choice for the same reason.
+            const std::size_t take =
+                std::min(self->q.size() - self->q_start, max_samples);
+            if (take > 0) {
+                to_copy.reserve(take);
+                to_copy.assign(self->q.begin() + static_cast<std::ptrdiff_t>(self->q_start),
+                               self->q.begin() +
+                                   static_cast<std::ptrdiff_t>(self->q_start + take));
+                self->q_start += take;
+                if (self->q_start == self->q.size()) {
+                    self->q.clear();
+                    self->q_start = 0;
+                }
+                written = take;
             }
         }
+
+        if (written > 0)
+            std::memcpy(d->data, to_copy.data(), written * sizeof(float));
+        b->size = written / static_cast<std::size_t>(self->channels);  // frames
 
         if (playback_debug()) {
             static unsigned pw_dbg_ = 0;
             if ((pw_dbg_++ & 63u) == 0u)
-                qDebug() << "audio: PW on_process wanted_samples=" << wanted_samples
-                         << "written_samples=" << written << "queued_after="
+                qDebug() << "audio: PW on_process written_samples=" << written
+                         << "queued_after="
                          << (self->q.size() - self->q_start);
         }
 
