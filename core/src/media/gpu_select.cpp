@@ -181,6 +181,29 @@ std::vector<GpuDevice> detect_gpus(const std::string& root) {
     return out;
 }
 
+std::string cpu_name(const std::string& root) {
+    std::ifstream in(root + "/proc/cpuinfo");
+    if (!in) return {};
+    std::string line;
+    while (std::getline(in, line)) {
+        // Lines look like "model name\t: AMD Ryzen 9 9900X 12-Core Processor".
+        const auto colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        std::string key = line.substr(0, colon);
+        while (!key.empty() &&
+               (key.back() == ' ' || key.back() == '\t'))
+            key.pop_back();
+        if (key != "model name") continue;
+        std::string val = line.substr(colon + 1);
+        const auto first = val.find_first_not_of(" \t");
+        if (first != std::string::npos) val.erase(0, first);
+        while (!val.empty() && (val.back() == '\n' || val.back() == '\r'))
+            val.pop_back();
+        if (!val.empty()) return val;
+    }
+    return {};
+}
+
 std::string gpu_name_for(const std::string& backend,
                          const std::string& device_arg,
                          const std::string& root) {

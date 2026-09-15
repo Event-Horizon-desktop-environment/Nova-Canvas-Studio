@@ -507,6 +507,152 @@ int main() {
             }
         }
         report(n > 0 && sr > sg && sr > sb, "render: red glyphs stay red-dominant");
+
+        // --- tight sprite (GPU fast-path overlay) --------------------------
+        // raster_title_sprite bakes the exact CPU layering law into one
+        // premultiplied box that the export kernels fuse. It must be valid
+        // exactly when the CPU path would paint, invalid on the degenerate
+        // inputs, and reproduce the CPU composite (over an opaque background)
+        // up to the final rounding pass.
+        {
+            const title::TitleSprite no_title = title::raster_title_sprite(t, W, H, font);
+            report(no_title.valid(), "sprite: a titled clip produces a valid sprite");
+            Clip blank_text = t;
+            blank_text.title.text.clear();
+            report(!title::raster_title_sprite(blank_text, W, H, font).valid(),
+                   "sprite: empty text -> invalid");
+            report(!title::raster_title_sprite(t, W, H, "/no/such/font.ttf").valid(),
+                   "sprite: missing font -> invalid");
+            report(!title::raster_title_sprite(t, 0, H, font).valid(),
+                   "sprite: zero canvas width -> invalid");
+
+            // Coverage footprint: the sprite bbox bounds the CPU bbox and the
+            // CPU-painted pixels carry sprite coverage.
+            std::vector<std::uint8_t> cpu = black;
+            title::render_clip_title_with_font(t, font, cpu, W, H, W * 4);
+            const title::TitleSprite spr = title::raster_title_sprite(t, W, H, font);
+            int cpu_min_x = W, cpu_min_y = H, cpu_max_x = -1, cpu_max_y = -1;
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x) {
+                    const std::size_t i = (static_cast<std::size_t>(y) * W + x) * 4;
+                    if (cpu[i] > 8 || cpu[i + 1] > 8 || cpu[i + 2] > 8) {
+                        cpu_min_x = std::min(cpu_min_x, x);
+                        cpu_min_y = std::min(cpu_min_y, y);
+                        cpu_max_x = std::max(cpu_max_x, x);
+                        cpu_max_y = std::max(cpu_max_y, y);
+                    }
+                }
+            report(spr.width > 0 && spr.height > 0 && spr.ox <= cpu_min_x &&
+                       spr.oy <= cpu_min_y && spr.ox + spr.width - 1 >= cpu_max_x &&
+                       spr.oy + spr.height - 1 >= cpu_max_y,
+                   "sprite: bbox covers the CPU-painted box");
+            std::size_t covered = 0;
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x) {
+                    const std::size_t i = (static_cast<std::size_t>(y) * W + x) * 4;
+                    if (cpu[i] > 8 || cpu[i + 1] > 8 || cpu[i + 2] > 8) {
+                        const int sx = x - spr.ox, sy = y - spr.oy;
+                        if (sx >= 0 && sy >= 0 && sx < spr.width && sy < spr.height &&
+                            spr.data[(static_cast<std::size_t>(sy) * spr.width + sx) * 4u + 3u] > 0)
+                            ++covered;
+                    }
+                }
+            report(covered > 0, "sprite: CPU-lit pixels carry sprite coverage");
+        }
+
+        // Composite equivalence: box + shadow + glyphs at partial opacity,
+        // composed two ways over the same opaque background — the CPU
+        // compositor writes into the canvas directly, the sprite path adds its
+        // premultiplied box over the identical background. They must agree to
+        // the final rounding (<= 5 LSB) and be byte-identical outside the box.
+        {
+            Clip full = t;
+            full.title.text = "Qp";
+            full.title.a = 0.8f;
+            full.title.r = 0.9f;
+            full.title.g = 0.4f;
+            full.title.b = 0.1f;
+            full.title.box = true;
+            full.title.box_opacity = 0.5f;
+            full.title.box_r = 0.1f;
+            full.title.box_g = 0.7f;
+            full.title.box_b = 0.3f;
+            full.title.box_pad_x = 6.0f;
+            full.title.box_pad_y = 4.0f;
+            full.title.box_radius = 4.0f;
+            full.title.shadow = true;
+            full.title.shadow_opacity = 0.6f;
+            full.title.shadow_blur = 1.0f;
+            full.title.shadow_dx = 3.0f;
+            full.title.shadow_dy = 2.0f;
+            full.title.shadow_r = 1.0f;
+            full.title.shadow_g = 1.0f;
+            full.title.shadow_b = 1.0f;
+            full.pos_x = 5.0;
+            full.pos_y = -3.0;
+
+            const int CW = 80, CH = 60;
+            std::vector<std::uint8_t> bg(static_cast<std::size_t>(CW) * CH * 4u);
+            for (std::size_t i = 0; i < bg.size(); i += 4) {
+                bg[i] = 200;
+                bg[i + 1] = 150;
+                bg[i + 2] = 100;
+                bg[i + 3] = 255;
+            }
+
+            std::vector<std::uint8_t> cpu_over = bg;
+            title::render_clip_title_with_font(full, font, cpu_over, CW, CH, CW * 4);
+
+            const title::TitleSprite spr_full = title::raster_title_sprite(full, CW, CH, font);
+            report(spr_full.valid(), "sprite: layered clip produces a valid sprite");
+            if (spr_full.valid()) {
+                std::vector<std::uint8_t> gpu_over = bg;
+                for (int y = 0; y < spr_full.height; ++y)
+                    for (int x = 0; x < spr_full.width; ++x) {
+                        const std::size_t si =
+                            (static_cast<std::size_t>(y) * spr_full.width + x) * 4u;
+                        const int cx = spr_full.ox + x, cy = spr_full.oy + y;
+                        if (cx < 0 || cy < 0 || cx >= CW || cy >= CH) continue;
+                        const std::size_t di = (static_cast<std::size_t>(cy) * CW + cx) * 4u;
+                        const float A = static_cast<float>(spr_full.data[si + 3]) / 255.0f;
+                        const float inv = 1.0f - A;
+                        for (int ch = 0; ch < 3; ++ch) {
+                            gpu_over[di + static_cast<std::size_t>(ch)] =
+                                static_cast<std::uint8_t>(std::clamp(
+                                    static_cast<int>(std::lround(
+                                        static_cast<float>(spr_full.data[si + static_cast<std::size_t>(ch)]) +
+                                        static_cast<float>(gpu_over[di + static_cast<std::size_t>(ch)]) * inv)),
+                                    0, 255));
+                        }
+                    }
+
+                int worst = 0, worst_out = 0;
+                for (int y = 0; y < CH; ++y)
+                    for (int x = 0; x < CW; ++x) {
+                        const std::size_t i = (static_cast<std::size_t>(y) * CW + x) * 4u;
+                        const bool inside = x >= spr_full.ox && x < spr_full.ox + spr_full.width &&
+                                            y >= spr_full.oy && y < spr_full.oy + spr_full.height;
+                        for (int ch = 0; ch < 3; ++ch) {
+                            const int d = std::abs(static_cast<int>(cpu_over[i + static_cast<std::size_t>(ch)]) -
+                                                    static_cast<int>(gpu_over[i + static_cast<std::size_t>(ch)]));
+                            worst = std::max(worst, d);
+                            if (!inside) worst_out = std::max(worst_out, d);
+                        }
+                    }
+                report(worst <= 5, "sprite: composite matches CPU to rounding (<= 5 LSB)");
+                report(worst_out == 0, "sprite: output is byte-identical outside the box");
+            }
+
+            // Placement invariance: a pos_x/pos_y bump shifts the sprite origin
+            // by the same integer px the CPU bbox shifts.
+            const title::TitleSprite s0 = title::raster_title_sprite(full, CW, CH, font);
+            Clip shifted = full;
+            shifted.pos_x += 9.0;
+            shifted.pos_y -= 7.0;
+            const title::TitleSprite s1 = title::raster_title_sprite(shifted, CW, CH, font);
+            report(s0.valid() && s1.valid() && s1.ox - s0.ox == 9 && s1.oy - s0.oy == -7,
+                   "sprite: placement follows pos_x/pos_y in px");
+        }
     }
 
     // --- export glue --------------------------------------------------------

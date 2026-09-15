@@ -6,6 +6,7 @@
 #include "canvas/core/gpu/colorspace.hpp"
 #include "canvas/core/gpu/cuda_convert.hpp"
 #include "canvas/core/media/hw_device.hpp"
+#include "canvas/core/timeline/title.hpp"
 #include "canvas/core/util/log.hpp"
 
 #include <cctype>
@@ -28,6 +29,7 @@ extern "C" {
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <istream>
 #include <memory>
 #include <mutex>
@@ -157,6 +159,549 @@ struct GpuGradeLut {
     }
 };
 
+// Per-export device-side title-overlay sprite cache. A Clip pointer (immutable
+// for the export's Project snapshot) identifies the raster: rasterise once to a
+// premultiplied host sprite (title::raster_title_sprite — same layering law as
+// the CPU compositor) and upload once. Mirrors GpuGradeLut's clip-identity
+// caching so a burned-in title overlay rises off the per-frame CPU composite
+// (was ~59 fps on the subtitle+title bench row) without re-rasterising or
+// re-uploading every frame.
+struct GpuTitleCache {
+    const Clip* clip = nullptr;
+    gpu::TitleSpriteGpu spr;
+
+    bool ensure(const Clip* c, int out_w, int out_h) {
+        if (!c || !c->has_title() || out_w <= 0 || out_h <= 0) return false;
+        if (clip == c) return spr.valid();
+        release();
+        const std::string font = canvas::core::title::find_font_path_for(c->title.font_family);
+        if (font.empty()) return false;
+        const title::TitleSprite host =
+            canvas::core::title::raster_title_sprite(*c, out_w, out_h, font);
+        if (!host.valid()) return false;
+        if (!canvas::core::gpu::title_sprite_upload(host.data.data(), host.width, host.height,
+                                                    host.ox, host.oy, &spr))
+            return false;
+        clip = c;
+        CANVAS_LOG("render: title sprite uploaded w=%d h=%d ox=%d oy=%d clip=%llu",
+               spr.w, spr.h, spr.ox, spr.oy, (unsigned long long)c->id);
+        return true;
+    }
+
+    void release() {
+        canvas::core::gpu::title_sprite_free(&spr);
+        clip = nullptr;
+    }
+};
+
+// Encoder-frame backend. Decided ONCE per export from the encoder's hw-frame
+// format, never from machine-wide CUDA presence (the old async-fault bug: on a
+// dual-vendor box a CUDA-capable machine with a VAAPI-only encoder ran the CUDA
+// kernels against AV_PIX_FMT_VAAPI surfaces and encoded garbage at ~4 fps).
+enum class ExportBackend {
+    Software,  // pure CPU decode + swscale + software encoder
+    Cuda,      // CUDA device: accelerated decode + fused NV12 kernels + NVENC
+    Vaapi,     // VAAPI device: accelerated decode + surface transfer feed + VAAPI encoder
+};
+
+// Live-preview push cadence for ExportControl::on_frame: ~30 fps wall clock so
+// the Deliver-page viewer mirrors the render without stalling the encode loop.
+struct PreviewThrottle {
+    std::chrono::steady_clock::time_point last{};
+    bool due() {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last < kPreviewPushInterval) return false;
+        last = now;
+        return true;
+    }
+};
+
+// One ready-to-encode frame handed to the pipeline loop. `frame` is owned by
+// the consumer; `event`/`source` are CUDA-only async-resize handles (null on
+// VAAPI/CPU frames) the consumer must wait on before avcodec_send_frame.
+struct PumpFrame {
+    AVFrame* frame = nullptr;  // encoder-ready surface / CPU NV12 (owned)
+    void* event = nullptr;     // CUDA async resize event (wait before send)
+    AVFrame* source = nullptr; // av_frame_ref'd decode source, alive until event waited
+};
+
+// Per-backend frame pump: the decode + composite + convert half of an export.
+// Every backend-specific resource (device, encoder surface pool, staging
+// frames, swscale contexts, grade LUT, judder counter) lives here and is
+// touched only by that backend's branch of produce(). Software/Cuda/Vaapi share
+// NO state, so the pipeline loop below is backend-agnostic by construction and
+// can never route one vendor's kernels onto another vendor's surfaces.
+class FramePump {
+public:
+    ExportBackend kind = ExportBackend::Software;
+    int out_w = 0, out_h = 0;
+    double tl_per_frame = 1.0;
+    AVPixelFormat enc_sw_fmt = AV_PIX_FMT_YUV420P;
+
+    // Backend-owned device (accelerated decode) + encoder surface pool. Pool is
+    // null on Software; the device may still be non-null (hw decode kept).
+    ::AVBufferRef* dec_dev = nullptr;
+    ::AVBufferRef* hw_frames = nullptr;
+
+    // RGB staging + RGB->encoder-format conversion (Software path and the
+    // CPU-composite fallback of the hw backends). Host CPU only, owned here.
+    SwsContext* sws = nullptr;
+    AVFrame* rgb = nullptr;
+
+    // ---- CUDA-only state (touched only by produce_cuda) ----
+    GpuGradeLut grade_lut;
+    GpuTitleCache title_cache;
+    int64_t judder_prev_src = INT64_MIN;
+
+    // ---- VAAPI-only staging (touched only by produce_vaapi): source-sized
+    // NV12, scaled letterbox-rect NV12, full-canvas NV12, NV12->NV12 swscale ----
+    AVFrame* va_scan = nullptr;
+    AVFrame* va_scaled = nullptr;
+    AVFrame* va_out = nullptr;
+    SwsContext* va_sws = nullptr;
+    int va_sws_src_w = 0, va_sws_src_h = 0, va_sws_dst_w = 0, va_sws_dst_h = 0;
+
+    // Shared hooks bound by export_project after its decoder session is up.
+    canvas::core::log::RenderTelemetry* telemetry = nullptr;
+    PreviewThrottle* throttle = nullptr;
+    std::function<void(const VideoFramePtr&)> push_preview;
+    const Project* project = nullptr;
+    RenderSession* session = nullptr;
+    bool session_ok = false;
+
+    // Encoder-pool backend from the device/pix-fmt setup. Returns false when no
+    // usable hw device (caller clears v_use_hw -> Software encode); the dec_dev
+    // is retained even then so accelerated decode survives the fallback.
+    bool create_device_and_pool(const std::string& hw_device, AVPixelFormat hw_pix,
+                                int w, int h) {
+        out_w = w;
+        out_h = h;
+        const AVHWDeviceType dt = av_hwdevice_find_type_by_name(hw_device.c_str());
+        if (dt == AV_HWDEVICE_TYPE_NONE) return false;
+        ::AVBufferRef* dev = nullptr;
+        // Same GPU pin the playback probes honor: a Settings-selected GPU
+        // passes its render node / CUDA ordinal to the encoder device so
+        // export lands on the same accelerator the user picked.
+        const std::string& gpu_arg =
+            (hw_device == canvas::core::HwDeviceManager::preferred_gpu_backend())
+                ? canvas::core::HwDeviceManager::preferred_device_arg()
+                : std::string{};
+        av_hwdevice_ctx_create(&dev, dt, gpu_arg.empty() ? nullptr : gpu_arg.c_str(),
+                               nullptr, 0);
+        dec_dev = dev;
+        if (!dec_dev) return false;
+
+        ::AVBufferRef* fr = av_hwframe_ctx_alloc(dev);
+        if (fr) {
+            AVHWFramesContext* fc = reinterpret_cast<AVHWFramesContext*>(fr->data);
+            if (fc) {
+                fc->format = hw_pix;
+                fc->sw_format = AV_PIX_FMT_NV12;
+                fc->width = w;
+                fc->height = h;
+                fc->initial_pool_size = 12;
+            }
+            if (av_hwframe_ctx_init(fr) == 0) {
+                hw_frames = fr;
+                enc_hw_fmt_ = reinterpret_cast<AVHWFramesContext*>(fr->data)->format;
+            } else {
+                av_buffer_unref(&fr);
+            }
+        }
+        if (!hw_frames) return false;  // no pool -> Software, but keep dec_dev
+
+        // Backend label comes from the pool's frame format alone.
+        if (enc_hw_fmt_ == AV_PIX_FMT_CUDA && canvas::core::gpu::cuda_available())
+            kind = ExportBackend::Cuda;
+        else if (enc_hw_fmt_ == AV_PIX_FMT_VAAPI)
+            kind = ExportBackend::Vaapi;
+        else
+            kind = ExportBackend::Software;
+        if (kind == ExportBackend::Vaapi) {
+            va_scan = av_frame_alloc();
+            va_scaled = av_frame_alloc();
+            va_out = av_frame_alloc();
+        }
+        return true;
+    }
+
+    // RGB -> enc_sw_fmt swscale with the output-tagged conversion matrix pinned
+    // (BT.709 for the bt709-tagged stream), plus the full-canvas RGB staging.
+    bool init_converters(int w, int h, AVPixelFormat fmt, bool bt709) {
+        out_w = w;
+        out_h = h;
+        tagged_bt709_ = bt709;
+        enc_sw_fmt = fmt;
+        if (sws) {
+            sws_freeContext(sws);
+            sws = nullptr;
+        }
+        sws = sws_getContext(w, h, AV_PIX_FMT_RGBA, w, h, fmt,
+                             SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!sws) return false;
+        const int conv_matrix = bt709 ? SWS_CS_ITU709 : SWS_CS_ITU601;
+        const int* conv_coefs = sws_getCoefficients(conv_matrix);
+        sws_setColorspaceDetails(sws, conv_coefs, 1, conv_coefs, 0,
+                                 0, 1 << 16, 1 << 16);
+        if (rgb) av_frame_free(&rgb);
+        rgb = av_frame_alloc();
+        rgb->format = AV_PIX_FMT_RGBA;
+        rgb->width = w;
+        rgb->height = h;
+        av_frame_get_buffer(rgb, 0);
+        return true;
+    }
+
+    const char* matrix_name() const {
+        return tagged_bt709_ ? "BT.709" : "BT.601";
+    }
+
+    // Dispatch into ONE backend by label; each branch touches only its own
+    // members. `out_frame` is the output-stream frame number (pts).
+    PumpFrame produce(int64_t tl, int64_t out_frame) {
+        if (kind == ExportBackend::Cuda) return produce_cuda(tl, out_frame);
+        if (kind == ExportBackend::Vaapi) return produce_vaapi(tl, out_frame);
+        return produce_software(tl, out_frame);
+    }
+
+    // Consumer-loop hooks: keep vendor concerns out of the shared pipeline loop.
+    void after_send() {
+        // NVENC reads surfaces asynchronously; barrier before returning the
+        // surface to the hw pool, else a recycled in-flight surface duplicates
+        // frames. VAAPI feed frames transferred synchronously need no barrier.
+        if (kind == ExportBackend::Cuda)
+            canvas::core::gpu::convert_nv12_device_sync();
+    }
+    void account_stalls() {
+        if (kind == ExportBackend::Cuda)
+            telemetry->note_pool_stalls(canvas::core::gpu::nv12_pool_stalls());
+    }
+
+    void teardown() {
+        // Device-side grade LUT + title-sprite caches: both encode paths have
+        // finished and synced by now, so no queued kernel can still read them.
+        // Null-safe.
+        if (kind == ExportBackend::Cuda) {
+            grade_lut.release();
+            title_cache.release();
+        }
+        av_frame_free(&rgb);
+        if (va_sws) {
+            sws_freeContext(va_sws);
+            va_sws = nullptr;
+        }
+        av_frame_free(&va_out);
+        av_frame_free(&va_scaled);
+        av_frame_free(&va_scan);
+        if (sws) {
+            sws_freeContext(sws);
+            sws = nullptr;
+        }
+        if (hw_frames) av_buffer_unref(&hw_frames);
+        if (dec_dev) av_buffer_unref(&dec_dev);
+    }
+
+private:
+    AVPixelFormat enc_hw_fmt_ = AV_PIX_FMT_NONE;
+    bool tagged_bt709_ = false;
+
+    VideoFramePtr frame_for(int64_t tl) {
+        if (session_ok && session) return session->frame(tl);
+        return render_video_frame(*project, tl, out_w, out_h, 0);
+    }
+
+    // Shared CPU-composite step: render RGBA on the CPU (session decode, hw or
+    // sw), preview-push, telemetry-note, and stage into the full-canvas rgb.
+    bool composite_rgba(int64_t tl, VideoFramePtr& vf) {
+        const auto comp_t0 = std::chrono::steady_clock::now();
+        vf = frame_for(tl);
+        if (!vf) return false;
+        if (throttle && throttle->due() && push_preview) push_preview(vf);
+        telemetry->note_cpu(std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - comp_t0).count());
+        const std::size_t bytes =
+            std::min<std::size_t>(vf->rgba.size(),
+                                  rgb->linesize[0] * (std::size_t)out_h);
+        std::memcpy(rgb->data[0], vf->rgba.data(), bytes);
+        return true;
+    }
+
+    PumpFrame produce_cuda(int64_t tl, int64_t out_frame) {
+        if (session_ok && session) {
+            RenderSession::GpuFrameInfo gfi;
+            bool gpu_ok = session->frame_gpu(tl, &gfi) && gfi.valid;
+            // A title overlay rides the fast path only when its per-clip sprite
+            // rasterises + uploads onto the device; otherwise drop to the CPU
+            // composite so pixels stay identical.
+            if (gpu_ok && gfi.clip && gfi.clip->has_title())
+                gpu_ok = title_cache.ensure(gfi.clip, out_w, out_h);
+            if (gpu_ok) {
+                telemetry->note_fast();
+                // Optional premultiplied title-overlay sprite (cache owns the
+                // device copy) fused by the resize/grade kernels below.
+                const gpu::TitleSpriteGpu* title =
+                    (gfi.clip && gfi.clip->has_title()) ? &title_cache.spr : nullptr;
+                // Sanity: output frames must map to strictly advancing source
+                // frames; a non-+1 delta means dropped/duplicated frames
+                // (judder). Only meaningful at fps == seq fps; otherwise the tl
+                // mapping itself duplicates/rounds and the +1 check trips.
+                if (gfi.src_frame >= 0 && tl_per_frame == 1.0) {
+                    if (judder_prev_src != INT64_MIN && gfi.src_frame != judder_prev_src + 1) {
+                        telemetry->note_stall();
+                        fprintf(stderr,
+                                "[FRAME-DIAG] tl_frame=%lld src=+%lld (prev src=%lld) delta=%lld\n",
+                                (long long)tl, (long long)gfi.src_frame,
+                                (long long)judder_prev_src,
+                                (long long)(gfi.src_frame - judder_prev_src));
+                    }
+                    judder_prev_src = gfi.src_frame;
+                }
+                AVFrame* hw = av_frame_alloc();
+                if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
+                    const uintptr_t yc = reinterpret_cast<uintptr_t>(hw->data[0]);
+                    const uintptr_t uvc = reinterpret_cast<uintptr_t>(hw->data[1]);
+                    auto _tr0 = std::chrono::steady_clock::now();
+                    // decode_to_hw() borrows; av_frame_ref() keeps the device
+                    // planes alive until the resize + event wait consume them.
+                    AVFrame* src_ref = nullptr;
+                    if (gfi.source) {
+                        src_ref = av_frame_alloc();
+                        if (src_ref && av_frame_ref(src_ref, gfi.source) < 0) {
+                            av_frame_free(&src_ref);
+                            src_ref = nullptr;
+                        }
+                    }
+                    // Async resize on a non-blocking stream; the consumer waits
+                    // on the event before sending the frame. Graded clips run
+                    // the fused grade+resize kernel (device LUT cached per
+                    // clip) so they stay on this path.
+                    bool resized = src_ref != nullptr;
+                    if (resized) {
+                        if (gfi.grade && gfi.grade->valid() && grade_lut.ensure(gfi)) {
+                            resized = canvas::core::gpu::convert_nv12_grade_resize_async(
+                                reinterpret_cast<const uint8_t*>(gfi.srcY),
+                                reinterpret_cast<const uint8_t*>(gfi.srcUV),
+                                gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
+                                reinterpret_cast<uint8_t*>(yc),
+                                static_cast<std::size_t>(hw->linesize[0]),
+                                reinterpret_cast<uint8_t*>(uvc),
+                                static_cast<std::size_t>(hw->linesize[1]),
+                                gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
+                                gfi.dx, gfi.dy, gfi.fade, grade_lut.params(gfi), title);
+                        } else {
+                            resized = canvas::core::gpu::convert_nv12_resize_async(
+                                reinterpret_cast<const uint8_t*>(gfi.srcY),
+                                reinterpret_cast<const uint8_t*>(gfi.srcUV),
+                                gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
+                                reinterpret_cast<uint8_t*>(yc),
+                                static_cast<std::size_t>(hw->linesize[0]),
+                                reinterpret_cast<uint8_t*>(uvc),
+                                static_cast<std::size_t>(hw->linesize[1]),
+                                gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
+                                gfi.dx, gfi.dy, gfi.fade, title);
+                        }
+                    }
+                    if (resized) {
+                        void* ev = nullptr;
+                        canvas::core::gpu::convert_nv12_record_event(&ev);
+                        auto _tr1 = std::chrono::steady_clock::now();
+                        // Async-launch cost of the resize (the event wait is
+                        // consumer-side; the wait axis shows up in the encode
+                        // time there).
+                        telemetry->note_resize(
+                            std::chrono::duration<double, std::milli>(_tr1 - _tr0).count());
+                        hw->pts = out_frame;
+                        return {hw, ev, src_ref};
+                    }
+                    if (src_ref) av_frame_unref(src_ref);
+                } else {
+                    telemetry->note_alloc_miss();
+                }
+                av_frame_free(&hw);
+            }
+        }
+        // CPU composite fallback: session decode (hw or sw) to RGBA, then the
+        // CUDA kernel converts straight into the encoder's device planes.
+        VideoFramePtr vf;
+        if (!composite_rgba(tl, vf)) return {};
+        AVFrame* hw = av_frame_alloc();
+        if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
+            const uintptr_t base = reinterpret_cast<uintptr_t>(hw->data[0]);
+            uint8_t* dY = reinterpret_cast<uint8_t*>(base);
+            uint8_t* dUV = reinterpret_cast<uint8_t*>(
+                base + static_cast<uintptr_t>(hw->linesize[0]) * static_cast<uintptr_t>(out_h));
+            if (canvas::core::gpu::convert_rgba_to_nv12(
+                    vf->rgba.data(), vf->width, vf->height,
+                    dY, static_cast<std::size_t>(hw->linesize[0]),
+                    dUV, static_cast<std::size_t>(hw->linesize[0]),
+                    out_w, out_h)) {
+                hw->pts = out_frame;
+                return {hw, nullptr, nullptr};
+            }
+            telemetry->note_alloc_miss();
+            av_frame_free(&hw);
+        } else if (hw) {
+            telemetry->note_alloc_miss();
+            av_frame_free(&hw);
+        }
+        return {};
+    }
+
+    // VAAPI encoder-surface feed: decode_to_hw() hands a VAAPI source; move it
+    // to host NV12 (transfer_data), re-create the letterbox content rect with an
+    // NV12->NV12 swscale when the source isn't canvas-sized, then upload the
+    // full-canvas host frame into a pooled encoder surface (transfer_data again).
+    // Fully synchronous — no CUDA events, no device sync. Grades and edge fades
+    // bail to the CPU compositor because the fused nv12GradeResize kernel is
+    // CUDA-only. Staging frames are unref'd + refilled each call.
+    AVFrame* vaapi_feed_frame(int64_t tl) {
+        RenderSession::GpuFrameInfo gfi;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!session->frame_gpu(tl, &gfi) || !gfi.valid) return nullptr;
+        // Grade + fade both need the CUDA fused kernel; CPU-composite them so
+        // pixels stay identical across encoder backends.
+        if (gfi.fade < 1.0f || (gfi.grade && gfi.grade->valid())) return nullptr;
+        // Title overlays ride the CUDA-only sprite kernel; VAAPI keeps the CPU
+        // composite so titled exports stay pixel-identical across backends.
+        if (gfi.clip && gfi.clip->has_title()) return nullptr;
+        // NV12 chroma is half-res in both axes: a non-even content offset can't
+        // be placed by plane-relative copies without re-subsampling.
+        if (gfi.dx < 0 || gfi.dy < 0 || (gfi.dx & 1) || (gfi.dy & 1)) return nullptr;
+        if (gfi.dstW <= 0 || gfi.dstH <= 0 || (gfi.dstW & 1) || (gfi.dstH & 1)) return nullptr;
+        if (!va_scan || !va_scaled || !va_out) return nullptr;
+
+        // VAAPI surface -> host NV12 at the source's native size. transfer_data
+        // stamps the decoded frame's real dims; trust those over gfi.
+        av_frame_unref(va_scan);
+        va_scan->format = AV_PIX_FMT_NV12;
+        if (av_hwframe_transfer_data(va_scan, gfi.source, 0) < 0) return nullptr;
+        const int sw = va_scan->width, sh = va_scan->height;
+        const bool identity =
+            (gfi.dx == 0 && gfi.dy == 0 && sw == out_w && sh == out_h);
+        AVFrame* feed = va_scan;
+        if (!identity) {
+            // Re-create the letterbox rect: scale source -> content size, paste
+            // onto a black full-canvas host frame, then upload that whole canvas.
+            if (va_sws_src_w != sw || va_sws_src_h != sh ||
+                va_sws_dst_w != gfi.dstW || va_sws_dst_h != gfi.dstH) {
+                if (va_sws) sws_freeContext(va_sws);
+                va_sws = sws_getContext(sw, sh, AV_PIX_FMT_NV12,
+                                        gfi.dstW, gfi.dstH, AV_PIX_FMT_NV12,
+                                        SWS_BILINEAR, nullptr, nullptr, nullptr);
+                va_sws_src_w = sw; va_sws_src_h = sh;
+                va_sws_dst_w = gfi.dstW; va_sws_dst_h = gfi.dstH;
+            }
+            if (!va_sws) return nullptr;
+            av_frame_unref(va_scaled);
+            va_scaled->format = AV_PIX_FMT_NV12;
+            va_scaled->width = gfi.dstW;
+            va_scaled->height = gfi.dstH;
+            if (av_frame_get_buffer(va_scaled, 32) < 0) return nullptr;
+            const uint8_t* srows[] = {va_scan->data[0], va_scan->data[1], nullptr, nullptr};
+            const int slines[] = {va_scan->linesize[0], va_scan->linesize[1], 0, 0};
+            sws_scale(va_sws, srows, slines, 0, sh, va_scaled->data, va_scaled->linesize);
+
+            av_frame_unref(va_out);
+            va_out->format = AV_PIX_FMT_NV12;
+            va_out->width = out_w;
+            va_out->height = out_h;
+            if (av_frame_get_buffer(va_out, 32) < 0) return nullptr;
+            for (int r = 0; r < va_out->height; ++r)
+                std::memset(va_out->data[0] + (std::size_t)r * (std::size_t)va_out->linesize[0],
+                            16, (std::size_t)va_out->linesize[0]);
+            for (int r = 0; r < va_out->height / 2; ++r)
+                std::memset(va_out->data[1] + (std::size_t)r * (std::size_t)va_out->linesize[1],
+                            128, (std::size_t)va_out->linesize[1]);
+            for (int r = 0; r < gfi.dstH; ++r)
+                std::memcpy(va_out->data[0] +
+                                (std::size_t)(gfi.dy + r) * (std::size_t)va_out->linesize[0] + gfi.dx,
+                            va_scaled->data[0] + (std::size_t)r * (std::size_t)va_scaled->linesize[0],
+                            (std::size_t)gfi.dstW);
+            for (int r = 0; r < gfi.dstH / 2; ++r)
+                std::memcpy(va_out->data[1] +
+                                (std::size_t)(gfi.dy / 2 + r) * (std::size_t)va_out->linesize[1] + gfi.dx,
+                            va_scaled->data[1] + (std::size_t)r * (std::size_t)va_scaled->linesize[1],
+                            (std::size_t)gfi.dstW);
+            feed = va_out;
+        }
+
+        AVFrame* hw = av_frame_alloc();
+        if (!hw || av_hwframe_get_buffer(hw_frames, hw, 0) != 0) {
+            telemetry->note_alloc_miss();
+            av_frame_free(&hw);
+            return nullptr;
+        }
+        if (av_hwframe_transfer_data(hw, feed, 0) != 0) {
+            telemetry->note_alloc_miss();
+            av_frame_free(&hw);
+            return nullptr;
+        }
+        telemetry->note_fast();
+        telemetry->note_resize(std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - t0).count());
+        return hw;
+    }
+
+    PumpFrame produce_vaapi(int64_t tl, int64_t out_frame) {
+        if (session_ok && session) {
+            if (AVFrame* hw = vaapi_feed_frame(tl)) {
+                hw->pts = out_frame;
+                return {hw, nullptr, nullptr};
+            }
+        }
+        // CPU composite fallback: RGBA -> NV12 on host, upload into a pooled
+        // VAAPI encoder surface (identical pixels to the software backend).
+        VideoFramePtr vf;
+        if (!composite_rgba(tl, vf)) return {};
+        AVFrame* input = av_frame_alloc();
+        if (!input) return {};
+        input->format = enc_sw_fmt;
+        input->width = out_w;
+        input->height = out_h;
+        if (av_frame_get_buffer(input, 0) >= 0) {
+            const uint8_t* src[] = {rgb->data[0]};
+            int src_lines[] = {rgb->linesize[0]};
+            sws_scale(sws, src, src_lines, 0, out_h, input->data, input->linesize);
+            input->pts = out_frame;
+            AVFrame* hw = av_frame_alloc();
+            if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
+                if (av_hwframe_transfer_data(hw, input, 0) == 0) {
+                    hw->pts = out_frame;
+                    av_frame_free(&input);
+                    return {hw, nullptr, nullptr};
+                }
+                av_frame_free(&hw);
+            } else if (hw) {
+                telemetry->note_alloc_miss();
+                av_frame_free(&hw);
+            }
+        }
+        av_frame_free(&input);
+        return {};
+    }
+
+    // Pure software encode (no hw frames): CPU composite then swscale straight
+    // into the encoder's pixel format.
+    PumpFrame produce_software(int64_t tl, int64_t out_frame) {
+        VideoFramePtr vf;
+        if (!composite_rgba(tl, vf)) return {};
+        AVFrame* input = av_frame_alloc();
+        if (!input) return {};
+        input->format = enc_sw_fmt;
+        input->width = out_w;
+        input->height = out_h;
+        if (av_frame_get_buffer(input, 0) >= 0) {
+            const uint8_t* src[] = {rgb->data[0]};
+            int src_lines[] = {rgb->linesize[0]};
+            sws_scale(sws, src, src_lines, 0, out_h, input->data, input->linesize);
+            input->pts = out_frame;
+            return {input, nullptr, nullptr};
+        }
+        av_frame_free(&input);
+        return {};
+    }
+};
+
 }  // namespace
 
 std::vector<std::string> available_hw_devices() {
@@ -273,7 +818,12 @@ std::string nv_preset_for(const std::string& codec, const std::string& preset) {
     if (p == "veryfast") return "p2";
     if (p == "faster") return "p2";
     if (p == "fast") return "p3";
-    if (p == "medium") return "p5";
+    // medium -> p4 per docs/nvenc.md (measured 2026-09-15, RTX 5070 Ti):
+    // p1..p4 are identical speed (feeder-bound), so the medium slot is chosen
+    // on rate-control accuracy — p4 hq CBR lands ~65 Mbps on the 80 Mbps law
+    // while p5 is a full quality tier slower for no deliverable benefit. Keep
+    // slow/veryslow/placebo as the quality-first tiers.
+    if (p == "medium") return "p4";
     if (p == "slow") return "p6";
     if (p == "veryslow" || p == "placebo") return "p7";
     // Already an NVENC preset or unknown: hand it through (av_opt_set no-ops on
@@ -346,15 +896,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     // Deliver-page viewer can mirror the render without stalling the encode
     // loop or allocating a host frame at full encode speed. `last` starts at
     // epoch so the first frame previews immediately.
-    struct PreviewThrottle {
-        std::chrono::steady_clock::time_point last{};
-        bool due() {
-            const auto now = std::chrono::steady_clock::now();
-            if (now - last < kPreviewPushInterval) return false;
-            last = now;
-            return true;
-        }
-    } preview_throttle;
+    PreviewThrottle preview_throttle;
     const auto push_preview = [&](const VideoFramePtr& vf) {
         if (!control || !control->on_frame || !vf) return;
         control->on_frame(vf);
@@ -392,6 +934,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     vctx->pix_fmt = v_use_hw ? hw_pix : sw_pix;
     vctx->gop_size = 120;
     vctx->max_b_frames = 0;
+    if (s.threads > 0) vctx->thread_count = s.threads;  // 0 = FFmpeg auto (all cores)
     // Compositing stays in the source's 8-bit limited-range bt709 space, so
     // stamp bt709 + TV range here. Missing tags make players guess the transfer
     // and slide into slow software colorspace conversion (stutter).
@@ -486,6 +1029,18 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             av_opt_set(vctx->priv_data, "preset", nv_preset_for(s.video_codec, p).c_str(), 0);
         }
     }
+    // NVENC AQ: redistribute bits toward busy regions (detail retention).
+    // Measured speed-neutral at strength 8 on Blackwell and bitrate-positive
+    // within a fixed budget (docs/nvenc.md §4.3) — a quality dial, never a
+    // speed play, so enable it on the bitrate-driven deliver path. constqp
+    // leaves QP fixed (nothing to redistribute). The Deliver panel carries
+    // aq-strength in `extra` and apply_codec_extra below runs last, so the
+    // strength 8 here is only the base when no explicit value is given.
+    if (is_nvenc && s.video_bitrate_kbps > 0 && s.crf < 0) {
+        av_opt_set_int(vctx->priv_data, "spatial_aq", 1, 0);
+        av_opt_set_int(vctx->priv_data, "temporal_aq", 1, 0);
+        av_opt_set_int(vctx->priv_data, "aq_strength", 8, 0);
+    }
     apply_codec_extra(vctx, s.extra);
 
     // Split-frame encoding: multi-engine GPUs (RTX 5070 Ti/5080/5090) encode
@@ -499,18 +1054,28 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
          vc.find("h265") != std::string::npos)) {
         av_opt_set_int(vctx->priv_data, "split_encode_mode", 1, 0);
     }
-    // Stamp the highest HEVC level the output size/fps requires. NVENC's
-    // "auto" under-picks Main@3.1 for 1440p60 (spec-invalid: 3.1 caps at 1080p),
-    // which pushes strict decoders into software decode -> judder.
+    // Stamp the highest HEVC level the stream's luma sample rate AND VBV buffer
+    // (CPB) require. NVENC's "auto" under-picks Main@3.1 for 1440p60
+    // (spec-invalid: 3.1 caps at 1080p), which pushes strict decoders into
+    // software decode -> judder. Level codes are FFmpeg's NVENC ints (30=1.0,
+    // so 183=6.1, 186=6.2); 200 is outside the option's 0..186 range.
     if (is_nvenc && (vc.find("hevc") != std::string::npos ||
                      vc.find("h265") != std::string::npos)) {
-        // Level from the stream's luma sample rate; values are NVENC's
-        // H.264-style integers (150=3.1 ... 183=5.0).
         const double luma_sps =
             static_cast<double>(s.width) * static_cast<double>(s.height) * s.fps;
-        int level = 183;  // Main@5.0: up to 2.56 Gsamples/s (covers 1440p60 @ 0.22G)
-        if (luma_sps > 2.56e9) level = 186;   // 5.1
-        if (luma_sps > 3.07e9) level = 200;   // 6.0
+        int level = 183;  // 6.1 (covers 1440p60 @ 0.22G and typical deliver targets)
+        if (luma_sps > 2.56e9) level = 186;  // 6.2 (8K-class sample rate)
+        // Level 6.1 caps the CPB at 120 Mbps; the exporter's VBR VBV window is
+        // 2x the max bitrate, so an 80 Mbps VBR export (240 Mbps window) opens
+        // only at 6.2 — stamping 6.1 here fails the open with "Invalid Level".
+        if (s.video_bitrate_kbps > 0 && s.crf < 0) {
+            const int64_t max_bps =
+                s.video_max_bitrate_kbps > 0
+                    ? static_cast<int64_t>(s.video_max_bitrate_kbps) * 1000
+                    : static_cast<int64_t>(s.video_bitrate_kbps) * 1000;
+            const int64_t cpb_bps = s.vid_rc_mode == "cbr" ? max_bps : max_bps * 2;
+            if (cpb_bps > 120000000) level = 186;
+        }
         av_opt_set_int(vctx->priv_data, "level", level, 0);
     }
     // NVENC needs roughly rc_lookahead + max_b_frames + 8 surfaces; hardcoding
@@ -534,69 +1099,28 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         av_opt_set_int(vctx->priv_data, "surfaces", surfaces, 0);
     }
 
-    ::AVBufferRef* hw_frames = nullptr;
-    ::AVBufferRef* dec_dev = nullptr;  // device used for accelerated decode of sources
-    if (v_use_hw) {
-        const AVHWDeviceType dt = av_hwdevice_find_type_by_name(hw_device.c_str());
-        ::AVBufferRef* dev = nullptr;
-        if (dt != AV_HWDEVICE_TYPE_NONE) {
-            // Same GPU pin the playback probes honor: a Settings-selected GPU
-            // passes its render node / CUDA ordinal to the encoder device so
-            // export lands on the same accelerator the user picked.
-            const std::string& gpu_arg =
-                (hw_device == canvas::core::HwDeviceManager::preferred_gpu_backend())
-                    ? canvas::core::HwDeviceManager::preferred_device_arg()
-                    : std::string{};
-            av_hwdevice_ctx_create(&dev, dt,
-                                   gpu_arg.empty() ? nullptr : gpu_arg.c_str(),
-                                   nullptr, 0);
-        }
-        dec_dev = dev;
-        if (dev) {
-            ::AVBufferRef* fr = av_hwframe_ctx_alloc(dev);
-            if (fr) {
-                AVHWFramesContext* fc = reinterpret_cast<AVHWFramesContext*>(fr->data);
-                if (fc) {
-                    fc->format = hw_pix;
-                    fc->sw_format = AV_PIX_FMT_NV12;
-                    fc->width = s.width;
-                    fc->height = s.height;
-                    fc->initial_pool_size = 12;
-                }
-                if (av_hwframe_ctx_init(fr) == 0) {
-                    hw_frames = fr;
-                    vctx->hw_frames_ctx = av_buffer_ref(hw_frames);
-                } else {
-                    av_buffer_unref(&fr);
-                }
-            }
-            // Keep `dec_dev` referenced for the decoder's lifetime: the frames
-            // context holds its own device ref, so unref'ing here would drop the
-            // decoder's device out from under it. Released at teardown.
-        }
-        if (!hw_frames) v_use_hw = false;
+    // One FramePump per export: it owns the backend's device, encoder surface
+    // pool and conversion staging, and hands the pipeline below exactly one
+    // encoder-ready AVFrame per timeline frame. The backend (Software/Cuda/
+    // Vaapi) is picked ONCE here from the pool's frame format — never from
+    // machine-global cuda_available(), which used to fire CUDA kernels against
+    // VAAPI surfaces on dual-vendor boxes (the old async-fault garbage at ~4fps).
+    FramePump pump;
+    if (v_use_hw &&
+        pump.create_device_and_pool(hw_device, hw_pix, s.width, s.height)) {
+        // Give the encoder the pool BEFORE avcodec_open2 below so it can size
+        // its surface accounting up front. pump owns dec_dev + hw_frames for
+        // the rest of the export and releases both in teardown().
+        vctx->hw_frames_ctx = av_buffer_ref(pump.hw_frames);
+    } else {
+        v_use_hw = false;  // no usable hw encoder surface pool -> software encode
     }
 
-    // Which hw-frame format the ENCODER actually consumes. `cuda_available()` is
-    // a machine-global property (any NVIDIA GPU present), NOT a property of this
-    // export's encoder frames — on a dual-vendor box where the only encoder is
-    // VAAPI (AMD iGPU) but an NVIDIA GPU is also present, it used to fire the
-    // CUDA composite kernels against AV_PIX_FMT_VAAPI encoder surfaces: the
-    // encoder frame's data[] is a VASurfaceID, `frame_gpu` boxed that as
-    // srcY/srcUV, and the kernels faulted asynchronously. The async fault read as
-    // "landed" in telemetry while the surface was never written (garbage encoded
-    // at ~4 fps), and the CPU fallback's cudaDeviceSynchronize surfaced the fault
-    // as a per-frame alloc_miss. Both vendor paths therefore pick the encode-side
-    // feed by the hw-frames FORMAT, never by machine-wide CUDA presence.
-    const AVPixelFormat enc_hw_fmt = hw_frames
-        ? reinterpret_cast<AVHWFramesContext*>(hw_frames->data)->format
-        : AV_PIX_FMT_NONE;
-    const bool enc_is_cuda = v_use_hw && hw_frames && enc_hw_fmt == AV_PIX_FMT_CUDA &&
-                             canvas::core::gpu::cuda_available();
-    const bool enc_is_vaapi = v_use_hw && hw_frames && enc_hw_fmt == AV_PIX_FMT_VAAPI;
-
+    // The backend is already fixed by FramePump::create_device_and_pool from the
+    // pool's frame format; the pipeline below must never re-derive it from
+    // machine-wide CUDA presence. `pump.kind` drives every branch from here on.
     if (avcodec_open2(vctx, vcodec, nullptr) < 0) {
-        if (hw_frames) av_buffer_unref(&hw_frames);
+        pump.teardown();
         avcodec_free_context(&vctx);
         avformat_free_context(oc);
         return fail("Failed to open video encoder: " + s.video_codec);
@@ -681,28 +1205,21 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     // Software format fed to the encoder: NV12 (+ upload) for hw encoders,
     // else vctx->pix_fmt exactly.
     const AVPixelFormat enc_sw_fmt = v_use_hw ? AV_PIX_FMT_NV12 : vctx->pix_fmt;
-    SwsContext* sws = sws_getContext(s.width, s.height, AV_PIX_FMT_RGBA,
-                                     s.width, s.height, enc_sw_fmt,
-                                     SWS_BILINEAR, nullptr, nullptr, nullptr);
-    if (!sws) {
-        avcodec_free_context(&actx); avcodec_free_context(&vctx);
-        if (oc->pb) avio_closep(&oc->pb);
-        avformat_free_context(oc);
-        return fail("Failed to create RGB->YUV conversion context.");
-    }
     // Pin the conversion matrix so the encoded pixels match the stamped tags
     // (issue #1): previously this passed NO SWS_CS_* flag, so libswscale applied
     // its SWS_CS_DEFAULT (== ITU601 / BT.601) matrix to every RGB->YUV export no
     // matter what the output stream was tagged. Output is conceived full-range
     // RGB in, limited-range BT.709 YUV out (matches the tagged range:mpeg).
     const bool tagged_bt709 = (vctx->colorspace == AVCOL_SPC_BT709);
-    const int conv_matrix = tagged_bt709 ? SWS_CS_ITU709 : SWS_CS_ITU601;
-    const int* conv_coefs = sws_getCoefficients(conv_matrix);
-    sws_setColorspaceDetails(sws, conv_coefs, 1, conv_coefs, 0,
-                             0, 1 << 16, 1 << 16);
+    if (!pump.init_converters(s.width, s.height, enc_sw_fmt, tagged_bt709)) {
+        avcodec_free_context(&actx); avcodec_free_context(&vctx);
+        if (oc->pb) avio_closep(&oc->pb);
+        avformat_free_context(oc);
+        return fail("Failed to create RGB->YUV conversion context.");
+    }
     // Tag-vs-conversion audit: output is stamped BT.709 limited (see configure
-    // above); this swscale now uses the SAME matrix (sws_setColorspaceDetails
-    // above), so a BT.709-tagged file is encoded with BT.709 coefficients.
+    // above); pump's swscale uses the SAME matrix, so a BT.709-tagged file is
+    // encoded with BT.709 coefficients.
     ::canvas::core::log::log_warning(
         "[export] color audit: out_tags=range:%s/matrix:%s/trc:%s ; rgba->%s "
         "sws_setColorspaceDetails matrix=%s srcRange=JPEG dstRange=MPEG — %s",
@@ -711,15 +1228,9 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
             : vctx->colorspace == AVCOL_SPC_BT470BG ? "bt601" : "other",
         vctx->color_trc == AVCOL_TRC_BT709 ? "bt709" : "other",
         av_get_pix_fmt_name(enc_sw_fmt),
-        conv_matrix == SWS_CS_ITU709 ? "BT.709" : "BT.601",
-        conv_matrix == SWS_CS_ITU709 ? "conversion matches stamped matrix"
-                                    : "conversion matrix follows tagged colorspace");
-
-    AVFrame* rgb = av_frame_alloc();
-    rgb->format = AV_PIX_FMT_RGBA;
-    rgb->width = s.width;
-    rgb->height = s.height;
-    av_frame_get_buffer(rgb, 0);
+        pump.matrix_name(),
+        tagged_bt709 ? "conversion matches stamped matrix"
+                     : "conversion matrix follows tagged colorspace");
 
     // audio source frame (planar)
     AVFrame* a_src = nullptr;
@@ -741,6 +1252,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     const double seq_fps = project.sequence.fps;
     const double export_fps = s.fps > 0.0 ? s.fps : (seq_fps > 0.0 ? seq_fps : 30.0);
     const double tl_per_frame = seq_fps > 0.0 ? seq_fps / export_fps : 1.0;
+    pump.tl_per_frame = tl_per_frame;
     const int64_t total_video = seq_fps > 0.0
         ? (int64_t)std::llround((double)s.duration_frames / seq_fps * export_fps)
         : s.duration_frames;
@@ -764,10 +1276,6 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     // per export, shared with RenderSession via set_telemetry(), and all note_*
     // calls are thread-safe (producer thread writes, consumer thread ticks).
     canvas::core::log::RenderTelemetry telemetry;
-    // Per-export judder-check state (src-frame +1 walk): local + captured, not a
-    // static, so a multi-export process never compares frame N of one export to
-    // frame M of the previous one.
-    int64_t judder_prev_src = INT64_MIN;
 
     // Decoded audio chunks are per-frame sized (e.g. 800 @48k/60fps) and don't
     // align to the encoder's 1024-sample frame size, so stage them in an
@@ -777,116 +1285,25 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     if (do_audio && a_frame_size > 0)
         a_acc.reserve((std::size_t)a_frame_size * 2 * s.audio_channels);
 
-    // Reusable render session: open sources once, reuse decoders, and decode on
-    // the GPU for hw exports (removes per-frame avformat_open_input).
+// Reusable render session: open sources once, reuse decoders, and decode on
+    // the GPU for hw exports (removes per-frame avformat_open_input). The session
+    // is backend-bound (opened with the pump's device), but audio decode always
+    // runs software inside the same RenderSession.
     RenderSession session;
     session.set_telemetry(&telemetry);
-    bool session_ok = session.begin(project, s.width, s.height, dec_dev);
+    bool session_ok = session.begin(project, s.width, s.height, pump.dec_dev);
 
-    // Device-side grade-LUT cache for the fused GPU grade kernel (one upload per
-    // graded clip per export). Released before avformat teardown below.
-    GpuGradeLut s_gpu_grade;
-
-    // VAAPI encoder-surface feed: the CUDA sibling for AV_PIX_FMT_VAAPI frames.
-    // decode_to_hw() hands a VAAPI source; the feed moves it to host NV12
-    // (av_hwframe_transfer_data), re-creates the letterbox content rect with an
-    // NV12->NV12 swscale when the source isn't canvas-sized, then uploads the
-    // full-canvas host frame into a pooled encoder surface (transfer_data again).
-    // Fully synchronous — no CUDA events, no device sync — so the pipelined
-    // producer treats the result exactly like a CPU frame ({frame, null event,
-    // null source}). Only engaged when the encoder's frames format is VAAPI;
-    // grades and edge fades bail to the CPU compositor because the fused
-    // nv12GradeResize kernel is CUDA-only. All state lives on the producer
-    // thread (single-threaded), staging frames are unref'd + refilled each call.
-    AVFrame* va_scan = av_frame_alloc();
-    AVFrame* va_scaled = av_frame_alloc();
-    AVFrame* va_out = av_frame_alloc();
-    SwsContext* va_sws = nullptr;
-    int va_sws_src_w = 0, va_sws_src_h = 0, va_sws_dst_w = 0, va_sws_dst_h = 0;
-    auto vaapi_feed_frame = [&](const int64_t tl) -> AVFrame* {
-        RenderSession::GpuFrameInfo gfi;
-        const auto t0 = std::chrono::steady_clock::now();
-        if (!session.frame_gpu(tl, &gfi) || !gfi.valid) return nullptr;
-        // Grade + fade both need the CUDA fused kernel; CPU-composite them so
-        // pixels stay identical across encoder backends.
-        if (gfi.fade < 1.0f || (gfi.grade && gfi.grade->valid())) return nullptr;
-        // NV12 chroma is half-res in both axes: a non-even content offset can't
-        // be placed by plane-relative copies without re-subsampling.
-        if (gfi.dx < 0 || gfi.dy < 0 || (gfi.dx & 1) || (gfi.dy & 1)) return nullptr;
-        if (gfi.dstW <= 0 || gfi.dstH <= 0 || (gfi.dstW & 1) || (gfi.dstH & 1)) return nullptr;
-        if (!va_scan || !va_scaled || !va_out) return nullptr;
-
-        // VAAPI surface -> host NV12 at the source's native size. transfer_data
-        // stamps the decoded frame's real dims; trust those over gfi.
-        av_frame_unref(va_scan);
-        va_scan->format = AV_PIX_FMT_NV12;
-        if (av_hwframe_transfer_data(va_scan, gfi.source, 0) < 0) return nullptr;
-        const int sw = va_scan->width, sh = va_scan->height;
-        const bool identity =
-            (gfi.dx == 0 && gfi.dy == 0 && sw == s.width && sh == s.height);
-        AVFrame* feed = va_scan;
-        if (!identity) {
-            // Re-create the letterbox rect: scale source -> content size, paste
-            // onto a black full-canvas host frame, then upload that whole canvas.
-            if (va_sws_src_w != sw || va_sws_src_h != sh ||
-                va_sws_dst_w != gfi.dstW || va_sws_dst_h != gfi.dstH) {
-                if (va_sws) sws_freeContext(va_sws);
-                va_sws = sws_getContext(sw, sh, AV_PIX_FMT_NV12,
-                                        gfi.dstW, gfi.dstH, AV_PIX_FMT_NV12,
-                                        SWS_BILINEAR, nullptr, nullptr, nullptr);
-                va_sws_src_w = sw; va_sws_src_h = sh;
-                va_sws_dst_w = gfi.dstW; va_sws_dst_h = gfi.dstH;
-            }
-            if (!va_sws) return nullptr;
-            av_frame_unref(va_scaled);
-            va_scaled->format = AV_PIX_FMT_NV12;
-            va_scaled->width = gfi.dstW;
-            va_scaled->height = gfi.dstH;
-            if (av_frame_get_buffer(va_scaled, 32) < 0) return nullptr;
-            const uint8_t* srows[] = {va_scan->data[0], va_scan->data[1], nullptr, nullptr};
-            const int slines[] = {va_scan->linesize[0], va_scan->linesize[1], 0, 0};
-            sws_scale(va_sws, srows, slines, 0, sh, va_scaled->data, va_scaled->linesize);
-
-            av_frame_unref(va_out);
-            va_out->format = AV_PIX_FMT_NV12;
-            va_out->width = s.width;
-            va_out->height = s.height;
-            if (av_frame_get_buffer(va_out, 32) < 0) return nullptr;
-            for (int r = 0; r < va_out->height; ++r)
-                std::memset(va_out->data[0] + (std::size_t)r * (std::size_t)va_out->linesize[0],
-                            16, (std::size_t)va_out->linesize[0]);
-            for (int r = 0; r < va_out->height / 2; ++r)
-                std::memset(va_out->data[1] + (std::size_t)r * (std::size_t)va_out->linesize[1],
-                            128, (std::size_t)va_out->linesize[1]);
-            for (int r = 0; r < gfi.dstH; ++r)
-                std::memcpy(va_out->data[0] +
-                                (std::size_t)(gfi.dy + r) * (std::size_t)va_out->linesize[0] + gfi.dx,
-                            va_scaled->data[0] + (std::size_t)r * (std::size_t)va_scaled->linesize[0],
-                            (std::size_t)gfi.dstW);
-            for (int r = 0; r < gfi.dstH / 2; ++r)
-                std::memcpy(va_out->data[1] +
-                                (std::size_t)(gfi.dy / 2 + r) * (std::size_t)va_out->linesize[1] + gfi.dx,
-                            va_scaled->data[1] + (std::size_t)r * (std::size_t)va_scaled->linesize[1],
-                            (std::size_t)gfi.dstW);
-            feed = va_out;
-        }
-
-        AVFrame* hw = av_frame_alloc();
-        if (!hw || av_hwframe_get_buffer(hw_frames, hw, 0) != 0) {
-            telemetry.note_alloc_miss();
-            av_frame_free(&hw);
-            return nullptr;
-        }
-        if (av_hwframe_transfer_data(hw, feed, 0) != 0) {
-            telemetry.note_alloc_miss();
-            av_frame_free(&hw);
-            return nullptr;
-        }
-        telemetry.note_fast();
-        telemetry.note_resize(std::chrono::duration<double, std::milli>(
-                                  std::chrono::steady_clock::now() - t0).count());
-        return hw;
-    };
+    // Bind the session + hooks into the pump so produce() can composite, push
+    // live previews, and record telemetry without the outer loop knowing which
+    // backend is active. The oracle lets the pump's CPU-composite fallback call
+    // render_video_frame when session decode fails (the hw backends fall back to
+    // the CPU compositor identically).
+    pump.session = &session;
+    pump.project = &project;
+    pump.session_ok = session_ok;
+    pump.telemetry = &telemetry;
+    pump.throttle = &preview_throttle;
+    pump.push_preview = push_preview;
 
     // Pipelined render: a producer thread decodes + composites ahead of the
     // main thread, which sends + drains. GPU work overlaps NVENC; a 3-thread
@@ -905,194 +1322,11 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
     bool producer_done = false;
     auto render_one_frame = [&](const int64_t f) -> std::tuple<AVFrame*, void*, AVFrame*> {
         // Output frame f lands at timeline time f/export_fps; map to the timeline
-        // frame shown at that moment (identity when fps == seq fps).
+        // frame shown at that moment (identity when fps == seq fps). The pump
+        // picks the backend branch on f's own label and stamps the pts.
         const int64_t tl = (int64_t)std::llround((double)f * tl_per_frame);
-        // GPU fast path: composite a single clip straight into the encoder's
-        // CUDA hw frame, skipping the CPU RGBA blit + upload.
-        if (enc_is_cuda && session_ok) {
-            RenderSession::GpuFrameInfo gfi;
-            const bool _gk = session.frame_gpu(tl, &gfi) && gfi.valid;
-            if (_gk) {
-                telemetry.note_fast();
-                // Total frame_gpu attempt cost lives in the renderer-side telemetry
-                // (note_gpu_attempt in RenderSession::frame_gpu); no static here.
-                // Sanity: output frames must map to strictly advancing source frames;
-                // a non-+1 delta means dropped/duplicated frames (judder). Only
-                // meaningful at fps == seq fps; otherwise the tl mapping itself
-                // duplicates/rounds and the +1 check would false-trip.
-                // `judder_prev_src` is captured per-export (declared next to
-                // `telemetry`), so it can't bleed across exports in one process.
-                if (gfi.src_frame >= 0 && tl_per_frame == 1.0) {
-                    if (judder_prev_src != INT64_MIN && gfi.src_frame != judder_prev_src + 1) {
-                        telemetry.note_stall();
-                        fprintf(stderr, "[FRAME-DIAG] tl_frame=%lld src=+%lld (prev src=%lld) delta=%lld\n",
-                                (long long)tl, (long long)gfi.src_frame,
-                                (long long)judder_prev_src, (long long)(gfi.src_frame - judder_prev_src));
-                    }
-                    judder_prev_src = gfi.src_frame;
-                }
-                AVFrame* hw = av_frame_alloc();
-                if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
-                    const uintptr_t yc = reinterpret_cast<uintptr_t>(hw->data[0]);
-                    const uintptr_t uvc = reinterpret_cast<uintptr_t>(hw->data[1]);
-                    auto _tr0 = std::chrono::steady_clock::now();
-                    // decode_to_hw() borrows; av_frame_ref() keeps the device planes
-                    // alive until the resize + event wait consume them.
-                    AVFrame* src_ref = nullptr;
-                    if (gfi.source) {
-                        src_ref = av_frame_alloc();
-                        if (src_ref && av_frame_ref(src_ref, gfi.source) < 0) {
-                            av_frame_free(&src_ref);
-                            src_ref = nullptr;
-                        }
-                    }
-                    // Async resize on a non-blocking stream; the consumer waits on the event
-                    // before sending the frame. Graded clips run the fused grade+resize
-                    // kernel (device LUT cached per clip) so they stay on this path.
-                    // `src_ref` guards the whole launch: the async kernel must read the
-                    // borrowed device planes, which only the av_frame_ref keeps alive.
-                    bool resized = src_ref != nullptr;
-                    if (resized) {
-                        if (gfi.grade && gfi.grade->valid() && s_gpu_grade.ensure(gfi)) {
-                            resized = canvas::core::gpu::convert_nv12_grade_resize_async(
-                                reinterpret_cast<const uint8_t*>(gfi.srcY),
-                                reinterpret_cast<const uint8_t*>(gfi.srcUV),
-                                gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
-                                reinterpret_cast<uint8_t*>(yc),
-                                static_cast<std::size_t>(hw->linesize[0]),
-                                reinterpret_cast<uint8_t*>(uvc),
-                                static_cast<std::size_t>(hw->linesize[1]),
-                                gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
-                                gfi.dx, gfi.dy, gfi.fade, s_gpu_grade.params(gfi));
-                        } else {
-                            resized = canvas::core::gpu::convert_nv12_resize_async(
-                                reinterpret_cast<const uint8_t*>(gfi.srcY),
-                                reinterpret_cast<const uint8_t*>(gfi.srcUV),
-                                gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
-                                reinterpret_cast<uint8_t*>(yc),
-                                static_cast<std::size_t>(hw->linesize[0]),
-                                reinterpret_cast<uint8_t*>(uvc),
-                                static_cast<std::size_t>(hw->linesize[1]),
-                                gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
-                                gfi.dx, gfi.dy, gfi.fade);
-                        }
-                    }
-                    if (resized) {
-                        void* ev = nullptr;
-                        canvas::core::gpu::convert_nv12_record_event(&ev);
-                        auto _tr1 = std::chrono::steady_clock::now();
-                        // Async-launch cost of the resize (the event wait is consumer-side;
-                        // the wait axis shows up in the encode time there).
-                        telemetry.note_resize(
-                            std::chrono::duration<double, std::milli>(_tr1 - _tr0).count());
-                        hw->pts = f;
-                        return {hw, ev, src_ref};
-                    }
-                    if (src_ref) av_frame_unref(src_ref);
-                } else {
-                    telemetry.note_alloc_miss();
-                }
-                av_frame_free(&hw);
-            }
-        }
-
-        // VAAPI feed: the encoder's frames are VAAPI surfaces (AMD/Intel, or the
-        // dual-vendor case where the machine has CUDA but this export does NOT).
-        // Fully synchronous transfer both ways — no CUDA kernels, no events.
-        if (enc_is_vaapi && session_ok) {
-            if (AVFrame* hw = vaapi_feed_frame(tl)) {
-                hw->pts = f;
-                return {hw, nullptr, nullptr};
-            }
-        }
-
-        // CPU composite fallback (identical to the legacy loop): render RGBA on
-        // the CPU, then convert to NV12 either with a CUDA kernel or swscale.
-        const auto comp_t0 = std::chrono::steady_clock::now();
-        auto vf = session_ok ? session.frame(tl)
-                             : render_video_frame(project, tl, s.width, s.height, 0);
-        if (!vf) return {nullptr, nullptr, nullptr};
-        // Live preview (zero-copy: hand the shared_ptr holding the frame we are
-        // about to encode; consumer threads marshal it onto the GUI).
-        if (preview_throttle.due()) push_preview(vf);
-        telemetry.note_cpu(std::chrono::duration<double, std::milli>(
-                               std::chrono::steady_clock::now() - comp_t0).count());
-        const std::size_t bytes =
-            std::min<std::size_t>(vf->rgba.size(), rgb->linesize[0] * (std::size_t)s.height);
-        memcpy(rgb->data[0], vf->rgba.data(), bytes);
-
-        AVFrame* to_send = nullptr;
-
-        if (enc_is_cuda) {
-            AVFrame* hw = av_frame_alloc();
-            if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
-                const uintptr_t base = reinterpret_cast<uintptr_t>(hw->data[0]);
-                uint8_t* dY = reinterpret_cast<uint8_t*>(base);
-                uint8_t* dUV = reinterpret_cast<uint8_t*>(base +
-                    static_cast<uintptr_t>(hw->linesize[0]) * static_cast<uintptr_t>(s.height));
-                if (canvas::core::gpu::convert_rgba_to_nv12(
-                        vf->rgba.data(), vf->width, vf->height,
-                        dY, static_cast<std::size_t>(hw->linesize[0]),
-                        dUV, static_cast<std::size_t>(hw->linesize[0]),
-                        s.width, s.height)) {
-                    hw->pts = f;
-                    to_send = hw;
-                } else {
-                    telemetry.note_alloc_miss();
-                    av_frame_free(&hw);
-                }
-            } else {
-                telemetry.note_alloc_miss();
-                av_frame_free(&hw);
-            }
-        }
-
-        if (!to_send && v_use_hw && hw_frames) {
-            AVFrame* input = av_frame_alloc();
-            if (input) {
-                input->format = enc_sw_fmt;
-                input->width = s.width;
-                input->height = s.height;
-                if (av_frame_get_buffer(input, 0) >= 0) {
-                    const uint8_t* src[] = {rgb->data[0]};
-                    int src_lines[] = {rgb->linesize[0]};
-                    sws_scale(sws, src, src_lines, 0, s.height, input->data, input->linesize);
-                    input->pts = f;
-                    AVFrame* hw = av_frame_alloc();
-                    if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
-                        if (av_hwframe_transfer_data(hw, input, 0) == 0) {
-                            hw->pts = f;
-                            to_send = hw;
-                        } else {
-                            av_frame_free(&hw);
-                        }
-                    } else if (hw) {
-                        telemetry.note_alloc_miss();
-                        av_frame_free(&hw);
-                    }
-                }
-                av_frame_free(&input);
-            }
-        }
-
-        if (!to_send && !v_use_hw) {
-            AVFrame* input = av_frame_alloc();
-            if (input) {
-                input->format = enc_sw_fmt;
-                input->width = s.width;
-                input->height = s.height;
-                if (av_frame_get_buffer(input, 0) >= 0) {
-                    const uint8_t* src[] = {rgb->data[0]};
-                    int src_lines[] = {rgb->linesize[0]};
-                    sws_scale(sws, src, src_lines, 0, s.height, input->data, input->linesize);
-                    input->pts = f;
-                    to_send = input;
-                } else {
-                    av_frame_free(&input);
-                }
-            }
-        }
-        return {to_send, nullptr, nullptr};
+        PumpFrame slot = pump.produce(tl, f);
+        return {slot.frame, slot.event, slot.source};
     };
 
     auto producer_thread_fn = [&] {
@@ -1132,7 +1366,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         qcv.notify_all();
     };
 
-    if (session_ok && total_video > 0 && (enc_is_cuda || enc_is_vaapi)) {
+    if (session_ok && total_video > 0 && pump.kind != ExportBackend::Software) {
         std::thread producer(producer_thread_fn);
 
         while (!ended && !cancelled()) {
@@ -1167,8 +1401,8 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                 // NVENC reads surfaces asynchronously; barrier before returning the
                 // surface to the hw pool, else a recycled in-flight surface
                 // duplicates frames. VAAPI feed frames transferred synchronously
-                // need no barrier.
-                if (enc_is_cuda) canvas::core::gpu::convert_nv12_device_sync();
+                // need no barrier (the pump knows which backend this is).
+                pump.after_send();
                 av_frame_free(&to_send);
             }
             // One slot per timeline frame; advance in lockstep regardless.
@@ -1198,8 +1432,7 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
                 std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - enc_t0).count());
             telemetry.set_progress(frame, total_video);
-            if (canvas::core::gpu::cuda_available())
-                telemetry.note_pool_stalls(canvas::core::gpu::nv12_pool_stalls());
+            pump.account_stalls();
             telemetry.tick();
 
             // audio for this pass
@@ -1302,166 +1535,16 @@ bool export_project(const Project& project, const ExportSettings& s, ExportContr
         // (identity when fps == seq fps).
         const int64_t tl = (int64_t)std::llround((double)frame * tl_per_frame);
         if (frame < total_video) {
-            // render one frame
-            bool gpu_composited = false;
-
-            // GPU fast path: single-clip frames composite on the GPU straight into
-            // the encoder's CUDA hw frame, skipping the CPU RGBA blit + full-res
-            // upload that dominate software compositing.
-            if (enc_is_cuda && session_ok) {
-                RenderSession::GpuFrameInfo gfi;
-                if (session.frame_gpu(tl, &gfi) && gfi.valid) {
-                    telemetry.note_fast();
-                    AVFrame* hw = av_frame_alloc();
-                    auto tb0 = std::chrono::steady_clock::now();
-                    if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
-                        const uintptr_t yc = reinterpret_cast<uintptr_t>(hw->data[0]);
-                        const uintptr_t uvc = reinterpret_cast<uintptr_t>(hw->data[1]);
-                        // Graded clips use the fused grade+resize kernel (device LUT
-                        // cached per clip), then sync; ungraded use the sync resize.
-                        bool got = false;
-                        if (gfi.grade && gfi.grade->valid() && s_gpu_grade.ensure(gfi)) {
-                            got = canvas::core::gpu::convert_nv12_grade_resize_async(
-                                      reinterpret_cast<const uint8_t*>(gfi.srcY),
-                                      reinterpret_cast<const uint8_t*>(gfi.srcUV),
-                                      gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
-                                      reinterpret_cast<uint8_t*>(yc),
-                                      static_cast<std::size_t>(hw->linesize[0]),
-                                      reinterpret_cast<uint8_t*>(uvc),
-                                      static_cast<std::size_t>(hw->linesize[1]),
-                                      gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
-                                      gfi.dx, gfi.dy, gfi.fade, s_gpu_grade.params(gfi)) &&
-                                  canvas::core::gpu::convert_nv12_sync();
-                        } else {
-                            got = canvas::core::gpu::convert_nv12_resize(
-                                reinterpret_cast<const uint8_t*>(gfi.srcY),
-                                reinterpret_cast<const uint8_t*>(gfi.srcUV),
-                                gfi.srcW, gfi.srcH, gfi.srcYPitch, gfi.srcUVPitch,
-                                reinterpret_cast<uint8_t*>(yc),
-                                static_cast<std::size_t>(hw->linesize[0]),
-                                reinterpret_cast<uint8_t*>(uvc),
-                                static_cast<std::size_t>(hw->linesize[1]),
-                                gfi.outW, gfi.outH, gfi.dstW, gfi.dstH,
-                                gfi.dx, gfi.dy, gfi.fade);
-                        }
-                        if (got) {
-                            hw->pts = frame;
-                            avcodec_send_frame(vctx, hw);
-                            gpu_composited = true;
-                        }
-                    }
-                    av_frame_free(&hw);
-                }
+            PumpFrame slot = pump.produce(tl, frame);
+            if (slot.frame) {
+                avcodec_send_frame(vctx, slot.frame);
+                pump.after_send();
+                av_frame_free(&slot.frame);
             }
-
-            // VAAPI feed (legacy single-threaded loop): encoder frames are VAAPI
-            // surfaces; fully synchronous transfer both ways, no CUDA involved.
-            if (!gpu_composited && enc_is_vaapi && session_ok) {
-                if (AVFrame* hw = vaapi_feed_frame(tl)) {
-                    hw->pts = frame;
-                    avcodec_send_frame(vctx, hw);
-                    gpu_composited = true;
-                    av_frame_free(&hw);
-                }
-            }
-
-            if (!gpu_composited) {
-            const auto comp_t0 = std::chrono::steady_clock::now();
-auto vf = session_ok ? session.frame(tl)
-                             : render_video_frame(project, tl, s.width, s.height, 0);
-            if (vf) {
-                // Live preview (zero-copy: the shared_ptr already holds the frame).
-                if (preview_throttle.due()) push_preview(vf);
-                telemetry.note_cpu(std::chrono::duration<double, std::milli>(
-                                       std::chrono::steady_clock::now() - comp_t0).count());
-                const std::size_t bytes =
-                    std::min<std::size_t>(vf->rgba.size(), rgb->linesize[0] * (std::size_t)s.height);
-                memcpy(rgb->data[0], vf->rgba.data(), bytes);
-
-                AVFrame* to_send = nullptr;
-
-                // GPU path: the CUDA kernel writes resized RGBA->NV12 directly into
-                // device planes, so NVENC consumes a frame that never left the GPU.
-                if (enc_is_cuda) {
-                    AVFrame* hw = av_frame_alloc();
-                    if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
-                        const uintptr_t base = reinterpret_cast<uintptr_t>(hw->data[0]);
-                        uint8_t* dY = reinterpret_cast<uint8_t*>(base);
-                        uint8_t* dUV = reinterpret_cast<uint8_t*>(base +
-                            static_cast<uintptr_t>(hw->linesize[0]) * static_cast<uintptr_t>(s.height));
-                        if (canvas::core::gpu::convert_rgba_to_nv12(
-                                vf->rgba.data(), vf->width, vf->height,
-                                dY, static_cast<std::size_t>(hw->linesize[0]),
-                                dUV, static_cast<std::size_t>(hw->linesize[0]),
-                                s.width, s.height)) {
-                            hw->pts = frame;
-                            to_send = hw;
-                        } else {
-                            telemetry.note_alloc_miss();
-                            av_frame_free(&hw);
-                        }
-                    } else if (hw) {
-                        telemetry.note_alloc_miss();
-                        av_frame_free(&hw);
-                    }
-                }
-
-                // CPU fallback: software RGBA->NV12 then upload to the hw frame.
-                if (!to_send && v_use_hw && hw_frames) {
-                    AVFrame* input = av_frame_alloc();
-                    if (input) {
-                        input->format = enc_sw_fmt;
-                        input->width = s.width;
-                        input->height = s.height;
-                        if (av_frame_get_buffer(input, 0) >= 0) {
-                            const uint8_t* src[] = {rgb->data[0]};
-                            int src_lines[] = {rgb->linesize[0]};
-                            sws_scale(sws, src, src_lines, 0, s.height, input->data, input->linesize);
-                            input->pts = frame;
-                            AVFrame* hw = av_frame_alloc();
-                            if (hw && av_hwframe_get_buffer(hw_frames, hw, 0) == 0) {
-                                if (av_hwframe_transfer_data(hw, input, 0) == 0) {
-                                    hw->pts = frame;
-                                    to_send = hw;
-                                } else {
-                                    av_frame_free(&hw);
-                                }
-                            } else if (hw) {
-                                telemetry.note_alloc_miss();
-                                av_frame_free(&hw);
-                            }
-                        }
-                        av_frame_free(&input);
-                    }
-                }
-
-                // Pure software encode (no hw frames): feed the NV12 directly.
-                if (!to_send && !v_use_hw) {
-                    AVFrame* input = av_frame_alloc();
-                    if (input) {
-                        input->format = enc_sw_fmt;
-                        input->width = s.width;
-                        input->height = s.height;
-                        if (av_frame_get_buffer(input, 0) >= 0) {
-                            const uint8_t* src[] = {rgb->data[0]};
-                            int src_lines[] = {rgb->linesize[0]};
-                            sws_scale(sws, src, src_lines, 0, s.height, input->data, input->linesize);
-                            input->pts = frame;
-                            to_send = input;
-                            input = nullptr;  // ownership moved to to_send
-                        }
-                        av_frame_free(&input);
-                    }
-                }
-
-                if (to_send) {
-                    avcodec_send_frame(vctx, to_send);
-                    av_frame_free(&to_send);
-                }
-            }
-            }
-            ++frame;
+            if (slot.event) canvas::core::gpu::convert_nv12_destroy_event(slot.event);
+            if (slot.source) av_frame_unref(slot.source);
         }
+        ++frame;
 
         // audio for this pass
         if (do_audio && audio_sample < total_audio) {
@@ -1517,8 +1600,7 @@ auto vf = session_ok ? session.frame(tl)
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - cpu_enc_t0).count());
         telemetry.set_progress(frame, total_video);
-        if (canvas::core::gpu::cuda_available())
-            telemetry.note_pool_stalls(canvas::core::gpu::nv12_pool_stalls());
+        pump.account_stalls();
         telemetry.tick();
 
         if (frame >= total_video && (audio_sample >= total_audio || !do_audio)) {
@@ -1566,7 +1648,7 @@ auto vf = session_ok ? session.frame(tl)
             progress((double)std::min(frame, total_video) / total_video, "Encode");
     }
 
-    }  // else: legacy single-threaded loop
+    }  // else: Software backend (CPU composite + software encoder), same pump feed
 
     av_write_trailer(oc);
 
@@ -1578,23 +1660,15 @@ auto vf = session_ok ? session.frame(tl)
     CANVAS_LOG("render: complete out='%s' frames=%lld audio_samples=%lld",
            s.output_path.c_str(), (long long)frame, (long long)audio_sample);
 
-    // Free the device-side grade LUT cache. Both encode paths have finished and
-    // synced by now (producer joined + event-waited; else path convert_nv12_sync
-    // called per frame), so no queued kernel can still read the LUT. Safe to
-    // call with a null cache.
-    s_gpu_grade.release();
+    // Free the device-side grade LUT cache + every backend resource. Both encode
+    // paths have finished and synced by now (producer joined + event-waited;
+    // sequential path pump.after_send after each frame), so no queued kernel can
+    // still read the LUT. Null-safe.
+    pump.teardown();
 
     if (a_src) av_frame_free(&a_src);
-    av_frame_free(&rgb);
-    if (va_sws) sws_freeContext(va_sws);
-    av_frame_free(&va_out);
-    av_frame_free(&va_scaled);
-    av_frame_free(&va_scan);
-    if (sws) sws_freeContext(sws);
     avcodec_free_context(&actx);
     avcodec_free_context(&vctx);
-    if (hw_frames) av_buffer_unref(&hw_frames);
-    if (dec_dev) av_buffer_unref(&dec_dev);
     if (oc && oc->pb) avio_closep(&oc->pb);
     avformat_free_context(oc);
 

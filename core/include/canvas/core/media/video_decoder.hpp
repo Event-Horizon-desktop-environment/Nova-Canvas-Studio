@@ -2,46 +2,26 @@
 
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/media/vaapi/surface.hpp"
+#include "canvas/core/media/sw_decode.hpp"
 
 extern "C" {
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/rational.h>
-#include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 }
 
-#include <atomic>
 #include <cstdint>
-#include <map>
-#include <mutex>
-#include <set>
+#include <memory>
 #include <string>
-#include <vector>
 
 namespace canvas::core {
 
-// One entry in a media file's keyframe (I-frame) index. Built once by walking
-// the container packet stream and recording each keyframe's byte position and
-// presentation time. Scrubbing uses it to seek straight to the I-frame at-or-
-// before the target and know exactly how long the decode-forward tail is — no
-// per-seek container search, so random seeks cost one Group of Pictures instead
-// of a demuxer scan.
-struct IframeEntry {
-    int64_t packet_pos = 0;   // file byte offset of the keyframe packet
-    double pts_seconds = 0.0; // presentation time (seconds) of the keyframe
-    int64_t frame = 0;        // frame number of the keyframe
-};
-
-// Process-wide I-frame index cache, keyed by media path. Populated by
-// background builder threads, read by decoders on the playback thread. Owned
-// here (not on any VideoDecoder) so a build that outlives a decoder still lands
-// safely in the cache.
-inline std::mutex s_iframe_mtx;
-inline std::map<std::string, std::shared_ptr<const std::vector<IframeEntry>>> s_iframe_cache;
-inline std::set<std::string> s_iframe_inflight;
-
+// VideoDecoder (see sw_decode.hpp for the software decode path): owns the shared
+// DemuxState (demux/decode FFmpeg contexts + stream position), the SoftDecoder
+// (software loop + sws RGBA conversion), and the decoder-specific state that
+// only the hardware/audio/attribution paths touch: the negotiated HW pixel
+// format and engagement latches, the GPU frozen-tail/lookback frames, and the
+// separate audio demux/seek domain. Public API is unchanged by the split.
 class VideoDecoder {
 public:
     VideoDecoder() = default;
@@ -69,7 +49,7 @@ public:
               const char* gpu_label = nullptr);
     void close();
 
-    [[nodiscard]] bool is_open() const { return fmt_ctx_ != nullptr; }
+    [[nodiscard]] bool is_open() const { return demux_state_ && demux_state_->fmt_ctx != nullptr; }
     [[nodiscard]] bool is_hardware() const { return hw_avail_; }
     // Named accelerator this decoder decodes on ("", "vaapi", "cuda", "qsv",
     // "vulkan" — "" = software / no hardware engaged). Same value the [dec]
@@ -78,10 +58,14 @@ public:
     // Physical GPU name this decoder is on ("AMD Radeon (Granite Ridge)"),
     // or "" when software / not resolved.
     [[nodiscard]] const char* gpu_label() const { return hw_gpu_label_.c_str(); }
-    [[nodiscard]] int width() const { return width_; }
-    [[nodiscard]] int height() const { return height_; }
-    [[nodiscard]] int nb_streams() const { return fmt_ctx_ ? fmt_ctx_->nb_streams : 0; }
-    [[nodiscard]] int video_stream_index() const { return video_stream_; }
+    [[nodiscard]] int width() const { return demux_state_ ? demux_state_->width : 0; }
+    [[nodiscard]] int height() const { return demux_state_ ? demux_state_->height : 0; }
+    [[nodiscard]] int nb_streams() const {
+        return demux_state_ && demux_state_->fmt_ctx ? demux_state_->fmt_ctx->nb_streams : 0;
+    }
+    [[nodiscard]] int video_stream_index() const {
+        return demux_state_ ? demux_state_->video_stream : -1;
+    }
     // True when the container's best video stream is an embedded still rather
     // than motion video — album art (mp3/m4a/ogg/flac cover art is exposed as
     // a one-frame attached-picture or single-packet stream). Import uses this
@@ -93,19 +77,30 @@ public:
     // av_find_best_stream picked, and every video stream in the container
     // (index:codec:WxH). Answers "does this file have multiple video streams?".
     [[nodiscard]] std::string video_stream_summary() const;
-    [[nodiscard]] double frame_rate() const { return frame_rate_; }
-    [[nodiscard]] double duration_seconds() const { return duration_seconds_; }
-    [[nodiscard]] int64_t total_frames() const { return total_frames_; }
-    [[nodiscard]] int64_t current_frame() const { return next_frame_; }
+    [[nodiscard]] double frame_rate() const { return demux_state_ ? demux_state_->frame_rate : 0.0; }
+    [[nodiscard]] double duration_seconds() const {
+        return demux_state_ ? demux_state_->duration_seconds : 0.0;
+    }
+    [[nodiscard]] int64_t total_frames() const {
+        return demux_state_ ? demux_state_->total_frames : -1;
+    }
+    [[nodiscard]] int64_t current_frame() const {
+        return demux_state_ ? demux_state_->next_frame : 0;
+    }
     // Resolved per-file color spec: matrix/range read from codecpar and
     // reconciled against a decoded-luma probe when a `tv`-style tag lies about
-    // full-range data. Every frame this decoder produces (RGBA via make_rgba,
-    // NV12 via decode_to_hw) is consistent with this spec.
-    [[nodiscard]] gpu::ColorSpec color_spec() const { return {matrix_, range_}; }
+    // full-range data. Every frame this decoder produces (RGBA via the software
+    // conversion, NV12 via decode_to_hw) is consistent with this spec.
+    [[nodiscard]] gpu::ColorSpec color_spec() const {
+        return demux_state_ ? gpu::ColorSpec{demux_state_->matrix, demux_state_->range}
+                            : gpu::ColorSpec{gpu::ColorMatrix::BT709, gpu::ColorRange::Limited};
+    }
     // Highest valid target frame index for this stream (inclusive), once known.
     // Returns -1 when the encoded extent is not yet known (no frame decoded and
     // neither the container nor stream duration is available).
-    [[nodiscard]] int64_t last_frame() const { return last_frame_; }
+    [[nodiscard]] int64_t last_frame() const {
+        return demux_state_ ? demux_state_->last_frame : -1;
+    }
 
     VideoFramePtr decode_next();
     void set_output_dim(int max_output_dim);
@@ -143,13 +138,11 @@ public:
     VideoFramePtr seek_to_frame(int64_t target_frame, int max_output_dim = 0);
 
     // Keyframe (I-frame) index of the media file, built lazily on first access
-// (empty until build_iframe_index() runs). Scrubbing seeks via this to avoid
-// per-seek container searches.
+    // (empty until build_iframe_index() runs). Scrubbing seeks via this to avoid
+    // per-seek container searches. Delegates to the shared DemuxState (and its
+    // process-wide cache), so hardware AND software decoders read one index.
     [[nodiscard]] bool has_iframe_index() const {
-        if (path_.empty()) return false;
-        std::lock_guard<std::mutex> lk(s_iframe_mtx);
-        const auto it = s_iframe_cache.find(path_);
-        return it != s_iframe_cache.end() && it->second && it->second->size() > 1;
+        return demux_state_ && demux_state_->has_iframe_index();
     }
     // Builds the I-frame index on demand (a single packet walk over the stream).
     void build_iframe_index();
@@ -188,7 +181,7 @@ public:
     // frames a preview decode will step through before returning a lower-cost
     // approximate frame. Larger = more accurate but slower on sparse-keyframe
     // media; 0 = exact/uncapped.
-    static const int kPreviewMaxOver = 1200;
+    static const int kPreviewMaxOver = canvas::core::kPreviewMaxOver;
 
     // Exports a decoded VAAPI hardware frame (as returned by decode_to_hw /
     // decode_to_hw_indexed on a VAAPI-configured decoder) into an owning
@@ -206,7 +199,7 @@ public:
     // (a 19k-frame keyframe interval caused a 78 s walk that garbled audio by
     // letting it pre-roll ahead). A far full-res seek returns the nearest frame
     // as an approximate still instead of blocking the worker for tens of seconds.
-    static const int kFullResMaxOver = 4000;
+    static const int kFullResMaxOver = canvas::core::kFullResMaxOver;
 
     // ---- Audio ----
     [[nodiscard]] bool has_audio() const { return audio_stream_ >= 0; }
@@ -221,34 +214,17 @@ public:
     void seek_audio(int64_t start_sample, int sample_rate);
 
 private:
-    void reset_stream_state(int64_t resume_frame);
-    // Clamps `target` into the valid source-frame window [0, last decodeable
-    // frame]. When the encoded extent is still unknown (last_frame_ == -1) the
-    // target is only floored at 0; the clamp becomes effective as soon as one
-    // frame has been decoded or a stream end is observed. This is what stops a
-    // scrub/play call over the media's end (e.g. a long music region past the
-    // clip) from walking the entire GOP chain to EOF.
-    int64_t clamp_target(int64_t target) const;
-    // Refines last_frame_ from the stream's own duration when the container
-    // duration was unknown at open() time. No-op once a value is already known.
-    void refine_last_frame();
-    VideoFramePtr make_rgba_frame(const AVFrame* src, int64_t ticks, double seconds, int64_t number);
-    // Decodes forward from the current position until it produces `target`,
-    // fast-overs (no RGBA conversion, no GPU->CPU copy) every intermediate GOP
-    // frame, converts only the target to RGBA. nullptr on EOF. Backs fast scrub
-    // previews. `max_over` bounds the fast-overs (0 = uncapped/exact); when
-    // exceeded the nearest decoded frame is returned so sparse-keyframe scrub
-    // previews stay instant.
-    VideoFramePtr decode_forward_to(int64_t target, int max_over = 0);
-    // Positions the demuxer to `target_seconds` via avformat_seek_file without
-    // decoding (used by the indexed seek path).
-    void container_seek_seconds(double target_seconds);
-
-    AVFormatContext* fmt_ctx_ = nullptr;
-    AVCodecContext* codec_ctx_ = nullptr;
-    SwsContext* sws_ctx_ = nullptr;
-    AVFrame* av_frame_ = nullptr;
-    AVPacket* packet_ = nullptr;
+    // Shared demux/decode session (FFmpeg contexts + stream position + the I-frame
+    // index). Owned as a unique_ptr so the heap address is stable across moves: the
+    // SoftwareDecoder (and the hardware path's call sites) borrow the raw pointer.
+    std::unique_ptr<DemuxState> demux_state_;
+    // Software decode loop + sws RGBA conversion + SW path counters. demux_ inside
+    // is re-pointed at demux_state_ on open() and on adoption (move).
+    SoftDecoder sw_decoder_;
+    // Negotiated hwaccel pixel format (AV_PIX_FMT_CUDA / AV_PIX_FMT_VAAPI) and the
+    // "hardware decode is on" latch. The GPU NV12 fast path and the download-in-
+    // convert path both key off them; the tag format AVFrame::format carries for
+    // device-memory frames, never the nested sw_format inside hw_frames_ctx.
     int hw_pix_fmt_ = AV_PIX_FMT_NONE;
     bool hw_avail_ = false;
     // Named accelerator this decoder is configured for ("" sw, "vaapi", "cuda",
@@ -266,65 +242,22 @@ private:
     bool hw_engaged_ = false;
     bool soft_only_ = false;
 
-    int video_stream_ = -1;
-    AVRational stream_tb_{0, 1};
-    int width_ = 0;
-    int height_ = 0;
-    double frame_rate_ = 0.0;
-    double duration_seconds_ = 0.0;
-    int64_t total_frames_ = -1;
-    // Resolved per-file color spec (see color_spec()). matrix_/range_ start on
-    // the codecpar tags and range_ may be upgraded to Full by the luma probe.
-    gpu::ColorMatrix matrix_ = gpu::ColorMatrix::BT709;
-    gpu::ColorRange range_ = gpu::ColorRange::Limited;
-    int64_t last_frame_ = -1;
-    int64_t next_frame_ = 0;
-    bool draining_ = false;
-    int out_max_dim_ = 0;
-    // Frozen-tail hold frames. When a caller targets a frame past the stream's
-    // encoded end (a clip whose audio outlives its video, or a far-forward
-    // scrub over the media edge), re-seeking and re-decoding the same final
-    // frame on every call is ~90ms/frame wasted work that turns the render tail
-    // into a 10fps crawl. Instead the last real frame is decoded once and held;
-    // any later past-end request serves the cached copy. hold_rgba_ covers the
-    // CPU RGBA path, hold_hw_ the GPU NV12 path (a ref-counted copy of the
-    // device frame, independent of the reused av_frame_).
-    VideoFramePtr hold_rgba_;
-    int64_t hold_rgba_src_ = -1;
-    int hold_rgba_dim_ = -1;
+    // GPU frozen-tail + one-frame lookback. hold_hw_/hold_hw_src_ serve requests
+    // past the stream end without re-decoding EOF; retain_hw_/retain_hw_src_ keep
+    // a ref-counted copy of the last device frame decode_to_hw served so a
+    // repeated source frame (sub-rate transition slot) rides the cheap sequential
+    // path instead of a per-repeat GOP re-walk. Both are ref-counted av_frames,
+    // independent of the reused demux_state_->av_frame.
     AVFrame* hold_hw_ = nullptr;
     int64_t hold_hw_src_ = -1;
-    // One-frame sequential lookback for the GPU path. When a transition's
-    // fading-out slot runs at a sub-rate (e.g. the B side of a 2:1 clip
-    // ratio), consecutive timeline frames can re-target the SAME source
-    // frame. The repeat would otherwise be served by decode_to_hw_indexed,
-    // whose container seek resets next_frame_ to 0 and forces a full-GOP
-    // re-walk (~54ms on 2K60) for every repeated B frame. retain_hw_ keeps a
-    // ref-counted copy of the last device frame decode_to_hw actually served
-    // (retain_hw_src_ = its frame number); decode_to_hw_indexed serves that
-    // exact copy instead of re-seeking when the walk is already parked past
-    // it, leaving next_frame_ untouched so the following distinct frame keeps
-    // riding the cheap sequential path.
     AVFrame* retain_hw_ = nullptr;
     int64_t retain_hw_src_ = -1;
-    // Sequential-walk vs keyframe-seek path accounting (see PathStats).
-    std::uint64_t path_seq_ = 0;
-    std::uint64_t path_seeks_ = 0;
-    double path_seq_ms_ = 0.0;
-    double path_seek_ms_ = 0.0;
-    double convert_ms_ = 0.0;
 
-    // Keyframe index (see IframeEntry). Built lazily on background threads into a
-    // process-wide cache keyed by path (s_iframe_cache); never on the
-    // decode/playback thread. Seeks fall back to plain container access until
-    // an index is ready. Owned outside the decoder so background builds safely
-    // outlive decoder teardown.
-    std::string path_;
-
-    // Audio stream decode state, kept in a *separate* AVFormatContext from fmt_ctx_
-    // so video lookahead and audio decoding each have an independent demux/seek
-    // position. Sharing one container made each reader discard the other's
-    // packets and issue mutual full-container seeks on every video frame (0.5fps).
+    // Audio stream decode state, kept in a *separate* AVFormatContext from the
+    // video demux (demux_state_->fmt_ctx) so video lookahead and audio decoding
+    // each have an independent demux/seek position. Sharing one container made
+    // each reader discard the other's packets and issue mutual full-container
+    // seeks on every video frame (0.5fps).
     int audio_stream_ = -1;
     AVFormatContext* audio_fmt_ctx_ = nullptr;
     AVCodecContext* audio_codec_ = nullptr;
@@ -338,4 +271,4 @@ private:
     AVRational audio_tb_{0, 1};
 };
 
-}
+}  // namespace canvas::core

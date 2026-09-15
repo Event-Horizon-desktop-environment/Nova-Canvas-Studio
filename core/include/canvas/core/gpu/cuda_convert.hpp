@@ -24,6 +24,19 @@ struct GradeKernelParams {
     int range = 0;
 };
 
+// Device-resident premultiplied-RGBA8 title-overlay sprite (the GPU upload of
+// title::raster_title_sprite), with its canvas origin. `rgba` is DEVICE memory
+// owned by the caller until title_sprite_free; `valid()` gates an overlay
+// launch.
+struct TitleSpriteGpu {
+    const uint8_t* rgba = nullptr;
+    int w = 0;
+    int h = 0;
+    int ox = 0;  // canvas x of the sprite's left edge
+    int oy = 0;  // canvas y of the sprite's top edge
+    [[nodiscard]] bool valid() const noexcept { return rgba != nullptr && w > 0 && h > 0; }
+};
+
 #ifndef CANVAS_HAVE_CUDA
 // When the GPU path is not compiled in (no nvcc / CANVAS_HAVE_CUDA undefined), these
 // declare compile-time fallbacks so callers can keep calling them unconditionally;
@@ -37,7 +50,8 @@ inline bool convert_nv12_resize(const uint8_t*, const uint8_t*, int, int, std::s
                                 int, int, int, int, float = 1.0f) { return false; }
 inline bool convert_nv12_resize_async(const uint8_t*, const uint8_t*, int, int, std::size_t,
                                       std::size_t, uint8_t*, std::size_t, uint8_t*, std::size_t,
-                                      int, int, int, int, int, int, float = 1.0f) { return false; }
+                                      int, int, int, int, int, int, float = 1.0f,
+                                      const TitleSpriteGpu* = nullptr) { return false; }
 inline bool convert_nv12_record_event(void**) { return false; }
 inline bool convert_nv12_wait_event(void*) { return true; }
 inline void convert_nv12_destroy_event(void*) {}
@@ -56,9 +70,14 @@ inline bool convert_nv12_grade_resize_async(const uint8_t*, const uint8_t*, int,
                                             std::size_t, std::size_t, uint8_t*, std::size_t,
                                             uint8_t*, std::size_t, int, int, int, int,
                                             int, int, float = 1.0f,
-                                            const GradeKernelParams& = {}) {
+                                            const GradeKernelParams& = {},
+                                            const TitleSpriteGpu* = nullptr) {
     return false;
 }
+inline bool title_sprite_upload(const uint8_t*, int, int, int, int, TitleSpriteGpu*) {
+    return false;
+}
+inline void title_sprite_free(TitleSpriteGpu*) {}
 #else
 // Converts a single host RGBA frame to NV12 directly on the GPU, resizing to
 // dst_w x dst_h with bilinear filtering. The output NV12 is written into
@@ -86,7 +105,8 @@ bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int sr
                                uint8_t* dY, std::size_t yPitch,
                                uint8_t* dUV, std::size_t uvPitch,
                                int out_w, int out_h, int dst_w, int dst_h,
-                               int dx, int dy, float fade = 1.0f);
+                               int dx, int dy, float fade = 1.0f,
+                               const TitleSpriteGpu* title = nullptr);
 bool convert_nv12_record_event(void** out);
 bool convert_nv12_wait_event(void* ev);
 void convert_nv12_destroy_event(void* ev);
@@ -117,13 +137,24 @@ const char* cuda_last_error_string();
 void* grade_lut_upload(const float* data, int size);
 void grade_lut_free(void* dev);
 
+// Uploads a host premultiplied-RGBA8 title sprite (title::TitleSprite::data
+// from raster_title_sprite, with its canvas origin) into device memory and
+// fills `out`. False on any failure (out left untouched). Free with
+// title_sprite_free; do not free while a queued kernel may still read it.
+bool title_sprite_upload(const uint8_t* rgba, int w, int h, int ox, int oy, TitleSpriteGpu* out);
+void title_sprite_free(TitleSpriteGpu* spr);
+
 // Fused NV12 resize + grade for graded clips on the export fast path — the
 // graded successor to convert_nv12_resize(_async). Same letterbox geometry and
 // bilinear law as nv12Resize, then YUV->RGB (GradeKernelParams gains), the 3D
 // LUT grade (explicit r-major index — no GL R/B axis swap), the whole-canvas
 // edge-fade RGB dip, and the exact rgbaToNV12 BT.709-limited encode. Replaces
 // convert_nv12_resize_async when a clip is graded so graded exports stay on the
-// NVENC path instead of dropping to the CPU RGBA blit.
+// NVENC path instead of dropping to the CPU RGBA blit. The optional `title`
+// sprite (see TitleSpriteGpu / raster_title_sprite) is fused over the faded
+// result on the same launch — its premultiplied coverage over the
+// already-faded canvas matches the CPU compositor's title-over-faded-video
+// order.
 bool convert_nv12_grade_resize_async(const uint8_t* srcY, const uint8_t* srcUV,
                                      int src_w, int src_h,
                                      std::size_t src_y_pitch, std::size_t src_uv_pitch,
@@ -131,7 +162,8 @@ bool convert_nv12_grade_resize_async(const uint8_t* srcY, const uint8_t* srcUV,
                                      uint8_t* dUV, std::size_t uvPitch,
                                      int out_w, int out_h, int dst_w, int dst_h,
                                      int dx, int dy, float fade = 1.0f,
-                                     const GradeKernelParams& g = {});
+                                     const GradeKernelParams& g = {},
+                                     const TitleSpriteGpu* title = nullptr);
 #endif  // CANVAS_HAVE_CUDA
 
 }  // namespace canvas::core::gpu

@@ -102,7 +102,10 @@ int main(int argc, char* argv[]) {
             .value(QStringLiteral("settings/hw_gpu"), QStringLiteral(""))
             .toString()
             .toStdString();
-        if (!gpu.empty()) {
+        if (gpu == canvas::core::gpu_select::kCpuSentinel) {
+            // CPU row: pure software encode + decode, persisted like a GPU pin.
+            canvas::core::HwDeviceManager::set_preferred_backend("software");
+        } else if (!gpu.empty()) {
             for (const auto& g : canvas::core::gpu_select::detect_gpus()) {
                 if (g.pci_slot == gpu) {
                     canvas::core::HwDeviceManager::set_preferred_gpu(

@@ -586,24 +586,10 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
     }
 
     // Engage only when exactly one video clip is enabled at this frame (the common
-    // no-overlap export case); any overlap/transform falls back to the CPU
-    // compositor to guarantee identical semantics.
-    {
-        // A title (pure title clip or a media clip carrying an overlay) must
-        // take the CPU composite path: the GPU fast path writes only the top
-        // decoder's planes, which would silently drop the rasterised text.
-        const auto& seq = project_->sequence;
-        for (const auto& track : seq.video_tracks) {
-            if (track.locked) continue;
-            const Clip* c = track.clip_at(tl_frame);
-            if (c && c->enabled && c->has_title()) {
-                CANVAS_LOG("frame_gpu: title at tl_frame=%lld -> CPU compositor",
-                       (long long)tl_frame);
-                gpu_note(0);  // title => CPU compositor
-                return false;
-            }
-        }
-    }
+    // no-overlap export case); any overlap falls back to the CPU compositor to
+    // guarantee identical semantics. Title overlays ride the fast path via a
+    // per-clip premultiplied sprite (see GpuTitleCache in exporter.cpp), so they
+    // no longer bail.
     const Clip* the_clip = nullptr;
     {
         int found = 0;
@@ -753,6 +739,7 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
     // Grade + source color spec ride along for the fused GPU grade kernel;
     // ungraded clips carry null grade and the exporter uses plain nv12Resize.
     out->grade = td->lut_for(clip);
+    out->clip = clip;
     const gpu::ColorSpec spec = td->dec->color_spec();
     out->matrix = static_cast<int>(spec.matrix);
     out->range = static_cast<int>(spec.range);

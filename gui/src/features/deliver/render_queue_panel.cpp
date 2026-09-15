@@ -92,20 +92,37 @@ QString rq_row_action_style() {
         .arg(css(tokens().state_hover));
 }
 
+// Measured render fps for the status line ("475 fps"), empty until the first
+// 1-s window closes. `render_fps` is the peak 1-s rolling-window rate, so the
+// completed card shows the max speed the render actually sustained.
+QString fps_badge(const canvas::core::RenderJob& j) {
+    if (j.render_fps <= 0.0) return {};
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.0f fps", j.render_fps);
+    return QString::fromLatin1(buf);
+}
+
 // Single status field, reused per job state: a live time-remaining estimate
 // (plus render speed) while rendering, total elapsed time once settled.
 QString status_text(const canvas::core::RenderJob& j) {
     using S = canvas::core::RenderJob::Status;
+    const QString speed = fps_badge(j);
     switch (j.status) {
         case S::Queued: return QStringLiteral("Queued");
-        case S::Completed:
-            return QStringLiteral("Rendered in %1").arg(format_duration(j.elapsed_seconds));
+        case S::Completed: {
+            if (speed.isEmpty())
+                return QStringLiteral("Rendered in %1").arg(format_duration(j.elapsed_seconds));
+            return QStringLiteral("Rendered in %1  ·  %2")
+                .arg(format_duration(j.elapsed_seconds), speed);
+        }
         case S::Failed: return QStringLiteral("Failed");
         case S::Cancelled: return QStringLiteral("Cancelled");
         case S::Rendering: {
             if (j.elapsed_seconds > 0.0 && j.progress > 0.05) {
                 const double remaining = j.elapsed_seconds * (1.0 - j.progress) / j.progress;
-                return QStringLiteral("Time remaining: ~%1").arg(format_duration(remaining));
+                if (speed.isEmpty())
+                    return QStringLiteral("Time remaining: ~%1").arg(format_duration(remaining));
+                return QStringLiteral("%1  ·  ~%2 left").arg(speed, format_duration(remaining));
             }
             return QStringLiteral("Rendering…");
         }

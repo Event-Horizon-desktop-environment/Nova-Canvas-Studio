@@ -28,7 +28,8 @@ struct RenderJob {
     enum class Status { Queued, Rendering, Completed, Failed, Cancelled };
     Status status = Status::Queued;
     double progress = 0.0;       // 0..1
-    double render_fps = 0.0;     // measured frame rate of the active render
+    double render_fps = 0.0;     // peak measured render speed (1-s rolling window);
+                                 // persists at completion so the card can show it
     std::string error;
     double elapsed_seconds = 0.0;
     int64_t frames_rendered = 0;

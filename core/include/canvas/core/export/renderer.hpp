@@ -91,6 +91,9 @@ public:
         // decodes with the file's actual matrix/range, mirroring swscale.
         int matrix = 1;
         int range = 0;
+        // The single enabled media clip (candidate for the fast-path title /
+        // grade identity). Null on fallback frames. Valid while `valid` is set.
+        const Clip* clip = nullptr;
         bool valid = false;
     };
 

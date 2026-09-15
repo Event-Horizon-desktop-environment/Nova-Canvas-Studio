@@ -4,6 +4,7 @@
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/util/log.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -351,7 +352,18 @@ void RenderQueue::worker() {
                 ? (int64_t)std::llround((double)local.total_frames / seq_fps * export_fps)
                 : local.total_frames;
             ExportControl ctrl;
+            // Rolling-window throughput, same law as the exporter's own ~1/s
+            // telemetry (done-delta over wall-delta per ~1 s bucket), not the
+            // whole-run average f/secs — session open would dilute that ~3x on
+            // a short export (the artifact the benches used to show). The first
+            // bucket anchors without emitting, mirroring telemetry.tick(). The
+            // PEAK window becomes the card's "max fps": it only ever ramps up
+            // as the pipeline warms, so final ≈ max, and it persists on the job.
             std::atomic<double> fps{0.0};
+            double win_done = 0.0;
+            std::chrono::steady_clock::time_point win_t = started;
+            bool win_armed = false;
+            double win_peak = 0.0;
             // Polled abort: cancel()/cancel_all()/remove()/~RenderQueue trip
             // cancel_current_, which export_project's render loop observes between
             // frames so the worker settles promptly.
@@ -359,9 +371,19 @@ void RenderQueue::worker() {
             ctrl.on_progress = [&](double p, const std::string& phase) {
                 (void)phase;
                 auto now = std::chrono::steady_clock::now();
-                double secs = std::chrono::duration<double>(now - started).count();
-                double f = p * total;
-                if (secs > 0) fps.store(f / secs);
+                const double secs = std::chrono::duration<double>(now - started).count();
+                const double f = p * total;
+                const double dt = std::chrono::duration<double>(now - win_t).count();
+                if (dt >= 1.0) {
+                    if (win_armed) {
+                        const double window_fps = (f - win_done) / dt;
+                        win_peak = std::max(win_peak, window_fps);
+                    }
+                    win_armed = true;
+                    win_done = f;
+                    win_t = now;
+                }
+                fps.store(win_peak > 0.0 ? win_peak : (secs > 0.0 ? f / secs : 0.0));
                 {
                     std::lock_guard<std::mutex> lk(mutex_);
                     for (auto& j : jobs_) {

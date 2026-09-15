@@ -139,6 +139,18 @@ QGroupBox* SettingsDialog::build_hardware_section() {
     // settings/hw_gpu and resolved at startup by main.cpp.
     gpu_combo_ = new QComboBox(box);
     gpu_combo_->addItem(tr("Automatic (best available)"), QStringLiteral(""));
+    // CPU row: pure software encode + decode on the named processor. Its data
+    // is the kCpuSentinel (never a PCI slot), persisted like a GPU pin and
+    // resolved at startup to the software backend (see main.cpp).
+    const std::string cpu_name =
+        canvas::core::gpu_select::cpu_name();
+    QString cpu_label = cpu_name.empty()
+                            ? tr("CPU (encode + decode)")
+                            : QString::fromUtf8(cpu_name.c_str()) +
+                                  tr(" \u00b7 CPU (encode + decode)");
+    gpu_combo_->addItem(
+        cpu_label,
+        QString::fromUtf8(canvas::core::gpu_select::kCpuSentinel));
     const auto gpus = canvas::core::gpu_select::detect_gpus();
     for (const auto& g : gpus) {
         QString label = QString::fromUtf8(g.name.c_str());
@@ -153,7 +165,11 @@ QGroupBox* SettingsDialog::build_hardware_section() {
         .toString();
     const int gpu_idx = gpu_combo_->findData(gpu_now);
     gpu_combo_->setCurrentIndex(gpu_idx >= 0 ? gpu_idx : 0);
-    const bool gpu_pinned = gpu_idx > 0;  // a real GPU (not "Automatic")
+    const bool cpu_pinned =
+        gpu_now ==
+        QString::fromUtf8(canvas::core::gpu_select::kCpuSentinel);
+    const bool gpu_pinned =
+        gpu_idx > 0 && !cpu_pinned;  // a real GPU (not Automatic/CPU)
     const canvas::core::gpu_select::GpuDevice* pinned = nullptr;
     if (gpu_pinned)
         for (const auto& g : gpus)
@@ -202,15 +218,18 @@ QGroupBox* SettingsDialog::build_hardware_section() {
         .toString();
     if (pinned)
         backend_now = QString::fromStdString(pinned->backend);
+    if (cpu_pinned) backend_now = QStringLiteral("software");
     const int idx = backend_combo_->findData(backend_now);
     backend_combo_->setCurrentIndex(idx >= 0 ? idx : 0);
-    backend_combo_->setEnabled(!gpu_pinned);
+    backend_combo_->setEnabled(!gpu_pinned && !cpu_pinned);
 
     auto* hint = new QLabel(
         tr("Preferred hardware accelerator. \"GPU\" pins one physical device; "
-           "its backend is chosen for you. \"Decoder\" pins a backend family "
-           "when the GPU is Automatic. Applies on the next decode session (a "
-           "device already open keeps working until it closes)."),
+           "its backend is chosen for you. The CPU row pins pure software "
+           "encode + decode on the named processor. \"Decoder\" pins a "
+           "backend family when the GPU is Automatic. Applies on the next "
+           "decode session (a device already open keeps working until it "
+           "closes)."),
         box);
     hint->setWordWrap(true);
     hint->setEnabled(false);
@@ -231,6 +250,20 @@ QGroupBox* SettingsDialog::build_hardware_section() {
             const QString backend = backend_combo_->currentData().toString();
             canvas::core::HwDeviceManager::set_preferred_backend(
                 backend.toStdString());
+            return;
+        }
+        if (slot == QString::fromUtf8(
+                          canvas::core::gpu_select::kCpuSentinel)) {
+            // CPU row: pure software encode + decode. Mirror it in the decoder
+            // row (which stays disabled like a pinned GPU) and pin it live.
+            // The exporter only engages a hardware encoder when its backend
+            // matches the preferred GPU backend (see exporter.cpp), so the
+            // software pin keeps encode on the CPU too.
+            backend_combo_->setEnabled(false);
+            const int b_idx =
+                backend_combo_->findData(QStringLiteral("software"));
+            if (b_idx >= 0) backend_combo_->setCurrentIndex(b_idx);
+            canvas::core::HwDeviceManager::set_preferred_backend("software");
             return;
         }
         // A concrete GPU: reflect its backend in the decoder row immediately so

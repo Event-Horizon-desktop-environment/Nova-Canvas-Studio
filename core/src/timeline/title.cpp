@@ -549,6 +549,105 @@ void blit_alpha(const uint8_t* alpha, const int bw, const int bh, const int ox, 
     }
 }
 
+// Shared placement law for a block of rasterised lines (single-line centred
+// box, or stacked centred lines with a 0.25 em gap), shifted by the clip's
+// visual offset. Both the canvas renderer and the tight-sprite rasteriser use
+// this one copy so their origins can never drift apart.
+std::vector<Placed> place_block(const std::vector<LineBitmap>& bits, const int width,
+                                const int height, const int off_x, const int off_y,
+                                const float em_px) {
+    if (bits.empty()) return {};
+    std::vector<Placed> placed;
+    placed.reserve(bits.size());
+    if (bits.size() <= 1) {
+        // Single line: the historical centred-box path, unchanged.
+        const LineBitmap& b = bits.front();
+        if (b.w > 0 && b.h > 0)
+            placed.push_back(
+                Placed{(width - b.w) / 2 + off_x, (height - b.h) / 2 + off_y, b.w, b.h, &b});
+    } else {
+        // Multi-line: stack the centred lines with a 0.25 em gap, the whole
+        // block centred vertically. Empty lines keep their slot (blank band).
+        const int gap = std::max(0, static_cast<int>(std::lround(em_px * 0.25f)));
+        int total = 0;
+        for (const LineBitmap& b : bits) total += b.h;
+        total += gap * (static_cast<int>(bits.size()) - 1);
+        int y = (height - total) / 2 + off_y;
+        for (const LineBitmap& b : bits) {
+            if (b.w > 0 && b.h > 0)
+                placed.push_back(Placed{(width - b.w) / 2 + off_x, y, b.w, b.h, &b});
+            y += b.h + gap;
+        }
+    }
+    return placed;
+}
+
+// Alpha-over of one component into a full-canvas premultiplied-RGBA8
+// accumulator (byte 3 = coverage), the sprite analogue of blit_alpha /
+// fill_rounded_rect: premultiplied add `c*a` and coverage add `a*(1-A)`. The
+// per-step rounding mirrors the CPU blob-per-component rounding, so the
+// sprite's accumulated premultiplied colour matches the canvas composite's
+// per-component law over an opaque background (up to one final blend pass).
+void sprite_blend(uint8_t* rgba, const std::size_t stride, const int width, const int height,
+                  const int x, const int y, const float r, const float g, const float b,
+                  const float a) {
+    if (a <= 0.0f || x < 0 || x >= width || y < 0 || y >= height) return;
+    uint8_t* dst = rgba + static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 4u;
+    const float inv = 1.0f - a;
+    dst[0] = static_cast<uint8_t>(std::clamp(
+        static_cast<int>(std::lround(r * a + static_cast<float>(dst[0]) * inv)), 0, 255));
+    dst[1] = static_cast<uint8_t>(std::clamp(
+        static_cast<int>(std::lround(g * a + static_cast<float>(dst[1]) * inv)), 0, 255));
+    dst[2] = static_cast<uint8_t>(std::clamp(
+        static_cast<int>(std::lround(b * a + static_cast<float>(dst[2]) * inv)), 0, 255));
+    dst[3] = static_cast<uint8_t>(std::clamp(
+        static_cast<int>(std::lround(a * 255.0f + static_cast<float>(dst[3]) * inv)), 0, 255));
+}
+
+// Solid alpha-over fill for the background box into the sprite accumulator,
+// replicating fill_rounded_rect's geometry and corner-coverage law exactly
+// (1 px anti-aliased edges from the corner circles, square when radius == 0).
+void sprite_fill_rounded(uint8_t* rgba, const std::size_t stride, const int width,
+                         const int height, int x0, int y0, int x1, int y1, const int radius,
+                         const float r, const float g, const float b, const float a) {
+    if (a <= 0.0f) return;
+    x0 = std::clamp(x0, 0, width);
+    y0 = std::clamp(y0, 0, height);
+    x1 = std::clamp(x1, 0, width);
+    y1 = std::clamp(y1, 0, height);
+    if (x1 <= x0 || y1 <= y0) return;
+    const int rad = std::max(0, std::min(radius, std::min((x1 - x0) / 2, (y1 - y0) / 2)));
+    const int right = x1 - 1;
+    const int bottom = y1 - 1;
+    const float loop_r = static_cast<float>(rad) - 0.5f;
+    const float hit_r = static_cast<float>(rad) + 0.5f;
+    for (int y = y0; y < y1; ++y) {
+        uint8_t* row = rgba + static_cast<std::size_t>(y) * stride;
+        for (int x = x0; x < x1; ++x) {
+            float cov = 1.0f;
+            if (rad > 0) {
+                // Corner centres sit on the inner radius corners.
+                const int cx = x < x0 + rad ? x0 + rad : (x > right - rad ? right - rad : -1);
+                const int cy = y < y0 + rad ? y0 + rad : (y > bottom - rad ? bottom - rad : -1);
+                if (cx >= 0 && cy >= 0) {
+                    const float dx = static_cast<float>(x - cx);
+                    const float dy = static_cast<float>(y - cy);
+                    const float d = std::sqrt(dx * dx + dy * dy);
+                    if (d <= loop_r) {
+                        cov = 1.0f;
+                    } else if (d >= hit_r) {
+                        cov = 0.0f;
+                    } else {
+                        cov = hit_r - d;
+                    }
+                }
+            }
+            if (cov <= 0.0f) continue;
+            sprite_blend(rgba, stride, width, height, x, y, r, g, b, a * cov);
+        }
+    }
+}
+
 }  // namespace
 
 // Separable box blur over an alpha plane (sliding window, clamped edges).
@@ -823,29 +922,7 @@ void render_clip_title_with_font(const Clip& clip, const std::string& font_path,
     const int off_x = static_cast<int>(std::lround(clip.pos_x));
     const int off_y = static_cast<int>(std::lround(clip.pos_y));
 
-    std::vector<Placed> placed;
-    placed.reserve(bits.size());
-    if (bits.size() <= 1) {
-        // Single line: the historical centred-box path, unchanged.
-        const LineBitmap& b = bits.front();
-        if (b.w > 0 && b.h > 0)
-            placed.push_back(
-                Placed{(width - b.w) / 2 + off_x, (height - b.h) / 2 + off_y, b.w, b.h, &b});
-    } else {
-        // Multi-line: stack the centred lines with a 0.25 em gap, the whole
-        // block centred vertically. Empty lines keep their slot (blank band).
-        const int gap = std::max(0, static_cast<int>(std::lround(em_px * 0.25f)));
-        int total = 0;
-        for (const LineBitmap& b : bits) total += b.h;
-        total += gap * (static_cast<int>(bits.size()) - 1);
-        int y = (height - total) / 2 + off_y;
-        for (const LineBitmap& b : bits) {
-            if (b.w > 0 && b.h > 0)
-                placed.push_back(
-                    Placed{(width - b.w) / 2 + off_x, y, b.w, b.h, &b});
-            y += b.h + gap;
-        }
-    }
+    std::vector<Placed> placed = place_block(bits, width, height, off_x, off_y, em_px);
     if (placed.empty()) return;
 
     // Background box behind the whole block (behind glyphs and shadows).
@@ -901,6 +978,140 @@ void render_clip_title(const Clip& clip, std::vector<uint8_t>& rgba, const int w
     const std::string path = find_font_path_for(clip.title.font_family);
     if (path.empty()) return;
     render_clip_title_with_font(clip, path, rgba, width, height, stride);
+}
+
+// Premultiplied-RGBA8 tight sprite of clip.title for the GPU fast path (see
+// title.hpp). Rasterises into a full-canvas accumulator with the same
+// layering/ordering law as render_clip_title_with_font (box -> shadow ->
+// glyphs, no offsets drop out of the canvas box), tracks the coverage
+// footprint, then crops to the tight box. Blending the sprite over an opaque
+// canvas reproduces the CPU compose save for the final rounding pass.
+TitleSprite raster_title_sprite(const Clip& clip, const int canvas_w, const int canvas_h,
+                                const std::string& font_path) {
+    TitleSprite out;
+    if (canvas_w <= 0 || canvas_h <= 0 || !clip.has_title() || font_path.empty()) return out;
+
+    const std::shared_ptr<const LoadedFont> font = load_font(font_path);
+    if (!font || !font->ok) return out;
+
+    const float em_px = static_cast<float>(glyph_height(clip, canvas_h));
+    const float scale = stbtt_ScaleForPixelHeight(&font->info, em_px);
+
+    const std::vector<std::string> lines = split_lines(clip.title.text);
+    std::vector<LineBitmap> bits;
+    bits.reserve(lines.size());
+    const TextStyle style{clip.title.bold, clip.title.italic, clip.title.underline};
+    for (const std::string& line : lines)
+        bits.push_back(rasterize_line(*font, codepoints(line), scale, style, em_px));
+
+    const float opacity = std::clamp(clip.opacity, 0.0f, 1.0f);
+    const float text_a = std::clamp(clip.title.a, 0.0f, 1.0f);
+    const float cr = static_cast<float>(std::lround(std::clamp(clip.title.r, 0.0f, 1.0f) * 255.0f));
+    const float cg = static_cast<float>(std::lround(std::clamp(clip.title.g, 0.0f, 1.0f) * 255.0f));
+    const float cb = static_cast<float>(std::lround(std::clamp(clip.title.b, 0.0f, 1.0f) * 255.0f));
+    const int off_x = static_cast<int>(std::lround(clip.pos_x));
+    const int off_y = static_cast<int>(std::lround(clip.pos_y));
+
+    // Same placement law as the canvas renderer, so a sprite and a CPU render
+    // put the block at the same pixels no matter which path exports.
+    const std::vector<Placed> placed = place_block(bits, canvas_w, canvas_h, off_x, off_y, em_px);
+    if (placed.empty()) return out;
+
+    // Full-canvas accumulator: premultiplied colour in RGB, coverage in A —
+    // prepared exactly like a CPU alpha-over, so compositing the packed sprite
+    // over an opaque background reproduces render_clip_title_with_font's output
+    // (up to the single final blend rounding).
+    std::vector<uint8_t> acc(static_cast<std::size_t>(canvas_w) * canvas_h * 4u, 0);
+    const std::size_t stride = static_cast<std::size_t>(canvas_w) * 4u;
+
+    // Background box behind the whole block (behind glyphs and shadows).
+    if (clip.title.box) {
+        int x0 = canvas_w, y0 = canvas_h, x1 = 0, y1 = 0;
+        for (const Placed& pl : placed) {
+            x0 = std::min(x0, pl.x);
+            y0 = std::min(y0, pl.y);
+            x1 = std::max(x1, pl.x + pl.w);
+            y1 = std::max(y1, pl.y + pl.h);
+        }
+        const int px = static_cast<int>(std::lround(clip.title.box_pad_x));
+        const int py = static_cast<int>(std::lround(clip.title.box_pad_y));
+        const int brad = std::max(0, static_cast<int>(std::lround(clip.title.box_radius)));
+        const float bcr = static_cast<float>(
+            std::lround(std::clamp(clip.title.box_r, 0.0f, 1.0f) * 255.0f));
+        const float bcg = static_cast<float>(
+            std::lround(std::clamp(clip.title.box_g, 0.0f, 1.0f) * 255.0f));
+        const float bcb = static_cast<float>(
+            std::lround(std::clamp(clip.title.box_b, 0.0f, 1.0f) * 255.0f));
+        sprite_fill_rounded(acc.data(), stride, canvas_w, canvas_h, x0 - px, y0 - py, x1 + px,
+                            y1 + py, brad, bcr, bcg, bcb, clip.title.box_opacity * opacity);
+    }
+
+    // Drop shadow (blurred, tinted, offset copy of each line) first, then the
+    // glyphs over it. The shadow inherits the text alpha so faded text casts a
+    // faded shadow.
+    const float scr = static_cast<float>(
+        std::lround(std::clamp(clip.title.shadow_r, 0.0f, 1.0f) * 255.0f));
+    const float scg = static_cast<float>(
+        std::lround(std::clamp(clip.title.shadow_g, 0.0f, 1.0f) * 255.0f));
+    const float scb = static_cast<float>(
+        std::lround(std::clamp(clip.title.shadow_b, 0.0f, 1.0f) * 255.0f));
+    const int sdx = static_cast<int>(std::lround(clip.title.shadow_dx));
+    const int sdy = static_cast<int>(std::lround(clip.title.shadow_dy));
+    const int srad = std::max(0, static_cast<int>(std::lround(clip.title.shadow_blur)));
+    const float shadow_a = clip.title.shadow_opacity * text_a * opacity;
+    const float glyph_a = text_a * opacity;
+    for (const Placed& pl : placed) {
+        if (clip.title.shadow) {
+            const std::vector<uint8_t> salpha = box_blur(pl.bmp->alpha.data(), pl.w, pl.h, srad);
+            for (int py = 0; py < pl.h; ++py) {
+                const float sa_scale = shadow_a / 255.0f;
+                for (int px2 = 0; px2 < pl.w; ++px2) {
+                    const uint8_t sa = salpha[static_cast<std::size_t>(py) * pl.w + px2];
+                    if (sa == 0) continue;
+                    sprite_blend(acc.data(), stride, canvas_w, canvas_h, pl.x + sdx + px2,
+                                 pl.y + sdy + py, scr, scg, scb,
+                                 static_cast<float>(sa) * sa_scale);
+                }
+            }
+        }
+        for (int py = 0; py < pl.h; ++py) {
+            const float ga_scale = glyph_a / 255.0f;
+            for (int px2 = 0; px2 < pl.w; ++px2) {
+                const uint8_t ga = pl.bmp->alpha[static_cast<std::size_t>(py) * pl.w + px2];
+                if (ga == 0) continue;
+                sprite_blend(acc.data(), stride, canvas_w, canvas_h, pl.x + px2, pl.y + py, cr,
+                             cg, cb, static_cast<float>(ga) * ga_scale);
+            }
+        }
+    }
+
+    // Tight crop of the coverage footprint.
+    int min_x = canvas_w, min_y = canvas_h, max_x = -1, max_y = -1;
+    for (int y = 0; y < canvas_h; ++y) {
+        const uint8_t* row = acc.data() + static_cast<std::size_t>(y) * stride;
+        for (int x = 0; x < canvas_w; ++x) {
+            if (row[x * 4u + 3u] != 0) {
+                min_x = std::min(min_x, x);
+                max_x = std::max(max_x, x);
+                min_y = std::min(min_y, y);
+                max_y = std::max(max_y, y);
+            }
+        }
+    }
+    if (max_x < 0) return out;
+
+    out.ox = min_x;
+    out.oy = min_y;
+    out.width = max_x - min_x + 1;
+    out.height = max_y - min_y + 1;
+    out.data.resize(static_cast<std::size_t>(out.width) * out.height * 4u);
+    for (int y = 0; y < out.height; ++y) {
+        std::memcpy(out.data.data() + static_cast<std::size_t>(y) * out.width * 4u,
+                    acc.data() + static_cast<std::size_t>(min_y + y) * stride +
+                        static_cast<std::size_t>(min_x) * 4u,
+                    static_cast<std::size_t>(out.width) * 4u);
+    }
+    return out;
 }
 
 }  // namespace canvas::core::title

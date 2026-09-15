@@ -135,7 +135,7 @@ struct DeliverVideoSettings {
     int target_bitrate_kbps = 80000;
     int max_bitrate_kbps = 80000;
     MultiEncode multi_encode = MultiEncode::Enabled;
-    std::string preset = "Faster";
+    std::string preset = "Medium";
     EncoderTuning tuning = EncoderTuning::HighQuality;
     bool two_pass = false;
     int lookahead_frames = 16;

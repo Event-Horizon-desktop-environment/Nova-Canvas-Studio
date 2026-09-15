@@ -118,6 +118,25 @@ static Project make_project(const std::string& src_path) {
     Track v; v.kind = Track::Kind::Video; v.name = "V1";
     p.sequence.video_tracks.push_back(std::move(v));
     Clip clip; clip.media = 0; clip.name = "A"; clip.tl_in = 0; clip.src_in = 0; clip.src_out = 12;
+    // Editorial content on the clip so the sweep exercises the title-rasterise
+    // + fade-envelope + composite path (frame_gpu bails on titles -> the CPU
+    // compositor), not just a straight codec blit. The subtitle-style title is
+    // nudged toward the bottom; the fades are short so the 12-frame source
+    // still has a full-opacity middle.
+    clip.title.text = "SWEEP";
+    clip.title.size = 0.14f;
+    clip.title.a = 1.0f;
+    clip.title.bold = true;
+    clip.title.box = true;
+    clip.title.box_opacity = 0.5f;
+    clip.title.box_pad_x = 6.0f;
+    clip.title.box_pad_y = 4.0f;
+    clip.title.box_radius = 2.0f;
+    clip.pos_y = 20.0;
+    clip.transition_in = TransitionType::FadeIn;
+    clip.transition_in_duration = 3;
+    clip.transition_out = TransitionType::DipToBlack;
+    clip.transition_out_duration = 3;
     place_clip(p.sequence, Track::Kind::Video, 0, clip, Placement::Overwrite);
     return p;
 }

@@ -66,6 +66,7 @@ struct ExportSettings {
     std::string vid_rc_mode = "auto";
     std::string preset = "medium";  // x264 preset or nvenc preset
     std::string extra = "";         // extra libavcodec options, "k=v\nk=v"
+    int threads = 0;                // 0 = encoder default (auto, all cores)
     bool remove_audio = false;      // if a codec is selected this is ignored
 };
 

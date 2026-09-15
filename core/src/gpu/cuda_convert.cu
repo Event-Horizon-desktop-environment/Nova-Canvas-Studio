@@ -305,6 +305,81 @@ __global__ void nv12GradeResize(const uint8_t* __restrict__ srcY,
     }
 }
 
+// Title-overlay fuse for the export fast path: blends one premultiplied-RGBA8
+// sprite (title::raster_title_sprite uploaded once per clip) over the canvas
+// AFTER the resize/grade+fade kernels, matching the CPU compositor's
+// title-over-faded-video order. Luma gets the exact per-pixel alpha-over law;
+// chroma reuses the block-origin sprite pixel like rgbaToNV12's top-left-of-
+// block sampling (averaging the 2x2 on-sprite samples for edge blocks that the
+// +1px launch expansion can straddle, so a sprite edge mid-block still tints).
+__global__ void nv12TitleBlend(const uint8_t* __restrict__ sp, int spw, int sph,
+                               int sox, int soy,
+                               uint8_t* __restrict__ outY, size_t oYPitch,
+                               uint8_t* __restrict__ outUV, size_t oUVPitch,
+                               int ow, int oh, float fade) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= ow || y >= oh) return;
+
+    const int sx = x - sox, sy = y - soy;
+    const bool hit = (unsigned)sx < (unsigned)spw && (unsigned)sy < (unsigned)sph;
+    float A = 0.f, pR = 0.f, pG = 0.f, pB = 0.f;
+    if (hit) {
+        const uint8_t* pp = sp + ((size_t)sy * spw + sx) * 4;
+        pR = pp[0];
+        pG = pp[1];
+        pB = pp[2];
+        A = pp[3] * (1.f / 255.f);
+    }
+    if (A > 0.f) {
+        // Sprite luma (premultiplied 0..255 scale, same law as rgbaToNV12)
+        // dipped by `fade`, alpha-over the already-faded video luma.
+        const float Yv = outY[(size_t)y * oYPitch + x];
+        const float Ys = 16.f + (0.183f * pR + 0.614f * pG + 0.062f * pB);
+        float Yo = 16.f + fade * (Ys - 16.f) + (1.f - A) * (Yv - 16.f);
+        if (Yo < 16.f) Yo = 16.f; else if (Yo > 235.f) Yo = 235.f;
+        outY[(size_t)y * oYPitch + x] = (uint8_t)(Yo + 0.5f);
+    }
+
+    if ((x & 1) == 0 && (y & 1) == 0) {
+        float A00 = A;
+        float rq = pR, gq = pG, bq = pB;
+        if (!hit || A00 == 0.f) {
+            float asum = 0.f, rsum = 0.f, gsum = 0.f, bsum = 0.f;
+#pragma unroll
+            for (int dyy = 0; dyy < 2; ++dyy) {
+                for (int dxx = 0; dxx < 2; ++dxx) {
+                    const int px = x + dxx - sox, py = y + dyy - soy;
+                    if ((unsigned)px < (unsigned)spw && (unsigned)py < (unsigned)sph) {
+                        const uint8_t* pp = sp + ((size_t)py * spw + px) * 4;
+                        rsum += pp[0];
+                        gsum += pp[1];
+                        bsum += pp[2];
+                        asum += pp[3];
+                    }
+                }
+            }
+            A00 = asum * (0.25f / 255.f);
+            rq = rsum * 0.25f;
+            gq = gsum * 0.25f;
+            bq = bsum * 0.25f;
+        }
+        if (A00 > 0.f) {
+            const int bx = x >> 1, by = y >> 1;
+            uint8_t* uv = outUV + (size_t)by * oUVPitch + (size_t)bx * 2;
+            const float Cbv = uv[0], Crv = uv[1];
+            const float Cbs = 128.f + (-0.101f * rq - 0.339f * gq + 0.439f * bq);
+            const float Crs = 128.f + (0.439f * rq - 0.399f * gq - 0.040f * bq);
+            float Cbo = 128.f + fade * (Cbs - 128.f) + (1.f - A00) * (Cbv - 128.f);
+            float Cro = 128.f + fade * (Crs - 128.f) + (1.f - A00) * (Crv - 128.f);
+            if (Cbo < 16.f) Cbo = 16.f; else if (Cbo > 240.f) Cbo = 240.f;
+            if (Cro < 16.f) Cro = 16.f; else if (Cro > 240.f) Cro = 240.f;
+            uv[0] = (uint8_t)(Cbo + 0.5f);
+            uv[1] = (uint8_t)(Cro + 0.5f);
+        }
+    }
+}
+
 }  // namespace
 
 bool cuda_available() {
@@ -350,6 +425,29 @@ bool gpu_cuda_check(const char* name, const cudaError_t e) {
     }
     return false;
 }
+
+// Fuses an optional title overlay into the just-written NV12 output by
+// launching nv12TitleBlend over the sprite's canvas footprint (+1px, so chroma
+// blocks that straddle the sprite edge still tint) on the same stream, right
+// after the resize/grade kernel. No-op without a valid sprite.
+void launch_title_blend(const TitleSpriteGpu* title, uint8_t* dY, std::size_t yPitch,
+                        uint8_t* dUV, std::size_t uvPitch, int ow, int oh, float fade,
+                        cudaStream_t s) {
+    if (!title || !title->valid() || ow <= 0 || oh <= 0) return;
+    const int x0 = title->ox - 1;
+    const int y0 = title->oy - 1;
+    const int x1 = title->ox + title->w;
+    const int y1 = title->oy + title->h;
+    const int lx0 = x0 < 0 ? 0 : x0;
+    const int ly0 = y0 < 0 ? 0 : y0;
+    const int lx1 = x1 >= ow ? ow - 1 : x1;
+    const int ly1 = y1 >= oh ? oh - 1 : y1;
+    if (lx1 < lx0 || ly1 < ly0) return;
+    const dim3 blk(16, 16);
+    const dim3 grp((lx1 - lx0 + 1 + 15) / 16, (ly1 - ly0 + 1 + 15) / 16);
+    nv12TitleBlend<<<grp, blk, 0, s>>>(title->rgba, title->w, title->h, title->ox, title->oy,
+                                       dY, yPitch, dUV, uvPitch, ow, oh, fade);
+}
 }  // namespace
 
 bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int src_w, int src_h,
@@ -357,7 +455,7 @@ bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int sr
                                uint8_t* dY, std::size_t yPitch,
                                uint8_t* dUV, std::size_t uvPitch,
                                int out_w, int out_h, int dst_w, int dst_h,
-                               int dx, int dy, float fade) {
+                               int dx, int dy, float fade, const TitleSpriteGpu* title) {
     if (!srcY || !srcUV || !dY || !dUV || src_w <= 0 || src_h <= 0 || out_w <= 0 ||
         out_h <= 0 || dst_w <= 0 || dst_h <= 0)
         return false;
@@ -370,6 +468,7 @@ bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int sr
     nv12Resize<<<grp, blk, 0, s>>>(srcY, srcUV, src_w, src_h, src_y_pitch, src_uv_pitch,
                                    dst_w, dst_h, dx, dy, dY, yPitch, dUV, uvPitch,
                                    out_w, out_h, fade);
+    launch_title_blend(title, dY, yPitch, dUV, uvPitch, out_w, out_h, fade, s);
     return gpu_cuda_check("nv12_resize_async", cudaGetLastError());
 }
 
@@ -605,6 +704,30 @@ void grade_lut_free(void* dev) {
     if (dev) cudaFree(dev);
 }
 
+bool title_sprite_upload(const uint8_t* rgba, int w, int h, int ox, int oy,
+                         TitleSpriteGpu* out) {
+    if (!rgba || !out || w <= 0 || h <= 0) return false;
+    const uint64_t bytes = (uint64_t)w * h * 4u;
+    void* d = nullptr;
+    if (cudaMalloc(&d, bytes) != cudaSuccess) return false;
+    if (cudaMemcpy(d, rgba, bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+        cudaFree(d);
+        return false;
+    }
+    out->rgba = static_cast<const uint8_t*>(d);
+    out->w = w;
+    out->h = h;
+    out->ox = ox;
+    out->oy = oy;
+    return true;
+}
+
+void title_sprite_free(TitleSpriteGpu* spr) {
+    if (!spr) return;
+    if (spr->rgba) cudaFree(const_cast<uint8_t*>(spr->rgba));
+    *spr = TitleSpriteGpu{};
+}
+
 bool convert_nv12_grade_resize_async(const uint8_t* srcY, const uint8_t* srcUV,
                                      int src_w, int src_h,
                                      std::size_t src_y_pitch, std::size_t src_uv_pitch,
@@ -612,7 +735,8 @@ bool convert_nv12_grade_resize_async(const uint8_t* srcY, const uint8_t* srcUV,
                                      uint8_t* dUV, std::size_t uvPitch,
                                      int out_w, int out_h, int dst_w, int dst_h,
                                      int dx, int dy, float fade,
-                                     const GradeKernelParams& g) {
+                                     const GradeKernelParams& g,
+                                     const TitleSpriteGpu* title) {
     if (!srcY || !srcUV || !dY || !dUV || src_w <= 0 || src_h <= 0 || out_w <= 0 ||
         out_h <= 0 || dst_w <= 0 || dst_h <= 0)
         return false;
@@ -630,6 +754,7 @@ bool convert_nv12_grade_resize_async(const uint8_t* srcY, const uint8_t* srcUV,
                                         src_uv_pitch, dst_w, dst_h, dx, dy,
                                         dY, yPitch, dUV, uvPitch,
                                         out_w, out_h, fade, g);
+    launch_title_blend(title, dY, yPitch, dUV, uvPitch, out_w, out_h, fade, s);
     return gpu_cuda_check("nv12_grade_resize_async", cudaGetLastError());
 }
 

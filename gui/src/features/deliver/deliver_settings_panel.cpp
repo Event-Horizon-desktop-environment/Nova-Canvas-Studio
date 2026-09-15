@@ -335,7 +335,7 @@ void DeliverSettingsPanel::build() {
     preset_q_combo_->addItems({tr("Placebo"), tr("Very Slow"), tr("Slow"), tr("Medium"),
                                tr("Fast"), tr("Faster"), tr("Very Fast"), tr("Superfast"),
                                tr("Ultrafast")});
-    preset_q_combo_->setCurrentText(tr("Faster"));
+    preset_q_combo_->setCurrentText(tr("Medium"));
     style_field(preset_q_combo_);
 
     tuning_combo_ = new QComboBox;

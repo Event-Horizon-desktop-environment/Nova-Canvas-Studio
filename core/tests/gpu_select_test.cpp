@@ -77,6 +77,31 @@ bool test_mapping_laws() {
     return ok;
 }
 
+bool test_cpu_name() {
+    bool ok = true;
+    // Synthetic cpuinfo tree: model name is parsed, missing file -> "".
+    const std::string root = "/tmp/canvas_gpu_test_cpu";
+    if (!ensure(mkdir(root.c_str(), 0755) == 0 || errno == EEXIST,
+                "mkdtemp root"))
+        return false;
+    if (!ensure(mkdir((root + "/proc").c_str(), 0755) == 0 || errno == EEXIST,
+                "mkdtemp proc"))
+        return false;
+    ok &= ensure(
+        write_file(root + "/proc/cpuinfo",
+                   "processor\t: 0\n"
+                   "vendor_id\t: AuthenticAMD\n"
+                   "model name\t: AMD Ryzen 9 9900X 12-Core Processor\n"
+                   "cpu MHz\t\t: 4400.000\n"),
+        "synthetic cpuinfo");
+    ok &= ensure(cpu_name(root) == "AMD Ryzen 9 9900X 12-Core Processor",
+                 "cpu model name parsed");
+    ok &= ensure(cpu_name("/tmp/canvas_gpu_test_cpu_missing_xyz") == "",
+                 "missing cpuinfo -> empty");
+    ok &= ensure(std::string(kCpuSentinel) == "cpu", "cpu sentinel spelling");
+    return ok;
+}
+
 bool test_detect_amd_only() {
     const std::string root = "/tmp/canvas_gpu_test_amd";
     const bool made = mkdir(root.c_str(), 0755) == 0 || errno == EEXIST;
@@ -245,6 +270,7 @@ bool test_gpu_name_for() {
 int run_gpu_select_tests() {
     bool all = true;
     all &= test_mapping_laws();
+    all &= test_cpu_name();
     all &= test_detect_amd_only();
     all &= test_detect_nvidia_amd_order();
     all &= test_unsupported_vendor_skipped();

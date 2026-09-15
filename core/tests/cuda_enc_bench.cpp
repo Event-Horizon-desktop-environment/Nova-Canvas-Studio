@@ -1,25 +1,25 @@
-// vaapi_enc_bench — VAAPI encode speed sweep @ the deliver target.
+// cuda_enc_bench — NVIDIA/CUDA (NVENC) encode speed sweep @ the deliver target.
 //
 // Measures export_project() wall-throughput at the user's real export intent —
-// H.265 VAAPI, 2560x1440, 60 fps, 80 Mbps — from the real 1440p AV1 source
-// clip, sweeping the knob space that the exporter actually exposes. Prints a
-// ranked leaderboard plus bytes/Mbps for each row.
+// H.265 NVENC, 2560x1440, 60 fps, 80 Mbps — from the real 1440p AV1 source,
+// sweeping the knob space that the exporter actually exposes. Prints a ranked
+// leaderboard plus bytes/Mbps for each row. The sibling of vaapi_enc_bench for
+// the CUDA backend.
 //
 // Informational by design: PASS when every measured row produced a decodable,
-// non-empty output file — it never asserts a speed (encode throughput is
-// machine/driver-dependent). The point is to (re)produce the "fastest safe
-// config" evidence (docs/vaapi.md §10) on THIS generation of hardware.
-//
-// Rows (hevc, the deliver codec):
-//   baseline        no extra knobs, rc = vbr_target @ 80 Mbps
-//   async_depth     {4, 8, 16, 32, 64} on top of baseline
-//   rc mode         CBR vs VBR at 80 Mbps
-//   preset names    ultrafast / faster / medium / slow / placebo
-//                   (exercises the exporter's vaapi_speed_for wiring)
-// h264 reference:   two rows at the same geometry so H.264 vs H.265 speed is
-//                   visible on the same run.
+// non-empty output file — it never asserts a speed. Rows:
+//   hevc async_depth    {4, 8, 16, 32, 64} on top of baseline (VBR@80 Mbps)
+//   rc mode             CBR vs VBR at 80 Mbps
+//   preset names        ultrafast / faster / medium / slow / placebo
+//                       (exercises the exporter's nv_preset_for p1..p7 wiring)
+//   feature rows        baseline + burned-in subtitle/fades. For NVENC the title
+//                       stays on the GPU and is fused by the nv12TitleBlend
+//                       kernel launch that already does resize+grade, so these
+//                       rows are the deliver numbers a subtitle-bearing timeline
+//                       gets on the fast path, not a CPU-compositor baseline.
+//   h264 reference      same geometry so H.264 vs H.265 speed is visible.
 
-#include "vaapi_test_common.hpp"
+#include "cuda_test_common.hpp"
 
 #include "canvas/core/export/exporter.hpp"
 #include "canvas/core/media/hw_device.hpp"
@@ -51,9 +51,21 @@ struct Row {
 }  // namespace
 
 int main() {
-    using namespace vaapi_test;
+    using namespace cuda_test;
     const std::string root = art_root();
     const std::string clip_path = default_clip_path();
+
+    if (!cuda_runtime_ok()) {
+        std::printf("SKIP CUDA runtime not available\n");
+        return 2;
+    }
+    const std::string dev = pick_cuda_encode_device();
+    if (dev.empty()) {
+        std::printf("SKIP no working CUDA/NVENC encode device\n");
+        return 2;
+    }
+    std::printf("cuda encode device: ordinal %s\n", dev.c_str());
+    canvas::core::HwDeviceManager::set_preferred_gpu("cuda", dev);
 
     const TestClip clip = probe_clip(clip_path);
     if (!clip.valid()) {
@@ -63,20 +75,12 @@ int main() {
     std::printf("source: %s %dx%d %.0ffps\n", clip.path.c_str(), clip.width,
                 clip.height, clip.fps);
 
-    const std::string node = pick_vaapi_encode_node();
-    if (node.empty()) {
-        std::printf("SKIP no working VAAPI encode node\n");
-        return 2;
-    }
-    std::printf("encode node: %s\n", node.c_str());
-    canvas::core::HwDeviceManager::set_preferred_gpu("vaapi", device_arg_for(node));
-
     constexpr int64_t kFrames = 90;  // 1.5 s @ 60 fps per row
     const auto proj = make_single_clip_project(clip, kFrames);
-    // Editorial-content variant: same clip but with a burned-in subtitle +
-    // edge fades. Exports of it take the CPU-compositor path (frame_gpu bails
-    // on titles) inside the encode, so its rows measure the full deliver path
-    // for a title-bearing timeline, not a bare video blit.
+    // Editorial-content variant: burn-in subtitle + edge fades. On the CUDA path
+    // the per-frame title sprite is uploaded once and woven into the fused
+    // resize+grade kernel launch (nv12TitleBlend), so these rows measure the full
+    // title raster->blend->encode deliver path at GPU cost, not a bare blit.
     const auto feat_proj = make_feature_project(clip, kFrames);
     constexpr double kSubtitleBandH = 0.18;  // bottom 18% = the subtitle band
 
@@ -84,7 +88,7 @@ int main() {
                               const std::string& extra, const std::string& tag,
                               const std::string& label, bool feature = false) -> Row {
         Row r{tag, label};
-        const EncResult res = run_export(feature ? feat_proj : proj, "hevc_vaapi", "mp4",
+        const EncResult res = run_export(feature ? feat_proj : proj, "hevc_nvenc", "mp4",
                                          kTargetWidth, kTargetHeight, kTargetFps,
                                          kFrames, -1, rc_mode, preset,
                                          kTargetBitrateKbps, extra, tag);
@@ -98,9 +102,9 @@ int main() {
         return r;
     };
 
-    const bool hevc_ok = encode_probe(node, "hevc_vaapi");
-    const bool h264_ok = encode_probe(node, "h264_vaapi");
-    std::printf("hevc_vaapi encode cap: %s | h264_vaapi: %s\n\n",
+    const bool hevc_ok = encode_probe(dev, "hevc_nvenc");
+    const bool h264_ok = encode_probe(dev, "h264_nvenc");
+    std::printf("hevc_nvenc encode cap: %s | h264_nvenc: %s\n\n",
                 hevc_ok ? "yes" : "no", h264_ok ? "yes" : "no");
 
     std::vector<Row> rows;
@@ -114,17 +118,25 @@ int main() {
                                 std::string("async_depth=") + depth + "\n", tag, label));
     }
     rows.push_back(hevc_row("cbr", "medium", "", "hevc_cbr", "hevc CBR@80M (tight VBV)"));
-    for (const char* pres : {"ultrafast", "faster", "slow", "placebo"}) {
+    for (const char* pres : {"ultrafast", "faster", "medium", "slow", "placebo"}) {
         const std::string tag = std::string("hevc_ps_") + pres;
         const std::string label = std::string("hevc VBR@80M preset=") + pres;
         rows.push_back(hevc_row("vbr_target", pres, "", tag, label));
     }
 
+    // --- feature-content rows: subtitle + fades through the deliver path -----
+    // Exercising the same fused GPU title->encode chain the app runs (the
+    // sprite upload + nv12TitleBlend fusion happen inside the export session).
+    rows.push_back(hevc_row("vbr_target", "medium", "", "hevc_feat",
+                            "hevc VBR@80M baseline + subtitle/fades", true));
+    rows.push_back(hevc_row("vbr_target", "ultrafast", "", "hevc_feat_fast",
+                            "hevc VBR@80M ultrafast + subtitle/fades", true));
+
     // --- h264 reference (same geometry/bitrate) ------------------------------
     if (h264_ok) {
         {
             Row r{"h264_base", "h264 VBR@80M baseline"};
-            const EncResult res = run_export(proj, "h264_vaapi", "mp4", kTargetWidth,
+            const EncResult res = run_export(proj, "h264_nvenc", "mp4", kTargetWidth,
                                              kTargetHeight, kTargetFps, kFrames, -1,
                                              "vbr_target", "medium", kTargetBitrateKbps,
                                              "", "h264_base");
@@ -136,7 +148,7 @@ int main() {
         }
         {
             Row r{"h264_ad16", "h264 VBR@80M async_depth=16"};
-            const EncResult res = run_export(proj, "h264_vaapi", "mp4", kTargetWidth,
+            const EncResult res = run_export(proj, "h264_nvenc", "mp4", kTargetWidth,
                                              kTargetHeight, kTargetFps, kFrames, -1,
                                              "vbr_target", "medium", kTargetBitrateKbps,
                                              "async_depth=16\n", "h264_ad16");
@@ -147,15 +159,6 @@ int main() {
             rows.push_back(std::move(r));
         }
     }
-
-    // --- feature-content rows: subtitle + fades through the deliver path -----
-    // Slower than the bare-clip rows by design (title rasterise + software
-    // compositor per frame), but these are the numbers a real subtitle-bearing
-    // timeline gets.
-    rows.push_back(hevc_row("vbr_target", "medium", "", "hevc_feat",
-                            "hevc VBR@80M baseline + subtitle/fades", true));
-    rows.push_back(hevc_row("vbr_target", "ultrafast", "", "hevc_feat_fast",
-                            "hevc VBR@80M ultrafast + subtitle/fades", true));
 
     // --- validate + rank -----------------------------------------------------
     std::printf("%-42s | %6s | %6s | %10s | %s\n", "row", "fps", "Mbps", "bytes", "status");
@@ -202,7 +205,7 @@ int main() {
         std::printf("\nfastest: %s at %.0f fps (%.1f Mbps, %lld bytes)\n",
                     best->tag.c_str(), best->fps, best->mbps,
                     static_cast<long long>(best->bytes));
-        std::printf("recommended ExportSettings: hevc_vaapi 2560x1440 @60fps "
+        std::printf("recommended ExportSettings: hevc_nvenc 2560x1440 @60fps "
                     "80Mbps vbr_target, preset=medium, extra=\"\"\n");
     }
 

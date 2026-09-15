@@ -173,6 +173,7 @@ message(STATUS "Nova Canvas CUDA acceleration: ${CANVAS_CUDA_ENABLED} (nvcc=${CA
 add_library(canvas_core STATIC
     src/media/frame_cache.cpp
     src/media/video_decoder.cpp
+    src/media/sw_decode.cpp
     src/media/audio_decoder.cpp
     src/media/hw_device.cpp
     src/media/gpu_select.cpp
@@ -329,6 +330,42 @@ target_link_libraries(canvas_equalizer_test PRIVATE canvas_core)
 set_target_properties(canvas_equalizer_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME equalizer COMMAND canvas_equalizer_test)
 
+# Software-decode sws buffer-sizing + RGBA conversion laws (issue #4 regression
+# guard). Synthesized YUV420P frames only — no media file, no device.
+add_executable(canvas_sw_decode_test tests/sw_decode_test.cpp)
+target_link_libraries(canvas_sw_decode_test PRIVATE canvas_core)
+set_target_properties(canvas_sw_decode_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME sw_decode COMMAND canvas_sw_decode_test)
+
+# Real-clip SOFTWARE (CPU-only) decode round trip over the user's genuine AV1
+# 2560x1440@60 reel — the software seam of the headless decode path, no
+# hardware device anywhere. Test source honors CANVAS_TEST_CLIP (default
+# /home/matt/Videos/clips/2026-09-14 09-12-48.mkv); SKIPs (exit 2) when the
+# clip is absent, exactly like the vaapi clip tests.
+add_executable(canvas_sw_decode_clip_test tests/sw_decode_clip_test.cpp)
+target_link_libraries(canvas_sw_decode_clip_test PRIVATE canvas_core)
+set_target_properties(canvas_sw_decode_clip_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME sw_decode_clip COMMAND canvas_sw_decode_clip_test)
+
+# Real-clip SOFTWARE (CPU-only, all-FFmpeg-threads) encode round trip: probe
+# the genuine 1440p60 reel, export 2560x1440@60 H.265 (libx265) @ 80,000 kbps
+# with threads=0 (FFmpeg auto = every core), then decode the output back and
+# verify frame count + non-black content. SKIPs (exit 2) when the clip is
+# absent or libx265 is unavailable.
+add_executable(canvas_sw_encode_clip_test tests/sw_encode_clip_test.cpp)
+target_link_libraries(canvas_sw_encode_clip_test PRIVATE canvas_core)
+set_target_properties(canvas_sw_encode_clip_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME sw_encode_clip COMMAND canvas_sw_encode_clip_test)
+
+# Software libx265 preset sweep at the same deliver law (informational only:
+# validates decode-back per row, never asserts speed). Long timeout: several
+# full export_project() runs back to back.
+add_executable(canvas_sw_encode_bench tests/sw_encode_bench.cpp)
+target_link_libraries(canvas_sw_encode_bench PRIVATE canvas_core)
+set_target_properties(canvas_sw_encode_bench PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME sw_encode_bench COMMAND canvas_sw_encode_bench)
+set_tests_properties(sw_encode_bench PROPERTIES TIMEOUT 600)
+
 add_executable(canvas_title_test tests/title_test.cpp)
 target_link_libraries(canvas_title_test PRIVATE canvas_core)
 set_target_properties(canvas_title_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
@@ -392,3 +429,20 @@ target_link_libraries(canvas_vaapi_enc_bench PRIVATE canvas_core)
 set_target_properties(canvas_vaapi_enc_bench PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME vaapi_enc_bench COMMAND canvas_vaapi_enc_bench)
 set_tests_properties(vaapi_enc_bench PROPERTIES TIMEOUT 300)
+
+# Device-bound CUDA/NVENC encode regression + speed sweep, the NVIDIA siblings
+# of vaapi_enc[_bench]. Same discipline (real encode on the real node, skip=2
+# without a CUDA runtime / working NVENC device), and both exercise the full
+# title->composite->encode chain via make_feature_project. The bench sweeps
+# dozens of full export_project() runs, so it gets a long timeout.
+add_executable(canvas_cuda_enc_test tests/cuda_enc_test.cpp)
+target_link_libraries(canvas_cuda_enc_test PRIVATE canvas_core)
+set_target_properties(canvas_cuda_enc_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME cuda_enc COMMAND canvas_cuda_enc_test)
+set_tests_properties(cuda_enc PROPERTIES TIMEOUT 120)
+
+add_executable(canvas_cuda_enc_bench tests/cuda_enc_bench.cpp)
+target_link_libraries(canvas_cuda_enc_bench PRIVATE canvas_core)
+set_target_properties(canvas_cuda_enc_bench PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME cuda_enc_bench COMMAND canvas_cuda_enc_bench)
+set_tests_properties(cuda_enc_bench PROPERTIES TIMEOUT 300)

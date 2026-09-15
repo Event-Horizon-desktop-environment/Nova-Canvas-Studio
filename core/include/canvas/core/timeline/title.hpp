@@ -124,4 +124,30 @@ void render_clip_title_with_font(const Clip& clip, const std::string& font_path,
                                  std::vector<uint8_t>& rgba, int width, int height,
                                  std::size_t stride);
 
+// A premultiplied-RGBA8 sprite holding a clip's title rasterised once, cropped
+// to its tight on-canvas box (coverage byte in the alpha channel, colours
+// premultiplied). `ox`/`oy` locate the sprite's top-left on the output canvas.
+// Rasterised with the exact layering/ordering law of
+// render_clip_title_with_font, so blending the sprite over an opaque frame
+// reproduces the CPU render up to the final rounding pass — the GPU fast path
+// burns this sprite with a single kernel instead of a per-frame CPU composite.
+struct TitleSprite {
+    std::vector<uint8_t> data;  // premultiplied RGBA8, width*height*4 bytes
+    int width = 0;
+    int height = 0;
+    int ox = 0;  // canvas x of the sprite's left edge
+    int oy = 0;  // canvas y of the sprite's top edge
+    [[nodiscard]] bool valid() const noexcept {
+        return !data.empty() && width > 0 && height > 0;
+    }
+};
+
+// Rasterises `clip.title` (explicit `font_path`, like
+// render_clip_title_with_font) into a premultiplied sprite whose box covers the
+// glyphs, their drop shadow and the background box. Invalid when the clip has
+// no title, the canvas dims are non-positive, the font resolves to nothing, or
+// the text rasterises nothing.
+[[nodiscard]] TitleSprite raster_title_sprite(const Clip& clip, int canvas_w,
+                                              int canvas_h, const std::string& font_path);
+
 }  // namespace canvas::core::title

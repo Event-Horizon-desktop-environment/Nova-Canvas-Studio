@@ -212,6 +212,7 @@ ExportSettings to_export_settings(const DeliverSettings& ds) {
                             encn.find("av1") != std::string::npos ||
                             encn.find("svt") != std::string::npos;
     es.preset = has_preset ? lower(ds.video.preset) : "";
+    es.threads = ds.advanced.threads;  // 0 = FFmpeg auto (all cores, default)
 
     // Rate control mapping.
     switch (ds.video.rate_control) {
@@ -247,8 +248,9 @@ ExportSettings to_export_settings(const DeliverSettings& ds) {
     // Tuning/quality knobs pushed through as extra options for encoders that
     // expose them (unknown opts are ignored by libav).
     std::ostringstream extra;
-    if (ds.video.aq_strength > 0)
-        extra << "aq-strength=" << ds.video.aq_strength << "\n";
+    // aq-strength always emitted (0 included) so the exporter's default-8 AQ
+    // base can be pushed all the way down to off from the panel.
+    extra << "aq-strength=" << ds.video.aq_strength << "\n";
     if (ds.video.lookahead_frames > 0)
         extra << "rc-lookahead=" << ds.video.lookahead_frames << "\n";
     if (ds.video.enable_b_frames()) {

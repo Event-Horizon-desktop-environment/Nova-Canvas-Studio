@@ -25,6 +25,11 @@
 
 namespace canvas::core::gpu_select {
 
+// Sentinel stored in settings/hw_gpu when the user picks the CPU row in the
+// Settings GPU picker. Never collides with a real identity: GPU rows persist
+// the PCI slot ("0000:7a:00.0") and Automatic persists "".
+inline constexpr const char* kCpuSentinel = "cpu";
+
 struct GpuDevice {
     std::string pci_slot;    // e.g. "0000:7a:00.0" (stable identity across
                              // boots; keys the persisted settings/hw_gpu value)
@@ -49,6 +54,12 @@ std::string device_arg_for(const std::string& backend,
 // empty vector when no render nodes exist (headless host / no GPU) — callers
 // treat that as "no GPU selection available" and fall back to probe order.
 std::vector<GpuDevice> detect_gpus(const std::string& root = "/");
+
+// Human-readable CPU model for the Settings GPU picker's CPU row
+// (e.g. "AMD Ryzen 9 9900X 12-Core Processor"), read from the first
+// "model name" line of <root>/proc/cpuinfo. Returns "" when unreadable.
+// Same `root` convention as detect_gpus so tests use a synthetic tree.
+std::string cpu_name(const std::string& root = "/");
 
 // Resolve the human-readable name of the GPU that `backend`/`device_arg`
 // address — the same pair HwDeviceManager passes to av_hwdevice_ctx_create().
