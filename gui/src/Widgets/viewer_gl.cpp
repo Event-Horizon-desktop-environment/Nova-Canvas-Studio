@@ -47,6 +47,21 @@ QByteArray viewer_shader_header(bool gles, bool fragment) {
     return QByteArray("#version 330 core\n");
 }
 
+// glTexImage3D lives beyond QOpenGLFunctions' 2.0 baseline; resolve it lazily
+// from the current context. Used to allocate the 3D grade LUT textures and the
+// neutral fallback through raw GL (Qt's QOpenGLTexture allocation path raises
+// GL_INVALID_OPERATION on Mesa 26 radeonsi and leaves the texture black).
+using TexImage3DProc = void (*)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei,
+                                GLint, GLenum, GLenum, const void*);
+TexImage3DProc tex_image_3d_proc() {
+    static TexImage3DProc proc = [] {
+        QOpenGLContext* c = QOpenGLContext::currentContext();
+        return c ? reinterpret_cast<TexImage3DProc>(c->getProcAddress("glTexImage3D"))
+                 : nullptr;
+    }();
+    return proc;
+}
+
 constexpr const char* kVertexSrc = R"(
 layout(location = 0) in vec2 in_pos;
 layout(location = 1) in vec2 in_uv;
@@ -349,6 +364,8 @@ void main() {
 }  // namespace
 
 ViewerGL::ViewerGL(QWidget* parent) : QOpenGLWidget(parent) {
+    static uint64_t next_uid = 1;
+    viewer_uid_ = next_uid++;
     setMinimumSize(320, 180);
     setMouseTracking(true);
 }
@@ -368,6 +385,8 @@ ViewerGL::~ViewerGL() {
         texture_nv12_b_uv_.reset();
         grade_tex_a_.reset();
         grade_tex_b_.reset();
+        if (grade_neutral_tex_) glDeleteTextures(1, &grade_neutral_tex_);
+        grade_neutral_tex_ = 0;
         if (vaapi_importer_) vaapi_importer_->release();
         if (vaapi_importer_b_) vaapi_importer_b_->release();
         program_.reset();
@@ -405,6 +424,20 @@ void ViewerGL::bind_nv12_b(const int y_unit, const int uv_unit) {
         texture_nv12_b_y_->bind(y_unit);
         texture_nv12_b_uv_->bind(uv_unit);
     }
+}
+
+void ViewerGL::bind_grade_lut(const int unit, QOpenGLTexture* lut) {
+    // The sampler3D uniforms must reference a COMPLETE 3D texture on every draw.
+    // Mesa's draw-time validation (GL core) rejects glDrawArrays with
+    // GL_INVALID_OPERATION when a 3D sampler's unit holds a 2D texture — which
+    // is what happens when u_grade/u_grade_b are left at their default value 0
+    // and unit 0 carries the RGBA video texture. The shader never samples the
+    // LUT while u_grade_*_size < 2, but the driver still validates the binding,
+    // so bind the clip's real LUT when attached and the neutral 1x1x1 3D texture
+    // otherwise.
+    glActiveTexture(static_cast<GLenum>(GL_TEXTURE0 + unit));
+    glBindTexture(GL_TEXTURE_3D, lut ? lut->textureId() : grade_neutral_tex_);
+    glActiveTexture(GL_TEXTURE0);
 }
 
 void ViewerGL::set_frame(canvas::core::RenderFramePtr frame) {
@@ -446,6 +479,19 @@ void ViewerGL::set_frame(canvas::core::RenderFramePtr frame) {
                                  : (frame->nv12 ? frame->nv12->height : 0));
         const int nw = (frame->nv12 ? frame->nv12->width : 0);
         const int nh = (frame->nv12 ? frame->nv12->height : 0);
+        // Always-on (log_warning, not the CANVAS_DEBUG-gated qDebug): arrival
+        // cadence and frame size are the first split between "frames never
+        // delivered to the viewer" and "delivered but the draw fails" — the
+        // two classes the black-viewer reports have been conflating.
+        ::canvas::core::log::log_warning(
+            "[viewer] set_frame uid=%llu frame=%dx%d nv12=%dx%d widget=%dx%d "
+            "path=%s small=%s last_tex=%dx%d recv_ms=%.1f",
+            static_cast<unsigned long long>(viewer_uid_), fw, fh, nw, nh,
+            std::max(1, width()), std::max(1, height()),
+            frame->nv12 && frame->nv12->has_gpu()
+                ? "vaapi"
+                : (frame->nv12 && frame->nv12->has_cpu() ? "nv12" : "rgba"),
+            (fw < width() || fh < height()) ? "yes" : "no", tex_w_, tex_h_, recv_ms);
         if (fw > 0 && fh > 0)
             qDebug() << "[viewer] set_frame"
                      << "frame=" << fw << "x" << fh
@@ -650,6 +696,22 @@ void ViewerGL::initializeGL() {
         "kept when unavailable)",
         vaapi_ok ? "available" : "unavailable");
 
+    // Neutral 1x1x1 3D texture for the grade sampler units. The sampler3D
+    // uniforms must always reference a complete 3D texture or Mesa rejects the
+    // draw (see bind_grade_lut); QOpenGLTexture's allocation path is broken on
+    // this driver, so allocate raw GL.
+    glGenTextures(1, &grade_neutral_tex_);
+    glBindTexture(GL_TEXTURE_3D, grade_neutral_tex_);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    const unsigned char neutral_lut[3] = {0, 0, 0};
+    if (TexImage3DProc t3d = tex_image_3d_proc())
+        t3d(GL_TEXTURE_3D, 0, GL_RGB8, 1, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, neutral_lut);
+    glActiveTexture(GL_TEXTURE0);
+
     if (frame_) upload_frame();
 }
 
@@ -749,7 +811,7 @@ qDebug() << "[viewer] UPSCALE"
             }
         }
 
-        const bool realloc = !tex->isStorageAllocated() || tw != w || th != h;
+        const bool realloc = tw != w || th != h;
         if (realloc) ++up_realloc_cnt;
         static int64_t tex_log_ = 0;
         if ((tex_log_++ % 16) == 0)
@@ -762,12 +824,21 @@ qDebug() << "[viewer] UPSCALE"
             // Qt forbids setSize/setFormat once storage is allocated; a size
             // change needs a fresh texture object instead.
             tex = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+            tex->create();
             tex->setMinificationFilter(QOpenGLTexture::Linear);
             tex->setMagnificationFilter(QOpenGLTexture::Linear);
             tex->setWrapMode(QOpenGLTexture::ClampToEdge);
-            tex->setSize(w, h);
-            tex->setFormat(QOpenGLTexture::RGBA8_UNorm);
-            tex->allocateStorage();
+            // Allocate through raw GL: QOpenGLTexture::allocateStorage() raises
+            // GL_INVALID_OPERATION on Mesa 26 radeonsi and leaves the texture
+            // black (the `[viewer] pixels` probe then reports a black frame with
+            // healthy src pixels). glTexImage2D on the same texture id works.
+            glBindTexture(GL_TEXTURE_2D, tex->textureId());
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA,
+                         GL_UNSIGNED_BYTE, nullptr);
             tw = w;
             th = h;
         }
@@ -1056,8 +1127,7 @@ qDebug() << "[viewer] UPSCALE"
             return;
         }
 
-        const bool y_realloc = !texture_nv12_y_->isStorageAllocated() || tex_w_ != w ||
-                               tex_h_ != h;
+        const bool y_realloc = tex_w_ != w || tex_h_ != h;
         if (y_realloc) {
             ++up_realloc_cnt;
             // Qt forbids setSize/setFormat once storage is allocated (logs
@@ -1065,20 +1135,37 @@ qDebug() << "[viewer] UPSCALE"
             // the stale buffer). Size changes therefore need a fresh texture
             // object; re-create the pair here (still on the context thread via
             // upload_frame's callers).
+            //
+            // Allocate through raw GL, same as the RGBA path in upload() above:
+            // QOpenGLTexture::allocateStorage() raises GL_INVALID_OPERATION on
+            // Mesa 26 radeonsi and leaves the texture black even though setData()
+            // below uploads real pixels — this is the NV12/hardware-decode fast
+            // path (the one real playback actually takes), so this was the
+            // black-screen-on-play bug: the RGBA fallback path got the raw-GL
+            // fix, this GPU path never did.
             texture_nv12_y_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+            texture_nv12_y_->create();
             texture_nv12_y_->setMinificationFilter(QOpenGLTexture::Linear);
             texture_nv12_y_->setMagnificationFilter(QOpenGLTexture::Linear);
             texture_nv12_y_->setWrapMode(QOpenGLTexture::ClampToEdge);
-            texture_nv12_y_->setSize(w, h);
-            texture_nv12_y_->setFormat(QOpenGLTexture::R8_UNorm);
-            texture_nv12_y_->allocateStorage();
+            glBindTexture(GL_TEXTURE_2D, texture_nv12_y_->textureId());
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
             texture_nv12_uv_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+            texture_nv12_uv_->create();
             texture_nv12_uv_->setMinificationFilter(QOpenGLTexture::Linear);
             texture_nv12_uv_->setMagnificationFilter(QOpenGLTexture::Linear);
             texture_nv12_uv_->setWrapMode(QOpenGLTexture::ClampToEdge);
-            texture_nv12_uv_->setSize(w / 2, h / 2);
-            texture_nv12_uv_->setFormat(QOpenGLTexture::RG8_UNorm);
-            texture_nv12_uv_->allocateStorage();
+            glBindTexture(GL_TEXTURE_2D, texture_nv12_uv_->textureId());
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, w / 2, h / 2, 0, GL_RG, GL_UNSIGNED_BYTE,
+                        nullptr);
             tex_w_ = w;
             tex_h_ = h;
         }
@@ -1106,24 +1193,36 @@ qDebug() << "[viewer] UPSCALE"
             const canvas::core::Nv12Frame* bn = frame_->b_nv12.get();
             const int bw = bn->width;
             const int bh = bn->height;
-            const bool b_realloc = !texture_nv12_b_y_->isStorageAllocated() ||
-                                   tex_bw_ != bw || tex_bh_ != bh;
+            const bool b_realloc = tex_bw_ != bw || tex_bh_ != bh;
             if (b_realloc) {
                 ++up_realloc_cnt;
+                // Same raw-GL allocation as the A-side pair above (see the
+                // comment there) — this driver rejects QOpenGLTexture's
+                // allocateStorage() path.
                 texture_nv12_b_y_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+                texture_nv12_b_y_->create();
                 texture_nv12_b_y_->setMinificationFilter(QOpenGLTexture::Linear);
                 texture_nv12_b_y_->setMagnificationFilter(QOpenGLTexture::Linear);
                 texture_nv12_b_y_->setWrapMode(QOpenGLTexture::ClampToEdge);
-                texture_nv12_b_y_->setSize(bw, bh);
-                texture_nv12_b_y_->setFormat(QOpenGLTexture::R8_UNorm);
-                texture_nv12_b_y_->allocateStorage();
+                glBindTexture(GL_TEXTURE_2D, texture_nv12_b_y_->textureId());
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, bw, bh, 0, GL_RED, GL_UNSIGNED_BYTE,
+                            nullptr);
                 texture_nv12_b_uv_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
+                texture_nv12_b_uv_->create();
                 texture_nv12_b_uv_->setMinificationFilter(QOpenGLTexture::Linear);
                 texture_nv12_b_uv_->setMagnificationFilter(QOpenGLTexture::Linear);
                 texture_nv12_b_uv_->setWrapMode(QOpenGLTexture::ClampToEdge);
-                texture_nv12_b_uv_->setSize(bw / 2, bh / 2);
-                texture_nv12_b_uv_->setFormat(QOpenGLTexture::RG8_UNorm);
-                texture_nv12_b_uv_->allocateStorage();
+                glBindTexture(GL_TEXTURE_2D, texture_nv12_b_uv_->textureId());
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, bw / 2, bh / 2, 0, GL_RG,
+                            GL_UNSIGNED_BYTE, nullptr);
                 tex_bw_ = bw;
                 tex_bh_ = bh;
             }
@@ -1269,6 +1368,16 @@ void ViewerGL::paintGL() {
 
     const bool has_frame_texture = texture_valid_ || nv12_valid_;
     if (!has_frame_texture) {
+        static int64_t blank_log_ = 0;
+        if ((blank_log_++ % 30) == 0)
+            ::canvas::core::log::log_warning(
+                "[viewer] paint uid=%llu BLANK tex=%dx%d widget=%dx%d dirty=%d "
+                "frame_rgba=%d frame_nv12=%d rgba_ok=%d",
+                static_cast<unsigned long long>(viewer_uid_), tex_w_, tex_h_,
+                std::max(1, width()), std::max(1, height()),
+                static_cast<int>(texture_dirty_),
+                frame_ && frame_->a && !frame_->a->rgba.empty() ? 1 : 0,
+                frame_ && frame_->nv12 ? 1 : 0, static_cast<int>(rgba_gl_ok_));
         // Upload a pending frame here, on the context thread, so the very first
         // frame also shows without prior GL calls from outside paintGL.
         if (texture_dirty_) upload_frame();
@@ -1308,14 +1417,18 @@ void ViewerGL::paintGL() {
         // attributable to the GL path, not just the decode that fed it.
         const auto p0 = std::chrono::steady_clock::now();
         if ((paint_log_++ % 30) == 0)
-            qDebug() << "[viewer] paint"
-                   << "mode=" << (scale_mode_ == ScaleMode::Fill ? "fill" : "fit")
-                       << "tex=" << tex_w_ << "x" << tex_h_
-                       << "widget=" << static_cast<int>(vw) << "x" << static_cast<int>(vh)
-                       << "tex_aspect=" << aspect
-                       << "widget_aspect=" << va
-                       << "cover_x=" << qw << "cover_y=" << qh
-                       << "path=" << (nv12_valid_ ? "nv12" : "rgba");
+            // Always-on (log_warning): which draw branch a paint actually took
+            // and what the texture state was, so a black viewer resolves to
+            // "blank path painted" vs "textured draw failed" without
+            // CANVAS_DEBUG. organic of the pixel probe's ~1/s throttle, this
+            // is the per-instance cadence.
+            ::canvas::core::log::log_warning(
+                "[viewer] paint uid=%llu tex=%dx%d widget=%dx%d tex_valid=%d "
+                "nv12_valid=%d vaapi_valid=%d dirty=%d rgba_ok=%d",
+                static_cast<unsigned long long>(viewer_uid_), tex_w_, tex_h_,
+                static_cast<int>(vw), static_cast<int>(vh), static_cast<int>(texture_valid_),
+                static_cast<int>(nv12_valid_), static_cast<int>(vaapi_valid_),
+                static_cast<int>(texture_dirty_), static_cast<int>(rgba_gl_ok_));
         const auto p1 = std::chrono::steady_clock::now();
         const double paint_ms =
             std::chrono::duration<double, std::milli>(p1 - p0).count();
@@ -1436,20 +1549,14 @@ void ViewerGL::paintGL() {
         const bool grade_b_attached = have_b && frame_->grade_b &&
                                       frame_->grade_b->valid() && grade_tex_b_ &&
                                       grade_b_uploaded_ == frame_->grade_b.get();
-        if (grade_a_attached) {
-            grade_tex_a_->bind(4);
-            program_nv12_trans_->setUniformValue("u_grade_a", 4);
-            program_nv12_trans_->setUniformValue("u_grade_a_size", frame_->grade->size);
-        } else {
-            program_nv12_trans_->setUniformValue("u_grade_a_size", 0);
-        }
-        if (grade_b_attached) {
-            grade_tex_b_->bind(5);
-            program_nv12_trans_->setUniformValue("u_grade_b", 5);
-            program_nv12_trans_->setUniformValue("u_grade_b_size", frame_->grade_b->size);
-        } else {
-            program_nv12_trans_->setUniformValue("u_grade_b_size", 0);
-        }
+        bind_grade_lut(4, grade_a_attached ? grade_tex_a_.get() : nullptr);
+        program_nv12_trans_->setUniformValue("u_grade_a", 4);
+        program_nv12_trans_->setUniformValue("u_grade_a_size",
+                                             grade_a_attached ? frame_->grade->size : 0);
+        bind_grade_lut(5, grade_b_attached ? grade_tex_b_.get() : nullptr);
+        program_nv12_trans_->setUniformValue("u_grade_b", 5);
+        program_nv12_trans_->setUniformValue("u_grade_b_size",
+                                             grade_b_attached ? frame_->grade_b->size : 0);
         if (single_fade) {
             const int fade_mode = frame_->fade_from_black ? 9 /*MODE_FADEIN_A*/
                                                           : 3 /*MODE_FADEOUT*/;
@@ -1489,13 +1596,10 @@ void ViewerGL::paintGL() {
                 canvas::core::gpu::color_matrix_name(frame_->nv12->matrix),
                 canvas::core::gpu::color_range_name(frame_->nv12->range), grade_state);
         }
-        if (grade_a_attached) {
-            grade_tex_a_->bind(4);
-            program_nv12_->setUniformValue("u_grade", 4);
-            program_nv12_->setUniformValue("u_grade_size", frame_->grade->size);
-        } else {
-            program_nv12_->setUniformValue("u_grade_size", 0);
-        }
+        bind_grade_lut(4, grade_a_attached ? grade_tex_a_.get() : nullptr);
+        program_nv12_->setUniformValue("u_grade", 4);
+        program_nv12_->setUniformValue("u_grade_size",
+                                       grade_a_attached ? frame_->grade->size : 0);
     } else {
         program_->bind();
         note_err(0);
@@ -1525,24 +1629,21 @@ void ViewerGL::paintGL() {
         }
         // A/B grade LUTs (units 4/5): the same sample-graded 3D-LUT path as the
         // NV12 shaders, so a CPU-RGBA decode still renders fully graded display.
+        // Units are bound unconditionally (real LUT or the neutral 3D texture) so
+        // the sampler3D uniforms never target the 2D video unit (Mesa rejects the
+        // draw otherwise); u_grade_*_size disables the grade when none is set.
         const bool grade_a_attached = frame_ && frame_->grade && frame_->grade->valid() &&
                                       grade_tex_a_ && grade_a_uploaded_ == frame_->grade.get();
         const bool grade_b_attached = frame_ && frame_->grade_b && frame_->grade_b->valid() &&
                                       grade_tex_b_ && grade_b_uploaded_ == frame_->grade_b.get();
-        if (grade_a_attached) {
-            grade_tex_a_->bind(4);
-            program_->setUniformValue("u_grade", 4);
-            program_->setUniformValue("u_grade_size", frame_->grade->size);
-        } else {
-            program_->setUniformValue("u_grade_size", 0);
-        }
-        if (grade_b_attached) {
-            grade_tex_b_->bind(5);
-            program_->setUniformValue("u_grade_b", 5);
-            program_->setUniformValue("u_grade_b_size", frame_->grade_b->size);
-        } else {
-            program_->setUniformValue("u_grade_b_size", 0);
-        }
+        bind_grade_lut(4, grade_a_attached ? grade_tex_a_.get() : nullptr);
+        program_->setUniformValue("u_grade", 4);
+        program_->setUniformValue("u_grade_size",
+                                  grade_a_attached ? frame_->grade->size : 0);
+        bind_grade_lut(5, grade_b_attached ? grade_tex_b_.get() : nullptr);
+        program_->setUniformValue("u_grade_b", 5);
+        program_->setUniformValue("u_grade_b_size",
+                                  grade_b_attached ? frame_->grade_b->size : 0);
         program_->setUniformValue("u_aspect", aspect);
         note_err(3);
     }
@@ -1617,7 +1718,8 @@ void ViewerGL::paintGL() {
     //   src avg/max == 0               -> decode/swscale produced black pixels
     //   fb mirrors src brightness      -> the GL viewer path painted fine
     static int64_t px_probe_ = 0;
-    if ((px_probe_++ % 60) == 0) {
+    const bool px_on_err = first_err != GL_NO_ERROR;
+    if (px_on_err || (px_probe_++ % 60) == 0) {
         const auto err_name = [](GLenum e) -> const char* {
             switch (e) {
                 case GL_NO_ERROR: return "none";
@@ -1687,12 +1789,86 @@ void ViewerGL::paintGL() {
         }
         // src_avg == -1 => no CPU slice this probe tick (NV12-only or blank).
         ::canvas::core::log::log_warning(
-            "[viewer] pixels errstage=%d err=%s tex=%dx%d win=%dx%d fb_avg=%d "
+            "[viewer] pixels uid=%llu errstage=%d err=%s tex=%dx%d win=%dx%d fb_avg=%d "
             "fb_nz=%d/%d fb=(%d,%d,%d,%d) src00=(%d,%d,%d,%d) "
             "srcc=(%d,%d,%d,%d) src_avg=%d",
-            err_stage, err_name(first_err), tex_w_, tex_h_, width(), height(),
-            fb_avg, fb_nz, fb_n, fbpx[0], fbpx[1], fbpx[2], fbpx[3],
-            s00[0], s00[1], s00[2], s00[3], scc[0], scc[1], scc[2], scc[3], src_avg);
+            static_cast<unsigned long long>(viewer_uid_), err_stage, err_name(first_err),
+            tex_w_, tex_h_, width(), height(), fb_avg, fb_nz, fb_n, fbpx[0], fbpx[1],
+            fbpx[2], fbpx[3], s00[0], s00[1], s00[2], s00[3], scc[0], scc[1], scc[2],
+            scc[3], src_avg);
+        if (px_on_err) {
+            // One-shot drill-down on the failing draw: which program/VAO/VBO are
+            // current, what is bound to every unit the shaders touch (units
+            // 0,1 = A/B RGBA, 4,5 = grade 3D), whether the neutral 3D sampler
+            // object is actually complete, and GL_ACTIVE_TEXTURE. The first
+            // black-viewer draw rejected by Mesa (`GL_INVALID_OPERATION` at
+            // glDrawArrays) was traced to a sampler3D unit holding a 2D texture;
+            // this dump pins the exact unit/binding responsible.
+            GLint prog = 0, vao = 0, arb = 0, eab = 0, active_tex = 0;
+            glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+            glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+            glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &arb);
+            glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &eab);
+            glGetIntegerv(GL_ACTIVE_TEXTURE, &active_tex);
+            GLint vp2[4] = {0, 0, 0, 0};
+            glGetIntegerv(GL_VIEWPORT, vp2);
+            ::canvas::core::log::log_warning(
+                "[viewer] gldump uid=%llu stage=%d prog=%d vao=%d arb=%d eab=%d "
+                "act_tex=%d vp=%dx%d+%d+%d",
+                static_cast<unsigned long long>(viewer_uid_), err_stage, prog, vao, arb,
+                eab, active_tex, vp2[2], vp2[3], vp2[0], vp2[1]);
+            for (int u = 0; u < 6; ++u) {
+                glActiveTexture(static_cast<GLenum>(GL_TEXTURE0 + u));
+                GLint t2d = 0, t3d = 0;
+                glGetIntegerv(GL_TEXTURE_BINDING_2D, &t2d);
+                glGetIntegerv(GL_TEXTURE_BINDING_3D, &t3d);
+                ::canvas::core::log::log_warning(
+                    "[viewer] gldump uid=%llu unit%d 2d=%d 3d=%d",
+                    static_cast<unsigned long long>(viewer_uid_), u, t2d, t3d);
+            }
+            glActiveTexture(GL_TEXTURE0);
+            if (grade_neutral_tex_) {
+                glBindTexture(GL_TEXTURE_3D, grade_neutral_tex_);
+                GLint w3 = 0, h3 = 0, d3 = 0, fmt3 = 0, base = 0, minf = 0, magf = 0;
+                glGetTexLevelParameteriv(GL_TEXTURE_3D, 0, GL_TEXTURE_WIDTH, &w3);
+                glGetTexLevelParameteriv(GL_TEXTURE_3D, 0, GL_TEXTURE_HEIGHT, &h3);
+                glGetTexLevelParameteriv(GL_TEXTURE_3D, 0, GL_TEXTURE_DEPTH, &d3);
+                glGetTexLevelParameteriv(GL_TEXTURE_3D, 0, GL_TEXTURE_INTERNAL_FORMAT, &fmt3);
+                glGetTexParameteriv(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, &base);
+                glGetTexParameteriv(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, &minf);
+                glGetTexParameteriv(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, &magf);
+                ::canvas::core::log::log_warning(
+                    "[viewer] gldump uid=%llu neutral3d id=%d lvl0=%dx%dx%d fmt=0x%x "
+                    "base=%d min=0x%x mag=0x%x istex=%d",
+                    static_cast<unsigned long long>(viewer_uid_), grade_neutral_tex_, w3,
+                    h3, d3, fmt3, base, minf, magf,
+                    glIsTexture(grade_neutral_tex_) ? 1 : 0);
+            } else {
+                ::canvas::core::log::log_warning(
+                    "[viewer] gldump uid=%llu neutral3d id=0 (NOT CREATED)",
+                    static_cast<unsigned long long>(viewer_uid_));
+            }
+            if (texture_ && texture_->textureId()) {
+                glBindTexture(GL_TEXTURE_2D, texture_->textureId());
+                GLint g = glGetError();
+                GLint fmt2 = 0, w2 = 0, h2 = 0;
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &fmt2);
+                if (glGetError() == GL_NO_ERROR) {
+                    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w2);
+                    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h2);
+                    ::canvas::core::log::log_warning(
+                        "[viewer] gldump uid=%llu video2d id=%d lvl0=%dx%d fmt=0x%x",
+                        static_cast<unsigned long long>(viewer_uid_),
+                        texture_->textureId(), w2, h2, fmt2);
+                } else {
+                    ::canvas::core::log::log_warning(
+                        "[viewer] gldump uid=%llu video2d id=%d glerr_after_bind=%d",
+                        static_cast<unsigned long long>(viewer_uid_),
+                        texture_->textureId(), static_cast<int>(g));
+                }
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+        }
     }
 
     if (nv12_blend) {

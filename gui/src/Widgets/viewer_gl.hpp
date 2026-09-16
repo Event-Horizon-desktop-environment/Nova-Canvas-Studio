@@ -82,6 +82,13 @@ private:
     // QOpenGLTexture wrappers. These helpers hide which one is live.
     void bind_nv12_a(int y_unit, int uv_unit);
     void bind_nv12_b(int y_unit, int uv_unit);
+    // Binds a clip's 3D grade LUT to `unit`, or the neutral 1x1x1 3D texture when
+    // no LUT is attached. The sampler3D uniforms must ALWAYS reference a 3D
+    // texture: left at their default value 0 they point at the unit holding the
+    // 2D video texture, and Mesa's draw-time validation then rejects the draw
+    // (GL_INVALID_OPERATION at glDrawArrays) even though the shader never samples
+    // the LUT — a silent black viewer. See bind_grade_lut.
+    void bind_grade_lut(int unit, QOpenGLTexture* lut);
     void draw_blank();
     // Paints the monitor overlays (safe areas / thirds grid / playback badge)
     // after the frame quad, in widget coordinates and clipped to the widget.
@@ -121,6 +128,11 @@ private:
     // hold A's and B's LUTs for the NV12 shaders; u_grade_*_size = 0 disables.
     std::unique_ptr<QOpenGLTexture> grade_tex_a_;
     std::unique_ptr<QOpenGLTexture> grade_tex_b_;
+    // Neutral 1x1x1 RGB 3D texture kept bound at the grade units when a side has
+    // no LUT, so the sampler3D uniforms always target a complete 3D texture (see
+    // bind_grade_lut). Raw GL id: QOpenGLTexture's allocation path is unusable
+    // on this driver (see the upload helpers in viewer_gl.cpp).
+    GLuint grade_neutral_tex_ = 0;
     const canvas::core::grade_graph::GradeLut3D* grade_a_uploaded_ = nullptr;
     const canvas::core::grade_graph::GradeLut3D* grade_b_uploaded_ = nullptr;
     QOpenGLBuffer vbo_{QOpenGLBuffer::VertexBuffer};
@@ -134,6 +146,9 @@ private:
     int tex_h_ = 0;
     int tex_bw_ = 0;
     int tex_bh_ = 0;
+    // Per-instance id so always-on `[viewer]` telemetry can tell the main
+    // Program viewer apart from the Source-preview viewer in a shared log file.
+    uint64_t viewer_uid_ = 0;
     bool texture_valid_ = false;
     bool texture_second_valid_ = false;
     bool texture_dirty_ = false;
