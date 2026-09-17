@@ -60,6 +60,27 @@ private:
     std::vector<std::unique_ptr<ICommand>> children_;
 };
 
+// Whole-kind track-LIST edit: snapshots the entire `video_tracks` or
+// `audio_tracks` vector before/after and swaps it back. Needed because
+// EditCommand::apply() addresses tracks by index and asserts they exist, which
+// cannot express a track being inserted/removed/reordered (every later index
+// shifts). Used by insert_track/remove_track/move_track.
+class TrackListCommand final : public ICommand {
+public:
+    TrackListCommand(std::string name, Track::Kind kind, std::vector<Track> before,
+                     std::vector<Track> after);
+
+    void redo(Sequence& seq) override;
+    void undo(Sequence& seq) override;
+    [[nodiscard]] const std::string& name() const noexcept override { return name_; }
+
+private:
+    std::string name_;
+    Track::Kind kind_;
+    std::vector<Track> before_;
+    std::vector<Track> after_;
+};
+
 enum class Placement { Overwrite, Insert, AppendAtEnd, PlaceOnTop };
 
 // `media_fps` is the source media's own frame rate. Placement derives the clip's
@@ -274,6 +295,32 @@ std::unique_ptr<ICommand> set_track_collapsed(Sequence& seq, Track::Kind kind,
 // one-click "turn the timeline into strips" action). Returns a single command
 // covering all tracks, so one Undo restores the per-track states.
 std::unique_ptr<ICommand> set_all_tracks_collapsed(Sequence& seq, bool collapsed);
+
+// ---------------------------------------------------------------------------
+// Track-shape edits (insert/remove/rename/reorder). Each is one undoable step
+// backed by TrackListCommand (whole-kind snapshots), since indices shift.
+// ---------------------------------------------------------------------------
+
+// Insert an empty track at `index` (valid range 0..track_count inclusive).
+// `name` empty derives "V{n}"/"A{n}" from the insertion position. Returns
+// nullptr for an invalid index.
+std::unique_ptr<ICommand> insert_track(Sequence& seq, Track::Kind kind, std::size_t index,
+                                       const std::string& name = "");
+
+// Remove the track at `index`. Guards: invalid index, or removing the LAST
+// track of its kind (the timeline always keeps at least one of each) → nullptr.
+// Clips on the removed track are removed with it (undo restores them).
+std::unique_ptr<ICommand> remove_track(Sequence& seq, Track::Kind kind, std::size_t index);
+
+// Rename the track at `index`. Returns nullptr for an invalid index; a null-op
+// command if the name is already that value.
+std::unique_ptr<ICommand> rename_track(Sequence& seq, Track::Kind kind, std::size_t index,
+                                       const std::string& name);
+
+// Move the track at `from` so it ends up at `to` (both in 0..track_count-1;
+// clip contents move with the track). Returns nullptr for an invalid index.
+std::unique_ptr<ICommand> move_track(Sequence& seq, Track::Kind kind, std::size_t from,
+                                     std::size_t to);
 
 class UndoStack {
 public:

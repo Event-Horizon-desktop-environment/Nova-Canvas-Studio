@@ -12,11 +12,13 @@ compiles from your system packages.
 
 ## Status
 
-Alpha, very much in motion. As of 2026-09-05 the app builds warning-free, 10
-of 11 tests pass, the timeline top strip + divider-band pan were just
-reworked, and the project was renamed (from Event Horizon Studio) to **Nova
-Canvas Studio** — binary `canvas`, project files still read the legacy
-format. Details, honesty included, live in [Current State](docs/CURRENT-STATE.md).
+Alpha, very much in motion. As of 2026-09-16 the app builds warning-free
+(Debug + Release), the 70-test suite passes except for two Vulkan
+render-kernel SKIP stubs, and the current feature surface is catalogued in
+[docs/FEATURES.md](docs/FEATURES.md). The project was renamed (from Event
+Horizon Studio) to **Nova Canvas Studio** — binary `canvas`, project files
+still read the legacy format. Details, honesty included, live in
+[Current State](docs/CURRENT-STATE.md).
 
 ## Quick start
 
@@ -32,6 +34,8 @@ ctest --test-dir build     # tests
 
 ## What you get
 
+The full feature list is in [docs/FEATURES.md](docs/FEATURES.md); in brief:
+
 - Undoable editing with linked A/V pairs, transitions, snapping, ripple
   delete, blade, and a snapshot-based command stack
 - A timeline that feels like the tools you already know: pinned ruler +
@@ -46,12 +50,13 @@ ctest --test-dir build     # tests
 
 ## Reading the source
 
+- [Features](docs/FEATURES.md) — what works, with status markers
 - [Architecture](docs/ARCHITECTURE.md) — how `core/` and `gui/` fit
   together, the timeline model, the playback and export pipelines
 - [Dependencies](docs/DEPENDENCIES.md) — exactly what we link and why,
   with per-distro package lists
 - [Building & Testing](docs/BUILDING.md) — build script, install/uninstall,
-  the 11-test suite
+  the test suite
 - [Current State](docs/CURRENT-STATE.md) — what works, known issues, recent
   changes
 - [Keyboard Shortcuts](docs/KEYBINDS.md) — every keybind bound so far, by area

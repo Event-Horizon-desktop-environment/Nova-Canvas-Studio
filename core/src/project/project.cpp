@@ -577,6 +577,17 @@ bool save_project(const Project& project, const std::string& path, std::string* 
             {"bins", project.bins},
             {"video_tracks", tracks_to_json(project.sequence.video_tracks)},
             {"audio_tracks", tracks_to_json(project.sequence.audio_tracks)}};
+        // Markers + named ranges (point markers have tl_out == 0). Historically
+        // NOT serialized at all, so a save silently dropped every marker; the
+        // absent key on old files still loads (empty list).
+        json bookmarks = json::array();
+        for (const auto& b : project.sequence.bookmarks)
+            bookmarks.push_back(json{{"id", b.id},
+                                     {"frame", b.frame},
+                                     {"tl_out", b.tl_out},
+                                     {"label", b.label}});
+        doc["bookmarks"] = std::move(bookmarks);
+        doc["next_bookmark_id"] = project.sequence.next_bookmark_id;
         // Deliver settings + render queue ride along with the timeline.
         doc["deliver_settings"] = deliver_to_json(project.deliver_settings);
         json render_jobs = json::array();
@@ -648,6 +659,7 @@ bool load_project(Project& out, const std::string& path, std::string* error) {
         p.media_root = doc.value("media_root", std::string());
         p.sequence.fps = doc.value("fps", 30.0);
         p.sequence.next_clip_id = doc.value("next_clip_id", ClipId{1});
+        p.sequence.next_bookmark_id = doc.value("next_bookmark_id", uint64_t{1});
 
         uint64_t max_id = 0;
         for (const auto& mj : doc.value("media", json::array())) {
@@ -674,6 +686,21 @@ bool load_project(Project& out, const std::string& path, std::string* error) {
             for (const auto& c : p.sequence.audio_tracks.back().clips) max_id = std::max(max_id, c.id);
         }
         p.sequence.next_clip_id = std::max(p.sequence.next_clip_id, max_id + 1);
+
+        // Markers + named ranges. Tolerant of files saved before markers were
+        // persisted (no key → no markers); ids re-seed next_bookmark_id so a
+        // later marker cannot collide with a loaded one.
+        for (const auto& bj : doc.value("bookmarks", json::array())) {
+            Bookmark b;
+            b.id = bj.value("id", uint64_t{0});
+            b.frame = bj.value("frame", int64_t{0});
+            b.tl_out = bj.value("tl_out", int64_t{0});
+            b.label = bj.value("label", std::string());
+            if (b.frame < 0) b.frame = 0;
+            if (b.tl_out < b.frame) b.tl_out = 0;
+            if (b.id >= p.sequence.next_bookmark_id) p.sequence.next_bookmark_id = b.id + 1;
+            p.sequence.bookmarks.push_back(std::move(b));
+        }
 
         // Deliver context: settings + saved render queue (tolerant of files
         // saved before either existed).

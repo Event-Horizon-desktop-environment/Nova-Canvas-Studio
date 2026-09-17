@@ -7,6 +7,7 @@
 #include "canvas/core/media/video_decoder.hpp"
 #include "canvas/core/timeline/audio_fade.hpp"
 #include "canvas/core/timeline/audio_mix.hpp"
+#include "canvas/core/timeline/blend.hpp"
 #include "canvas/core/timeline/clip_rate.hpp"
 #include "canvas/core/timeline/title.hpp"
 #include "canvas/core/util/log.hpp"
@@ -133,39 +134,12 @@ void blit_rgba(const VideoFrame& src, std::vector<uint8_t>& canvas, int canvas_w
     }
 }
 
-inline uint8_t clamp_byte(int v) {
-    return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
-}
-
-// Blend of a single `base` (canvas) channel-pair with `src` using `mode`, then
-// dissolved by `opacity` over `base`: final = blend * opacity + base*(1-opacity).
-// The identity (Normal + opacity 1) collapses to `src`, so the caller's fast
-// path bypasses this entirely and stays byte-identical to blit_rgba.
-inline uint8_t blend_channel(const int mode, const float opacity, const int base,
-                             const int src) {
-    int blended;
-    switch (mode) {
-        case 1:  // Add
-            blended = base + src;
-            break;
-        case 2:  // Multiply
-            blended = base * src / 255;
-            break;
-        case 3:  // Screen
-            blended = 255 - (255 - base) * (255 - src) / 255;
-            break;
-        case 4:  // Overlay
-            blended = base < 128 ? 2 * base * src / 255
-                                 : 255 - 2 * (255 - base) * (255 - src) / 255;
-            break;
-        default:  // Normal
-            blended = src;
-            break;
-    }
-    const float a = opacity;
-    const float fb = static_cast<float>(blended) * a + static_cast<float>(base) * (1.0f - a);
-    return clamp_byte(static_cast<int>(std::lround(fb)));
-}
+// Single-channel blend of `base` (canvas) with `src` in `clip.blend_mode`,
+// then dissolved by `opacity` over `base`: final = blend*opacity +
+// base*(1-opacity). The law lives in timeline/blend.hpp (canonical enum order,
+// defined through the grade_graph float law) — the identity (Normal + opacity
+// 1) collapses to `src`, so the caller's fast path bypasses this entirely and
+// stays byte-identical to blit_rgba.
 
 // Transform + composite blit. The base rect is the fitted letterboxed rect of
 // the source (bx,by,size base_w x base_h) whose CENTER is the origin of the
@@ -204,7 +178,7 @@ void blit_rgba_transformed(const VideoFrame& src, std::vector<uint8_t>& canvas,
     const double sy_ = clip.scale_y;
     const double pxx = clip.pos_x;
     const double pyy = clip.pos_y;
-    const int mode = static_cast<int>(clip.blend_mode);
+    const auto blend_mode = clip.blend_mode;
 
     const double left = bx, top = by, right = bx + base_w, bottom = by + base_h;
     double min_x = left, min_y = top, max_x = right, max_y = bottom;
@@ -266,14 +240,17 @@ void blit_rgba_transformed(const VideoFrame& src, std::vector<uint8_t>& canvas,
             const std::size_t so =
                 static_cast<std::size_t>(sy) * src.stride + static_cast<std::size_t>(sx) * 4u;
             std::size_t dpo = drow + static_cast<std::size_t>(ox) * 4u;
-            if (opacity >= 1.0f && mode == 0) {
+            if (opacity >= 1.0f && blend_mode == BlendMode::Normal) {
                 canvas[dpo + 0] = src.rgba[so + 0];
                 canvas[dpo + 1] = src.rgba[so + 1];
                 canvas[dpo + 2] = src.rgba[so + 2];
             } else {
-                canvas[dpo + 0] = blend_channel(mode, opacity, canvas[dpo + 0], src.rgba[so + 0]);
-                canvas[dpo + 1] = blend_channel(mode, opacity, canvas[dpo + 1], src.rgba[so + 1]);
-                canvas[dpo + 2] = blend_channel(mode, opacity, canvas[dpo + 2], src.rgba[so + 2]);
+                canvas[dpo + 0] = blend::blend_channel(blend_mode, opacity, canvas[dpo + 0],
+                                                       src.rgba[so + 0]);
+                canvas[dpo + 1] = blend::blend_channel(blend_mode, opacity, canvas[dpo + 1],
+                                                       src.rgba[so + 1]);
+                canvas[dpo + 2] = blend::blend_channel(blend_mode, opacity, canvas[dpo + 2],
+                                                       src.rgba[so + 2]);
             }
             canvas[dpo + 3] = 255;
         }

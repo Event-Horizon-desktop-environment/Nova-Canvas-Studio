@@ -74,6 +74,40 @@ void shift_from(std::vector<Clip>& clips, const int64_t from, const int64_t delt
         }
 }
 
+// Split any clip that STRADDLES `at` into [.., at) and [at, ..) so a following
+// shift_from(at, delta) ripples the tail cleanly. Without this a ripple INSERT
+// onto an occupied frame would leave the existing clip untouched and the new
+// clip overlapping it (nothing "ripples", content is silently covered). Both
+// halves keep the original src/tl rate via src_at_tl. A clip that merely
+// touches `at` (tl_in == at or tl_out == at) is left whole.
+void split_at(std::vector<Clip>& clips, const int64_t at) {
+    bool split = false;
+    for (const auto& c : clips)
+        if (c.tl_in < at && at < c.tl_out) {
+            split = true;
+            break;
+        }
+    if (!split) return;
+
+    std::vector<Clip> out;
+    out.reserve(clips.size() + 1);
+    for (auto clip : clips) {
+        if (clip.tl_in < at && at < clip.tl_out) {
+            Clip head = clip;
+            head.tl_out = at;
+            head.src_out = src_at_tl(clip, at);
+            Clip tail = clip;
+            tail.tl_in = at;
+            tail.src_in = src_at_tl(clip, at);
+            out.push_back(std::move(head));
+            out.push_back(std::move(tail));
+        } else {
+            out.push_back(std::move(clip));
+        }
+    }
+    clips = std::move(out);
+}
+
 class SingleTrackEdit {
 public:
     SingleTrackEdit(Sequence& s, const Track::Kind k, const std::size_t i, std::string name)
@@ -417,6 +451,27 @@ void GroupCommand::undo(Sequence& seq) {
         if (*it) (*it)->undo(seq);
 }
 
+TrackListCommand::TrackListCommand(std::string name, const Track::Kind kind,
+                                   std::vector<Track> before, std::vector<Track> after)
+    : name_(std::move(name)),
+      kind_(kind),
+      before_(std::move(before)),
+      after_(std::move(after)) {}
+
+void TrackListCommand::redo(Sequence& seq) {
+    if (kind_ == Track::Kind::Video)
+        seq.video_tracks = after_;
+    else
+        seq.audio_tracks = after_;
+}
+
+void TrackListCommand::undo(Sequence& seq) {
+    if (kind_ == Track::Kind::Video)
+        seq.video_tracks = before_;
+    else
+        seq.audio_tracks = before_;
+}
+
 void UndoStack::record(std::unique_ptr<ICommand> command) {
     redo_.clear();
     undo_.push_back(std::move(command));
@@ -480,6 +535,7 @@ std::unique_ptr<ICommand> place_clip(Sequence& seq, const Track::Kind kind,
     clip.tl_out = clip.tl_in + std::llround((clip.src_out - clip.src_in) * ratio);
 
     if (mode == Placement::Insert) {
+        split_at(target->clips, clip.tl_in);
         shift_from(target->clips, clip.tl_in, clip.duration());
     } else {
         target->clips = clipped_range(target->clips, clip.tl_in, clip.tl_out);
@@ -531,6 +587,8 @@ std::unique_ptr<ICommand> place_linked_clip(Sequence& seq, const std::size_t vid
     audio.tl_out = audio.tl_in + std::llround((audio.src_out - audio.src_in) * ratio);
 
     if (mode == Placement::Insert) {
+        split_at(vt->clips, video.tl_in);
+        split_at(at->clips, audio.tl_in);
         shift_from(vt->clips, video.tl_in, video.duration());
         shift_from(at->clips, audio.tl_in, audio.duration());
     } else {
@@ -1877,6 +1935,91 @@ std::unique_ptr<ICommand> set_clip_metadata(Sequence& seq, const Track::Kind kin
 
     std::vector<TrackSnapshot> after = take_snapshots(seq, involved);
     return std::make_unique<EditCommand>("clip metadata", std::move(before), std::move(after));
+}
+
+// ---------------------------------------------------------------------------
+// Track-shape edits. The ops mutate the sequence in place (like every other
+// edit op) and return a TrackListCommand carrying the whole-kind before/after
+// vectors, so one Undo restores the exact track list including clip contents.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::vector<Track>& tracks_of(Sequence& seq, const Track::Kind kind) {
+    return kind == Track::Kind::Video ? seq.video_tracks : seq.audio_tracks;
+}
+
+std::ptrdiff_t as_index(const std::size_t i) { return static_cast<std::ptrdiff_t>(i); }
+
+}  // namespace
+
+std::unique_ptr<ICommand> insert_track(Sequence& seq, const Track::Kind kind,
+                                       const std::size_t index, const std::string& name) {
+    const std::size_t count = seq.track_count(kind);
+    if (index > count) return nullptr;
+
+    std::vector<Track>& tracks = tracks_of(seq, kind);
+    std::vector<Track> before = tracks;
+    Track t;
+    t.kind = kind;
+    t.name = name.empty() ? (kind == Track::Kind::Video ? "V" : "A") + std::to_string(index + 1)
+                          : name;
+    std::vector<Track> after = before;
+    after.insert(after.begin() + as_index(index), std::move(t));
+    tracks = after;
+    return std::make_unique<TrackListCommand>("insert track", kind, std::move(before),
+                                              std::move(after));
+}
+
+std::unique_ptr<ICommand> remove_track(Sequence& seq, const Track::Kind kind,
+                                       const std::size_t index) {
+    const std::size_t count = seq.track_count(kind);
+    if (index >= count || count <= 1) return nullptr;  // keep >= 1 track of each kind
+
+    std::vector<Track>& tracks = tracks_of(seq, kind);
+    std::vector<Track> before = tracks;
+    std::vector<Track> after = before;
+    after.erase(after.begin() + as_index(index));
+    tracks = after;
+    return std::make_unique<TrackListCommand>("remove track", kind, std::move(before),
+                                              std::move(after));
+}
+
+std::unique_ptr<ICommand> rename_track(Sequence& seq, const Track::Kind kind,
+                                       const std::size_t index, const std::string& name) {
+    if (index >= seq.track_count(kind)) return nullptr;
+
+    std::vector<Track>& tracks = tracks_of(seq, kind);
+    std::vector<Track> before = tracks;
+    std::vector<Track> after = before;
+    after[index].name = name;
+    if (before[index].name == name) {  // null-op, still undoable
+        // `before` and `after` are semantically identical here; pass two distinct
+        // objects (never std::move the SAME vector twice — argument evaluation
+        // order is unspecified, so one argument could receive an empty
+        // moved-from vector).
+        std::vector<Track> same = before;
+        return std::make_unique<TrackListCommand>("rename track", kind, std::move(before),
+                                                  std::move(same));
+    }
+    tracks = after;
+    return std::make_unique<TrackListCommand>("rename track", kind, std::move(before),
+                                              std::move(after));
+}
+
+std::unique_ptr<ICommand> move_track(Sequence& seq, const Track::Kind kind, const std::size_t from,
+                                     const std::size_t to) {
+    const std::size_t count = seq.track_count(kind);
+    if (from >= count || to >= count || from == to) return nullptr;
+
+    std::vector<Track>& tracks = tracks_of(seq, kind);
+    std::vector<Track> before = tracks;
+    std::vector<Track> after = before;
+    Track moved = std::move(after[from]);
+    after.erase(after.begin() + as_index(from));
+    after.insert(after.begin() + as_index(to), std::move(moved));
+    tracks = after;
+    return std::make_unique<TrackListCommand>("move track", kind, std::move(before),
+                                              std::move(after));
 }
 
 }  // namespace canvas::core

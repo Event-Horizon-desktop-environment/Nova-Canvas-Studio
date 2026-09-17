@@ -1,3 +1,9 @@
+> **GIT IS READ-ONLY — READ-ONLY MODE.**
+> **Never let AI push any commits — ever!** Do not run `git push`, `git commit`,
+> `git add`, `git reset`, `git stash`, or any other state-changing git command.
+> The working tree is the user's; AI may inspect (`status`, `diff`, `log`) only.
+> The user commits and pushes, never the AI.
+
 # AGENTS.md — Nova Canvas Studio
 
 C++20 / Qt6 / FFmpeg **nonlinear video editor** (dark, editor-grade UI). Linux-only. The GUI shell lives in `gui/`, the headless editor/export engine in `core/` (`canvas_core` static lib). Namespaces: `canvas::core` / `canvas::gui` (GPU code is `canvas::core::gpu`).

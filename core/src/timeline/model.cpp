@@ -65,10 +65,27 @@ uint64_t Sequence::toggle_bookmark(const int64_t frame, const std::string& label
         }
     }
     const uint64_t id = next_bookmark_id++;
-    bookmarks.push_back(Bookmark{frame, label, id});
+    bookmarks.push_back(Bookmark{frame, 0, label, id});
     std::sort(bookmarks.begin(), bookmarks.end(),
               [](const Bookmark& a, const Bookmark& b) { return a.frame < b.frame; });
     return id;
+}
+
+uint64_t Sequence::add_range(const int64_t in, const int64_t out, const std::string& label) {
+    const int64_t start = std::max<int64_t>(0, in);
+    const int64_t end = out > start ? out : 0;
+    const uint64_t id = next_bookmark_id++;
+    bookmarks.push_back(Bookmark{start, end, label, id});
+    std::sort(bookmarks.begin(), bookmarks.end(),
+              [](const Bookmark& a, const Bookmark& b) { return a.frame < b.frame; });
+    return id;
+}
+
+std::vector<Bookmark> Sequence::bookmarks_in(const int64_t in, const int64_t out) const {
+    std::vector<Bookmark> hit;
+    for (const auto& b : bookmarks)
+        if (b.frame >= in && b.frame < out) hit.push_back(b);
+    return hit;
 }
 
 bool Sequence::remove_bookmark(const uint64_t id) {

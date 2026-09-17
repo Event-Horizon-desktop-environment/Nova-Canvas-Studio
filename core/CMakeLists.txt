@@ -184,6 +184,8 @@ add_library(canvas_core STATIC
     src/media/transcribe.cpp
     src/timeline/model.cpp
     src/timeline/edit_ops.cpp
+    src/timeline/blend.cpp
+    src/timeline/markers.cpp
     src/timeline/time_stretch.cpp
     src/timeline/title.cpp
     src/timeline/captions.cpp
@@ -202,6 +204,8 @@ add_library(canvas_core STATIC
     src/export/grade_frame.cpp
     src/export/exporter.cpp
     src/export/deliver_preset.cpp
+    src/export/edl.cpp
+    src/export/loudness.cpp
     src/export/vaapi_encode.cpp
     src/export/qsv_encode.cpp
     src/export/render_queue.cpp
@@ -446,3 +450,37 @@ target_link_libraries(canvas_cuda_enc_bench PRIVATE canvas_core)
 set_target_properties(canvas_cuda_enc_bench PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 add_test(NAME cuda_enc_bench COMMAND canvas_cuda_enc_bench)
 set_tests_properties(cuda_enc_bench PROPERTIES TIMEOUT 300)
+
+# --- Phase 1 (roadmap) regression laws -------------------------------------
+# Headless law modules added for the Phase 1 difficulty-ramp items: F6 blend
+# math, E4 markers/ranges, E2 3-point editing, E6 track-shape ops, D1 EDL
+# export, A5 loudness normalization. See docs/PHASE1.md.
+add_executable(canvas_blend_modes_test tests/blend_modes_test.cpp)
+target_link_libraries(canvas_blend_modes_test PRIVATE canvas_core)
+set_target_properties(canvas_blend_modes_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME blend_modes COMMAND canvas_blend_modes_test)
+
+add_executable(canvas_markers_test tests/markers_test.cpp)
+target_link_libraries(canvas_markers_test PRIVATE canvas_core)
+set_target_properties(canvas_markers_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME markers COMMAND canvas_markers_test)
+
+add_executable(canvas_three_point_test tests/three_point_test.cpp)
+target_link_libraries(canvas_three_point_test PRIVATE canvas_core)
+set_target_properties(canvas_three_point_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME three_point COMMAND canvas_three_point_test)
+
+add_executable(canvas_track_ops_test tests/track_ops_test.cpp)
+target_link_libraries(canvas_track_ops_test PRIVATE canvas_core)
+set_target_properties(canvas_track_ops_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME track_ops COMMAND canvas_track_ops_test)
+
+add_executable(canvas_edl_test tests/edl_test.cpp)
+target_link_libraries(canvas_edl_test PRIVATE canvas_core)
+set_target_properties(canvas_edl_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME edl COMMAND canvas_edl_test)
+
+add_executable(canvas_loudness_test tests/loudness_test.cpp)
+target_link_libraries(canvas_loudness_test PRIVATE canvas_core)
+set_target_properties(canvas_loudness_test PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+add_test(NAME loudness COMMAND canvas_loudness_test)

@@ -36,13 +36,20 @@ enum class TransitionType {
 }
 
 // How a video clip composites over the content beneath it (lower tracks then
-// the black background). `Normal` is a plain alpha-over.
+// the black background). `Normal` is a plain alpha-over. The first five values
+// are the original set and MUST keep their numeric values (project files store
+// the int); Phase 1 (F6) appended SoftLight/Subtract/Difference. The byte law
+// for these lives in timeline/blend.hpp, defined through the color-page
+// grade_graph::BlendMode math so the two can never drift.
 enum class BlendMode {
     Normal = 0,
     Add,
     Multiply,
     Screen,
     Overlay,
+    SoftLight,
+    Subtract,
+    Difference,
 };
 
 struct Clip {
@@ -300,8 +307,15 @@ struct Track {
 
 struct Bookmark {
     int64_t frame = 0;
+    // Range end. 0 (the default) means a point marker at `frame`; a value
+    // `> frame` means a named RANGE [frame, tl_out). `frame` stays the marker
+    // START so every existing point-marker lookup (has_bookmark, toggle) is
+    // unchanged.
+    int64_t tl_out = 0;
     std::string label;
     uint64_t id = 0;
+
+    [[nodiscard]] bool is_range() const noexcept { return tl_out > frame; }
 };
 
 struct Sequence {
@@ -317,6 +331,13 @@ struct Sequence {
 
     [[nodiscard]] bool has_bookmark(int64_t frame) const noexcept;
     [[nodiscard]] uint64_t toggle_bookmark(int64_t frame, const std::string& label = "");
+    // Add a named RANGE [in, out). `out <= in` degenerates to a point marker.
+    // Returns the new bookmark id. Keeps `bookmarks` sorted by start frame.
+    [[nodiscard]] uint64_t add_range(int64_t in, int64_t out, const std::string& label = "");
+    // Bookmarks whose START frame lies in [in, out) — the export-from-range
+    // query. Ranges are included when their start is inside (a range that merely
+    // overlaps the window but starts before it is not captured).
+    [[nodiscard]] std::vector<Bookmark> bookmarks_in(int64_t in, int64_t out) const;
     bool remove_bookmark(uint64_t id);
     void remove_bookmark_at(int64_t frame);
 
