@@ -435,7 +435,11 @@ void TimelineWidget::leaveEvent(QEvent* event) {
 void TimelineWidget::dragLeaveEvent(QDragLeaveEvent* event) {
     if (drop_lane_flat_ != -1) clear_row_highlight(drop_lane_highlight_, drop_lane_flat_);
     clear_drop_preview();
-    QGraphicsView::dragLeaveEvent(event);
+    // This view resolves drops itself (the dragenter/dragmove/drop overrides
+    // never chain to QGraphicsView), so the base's scene drag-drop bookkeeping
+    // was never armed — calling it here makes Qt warn "drag leave received
+    // before drag enter". Just consume the event.
+    event->accept();
 }
 
 int64_t TimelineWidget::snap_frame(int64_t frame) const {
