@@ -1,8 +1,3 @@
-// Page-switcher toolbar (Media/Cut/Edit/Fusion/Color/Fairlight/Deliver + the
-// Home/Settings cluster), split out of ShellTopBar.cpp (splitplan refactor).
-// Each page button routes to enter_deliver_page / enter_edit_page plus the
-// Color page entry-exit seam; everything else falls back to the Edit layout.
-
 #include "UX/MainWindow.hpp"
 #include "UX/theme.hpp"
 
@@ -24,7 +19,6 @@ void build_page_bar(MainWindow& mw) {
     page_bar->setToolButtonStyle(Qt::ToolButtonTextOnly);
     page_bar->setIconSize(QSize(16, 16));
 
-    // Stretchable spacer so the page buttons sit centered in the bar.
     auto* page_bar_spacer_l = new QWidget(page_bar);
     page_bar_spacer_l->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     page_bar->addWidget(page_bar_spacer_l);
@@ -41,17 +35,12 @@ void build_page_bar(MainWindow& mw) {
         apply_theme_style(b, &page_pill_style);
         page_bar->addWidget(b);
         QObject::connect(b, &QToolButton::clicked, &mw, [&mw, b, name, page_bar](bool) {
-            // Edit, Deliver, and Color have their own layouts; the rest fall
-            // back to the Edit workspace. Leaving the Color page is handled
-            // here for whatever target page the bar lands on.
             const bool deliver = qstrcmp(name, "Deliver") == 0;
             const bool color_page = qstrcmp(name, "Color") == 0;
             for (QToolButton* other : page_bar->findChildren<QToolButton*>()) {
                 if (other != b) other->setChecked(false);
             }
             b->setChecked(true);
-            // Page pills leave whatever page is showing, including the
-            // Project Manager (its stack page would otherwise stay current).
             mw.leave_project_manager();
             leave_color_page(mw);
             if (deliver) mw.enter_deliver_page();
@@ -64,8 +53,6 @@ void build_page_bar(MainWindow& mw) {
         });
     }
 
-    // Second stretchable spacer: centers the page group and pushes the
-    // Home/Settings cluster to the far right of the bar.
     auto* page_bar_spacer_r = new QWidget(page_bar);
     page_bar_spacer_r->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     page_bar->addWidget(page_bar_spacer_r);
@@ -83,8 +70,6 @@ void build_page_bar(MainWindow& mw) {
     page_bar->addWidget(settings_btn);
     mw.addToolBar(Qt::BottomToolBarArea, page_bar);
 
-    // Home returns to the Project Manager and drops every page-pill selection,
-    // Resolve-style; enter_project_manager handles the rest of the layout swap.
     QObject::connect(home_btn, &QToolButton::clicked, &mw, [&mw, page_bar] {
         for (QToolButton* other : page_bar->findChildren<QToolButton*>())
             other->setChecked(false);
@@ -92,4 +77,4 @@ void build_page_bar(MainWindow& mw) {
     });
 }
 
-}  // namespace canvas::gui
+}

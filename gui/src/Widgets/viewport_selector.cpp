@@ -19,7 +19,7 @@ constexpr int kRadius = 8;
 constexpr int kTextLeft = 10;
 constexpr int kChevronRight = 4;
 
-}  // namespace
+}
 
 ViewportSelector::ViewportSelector(QWidget* parent) : QWidget(parent) {
     setFixedSize(kW, kH);
@@ -27,7 +27,6 @@ ViewportSelector::ViewportSelector(QWidget* parent) : QWidget(parent) {
     setToolTip(tr("Viewport / timebase selector"));
     setMouseTracking(true);
     QFont f = font();
-    // Point size (not pixel size) so the label scales with the display's DPI.
     f.setPointSizeF(7.5);
     setFont(f);
 }
@@ -100,4 +99,4 @@ void ViewportSelector::set_current(QString item) {
     emit changed(current_);
 }
 
-}  // namespace canvas::gui
+}

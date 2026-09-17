@@ -13,13 +13,6 @@
 namespace canvas::gui {
 
 namespace {
-// Vertical brightness guides (0/25/50/75/100%) + 0..255 base labels. A
-// histogram's x-axis is VALUE (brightness), never image position, so it must
-// not reuse the waveform/parade horizontal-luma grid with its 0..1023
-// left-edge scale — that axis reads as "luminance up, image position right",
-// which is exactly why it looked like an RGB parade instead of a histogram.
-// `stacked` (RGB display) adds the two hairline separators between the three
-// channel panes and a faint R/G/B tag at the top-left of each pane.
 void paint_histogram_grid(QPainter& p, const QRectF& plot, bool stacked) {
     const ThemeTokens& t = tokens();
 
@@ -50,7 +43,7 @@ void paint_histogram_grid(QPainter& p, const QRectF& plot, bool stacked) {
 
     p.setFont(QFont(p.font().family(), 6));
     for (int g = 0; g <= 4; ++g) {
-        const int level = g * (kScopeLevels / 4);  // 0, 64, 128, 192, 256
+        const int level = g * (kScopeLevels / 4);
         const double x = plot.left() + g * plot.width() / 4.0;
         p.setPen(with_alpha(t.ink, 150));
         p.drawText(QRectF(x - 12.0, plot.bottom() - 10.0, 24.0, 9.0),
@@ -58,7 +51,7 @@ void paint_histogram_grid(QPainter& p, const QRectF& plot, bool stacked) {
                    QString::number(level >= kScopeLevels ? kScopeLevels - 1 : level));
     }
 }
-}  // namespace
+}
 
 void HistogramScope::recompute_render() {
     hist_.clear();
@@ -67,9 +60,6 @@ void HistogramScope::recompute_render() {
     if (frame->a && !frame->a->rgba.empty()) {
         hist_.accumulate(*frame->a);
     } else if (frame->nv12 && !frame->nv12->y.empty()) {
-        // Color archive: [scope] spec-change line exactly once per source
-        // switch — histogram readings share the frame->nv12 spec (matrix +
-        // probe-reconciled range) that grades must be judged against.
         const auto& nv12 = *frame->nv12;
         if (!spec_seen_ || nv12.matrix != last_spec_matrix_ || nv12.range != last_spec_range_) {
             spec_seen_ = true;
@@ -86,8 +76,6 @@ void HistogramScope::recompute_render() {
 }
 
 void HistogramScope::render_density() {
-    // Collapsed to 1D (wave spec §3): sum each level across all columns of the
-    // already-computed column buffers.
     hist1d_.fill(0);
     hist1d_luma_.fill(0);
     const auto& h = hist_.channels();
@@ -111,14 +99,10 @@ void HistogramScope::render_density() {
     content_ = QImage(kScopeLevels, kScopeLevels, QImage::Format_ARGB32_Premultiplied);
     content_.fill(QColor(3, 4, 7));
 
-    // RGB piles the three channels into stacked panes — red top, green middle,
-    // blue bottom — each auto-scaled to its own peak (Resolve-style). Panes
-    // never overlap, so there is no additive white-out; Luma keeps the single
-    // full-height white bar chart.
     content_ = QImage(kScopeLevels, kScopeLevels, QImage::Format_ARGB32_Premultiplied);
     content_.fill(QColor(3, 4, 7));
 
-    const int band = kScopeLevels / 3;  // 85 rows per pane, 3×85 = 255
+    const int band = kScopeLevels / 3;
     QPainter p(&content_);
     if (display_ == ScopeDisplay::Luma) {
         p.drawImage(0, 0, log_bar_plane(hist1d_luma_.data(), kScopeLevels, kScopeLumaWhite));
@@ -139,4 +123,4 @@ void HistogramScope::paint_body(QPainter& p, const QRectF& plot) {
     paint_histogram_grid(p, plot, display_ == ScopeDisplay::Rgb);
 }
 
-}  // namespace canvas::gui
+}

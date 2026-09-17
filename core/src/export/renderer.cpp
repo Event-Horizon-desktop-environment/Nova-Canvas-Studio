@@ -29,8 +29,6 @@ namespace canvas::core {
 
 grade_graph::GradeLutPtr RenderSession::TrackDecoder::lut_for(
     const Clip* clip) {
-    // Clips are immutable per Project snapshot; the pointer is a cheap identity
-    // whose lifetime outlives the session. Re-bake only when the clip changes.
     if (clip == lut_clip) return lut;
     lut_clip = clip;
     if (!clip || !clip->has_grade()) {
@@ -53,11 +51,6 @@ double media_fps_for(const Project& project, const Clip& clip) {
     return project.sequence.fps;
 }
 
-// Timeline frame -> source media frame for a clip. Time-based: a seq-frame
-// offset advances the source by the media/sequence fps ratio so 60fps footage
-// on a 30fps timeline strides two source frames per timeline frame (full
-// intended motion) instead of halving the content. Speed Change (clip_rate)
-// multiplies the offset for a whole-clip retime. Matches the playback path.
 int64_t clip_src_frame(const Project& project, const Clip& clip, int64_t tl_frame) {
     const double mf = media_fps_for(project, clip);
     const double sf = project.sequence.fps;
@@ -71,41 +64,18 @@ int64_t clip_src_frame(const Project& project, const Clip& clip, int64_t tl_fram
                              mf / sf));
 }
 
-// Returns the first enabled clip on `kind` tracks at `tl_frame`, preferring the
-// topmost (last) track, or nullptr.
-const Clip* top_clip_at(const Sequence& seq, Track::Kind kind, int64_t tl_frame) {
-    const auto& tracks = kind == Track::Kind::Video ? seq.video_tracks : seq.audio_tracks;
-    for (std::size_t i = tracks.size(); i-- > 0;) {
-        const auto& track = tracks[i];
-        if (track.locked) continue;
-        const Clip* c = track.clip_at(tl_frame);
-        if (c && c->enabled) return c;
-    }
-    return nullptr;
-}
-
-// Adds the interleaved `src` chunk into `out` (a [frames x out_channels]
-// buffer) applying the per-frame transition envelope `gains`, the clip's
-// linear volume `vol` and the stereo pan balance (gl/gr). Mirrors the
-// playback mix so export and playback sum identically at any channel count.
 void mix_audio_chunk(std::vector<float>& out, const std::vector<float>& src, int src_ch,
                      int out_channels, const std::vector<float>& gains, float vol,
                      float gl, float gr) {
     audio_mix::mix_chunk(out, out_channels, src, src_ch, &gains, vol, gl, gr);
 }
 
-// Raw-samples form of the above: the per-clip voice-isolation stage hands the
-// mix a possibly-shorter denoised buffer (RNNoise stream lookahead), so the
-// pointer+frames overload of audio_mix::mix_chunk is the shared single law.
 void mix_audio_chunk(std::vector<float>& out, const float* src, int src_ch, int frames,
                      int out_channels, const std::vector<float>& gains, float vol,
                      float gl, float gr) {
     audio_mix::mix_chunk(out, out_channels, src, src_ch, frames, &gains, vol, gl, gr);
 }
 
-// 2D box blit that composites a decoded source RGBA frame onto a canvas,
-// scaling to `dst_w x dst_h` (letterboxed) at `dx,dy`. Alpha is not used; an
-// upper video track fully replaces the lower content where it covers.
 void blit_rgba(const VideoFrame& src, std::vector<uint8_t>& canvas, int canvas_w,
                int canvas_h, int dst_w, int dst_h, int dx, int dy) {
     if (canvas_w <= 0 || canvas_h <= 0 || dst_w <= 0 || dst_h <= 0) return;
@@ -134,26 +104,6 @@ void blit_rgba(const VideoFrame& src, std::vector<uint8_t>& canvas, int canvas_w
     }
 }
 
-// Single-channel blend of `base` (canvas) with `src` in `clip.blend_mode`,
-// then dissolved by `opacity` over `base`: final = blend*opacity +
-// base*(1-opacity). The law lives in timeline/blend.hpp (canonical enum order,
-// defined through the grade_graph float law) — the identity (Normal + opacity
-// 1) collapses to `src`, so the caller's fast path bypasses this entirely and
-// stays byte-identical to blit_rgba.
-
-// Transform + composite blit. The base rect is the fitted letterboxed rect of
-// the source (bx,by,size base_w x base_h) whose CENTER is the origin of the
-// clip's visual transform. The forward mapping per output pixel `o`:
-//
-//   final = P + R(rot) * F * S * (o_in_base - P) + (pos_x, pos_y)
-//
-// where P = base-rect center + (anchor_dx, anchor_dy) is the rotation pivot, S
-// scales by (scale_x, scale_y), F mirrors (flip_h/flip_v) about the pivot, and
-// R rotates. Nearest-sample from the source. Fast path: when the clip has no
-// transform and is opaque/Normal, delegates to blit_rgba for byte-identical
-// output. Otherwise each destination pixel inside the bounding box of the
-// mapped quad is inverse-mapped and blender-overlaid per clip->blend_mode with
-// clip->opacity.
 void blit_rgba_transformed(const VideoFrame& src, std::vector<uint8_t>& canvas,
                            int canvas_w, int canvas_h, int base_w, int base_h,
                            int bx, int by, const Clip& clip) {
@@ -215,9 +165,6 @@ void blit_rgba_transformed(const VideoFrame& src, std::vector<uint8_t>& canvas,
     for (int oy = ylo; oy <= yhi; ++oy) {
         const std::size_t drow = static_cast<std::size_t>(oy) * dst_stride;
         for (int ox = xlo; ox <= xhi; ++ox) {
-            // Inverse map (reverse of scale -> flip -> rotate -> position) at
-            // the destination pixel CENTRE so a pure flip/identity reaches the
-            // exact source pixel and stays byte-identical to blit_rgba.
             const double ux = ox + 0.5 - pxx - px;
             const double uy = oy + 0.5 - pyy - py;
             const double vx = ux * cs + uy * sn;
@@ -228,8 +175,6 @@ void blit_rgba_transformed(const VideoFrame& src, std::vector<uint8_t>& canvas,
             const double zy = wy / sy_;
             const double param_x = zx + px;
             const double param_y = zy + py;
-            // Nearest sample in pixel-centre coordinates (matching blit_rgba and
-            // the GPU nv12Resize kernel).
             const double u =
                 (param_x - bx) * static_cast<double>(src.width) / base_w - 0.5;
             const double v =
@@ -257,10 +202,10 @@ void blit_rgba_transformed(const VideoFrame& src, std::vector<uint8_t>& canvas,
     }
 }
 
-}  // namespace
+}
 
 VideoFramePtr render_video_frame(const Project& project, int64_t tl_frame, int width,
-                                 int height, int max_dim,
+                                 int height,
                                  const struct AVBufferRef* hw_device_ctx) {
     if (width <= 0 || height <= 0) {
         log::log_error("render_video_frame: BAD_ARGS w=%d h=%d", width, height);
@@ -277,17 +222,12 @@ VideoFramePtr render_video_frame(const Project& project, int64_t tl_frame, int w
     canvas->rgba.assign(canvas->stride * static_cast<std::size_t>(height), 0);
     canvas->frame_number = tl_frame;
 
-    // Decode each enabled video track's clip at this frame, top (last) to
-    // bottom (first), compositing onto the canvas.
     for (std::size_t i = seq.video_tracks.size(); i-- > 0;) {
         const auto& track = seq.video_tracks[i];
         if (track.locked) continue;
         const Clip* clip = track.clip_at(tl_frame);
         if (!clip || !clip->enabled) continue;
         if (clip->media < 0) {
-            // Title/generator clip: its video IS the text raster. Draw it over
-            // whatever the lower tracks composited so far (black for a bare
-            // title on its own track).
             if (clip->has_title())
                 canvas::core::title::render_clip_title(*clip, canvas->rgba, width, height,
                                                        canvas->stride);
@@ -306,7 +246,6 @@ VideoFramePtr render_video_frame(const Project& project, int64_t tl_frame, int w
         }
 
         const int64_t src_frame = clip_src_frame(project, *clip, tl_frame);
-        // Pillarbox/letterbox the source to fit the canvas preserving aspect.
         const double src_ar = dec.width() > 0 && dec.height() > 0
                                   ? static_cast<double>(dec.width()) / dec.height()
                                   : 1.0;
@@ -325,12 +264,9 @@ VideoFramePtr render_video_frame(const Project& project, int64_t tl_frame, int w
         const int dx = (width - dst_w) / 2;
         const int dy = (height - dst_h) / 2;
 
-        // Decode at full res (max_dim 0). For speed we allow a reduced cache,
-        // but correctness + quality matter most for export.
         auto frame = dec.decode_to_frame(src_frame, 0);
         if (frame) {
             if (clip->has_grade()) {
-                // One-shot path: bake inline (sub-ms for the grid + trilinear).
                 const grade_graph::GradeLutPtr lut = grade_graph::bake_grade_lut(clip->grade);
                 if (lut) {
                     if (VideoFramePtr graded = apply_grade_lut(*frame, *lut)) frame = graded;
@@ -357,7 +293,7 @@ struct AudioTrackState {
     const Clip* clip = nullptr;
 };
 
-}  // namespace
+}
 
 RenderSession::~RenderSession() { end(); }
 
@@ -405,8 +341,6 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
     canvas->rgba.assign(canvas->stride * static_cast<std::size_t>(height_), 0);
     canvas->frame_number = tl_frame;
 
-    // Composite each enabled video track, top (last) to bottom (first), reusing
-    // a persistent decoder per track so we never re-open the media every frame.
     for (std::size_t i = tracks_.size(); i-- > 0;) {
         TrackDecoder& td = tracks_[i];
         const Track& track = *td.track;
@@ -417,9 +351,6 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
             continue;
         }
         if (clip->media < 0) {
-            // Title/generator clip: rasterise the text over the canvas the
-            // lower tracks composited so far. Persist no decoder (there is no
-            // media to keep open).
             td.dec.reset();
             td.active_clip = nullptr;
             if (clip->has_title())
@@ -428,7 +359,6 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
             continue;
         }
 
-        // Re-open the decoder only when the active clip/media changes.
         if (!td.dec || !td.dec->is_open() || td.active_media != clip->media ||
             td.active_tl_in != clip->tl_in) {
             const MediaEntry* m = project_ ? project_->media_by_id(clip->media) : nullptr;
@@ -464,7 +394,6 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
             }
         }
 
-        // Pillarbox/letterbox the source to fit the canvas preserving aspect.
         const double dar = decoded->width > 0
                                ? static_cast<double>(decoded->width) / decoded->height
                                : 1.0;
@@ -487,9 +416,6 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
                                                    canvas->stride);
     }
 
-    // Per-clip edge fades applied to the composited canvas: fade-in from black at
-    // the top clip's head, fade-out to black at its tail when no clip follows the
-    // cut. Both blend the whole frame toward black by a factor from the window.
     float fade = 1.0f;
     const Sequence& seq_ = project_ ? project_->sequence : Sequence{};
     const Clip* a_ = nullptr;
@@ -536,15 +462,6 @@ VideoFramePtr RenderSession::frame(int64_t tl_frame) {
 bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
     if (!out) return false;
     out->valid = false;
-    // Outer gate timing for the whole GPU fast-path attempt, plus the inner
-    // decode_to_hw cost (the dominant, per-GOP seek often dominates here).
-    // Aggregate goes to the shared per-export RenderTelemetry window (~1/s) so
-    // a fast-path regression (NVDEC hiccup, driver stall, hw-frames pool
-    // pressure) is visible as avg_ms climbing rather than a wall of per-frame
-    // lines, and so the renderer-side counts reconcile with the exporter-side
-    // fast/cpu split (landed here == fast there, bail == cpu). This function is
-    // also called on frames that bail early (overlap, fades) — `valid` separates
-    // landed vs rejected.
     const auto gpu_t0 = std::chrono::steady_clock::now();
     double decode_ms_note = 0.0;
     const auto gpu_note = [&](int reason_idx) {
@@ -553,8 +470,6 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
                                   std::chrono::steady_clock::now() - gpu_t0).count();
         telemetry_->note_gpu_attempt(out->valid, reason_idx, ms_all, decode_ms_note);
     };
-    // Dot not update `out->valid` in the early-bail prechecks below until we
-    // actually know; mark fallbacks via gpu_note with a reason index.
     if (width_ <= 0 || height_ <= 0 || !hw_device_ctx_ || !project_) {
         CANVAS_LOG("frame_gpu: preconditions failed w=%d h=%d hw=%p proj=%p",
                width_, height_, (const void*)hw_device_ctx_, (const void*)project_);
@@ -562,11 +477,6 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
         return false;
     }
 
-    // Engage only when exactly one video clip is enabled at this frame (the common
-    // no-overlap export case); any overlap falls back to the CPU compositor to
-    // guarantee identical semantics. Title overlays ride the fast path via a
-    // per-clip premultiplied sprite (see GpuTitleCache in exporter.cpp), so they
-    // no longer bail.
     const Clip* the_clip = nullptr;
     {
         int found = 0;
@@ -582,20 +492,11 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
         if (found != 1 || !the_clip) {
             CANVAS_LOG("frame_gpu: clip_count=%d at tl_frame=%lld (need exactly 1)",
                    found, (long long)tl_frame);
-            gpu_note(0);  // overlap / multi-clip => CPU compositor
+            gpu_note(0);
             return false;
         }
     }
 
-    // Grade the tree applies BEFORE the transform/composite blit. The GPU path
-    // now grades inline: the baked LUT rides on GpuFrameInfo and the exporter's
-    // fused nv12GradeResize kernel applies it during the resize (previously a
-    // graded clip had to drop to the CPU compositor — which cost the fast path
-    // on every graded export).
-
-    // Single-clip edge fades: fold the whole-canvas black-factor blend into the
-    // GPU resize (fade in/out windows), using the same law as the CPU
-    // compositor so the GPU and CPU paths agree on every faded frame.
     {
         const Clip* f = the_clip;
         const bool in_in = f->has_transition_in() && !is_audio_transition(f->transition_in) &&
@@ -622,14 +523,13 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
         out->fade = fade;
     }
 
-    // Locate the persistent decoder for the track holding this clip.
     TrackDecoder* td = nullptr;
     for (auto& t : tracks_) {
         if (t.track && t.track->clip_at(tl_frame)) { td = &t; break; }
     }
     if (!td) {
         CANVAS_LOG("frame_gpu: no track decoder for tl_frame=%lld", (long long)tl_frame);
-        gpu_note(1);  // not full-res-compositable
+        gpu_note(1);
         return false;
     }
     const Track& track = *td->track;
@@ -653,7 +553,7 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
         if (!td->dec->open(m->path, &err, hw_device_ctx_)) {
             CANVAS_LOG("frame_gpu: decoder open FAILED path='%s' err='%s'", m->path.c_str(), err.c_str());
             td->dec.reset();
-            gpu_note(2);  // decoder open failure
+            gpu_note(2);
             return false;
         }
         td->active_clip = clip;
@@ -677,15 +577,11 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
                 (const void*)hw, hw ? (const void*)hw->hw_frames_ctx : nullptr,
                 hw ? hw->width : 0, hw ? hw->height : 0);
         }
-        gpu_note(3);  // decode failure
+        gpu_note(3);
         return false;
     }
-    // The frame returned may overshoot src_frame (>= matching); record the true
-    // decoded number so the caller can detect duplicate/out-of-order emissions.
     out->src_frame = td->dec->current_frame() - 1;
 
-    // Letterbox the source into the canvas preserving its aspect (same rule as
-    // blit_rgba) so the GPU result matches the CPU framing.
     const double dar = static_cast<double>(hw->width) / hw->height;
     int dst_w = width_, dst_h = height_;
     if (dar > 0.0) {
@@ -713,15 +609,13 @@ bool RenderSession::frame_gpu(int64_t tl_frame, GpuFrameInfo* out) {
     out->dx = (width_ - dst_w) / 2;
     out->dy = (height_ - dst_h) / 2;
     out->source = hw;
-    // Grade + source color spec ride along for the fused GPU grade kernel;
-    // ungraded clips carry null grade and the exporter uses plain nv12Resize.
     out->grade = td->lut_for(clip);
     out->clip = clip;
     const gpu::ColorSpec spec = td->dec->color_spec();
     out->matrix = static_cast<int>(spec.matrix);
     out->range = static_cast<int>(spec.range);
     out->valid = true;
-    gpu_note(-1);  // landed: counts total ms, never increments bailed/reasons
+    gpu_note(-1);
     return true;
 }
 
@@ -746,16 +640,11 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
                             static_cast<std::size_t>(out_channels),
                         0.0f);
 
-    // Decode each audible audio track and mix (sum) its samples in place.
-    // Tracks are looped from the top (later tracks win nothing here — audio
-    // sums, so order is irrelevant); locked tracks are still rendered
-    // (locked = read-only, audio stays audible, mirroring playback).
     const bool any_solo = audio_mix::any_solo(seq.audio_tracks);
     const double seq_fps = seq.fps;
     const double tl_sec = static_cast<double>(tl_sample) / out_sample_rate;
     for (const auto& track : seq.audio_tracks) {
         if (track.muted || (any_solo && !track.solo)) continue;
-        // Determine which timeline frame range this audio chunk covers.
         const int64_t tl_frame = (seq_fps > 0.0)
             ? static_cast<int64_t>(std::llround(tl_sec * seq_fps))
             : static_cast<int64_t>(std::llround(tl_sec * fps));
@@ -778,9 +667,6 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
 
         const int64_t start_tl_frame = tl_frame;
         const int64_t src_frame = clip_src_frame(project, *clip, start_tl_frame);
-        // Media position from CONTINUOUS timeline time (same law as the
-        // RenderSession path): advances exactly num_frames per call at any export
-        // fps instead of rate/seq_fps, keeping the decoder inside its window.
         const int64_t start_media_sample =
             (seq_fps > 0.0 && tl_sec >= static_cast<double>(clip->tl_in) / seq_fps)
                 ? static_cast<int64_t>(std::llround(
@@ -797,18 +683,12 @@ AudioChunkPtr render_audio_chunk(const Project& project, int64_t tl_sample, int 
         }
 
         const int src_ch = chunk->channels;
-        // Per-output-frame gain from the clip's audio IN/OUT transitions
-        // (audio_fade_gain returns 1.0 when no audio fade touches the frame) and
-        // the track's post-fade gain (db_to_gain law). Fade frames advance on the
-        // TIMELINE clock (seq_fps), matching the media-sample law above; when
-        // export fps == seq fps this reduces to the historical `* fps` form.
         std::vector<float> gains(static_cast<std::size_t>(num_frames));
         for (int k = 0; k < num_frames; ++k) {
             const int64_t frm = start_tl_frame + static_cast<int64_t>(
                 static_cast<double>(k) / out_sample_rate * seq_fps);
             gains[static_cast<std::size_t>(k)] = audio_fade_gain(*clip, frm);
         }
-        // Mix: sum with the clip's volume, the track's gain, and the pan balance.
         float gl = 1.0f;
         float gr = 1.0f;
         audio_mix::pan_gains(clip->pan, gl, gr);
@@ -841,16 +721,6 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
     CANVAS_LOG("RenderSession::audio_chunk tl_sample=%lld frames=%d rate=%d ch=%d",
            (long long)tl_sample, num_frames, out_sample_rate, out_channels);
 
-    // Round to nearest, not floor: the float product at an exact frame boundary
-    // can evaluate a hair below the integer (98400 samples @60fps -> 122.9999998),
-    // and flooring that systematically requests the previous frame every chunk ->
-    // a persistent 1-frame backward drift that force-re-seeks -> repeated audio.
-    //
-    // tl_sample is the OUTPUT sample position; map it to timeline time directly,
-    // not through the export fps. Only this keeps the media cursor advancing by
-    // exactly num_frames per call when export fps != sequence fps (the old
-    // frame-quantized law stepped rate/seq_fps samples per call while the
-    // exporter only served rate/fps -> a seek-back every chunk -> quadratic).
     const double seq_fps = project_->sequence.fps;
     const double tl_sec = static_cast<double>(tl_sample) / out_sample_rate;
     const int64_t start_tl_frame =
@@ -858,11 +728,6 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
             ? static_cast<int64_t>(std::llround(tl_sec * seq_fps))
             : static_cast<int64_t>(std::llround(tl_sec * fps));
 
-    // Mix each audible audio track in place, reusing the persistent per-track
-    // AudioDecoder so sequential chunks advance one continuous decode stream
-    // (no re-open/resampler re-prime per chunk — that produced repeated audio).
-    // Locked tracks are still rendered (locked = read-only, still audible),
-    // mirroring playback semantics.
     const bool any_solo = audio_mix::any_solo(project_->sequence.audio_tracks);
     for (AudioTrackDecoder& atd : audio_tracks_) {
         const Track& track = *atd.track;
@@ -896,33 +761,16 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
             atd.active_clip = clip;
             atd.active_media = clip->media;
             atd.active_tl_in = clip->tl_in;
-            // New clip (or a re-entered one after a backtrack): the RNNoise GRU
-            // state must not carry across the boundary; the position jumps even
-            // when the media id is the same. tick() re-creates fresh state on
-            // the next use.
             iso_bank_.drop(clip->id);
-            // Same seam for the Speed Change stretch: analysis/synthesis
-            // cursors must not span the boundary.
             stretch_bank_.drop(clip->id);
-            // And for the EQ: a fresh curve, no stale IIR memory across the
-            // re-open.
             eq_bank_.drop(clip->id);
         }
 
         const double media_fps = media_fps_for(*project_, *clip);
         if (media_fps <= 0.0) continue;
-        // Speed Change (whole-clip retime): the timeline-consumed offset is
-        // scaled by the factor so the media cursor advances speed× per output
-        // frame, in lockstep with clip_src_frame's video law.
         const double spd = cliprate::effective_rate(*clip);
         const double pitch = cliprate::pitch_factor(*clip);
         const int64_t src_frame = clip_src_frame(*project_, *clip, start_tl_frame);
-        // Media position from CONTINUOUS timeline time: (tl_sec - tl_in/seq_fps)
-        // seconds into the clip, advanced at the clip's speed. When export fps
-        // == sequence fps (tl_sec*fps an exact integer) this is identical to the
-        // old frame-law; when they differ it advances exactly num_frames per
-        // call instead of rate/seq_fps, so the decoder stays inside its forward
-        // window.
         const int64_t start_media_sample =
             (seq_fps > 0.0 && tl_sec >= static_cast<double>(clip->tl_in) / seq_fps)
                 ? static_cast<int64_t>(std::llround(
@@ -931,12 +779,6 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
                       out_sample_rate))
                 : 0;
 
-        // num_frames OUTPUT frames need num_frames * speed media samples. A
-        // retimed/pitched clip additionally pre-feeds the engine's retime
-        // lookahead (WSOLA window, scaled by the pitch factor, plus the
-        // resampler's edge margin) so the engine can complete every grain
-        // inside this call and return exactly num_frames (the exporter must
-        // not produce a short audio chunk for a video frame).
         int media_req = static_cast<int>(std::max<int64_t>(
             1, cliprate::media_span_for_output(*clip, num_frames)));
         media_req += TimeStretch::retime_lookahead(out_sample_rate, spd, pitch);
@@ -947,12 +789,6 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
             continue;
         }
 
-        // [AUDIO-DIAG] unconditional trace (mirrors the [dbg]/[FRAME-DIAG] hooks):
-//   - <SHORTFALL> decoded fewer samples than requested. The exporter advances
-//                 by max(got,req), so a shortfall runs AHEAD of real audio; a
-//                 later hard-seek past the decoder's forward tolerance repeats
-//                 audio (Matroska-PCM far-seek).
-//   - <BACKJUMP>  media_sample went backward/stalled (a true loop).
         const std::size_t _src_ch = static_cast<std::size_t>(chunk->channels);
         const std::size_t _n = chunk->samples.size();
         const int _got = (int)(_n / _src_ch);
@@ -973,14 +809,6 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
         ++_d_call;
 
         const int src_ch = chunk->channels;
-        // Per-clip Speed Change + Pitch shift + Pan (WSOLA + windowed-sinc
-        // retime engine): stretch + resample the decoded media to the export
-        // clock's num_frames-sized output window (mirrors playback's
-        // write_mixed stage). The media cursor stays in the source's domain;
-        // only the mixed stream is retimed. The extra lookahead feed above
-        // lets the engine return a full chunk every call; near clip EOF it
-        // may legitimately return less. The pan balance is baked into the
-        // engine output, so the mix below applies center.
         const float* pcm = chunk->samples.data();
         int den_ch = src_ch;
         int den_frames = static_cast<int>(chunk->samples.size()) / src_ch;
@@ -1005,13 +833,6 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
             }
         }
 
-        // Per-clip AI voice isolation (RNNoise) applied BEFORE gains/mix, so the
-        // denoised PCM feeds the same fade/volume/pan law as decoding would.
-        // The network is fixed at 48 kHz; at any other export rate the stage is
-        // skipped (with a one-time warning) and the clip goes out raw — the
-        // Inspector hints at this too. The stage streams across chunk calls
-        // within one clip (the persistent decoder keeps GRU state continuous)
-        // and is dropped on clip re-open (above).
         std::vector<float> denoised;
         if (clip->voice_isolation != VoiceIsolationMode::None) {
             if (out_sample_rate != VoiceIsolation::kSampleRate) {
@@ -1037,23 +858,10 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
                 }
             }
         }
-        // Per-clip parametric EQ: the 6-band biquad cascade (RBJ Cookbook)
-        // applied after voice isolation and before the gains/fade mix — the
-        // same stage order as playback. The EQ is pure stream-in-place
-        // filtering at ANY export rate (no fixed-48 kHz bypass like the RNNoise
-        // stage above) and writes exactly the frame count it was given, so the
-        // per-output-frame gain law below stays in sync. Disabled clips pass
-        // through bit-exact (the settle-to-dry is crossfaded over kGlideFrames
-        // by the bank; export never toggles mid-clip, so its disabled path is
-        // always already settled). An enabled clip's FIRST tick glides dry->wet
-        // over kGlideFrames so a fresh curve fades in click-free.
         std::vector<float> eqd;
         if (den_frames > 0 && pcm) {
             if (clip->eq_enabled || eq_bank_.wants_samples(clip->id, false)) {
                 eqd.assign(pcm, pcm + static_cast<std::size_t>(den_frames) * den_ch);
-                // The EQ is stream-in-place and rate-preserving, so it writes
-                // exactly the frames it was given (the returned count is the
-                // no-lookahead contract, asserted here).
                 den_frames = eq_bank_.tick(clip->id, clip->eq_bands, clip->eq_enabled,
                                            out_sample_rate, den_ch, eqd.data(), den_frames);
                 pcm = eqd.data();
@@ -1062,10 +870,6 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
                                     nullptr, 0);
             }
         }
-        // Per-output-frame gain from the clip's audio IN/OUT transitions
-        // (audio_fade_gain returns 1.0 when no audio fade touches the frame).
-        // Fade frames advance on the TIMELINE clock (seq_fps), matching the
-        // media-sample law above and reducing to `* fps` when they coincide.
         std::vector<float> gains(static_cast<std::size_t>(den_frames));
         for (int k = 0; k < den_frames; ++k) {
             const int64_t frm = start_tl_frame + static_cast<int64_t>(
@@ -1073,8 +877,6 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
             gains[static_cast<std::size_t>(k)] = audio_fade_gain(*clip, frm);
         }
         if (den_frames > 0 && pcm) {
-            // Pan is baked by the retime engine above; the free-function path
-            // (render_audio_chunk) still applies pan_gains here itself.
             mix_audio_chunk(out->samples, pcm, den_ch, den_frames, out_channels, gains,
                             audio_mix::db_to_gain(clip->volume_db) * audio_mix::db_to_gain(track.gain_db),
                             1.0f, 1.0f);
@@ -1083,4 +885,4 @@ AudioChunkPtr RenderSession::audio_chunk(int64_t tl_sample, int num_frames,
     return out;
 }
 
-}  // namespace canvas::core
+}

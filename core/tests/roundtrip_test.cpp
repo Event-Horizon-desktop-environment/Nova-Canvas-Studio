@@ -1,7 +1,3 @@
-// Round-trip test for the timeline engine and project serialization.
-// Builds a sequence via edit ops, saves, loads, and verifies the clip
-// layout is identical (playback-identical). Run under ASAN.
-
 #include "canvas/core/media/audio_waveform.hpp"
 #include "canvas/core/media/audio_decoder.hpp"
 #include "canvas/core/media/video_decoder.hpp"
@@ -60,9 +56,6 @@ void check(bool cond, const char* what) {
 namespace {
 constexpr double kTau = 6.2831853071795865;
 
-// Synthesize a deterministic stereo 16-bit WAV (no encoder needed) so audio
-// decoder tests have ground truth without external fixtures. Frame idx n has
-// channel c = round(0.8*sin(TAU*(300+100c)/rate*n + start_c)*32767)/32768.
 bool write_test_wav(const char* path, int rate, int channels, double seconds) {
     std::FILE* f = std::fopen(path, "wb");
     if (!f) return false;
@@ -101,14 +94,13 @@ bool write_test_wav(const char* path, int rate, int channels, double seconds) {
     return true;
 }
 
-// Ground-truth float for the same waveform (must match write_test_wav bit-for-bit).
-float test_wav_sample(int64_t frame, int channels_total, int ch) {
+float test_wav_sample(int64_t frame, int ch) {
     const double ph = kTau * (300.0 + 100.0 * ch) / 48000.0 * static_cast<double>(frame) +
                       (ch ? 1.7 : 0.0);
     const float v = static_cast<float>(0.8 * std::sin(ph));
     return static_cast<float>(std::llround(v * 32767.0f)) / 32768.0f;
 }
-} // namespace
+}
 
 Project make_project() {
     Project p;
@@ -138,7 +130,7 @@ Project make_project() {
     return p;
 }
 
-}  // namespace
+}
 
 int main() {
     UndoStack undo;
@@ -146,7 +138,6 @@ int main() {
     {
         Project p = make_project();
 
-        // Place clip A overwrite at 0, 60 frames source.
         Clip a;
         a.media = 0;
         a.name = "A";
@@ -157,7 +148,6 @@ int main() {
         check(cmd != nullptr, "place_clip overwrite returns command");
         undo.record(std::move(cmd));
 
-        // Append clip B.
         Clip b;
         b.media = 0;
         b.name = "B";
@@ -169,13 +159,11 @@ int main() {
 
         check(p.sequence.duration_frames() == 150, "duration after two clips is 150");
 
-        // Blade at frame 30 on V1.
         cmd = blade_at(p.sequence, Track::Kind::Video, 0, 30);
         check(cmd != nullptr, "blade_at returns command");
         undo.record(std::move(cmd));
         check(p.sequence.video_tracks[0].clips.size() == 3, "blade splits clip into two (3 clips)");
 
-        // Lift (delete leaving gap) the middle clip (frame 0..30).
         cmd = lift_range(p.sequence, Track::Kind::Video, 0, 0, 30);
         check(cmd != nullptr, "lift_range returns command");
         undo.record(std::move(cmd));
@@ -183,35 +171,26 @@ int main() {
         const int64_t dur_before = p.sequence.duration_frames();
         check(dur_before == 150, "lift keeps total duration (gap left)");
 
-        // Undo the lift: clip comes back.
         check(undo.undo(p.sequence), "undo lift");
         check(p.sequence.video_tracks[0].clips.size() == 3, "after undo, 3 clips again");
 
-        // Redo lift.
         check(undo.redo(p.sequence), "redo lift");
         check(p.sequence.video_tracks[0].clips.size() == 2, "after redo, 2 clips");
 
-        // Ripple delete the range 30..120: removes B entirely and closes gap.
         cmd = ripple_delete_range(p.sequence, Track::Kind::Video, 0, 30, 120);
         check(cmd != nullptr, "ripple_delete_range returns command");
         undo.record(std::move(cmd));
         std::printf("  info: after ripple delete, duration=%lld clips=%zu\n",
                     (long long)p.sequence.duration_frames(), p.sequence.video_tracks[0].clips.size());
-        // One 30-frame clip remains starting at 30; its end frame (duration) is 60.
         check(p.sequence.video_tracks[0].clips.size() == 1, "ripple delete leaves one clip");
         check(p.sequence.video_tracks[0].clips[0].duration() == 30, "ripple delete leaves 30-frame clip");
         check(p.sequence.duration_frames() == 60, "ripple delete closes gap (end frame 60)");
 
-        // Clip metadata (tag / colour / comments) must survive the round-trip.
         p.sequence.video_tracks[0].clips[0].clip_tag = Clip::ClipTag::GoodTake;
         p.sequence.video_tracks[0].clips[0].clip_color = 7;
         p.sequence.video_tracks[0].clips[0].comments = "keeper shot";
-        // Speed Change (whole-clip retime) fields must also survive the round-trip.
         p.sequence.video_tracks[0].clips[0].speed_enabled = true;
         p.sequence.video_tracks[0].clips[0].speed_factor = 2.0;
-        // Pitch shift and the 6-band parametric EQ (with a disabled band) must
-        // survive too — these were lost before per-clip audio-processing
-        // serialization landed, silently resetting every EQ/pitch edit on load.
         p.sequence.video_tracks[0].clips[0].pitch_semitones = 2.0f;
         p.sequence.video_tracks[0].clips[0].pitch_cents = 50.0f;
         p.sequence.video_tracks[0].clips[0].eq_enabled = true;
@@ -221,7 +200,6 @@ int main() {
         eq[3].frequency = 4000.0f;
         eq[4].enabled = false;
 
-        // Serialize.
         std::string err;
         check(save_project(p, "/tmp/opencode/media/roundtrip.ehproj", &err), "save_project");
 
@@ -245,17 +223,15 @@ int main() {
         check(loaded.media.size() == 1 && loaded.media[0].bin == "Scratch", "media bin preserved");
         check(loaded.bins.size() == 1 && loaded.bins[0] == "Scratch", "bins list preserved");
 
-        // Undo to the state just before the ripple delete (2 clips, duration 150).
         check(undo.undo(p.sequence), "undo ripple delete");
         check(p.sequence.video_tracks[0].clips.size() == 2, "after undo ripple, 2 clips");
         check(p.sequence.duration_frames() == 150, "after undo ripple, duration 150");
 
-        // Undo everything from the full history to an empty track.
         while (undo.undo(p.sequence)) {}
         check(p.sequence.video_tracks[0].clips.empty(), "unwound to empty track");
     }
 
-    {   // Blading a fade-bearing clip must not plant a transition on the seam.
+    {
         Project p = make_project();
         Clip a;
         a.media = 0;
@@ -282,29 +258,21 @@ int main() {
         const auto& clips = p.sequence.video_tracks[0].clips;
         check(clips.size() == 2, "transition-blade: clip split in two");
         if (clips.size() == 2) {
-            // Left half [0,15): its tail is now an interior cut -> no OUT fade.
             check(!clips[0].has_transition_out(), "transition-blade: seam is a plain cut (left half)");
-            // Right half [15,60): head is an interior cut -> no IN fade; its tail
-            // (the ORIGINAL clip end) keeps the fade-out.
             check(!clips[1].has_transition_in(), "transition-blade: seam is a plain cut (right half)");
             check(clips[1].has_transition_out() && clips[1].transition_out_duration == 14,
                   "transition-blade: fade stays on the original tail");
         }
     }
 
-    {   // Blading an fps-mismatched clip must keep BOTH halves at the clip's
-        // src/tl rate. Leaf law (regression-verified): the source cut position
-        // is src_in + round((pos - tl_in) * src_span / tl_span), NOT a naive
-        // 1:1 offset — 60fps media on a 30fps timeline spans 2 src frames per
-        // tl frame, so a naive split puts the cut at the WRONG audio frame and
-        // collapses the left half toward rate 1.0 (plays at the wrong speed).
+    {
         Project p = make_project();
         Clip a;
         a.media = 0;
         a.name = "Rate2";
         a.tl_in = 828;
         a.src_in = 0;
-        a.src_out = 30661;   // 60fps media: tl span (15331) is half the src span
+        a.src_out = 30661;
         auto cmd = place_clip(p.sequence, Track::Kind::Video, 0, a, Placement::Overwrite, 60.0);
         check(cmd != nullptr, "rate-blade: place 60fps clip at 30fps timeline");
         undo.record(std::move(cmd));
@@ -314,8 +282,6 @@ int main() {
         check(tl_span > 0.0 && std::abs((placed.src_out - placed.src_in) / tl_span - 2.0) < 1e-3,
               "rate-blade: placed clip has src/tl rate ~2.0");
 
-        // Blade at the same timeline frame the razor logged (tl=1214); the leaf
-        // law must land the cut at src=772 (12.87s @60fps), NOT 386 (6.43s).
         cmd = blade_at(p.sequence, Track::Kind::Video, 0, 1214);
         check(cmd != nullptr, "rate-blade: cut mid-rate clip");
         undo.record(std::move(cmd));
@@ -340,7 +306,7 @@ int main() {
         }
     }
 
-    {   // Same rate-preserving law on the LINKED blade (A/V pair cut together).
+    {
         Project p = make_project();
         Clip v;
         v.media = 0;
@@ -374,7 +340,7 @@ int main() {
         }
     }
 
-    {   // Linked audio/video placement, movement, deletion, and unlink.
+    {
         Project p = make_project();
 
         Clip v;
@@ -393,7 +359,6 @@ int main() {
         check(vc.is_linked() && ac.is_linked(), "linked pair is mutually linked");
         check(vc.linked_id == ac.id && ac.linked_id == vc.id, "reciprocal linked ids");
 
-        // Move the video clip to frame 30; the audio mate should follow.
         cmd = move_clip(p.sequence, Track::Kind::Video, 0, vc.id,
                         Track::Kind::Video, 0, 30);
         check(cmd != nullptr, "move linked video returns command");
@@ -402,7 +367,6 @@ int main() {
               p.sequence.audio_tracks[0].clips[0].tl_in == 30,
               "moving video moves audio mate");
 
-        // Delete the video clip (lift its range); audio mate should be removed too.
         const auto& mv = p.sequence.video_tracks[0].clips[0];
         cmd = lift_range(p.sequence, Track::Kind::Video, 0, mv.tl_in, mv.tl_out);
         check(cmd != nullptr, "lift linked video returns command");
@@ -410,7 +374,6 @@ int main() {
         check(p.sequence.video_tracks[0].clips.empty() && p.sequence.audio_tracks[0].clips.empty(),
               "deleting video removes linked audio");
 
-        // Undo back to the linked pair, then unlink.
         undo.undo(p.sequence);
         undo.undo(p.sequence);
         const auto& uvc = p.sequence.video_tracks[0].clips[0];
@@ -421,7 +384,6 @@ int main() {
               !p.sequence.audio_tracks[0].clips[0].is_linked(),
               "unlink clears both sides");
 
-        // Moving the now-unlinked video must NOT move audio.
         const auto& uc = p.sequence.video_tracks[0].clips[0];
         cmd = move_clip(p.sequence, Track::Kind::Video, 0, uc.id, Track::Kind::Video, 0, 40);
         check(cmd != nullptr, "move unlinked video returns command");
@@ -430,7 +392,6 @@ int main() {
               p.sequence.audio_tracks[0].clips[0].tl_in == 0,
               "unlinked video moves independently of audio");
 
-        // Link the unlinked video clip back to the overlapping audio clip.
         const auto& relink = p.sequence.video_tracks[0].clips[0];
         cmd = link_clip(p.sequence, Track::Kind::Video, 0, relink.id);
         check(cmd != nullptr, "link_clip returns command");
@@ -439,12 +400,11 @@ int main() {
               p.sequence.audio_tracks[0].clips[0].is_linked(),
               "link_clip re-links both sides");
 
-        // link_clip on an already-linked clip is a no-op.
         cmd = link_clip(p.sequence, Track::Kind::Video, 0, relink.id);
         check(cmd == nullptr, "link_clip on linked clip returns nullptr");
     }
 
-    {   // Moving a linked video clip to another video channel keeps its audio mate.
+    {
         Project p = make_project();
 
         Clip v;
@@ -458,7 +418,6 @@ int main() {
         check(cmd != nullptr, "place_linked_clip (cross-track) returns command");
         undo.record(std::move(cmd));
 
-        // Add a second video channel (V2).
         Track v2;
         v2.kind = Track::Kind::Video;
         v2.name = "V2";
@@ -480,9 +439,6 @@ int main() {
     }
 
     {
-        // reduce_waveform: re-bucket a high-resolution waveform down to a
-        // target pixel width without re-decoding. This backs the thumbnail
-        // service's "decode once per media, re-bucket per width" optimization.
         AudioWaveform raw;
         raw.buckets = 4096;
         raw.peak.assign(4096, 0.0f);
@@ -500,35 +456,25 @@ int main() {
               "reduce_waveform first peak is max of its range, within [0,1]");
         check(out.peak.back() >= out.peak.front(), "reduce_waveform preserves rising trend");
 
-        // Last target bucket should approximate the max of the last source
-        // buckets (peak semantics: max within range).
         float last_peak = 0.0f;
         for (std::size_t i = 0; i < raw.buckets; ++i)
             last_peak = std::max(last_peak, raw.peak[i]);
         check(out.peak.back() >= last_peak - 1e-6f,
               "reduce_waveform peak reflects max of source range");
 
-        // Degenerate inputs must not crash or produce wrong sizes.
         AudioWaveform empty = reduce_waveform(AudioWaveform{}, 64);
         check(empty.buckets == 64 && empty.peak.size() == 64,
               "reduce_waveform handles empty source safely");
         AudioWaveform zero = reduce_waveform(raw, 0);
         check(zero.buckets == 0 && zero.peak.empty(), "reduce_waveform handles 0 target");
 
-        // Range-aware variant: a clip displaying a sub-window of the media must
-        // see exactly that slice. Sample the source at the mid-point (peak array
-        // scales linearly 0.1..0.9) and split the window in half.
         const double mid = raw.peak[raw.buckets / 2];
         AudioWaveform lo = reduce_waveform(raw, 8, 0.0, 0.5);
         AudioWaveform hi = reduce_waveform(raw, 8, 0.5, 1.0);
         check(lo.buckets == 8 && hi.buckets == 8,
               "reduce_waveform range yields requested bucket count");
-        // The lo slice only samples raw buckets below the midline, so its last
-        // bucket peak can never rise past it (peak = max over the slice).
         check(lo.peak.back() <= mid + 1e-6f && lo.peak.back() >= lo.peak.front(),
               "reduce_waveform lo-half stays within its half and rises");
-        // The hi slice samples only at/above the midline, so its first bucket
-        // peak stays at/above it; its last covers the tail and hits the max.
         check(hi.peak.front() >= mid - 1e-6f,
               "reduce_waveform hi-half begins at the midline peak");
         check(hi.peak.back() >= raw.peak.back() - 1e-6f,
@@ -536,21 +482,15 @@ int main() {
         AudioWaveform whole = reduce_waveform(raw, 8, 0.0, 1.0);
         check(whole.peak.back() >= lo.peak.back() && whole.peak.front() <= hi.peak.front(),
               "reduce_waveform whole-file spans the range pieces");
-        // Degenerate range falls back to whole-file rather than blanking.
         AudioWaveform bad = reduce_waveform(raw, 4, 0.5, 0.5);
         check(bad.peak[0] >= raw.peak[0], "reduce_waveform zero-width range is safe");
 
-        // Sanity: 2-arg and 3-arg whole-file forms agree.
         AudioWaveform all = reduce_waveform(raw, 128, 0.0, 1.0);
         check(all.peak == out.peak && all.rms == out.rms,
               "reduce_waveform 3-arg full range matches 2-arg");
     }
 
     {
-        // Low-resolution preview decode: decode_to_frame(..., max_output_dim)
-        // must return a scaled-down RGBA frame while the full-res path keeps
-        // native size. This backs fast scrubbing without poisoning the
-        // full-res playback cache.
         VideoDecoder dec;
         std::string err;
         if (dec.open("/tmp/opencode/test_av.mp4", &err)) {
@@ -579,22 +519,11 @@ int main() {
     }
 
     {
-        // Audio decoder seek + sequential-advance must produce real (non-silent)
-        // samples that move forward in time. Two regression guards:
-        //   1. Seeking by the audio stream index on PCM/AAC in a container used
-        //      to return only silent frames ("no audio after scrubbing") ->
-        //      seek by the file-wide timestamp (stream -1) instead.
-        //   2. After a seek, decoded_at was left 0, so the next call re-sought
-        //      and served the identical first slice forever (repeating audio)
-        //      -> decoded_at must be anchored at the seek target.
         AudioDecoder adec;
         std::string aerr;
-        // Test media with an audio stream. Prefer the generated AV clip.
         const char* apath = "/tmp/opencode/test_av.mp4";
         if (adec.open(apath) && adec.has_audio()) {
             const int out_rate = 44100;
-            // Far forward seek (like a scrub), then small sequential steps that
-            // mirror playback resuming after the scrub lands.
             const int64_t base = static_cast<int64_t>(out_rate) * 20LL;
             auto a0 = adec.decode(base, 800, out_rate);
             check(a0 && !a0->samples.empty(), "audio decoder far seek returns frames");
@@ -604,13 +533,8 @@ int main() {
                     const float a = s < 0.0f ? -s : s;
                     if (a > peak) peak = a;
                 }
-                // Peak above an absurdly-low threshold proves real signal, not
-                // the float-rounding denormals a broken seek produces.
                 check(peak > 1e-4f,
                       "audio decoder far seek yields non-silent samples");
-                // If a sequential call reports a start_sample far behind the
-                // requested position (or returns the same bytes), the decoder
-                // is stuck re-serving the first slice instead of advancing.
                 auto a1 = adec.decode(base + 800, 800, out_rate);
                 check(a1 && a1->start_sample == base + 800 &&
                           !a1->samples.empty(),
@@ -632,18 +556,12 @@ int main() {
     }
 
     {
-        // AudioDecoder forward-jump regression (trimmed-head fix): before the
-        // fix, decode() only hard-seeked on BACKWARD jumps, so a request well
-        // FORWARD of the current position silently served the file's beginning
-        // until sequential decode caught up — audible as ~1s of garbled audio
-        // at the head of any clip trimmed from its start. Uses a synthesized
-        // deterministic WAV so the served region can be asserted exactly.
         const char* wpath = "/tmp/canvas_audio_fw_test.wav";
         const bool wrote = write_test_wav(wpath, 48000, 2, 6);
         check(wrote, "fw-jump: write test wav");
         if (!wrote) return 1;
         constexpr int kRate = 48000;
-        constexpr int64_t kHead = 51200;  // e.g. a 32-frame trim at 30fps
+        constexpr int64_t kHead = 51200;
         constexpr int kSpan = 800;
         std::vector<float> truth;
         {
@@ -662,12 +580,11 @@ int main() {
         const auto region_matches = [&](const std::vector<float>& s, int64_t start_frame) {
             if (s.size() < static_cast<std::size_t>(kSpan) * 2) return false;
             for (int i = 0; i < kSpan * 2; ++i) {
-                if (std::fabs(s[i] - test_wav_sample(start_frame + i / 2, 2, i % 2)) > 1e-3f)
+                if (std::fabs(s[i] - test_wav_sample(start_frame + i / 2, i % 2)) > 1e-3f)
                     return false;
             }
             return true;
         };
-        // Path 1: fresh decoder, first request lands at the trimmed head.
         {
             AudioDecoder a;
             check(a.open(wpath) && a.has_audio(), "fw-jump: open decoder A");
@@ -677,8 +594,6 @@ int main() {
             check(region_matches(c1 ? c1->samples : std::vector<float>{}, kHead),
                   "fw-jump: fresh first call serves the requested region, not file start");
         }
-        // Path 2: playback-rewind shape — decode ahead a while, reset(), then
-        // jump well forward again.
         {
             AudioDecoder b;
             check(b.open(wpath) && b.has_audio(), "fw-jump: open decoder B");
@@ -699,10 +614,6 @@ int main() {
     }
 
     {
-        // Transitions: set/clear a clip's OUT transition (type + duration),
-        // and verify it round-trips through project serialization. The
-        // transition is stored on the clip, so the snapshot-based undo also
-        // restores it.
         Project p = make_project();
 
         Clip a;
@@ -736,19 +647,16 @@ int main() {
                   ca.transition_out_duration == 6,
               "clip carries cross-dissolve transition of 6 frames");
 
-        // Undo restores the prior (none) transition state.
         check(undo.undo(p.sequence), "undo transition");
         check(p.sequence.video_tracks[0].clips[0].transition_out == TransitionType::None,
               "undo clears transition");
 
-        // Redo reapplies it, then serialize and back.
         check(undo.redo(p.sequence), "redo transition");
         cmd = clear_clip_transition(p.sequence, Track::Kind::Video, 0, id_a);
         check(cmd != nullptr, "clear_clip_transition returns command");
         undo.record(std::move(cmd));
         check(p.sequence.video_tracks[0].clips[0].transition_out == TransitionType::None,
               "clear removes transition");
-        // Restore transition for the round-trip check.
         cmd = set_clip_transition(p.sequence, Track::Kind::Video, 0, id_a,
                                   TransitionType::WipeRight, 8);
         check(cmd != nullptr, "set wipe transition returns command");
@@ -762,8 +670,6 @@ int main() {
         check(trc.transition_out == TransitionType::WipeRight && trc.transition_out_duration == 8,
               "transition type+duration round-trip through serialization");
 
-        // IN (leading-edge) transition: independent of OUT, fades the clip in
-        // from black at its head. Verify set / undo / clear / serialization.
         cmd = set_clip_transition_in(p.sequence, Track::Kind::Video, 0, id_a,
                                      TransitionType::FadeIn, 12);
         check(cmd != nullptr, "set_clip_transition_in returns command");
@@ -798,7 +704,6 @@ int main() {
         check(in_c.transition_out == TransitionType::WipeRight && in_c.transition_out_duration == 8,
               "OUT transition survives IN-round-trip");
 
-        // Linked audio mate inherits the video transition.
         Project lp = make_project();
         Clip v;
         v.media = 0;
@@ -820,9 +725,6 @@ int main() {
         check(lp.sequence.audio_tracks[0].clips[0].transition_out_duration == 10,
               "linked audio mate inherits the transition duration");
 
-        // Per-kind type translation: a video transition on a linked pair must put
-        // a matching AUDIO fade on the audio mate (the requested behavior), not
-        // the same video-only type (which the audio mixers would ignore).
         cmd = set_clip_transition(lp.sequence, Track::Kind::Video, 0, vid,
                                   TransitionType::CrossDissolve, 10);
         undo.record(std::move(cmd));
@@ -837,8 +739,6 @@ int main() {
                   lp.sequence.audio_tracks[0].clips[0].transition_in ==
                       TransitionType::AudioFadeConstantGain,
               "dip-to-black translates the audio mate to a dip to silence");
-        // ...and the reverse direction: an audio fade applied via the AUDIO clip
-        // gives the video mate a matching video transition.
         const ClipId aud_id = lp.sequence.audio_tracks[0].clips[0].id;
         cmd = set_clip_transition(lp.sequence, Track::Kind::Audio, 0, aud_id,
                                   TransitionType::AudioFadeConstantGain, 8);
@@ -850,9 +750,6 @@ int main() {
     }
 
     {
-        // Render-time audio fade: the exported mix must actually apply the clip's
-        // AUDIO IN/OUT transitions (audio_fade_gain envelope). Uses the
-        // synthesized WAV as media so the expected waveform is exact ground truth.
         const char* wpath = "/tmp/canvas_audio_fade_test.wav";
         check(write_test_wav(wpath, 48000, 2, 3), "render-fade: write test wav");
         Project p = make_project();
@@ -884,24 +781,19 @@ int main() {
                     const int k = static_cast<int>(s / 2);
                     const int64_t tl = start_tl + k / (kRate / 30);
                     const float g = audio_fade_gain(fade_clip, tl);
-                    const float want = test_wav_sample(base + s / 2, 2, s % 2) * g;
+                    const float want = test_wav_sample(base + s / 2, s % 2) * g;
                     if (std::fabs(c->samples[s] - want) > 1e-3f) ok = false;
                 }
             }
             check(ok, what);
         };
-        // Before the OUT fade window [24,30): unity gain.
         probe(20, 4, "render-fade: audio before the fade window is unchanged");
-        // Inside the window: gain ramps 1 -> 0 (linear ConstantGain).
         probe(25, 10, "render-fade: ConstantGain out-fade scales the exported mix");
-        // Overlapping the fade start: first in-window frame already attenuated.
         probe(25, 1, "render-fade: fade window start is attenuated");
         std::remove(wpath);
     }
 
     {
-        // Delete Through Edit: merging two adjacent same-media clips (with
-        // continuous source) into a single clip that spans both.
         Project p = make_project();
 
         Clip a;
@@ -914,7 +806,6 @@ int main() {
         check(cmd != nullptr, "through edit: place clip A");
         undo.record(std::move(cmd));
 
-        // B continues A's source exactly (B.src_in == A.src_out == 30).
         Clip b;
         b.media = 0;
         b.name = "B";
@@ -937,7 +828,6 @@ int main() {
         check(track.clips[0].src_in == 0 && track.clips[0].src_out == 60,
               "merged clip spans source [0, 60)");
 
-        // Undo restores the two-clip cut.
         check(undo.undo(p.sequence), "undo through edit");
         check(p.sequence.video_tracks[0].clips.size() == 2,
               "undo restores the two clips separated by a cut");
@@ -945,8 +835,6 @@ int main() {
         check(p.sequence.video_tracks[0].clips.size() == 1,
               "redo re-merges into one clip");
 
-        // A cut whose clips do not share continuous source is NOT a valid
-        // through edit (returns nullptr).
         Project q = make_project();
         Clip c2;
         c2.media = 0;
@@ -956,7 +844,7 @@ int main() {
         cmd = place_clip(q.sequence, Track::Kind::Video, 0, c2, Placement::Overwrite);
         undo.record(std::move(cmd));
         Clip d2;
-        d2.media = 0;  // non-continuous: B starts at src 0, not 30
+        d2.media = 0;
         d2.tl_in = 30;
         d2.src_in = 0;
         d2.src_out = 30;
@@ -968,9 +856,6 @@ int main() {
     }
 
     {
-        // Auto-create top tracks: a linked A/V pair on V1/A1 dragged to the
-        // top gains a fresh video + audio channel above and hops onto it as a
-        // single undoable edit.
         Project p = make_project();
         Clip v;
         v.media = 0;
@@ -1044,8 +929,6 @@ int main() {
     }
 
     {
-        // Per-clip audio mix (volume_db/pan) + track mixing flags (muted/solo)
-        // survive a save/load round-trip and undo through the edit ops.
         Project p = make_project();
         Clip a;
         a.media = 0;
@@ -1176,8 +1059,6 @@ int main() {
     }
 
     {
-        // Visual transform + composite: set, undo, linked-mate inheritance, and
-        // serialization round-trip for the per-clip visual/composite fields.
         Project p = make_project();
         UndoStack undo;
         Clip a;
@@ -1232,7 +1113,6 @@ int main() {
                   vc_undone.anchor_dy == 0.0 && !vc_undone.flip_h && !vc_undone.flip_v,
               "visual: undo restores transform defaults");
 
-        // Linked audio mate inherits the video transform (shared fields).
         Project lp = make_project();
         Clip v;
         v.media = 0;
@@ -1264,10 +1144,6 @@ int main() {
     }
 
     {
-        // Deliver context persistence: the panel's expensive deliverables
-        // settings + the render queue (staged jobs and finished cards with
-        // their completion time) save inside the project file and come back
-        // intact, so reopening a project hands you straight back the export.
         Project p = make_project();
         DeliverSettings ds;
         ds.video.codec = "H.265";
@@ -1288,7 +1164,7 @@ int main() {
         staged.settings = ds;
         staged.output_path = "/tmp/opencode/media/final_v2.mkv";
         staged.total_frames = 4500;
-        staged.status = 0;  // Queued
+        staged.status = 0;
         p.render_jobs.push_back(staged);
 
         RenderJobSnapshot finished;
@@ -1297,7 +1173,7 @@ int main() {
         finished.settings = ds;
         finished.output_path = "/tmp/opencode/media/final_v1.mkv";
         finished.total_frames = 4500;
-        finished.status = 2;  // Completed
+        finished.status = 2;
         finished.progress = 1.0;
         finished.elapsed_seconds = 42.5;
         finished.frames_rendered = 4500;
@@ -1308,7 +1184,7 @@ int main() {
         failed.id = 9;
         failed.name = "wrong_codec";
         failed.settings = ds;
-        failed.status = 3;  // Failed
+        failed.status = 3;
         failed.error = "encoder init failed";
         failed.finished_at = "14:40:11";
         p.render_jobs.push_back(failed);
@@ -1317,7 +1193,7 @@ int main() {
         mid_render.id = 10;
         mid_render.name = "in_flight";
         mid_render.settings = ds;
-        mid_render.status = 1;  // Rendering — must come back Queued
+        mid_render.status = 1;
         mid_render.progress = 0.4;
         p.render_jobs.push_back(mid_render);
 
@@ -1351,7 +1227,6 @@ int main() {
             check(loaded.render_jobs[2].status == 3 &&
                       loaded.render_jobs[2].error == "encoder init failed",
                   "deliver: failed card round-trips its error");
-            // A job saved mid-render must not resurrect as Rendering.
             const RenderJob resumed = render_job_from_snapshot(loaded.render_jobs[3]);
             check(resumed.status == RenderJob::Status::Queued &&
                       resumed.settings.video.codec == "H.265",
@@ -1370,10 +1245,6 @@ int main() {
     }
 
     {
-        // Clip trim/extend edit ops. Head/tail trims move the source window with
-        // the edge; the tail can grow back into the deleted region after a
-        // blade+delete ("regrow"), and clamps keep edges off neighbors and within
-        // the media duration.
         Project p = make_project();
         Clip a;
         a.media = 0;
@@ -1386,7 +1257,6 @@ int main() {
         undo.record(std::move(cmd));
         const ClipId id = p.sequence.video_tracks[0].clips[0].id;
 
-        // Regrow the tail: media has 300 frames, so the clip can extend to 300.
         cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, id, 60, 300);
         check(cmd != nullptr, "trim: tail regrow returns command");
         undo.record(std::move(cmd));
@@ -1394,7 +1264,6 @@ int main() {
                   p.sequence.video_tracks[0].clips[0].src_out == 60,
               "trim: tail regrow extends tl_out and src_out together");
 
-        // Request beyond the media duration clamps to the media end.
         cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, id, 10000, 300);
         check(cmd != nullptr, "trim: over-long tail request returns command");
         undo.record(std::move(cmd));
@@ -1402,9 +1271,6 @@ int main() {
                   p.sequence.video_tracks[0].clips[0].src_out == 300,
               "trim: tail clamps to the media duration");
 
-        // A right neighbor blocks further tail growth. First shrink the clip so
-        // its source window has room left beyond the neighbor (otherwise the
-        // media-duration clamp, not the neighbor, bounds the trim).
         cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, id, 200, 300);
         check(cmd != nullptr, "trim: shrink tail returns command");
         undo.record(std::move(cmd));
@@ -1426,7 +1292,6 @@ int main() {
         check(p.sequence.video_tracks[0].clips[0].tl_out == 210,
               "trim: tail clamps to the right neighbor's start");
 
-        // Head extension (regrow left) pulls src_in with the edge.
         cmd = trim_clip_head(p.sequence, Track::Kind::Video, 0, id, 20, 300);
         check(cmd != nullptr, "trim: head regrow returns command");
         undo.record(std::move(cmd));
@@ -1434,7 +1299,6 @@ int main() {
                   p.sequence.video_tracks[0].clips[0].src_in == 20,
               "trim: head regrow extends tl_in and src_in together");
 
-        // ...but only as far back as the source allows (src_in >= 0).
         cmd = trim_clip_head(p.sequence, Track::Kind::Video, 0, id, -500, 300);
         check(cmd != nullptr, "trim: over-long head request returns command");
         undo.record(std::move(cmd));
@@ -1442,11 +1306,9 @@ int main() {
                   p.sequence.video_tracks[0].clips[0].src_in == 0,
               "trim: head clamps to the source start");
 
-        // No-op edge (same position) yields no command.
         cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, id, 210, 300);
         check(cmd == nullptr, "trim: same-position tail is a no-op");
 
-        // Undo unwinds the trim history back to the original [0,30).
         check(undo.undo(p.sequence), "trim: undo over-long head");
         check(p.sequence.video_tracks[0].clips[0].tl_in == 20, "trim: undo restores head");
         check(undo.undo(p.sequence), "trim: undo head regrow");
@@ -1459,7 +1321,6 @@ int main() {
                   p.sequence.video_tracks[0].clips[0].src_out == 30,
               "trim: undo full history restores the original [0,30)");
 
-        // Locked tracks reject trims.
         Track& v1 = p.sequence.video_tracks[0];
         v1.locked = true;
         cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, id, 60, 300);
@@ -1468,8 +1329,6 @@ int main() {
     }
 
     {
-        // Linked A/V pair: trimming one edge moves the mate by the same delta,
-        // and the pair's shared limit is the intersection of both clips' ranges.
         Project p = make_project();
         Clip v;
         v.media = 0;
@@ -1483,7 +1342,6 @@ int main() {
         undo.record(std::move(cmd));
         const ClipId vid = p.sequence.video_tracks[0].clips[0].id;
 
-        // An audio clip sitting right after the mate's audio space limits the pair.
         Clip constrict;
         constrict.media = 0;
         constrict.name = "CONSTRICT";
@@ -1494,8 +1352,6 @@ int main() {
         check(cmd != nullptr, "trim-linked: place constricting audio clip");
         undo.record(std::move(cmd));
 
-        // Video alone could reach 300, but the audio mate stops at its neighbor
-        // (tl_in 70), so both clips stop at 70.
         cmd = trim_clip_tail(p.sequence, Track::Kind::Video, 0, vid, 200, 300);
         check(cmd != nullptr, "trim-linked: mate-constrained tail returns command");
         undo.record(std::move(cmd));
@@ -1506,9 +1362,6 @@ int main() {
                   p.sequence.audio_tracks[0].clips[0].src_out == 70,
               "trim-linked: pair src_out follows in lockstep");
 
-        // A mate-constrained HEAD trim behaves symmetrically: the audio mate ends
-        // up pinned at 20 by its left neighbor (which ends at 20), so the video
-        // cannot go past it.
         Clip head_limit;
         head_limit.media = 0;
         head_limit.name = "HEADLIMIT";
@@ -1529,7 +1382,6 @@ int main() {
               "trim-linked: pair head clamps to the audio mate's neighbor");
     }
 
-    // Batch-capable atomic group move.
     {
         Project p = make_project();
         Clip a;
@@ -1553,9 +1405,6 @@ int main() {
         const ClipId ia = p.sequence.video_tracks[0].clips[0].id;
         const ClipId ib = p.sequence.video_tracks[0].clips[1].id;
 
-        // Moving the pair +40 as one atomic op must NOT let the first placement
-        // trim the second (sequential move_clip would shrink B to [120,160] until
-        // its own rep ran — or outright delete it when fully covered).
         cmd = move_clips_batch(p.sequence, {{ia, Track::Kind::Video, 0, 40},
                                             {ib, Track::Kind::Video, 0, 70}});
         check(cmd != nullptr, "batch-move: atomic move returns command");
@@ -1570,9 +1419,6 @@ int main() {
         check(p.sequence.video_tracks[0].clips.size() == 2,
               "batch-move: no clip is lost or duplicated");
 
-        // A stationary clip partially overlapped by the final group is still
-        // overwritten at the boundary (intended) — and ONLY the stationary clip
-        // loses frames; the dragged group keeps its exact size.
         Clip c;
         c.media = 0;
         c.name = "BATH_C";
@@ -1602,11 +1448,6 @@ int main() {
     }
 
     {
-        // blade_linked_at cuts the UNLINKED source-sibling: a clip of the same
-        // media on the opposite track kind, strictly interior to the cut, so a
-        // dropped A/V pair splits as one even after its link was lost. The pair
-        // gets re-linked, unattached audio (different media) is never touched,
-        // and a locked mate track is left alone.
         Project p;
         p.sequence.fps = 30.0;
         p.sequence.video_tracks.emplace_back(Track::Kind::Video, "V1");
@@ -1625,7 +1466,7 @@ int main() {
         p.sequence.video_tracks[0].clips.push_back(vp);
 
         Clip ap;
-        ap.media = 3;  // same source file, no linked_id
+        ap.media = 3;
         ap.name = "AES_PAIR";
         ap.tl_in = 1000;
         ap.tl_out = 5000;
@@ -1635,7 +1476,7 @@ int main() {
         p.sequence.audio_tracks[0].clips.push_back(ap);
 
         Clip vo;
-        vo.media = 9;  // voiceover, different media
+        vo.media = 9;
         vo.name = "VES_VO";
         vo.tl_in = 1000;
         vo.tl_out = 5000;
@@ -1643,7 +1484,7 @@ int main() {
         p.sequence.audio_tracks[0].clips.push_back(vo);
 
         Clip dead;
-        dead.media = 2;  // primary must cut V2's same-media clip too
+        dead.media = 2;
         dead.name = "VES_V2";
         dead.tl_in = 1000;
         dead.tl_out = 5000;
@@ -1683,8 +1524,6 @@ int main() {
                   p.sequence.audio_tracks[0].clips.size() == 2,
               "sibling-blade: undo restores the pre-cut state");
 
-        // Guard rails: unattached audio (media 9) is never cut, and a locked
-        // mate track keeps its clip whole.
         Track& at = p.sequence.audio_tracks[0];
         at.locked = true;
         cmd = blade_linked_at(p.sequence, Track::Kind::Video, 0, 3000);
@@ -1694,11 +1533,6 @@ int main() {
     }
 
     {
-        // Color grade (Phase 3): set_clip_grade puts a node tree on a video
-        // clip, undo/redo round-trips it through the snapshot machinery, the
-        // linked audio mate inherits the same graph, and the whole tree
-        // survives a save/load at project version 4. An empty graph reads as
-        // "no grade" and keeps clips byte-identical on save.
         Project p = make_project();
         UndoStack undo;
         Clip a;
@@ -1751,8 +1585,6 @@ int main() {
         }
         check(gain_ok, "grade: node params survive save/load");
 
-        // Existing therapy: a v3 file (no "grade" key anywhere) must load into
-        // clips with no grade and re-save without adding the key.
         nlohmann::json v3;
         v3["canvas_project"] = 3;
         v3["name"] = "legacy";
@@ -1814,9 +1646,6 @@ int main() {
                   "grade: ungraded clip re-saves without a grade key");
         }
 
-        // Linked mate inheritance: set on the video half; the audio mate holds
-        // the same graph (the payload is inert on audio, but the pair shares
-        // one grade so toggles/copies never drift).
         Project lp = make_project();
         Clip v;
         v.media = 0;
@@ -1838,7 +1667,6 @@ int main() {
               "grade: linked audio mate inherits the grade");
     }
 
-    // Title overlay: edit-op contract, undo/redo, and save/load round trip.
     {
         std::unique_ptr<ICommand> cmd;
         Project tp = make_project();
@@ -1927,17 +1755,12 @@ int main() {
                   tlc.title.box_g == want.box_g && tlc.title.box_b == want.box_b,
               "title: fields survive save/load");
 
-        // A no-title clip re-saves without the title key: legacy v3-style bytes.
         std::string nt_err;
         check(save_project(tloaded, "/tmp/opencode/media/notitle.ehproj", &nt_err),
               "title: save project with title cleared");
     }
 
     {
-        // GroupCommand: a batch of child edits records as ONE undo step (used by
-        // the Subtitles tab's "select all captions" bulk styling). Undo reverts
-        // every child, redo re-applies them, and the group survives a mixed
-        // child list (here: a title change + a transform change on two clips).
         Project gp;
         canvas::core::Track gv1;
         gv1.kind = canvas::core::Track::Kind::Video;
@@ -1989,11 +1812,6 @@ int main() {
     }
 
     {
-        // A clip comment carrying invalid UTF-8 bytes used to abort save_project
-        // with nlohmann type_error.316, leaving a 0-byte file behind: the dump
-        // runs after ofstream already created the file. The repair pass must
-        // sanitize non-UTF-8 sequences (and non-finite floats) before dumping
-        // so a bad byte in user data can never produce a silent empty save.
         Project tp;
         tp.name = "utf8-repair";
         canvas::core::Track v1;
@@ -2006,7 +1824,7 @@ int main() {
         c.tl_out = 24;
         c.src_in = 0;
         c.src_out = 24;
-        std::string bad = "label\xFF\xFE";  // lone continuation bytes
+        std::string bad = "label\xFF\xFE";
         c.comments = bad;
         c.eq_bands[0].frequency = 1000.0f;
         c.eq_bands[0].gain = std::nan("");

@@ -1,6 +1,3 @@
-// Headless Vulkan capability probe — implementation (Phase 0 — Vulkan-tests).
-// See vk_probe.hpp for the contract. Qt-free; links Vulkan::Vulkan only.
-
 #include "vk_probe.hpp"
 
 #include <vulkan/vulkan.h>
@@ -11,9 +8,6 @@ namespace canvas::vktest {
 
 namespace {
 
-// Try to enable the video-queue extensions at instance level so the queue
-// family probe can read real video-codec operation bits. Missing extensions
-// are simply skipped (the device list still reports their absence).
 void enable_available_extensions(std::vector<const char*>& names) {
     static const char* const kVideoInstanceExts[] = {
         VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,
@@ -34,7 +28,7 @@ void enable_available_extensions(std::vector<const char*>& names) {
     }
 }
 
-}  // namespace
+}
 
 ProbeResult run_probe() {
     ProbeResult out;
@@ -89,7 +83,6 @@ ProbeResult run_probe() {
         info.api_version = props.apiVersion;
         info.driver_version = props.driverVersion;
 
-        // Driver-name + conformance come via the PROPERTIES2 chain.
         VkPhysicalDeviceDriverPropertiesKHR driver{};
         driver.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES_KHR;
         VkPhysicalDeviceVulkan13Properties v13{};
@@ -109,8 +102,6 @@ ProbeResult run_probe() {
             info.conformance_patch = driver.conformanceVersion.patch;
         }
 
-        // Queue families + their video-codec operation bits (only meaningful
-        // when the video extensions were enabled at instance level).
         std::uint32_t fam_count = 0;
         vkGetPhysicalDeviceQueueFamilyProperties2(phys, &fam_count, nullptr);
         std::vector<VkQueueFamilyProperties2> families(fam_count);
@@ -148,7 +139,6 @@ ProbeResult run_probe() {
             info.queue_families.push_back(q);
         }
 
-        // Device extension set.
         std::uint32_t ext_count = 0;
         vkEnumerateDeviceExtensionProperties(phys, nullptr, &ext_count, nullptr);
         std::vector<VkExtensionProperties> exts(ext_count);
@@ -169,9 +159,6 @@ ProbeResult run_probe() {
             if (name == VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME) info.external_semaphore_fd = true;
         }
 
-        // Core-promotion: several interop extensions became core by Vulkan
-        // 1.1/1.2/1.3, so a conformant driver may not list them as extensions.
-        // OR in the version floor so the report says "usable", not "named".
         if (info.api_version >= VK_API_VERSION_1_1) {
             info.external_memory_fd = true;
             info.external_semaphore_fd = true;
@@ -190,9 +177,7 @@ ProbeResult run_probe() {
 
     vkDestroyInstance(inst, nullptr);
 
-    // Primary device = first decoded (driver order usually puts the discrete
-    // GPU first). The report keeps the full list for later machine-matrix work.
     return out;
 }
 
-}  // namespace canvas::vktest
+}

@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
-# ============================================================================
-#  Nova Canvas Studio — Build Script
-#  Builds the project from source and optionally installs dependencies.
-#  Supports: Fedora, Arch Linux, Debian/Ubuntu, PikaOS, and derivatives.
-# ============================================================================
 
 set -euo pipefail
 
-# ── Configuration ───────────────────────────────────────────────────────────
 BUILD_DIR="build"
 BUILD_TYPE="Release"
 JOBS="$(nproc 2>/dev/null || echo 4)"
@@ -15,7 +9,6 @@ INSTALL_DEPS=0
 CLEAN_BUILD=0
 RUN_BUILD=1
 
-# ── Colors & Formatting ─────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
     BOLD="\033[1m"
     DIM="\033[2m"
@@ -32,7 +25,6 @@ else
     MAGENTA="" CYAN="" GRAY=""
 fi
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
 info()    { printf "${BLUE}  ▸${RESET} %s\n" "$*"; }
 ok()      { printf "${GREEN}  ✓${RESET} %s\n" "$*"; }
 warn()    { printf "${YELLOW}  ⚠${RESET} %s\n" "$*"; }
@@ -66,19 +58,16 @@ spinner() {
     fi
 }
 
-# ── Banner ──────────────────────────────────────────────────────────────────
 banner() {
     printf "\n"
     printf "    ${BOLD}${CYAN}Nova Canvas Studio${RESET} ${DIM}— Nonlinear Video Editor${RESET}\n"
     hr
 }
 
-# ── Distro Detection ────────────────────────────────────────────────────────
 detect_distro() {
     step "Detecting Distribution"
 
     if [[ -f /etc/os-release ]]; then
-        # shellcheck source=/dev/null
         . /etc/os-release
         DISTRO_ID="${ID:-unknown}"
         DISTRO_LIKE="${ID_LIKE:-$ID}"
@@ -91,7 +80,6 @@ detect_distro() {
         fedora)             PKG_MGR="dnf"   ; DISTRO_FAMILY="fedora"  ;;
         arch|manjaro|endeavouros|garuda) PKG_MGR="pacman"; DISTRO_FAMILY="arch"    ;;
         debian|ubuntu|linuxmint|pop|pika*)
-            # PikaOS detection — check both ID and ID_LIKE
             if [[ "$DISTRO_ID" == pika* ]] || [[ "$DISTRO_LIKE" == *pika* ]]; then
                 PKG_MGR="apt"
                 DISTRO_FAMILY="pikaos"
@@ -119,22 +107,6 @@ detect_distro() {
     ok "Detected: ${BOLD}$DISTRO_NAME${RESET} (family: $DISTRO_FAMILY, pkg: $PKG_MGR)"
 }
 
-# ── Package Maps ────────────────────────────────────────────────────────────
-#
-#  Package availability checked against:
-#    Fedora  : https://packages.fedoraproject.org/
-#    Arch    : https://archlinux.org/packages/
-#    Debian  : https://www.debian.org/distrib/packages
-#    PikaOS  : https://packages.pika-os.com/
-#
-
-# -- Fedora packages (dnf) --
-# qt6-qtbase-devel, qt6-qtsvg-devel        — Qt6 Widgets + Svg
-# ffmpeg-devel                               — FFmpeg (libavformat, libavcodec, etc.)
-# pipewire-devel                             — PipeWire
-# alsa-lib-devel                             — ALSA
-# nlohmann-json-devel                        — JSON
-# cmake, ninja-build, meson, gcc-c++, pkgconf  — Build toolchain
 FEDORA_DEPS=(
     cmake
     ninja-build
@@ -149,13 +121,6 @@ FEDORA_DEPS=(
     nlohmann-json-devel
 )
 
-# -- Arch packages (pacman) --
-# qt6-base, qt6-svg                          — Qt6 Widgets + Svg
-# ffmpeg                                      — FFmpeg
-# pipewire                                    — PipeWire
-# alsa-lib                                    — ALSA
-# nlohmann-json                               — JSON
-# cmake, ninja, meson, gcc, pkgconf            — Build toolchain
 ARCH_DEPS=(
     cmake
     ninja
@@ -170,15 +135,6 @@ ARCH_DEPS=(
     nlohmann-json
 )
 
-# -- Debian / Ubuntu packages (apt) --
-# qt6-base-dev, libqt6svg6-dev               — Qt6 Widgets + Svg
-# libavformat-dev, libavcodec-dev,            — FFmpeg dev headers
-#   libavutil-dev, libswscale-dev
-# libpipewire-0.3-dev                         — PipeWire
-# libasound2-dev                              — ALSA
-# nlohmann-json3-dev                          — JSON
-# build-essential, cmake, ninja-build,        — Build toolchain
-#   meson, pkg-config
 DEBIAN_DEPS=(
     build-essential
     cmake
@@ -197,13 +153,8 @@ DEBIAN_DEPS=(
     nlohmann-json3-dev
 )
 
-# -- PikaOS packages (apt, Debian-based) --
-# Same as Debian — PikaOS ships standard Debian/Ubuntu packages.
 PIKAOS_DEPS=("${DEBIAN_DEPS[@]}")
 
-# ── Package Installation ────────────────────────────────────────────────────
-# Pick the privilege-elevation tool: prefer pkexec (GUI auth prompt),
-# fall back to sudo if pkexec isn't available.
 pick_elevator() {
     if command -v pkexec &>/dev/null; then
         ELEV="pkexec"
@@ -239,7 +190,6 @@ install_deps() {
     done
     echo
 
-    # Ask for confirmation before touching the system.
     read -r -p "  ${YELLOW}?${RESET} Install these dependencies now? [y/N] " answer
     case "${answer,,}" in
         y|yes)
@@ -268,17 +218,11 @@ install_deps() {
     ok "All dependencies installed."
 }
 
-# ── System Install ─────────────────────────────────────────────────────────
-# Installs the build that was just compiled (no second rebuild) into /usr.
-# The install prefix is overridden at install time via --prefix (CMake >= 3.15),
-# so the build dir stays untouched; only the final install elevates (pkexec).
 install_system() {
     step "Installing Nova Canvas Studio to the system"
 
     pick_elevator
 
-    # Absolute path: pkexec runs as root from a different cwd, so a relative
-    # "$BUILD_DIR" would resolve against /root instead of the repo.
     local abs_build_dir
     abs_build_dir="$(cd "$BUILD_DIR" && pwd)"
 
@@ -288,18 +232,12 @@ install_system() {
     ok "Installed. Launch it from your app menu or run: ${BOLD}canvas${RESET}"
 }
 
-# ── Build ───────────────────────────────────────────────────────────────────
 do_build() {
     step "Building Nova Canvas Studio"
 
     local cmake_args=("-DCMAKE_BUILD_TYPE=$BUILD_TYPE")
     local generator="Ninja"
 
-    # Enable the CUDA-GPU encode path when an NVIDIA CUDA toolkit is installed.
-    # nvcc (in /usr/local/cuda/bin) is often not on the default PATH; without it
-    # nvcc isn't found, CANVAS_HAVE_CUDA stays OFF, and the exporter's CUDA calls
-    # fail to link. Detect common install layouts and expose nvcc so the GPU
-    # path builds. Plain build.sh thus never needs sudo/pkexec for this.
     if ! command -v nvcc &>/dev/null; then
         for cuda_dir in "${CUDA_HOME:-}" /usr/local/cuda /opt/cuda /usr/cuda; do
             if [[ -n "$cuda_dir" && -x "$cuda_dir/bin/nvcc" ]]; then
@@ -311,7 +249,6 @@ do_build() {
         done
     fi
 
-    # Prefer Ninja if available, fall back to Unix Makefiles
     if command -v ninja &>/dev/null; then
         cmake_args+=("-G" "Ninja")
     else
@@ -319,13 +256,11 @@ do_build() {
         cmake_args+=("-G" "Unix Makefiles")
     fi
 
-    # Clean build requested?
     if [[ "$CLEAN_BUILD" -eq 1 ]]; then
         info "Cleaning previous build directory..."
         rm -rf "$BUILD_DIR"
     fi
 
-    # Configure only if not already configured — otherwise just rebuild.
     if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
         info "First-time config: cmake -B $BUILD_DIR ${cmake_args[*]}"
         cmake -B "$BUILD_DIR" "${cmake_args[@]}" 2>&1 | while IFS= read -r line; do
@@ -341,7 +276,6 @@ do_build() {
         fi
     fi
 
-    # Build (incremental — only recompiles changes)
     info "cmake --build $BUILD_DIR -j$JOBS"
     cmake --build "$BUILD_DIR" -j"$JOBS" 2>&1 | while IFS= read -r line; do
         printf "    ${DIM}%s${RESET}\n" "$line"
@@ -350,15 +284,12 @@ do_build() {
     hr
     ok "${BOLD}Build complete!${RESET}"
 
-    # Headless Qt-free guard (splitplan Phase 21): core/ and the extracted
-    # GUI headless modules must never gain a <Q...> include.
     info "check_qtdep: verifying no Qt in headless modules"
     if ! "$(dirname "$0")/scripts/check_qtdep.sh" -q; then
         fail "check_qtdep FAILED — a headless module includes Qt"
     fi
     ok "check_qtdep: headless modules are Qt-free"
 
-    # Optional system-wide install, mirroring `sudo just install-release`.
     printf "\n    ${CYAN}Install Nova Canvas Studio system-wide?${RESET} (installs to /usr via pkexec)"
     read -r -p " [y/N] " answer
     case "${answer,,}" in
@@ -374,7 +305,6 @@ do_build() {
     printf "    ${CYAN}Run:${RESET}    ./$BUILD_DIR/gui/canvas [file]\n\n"
 }
 
-# ── Usage ───────────────────────────────────────────────────────────────────
 usage() {
     cat <<EOF
 ${BOLD}Usage:${RESET} $(basename "$0") [OPTIONS]
@@ -389,7 +319,6 @@ ${BOLD}Options:${RESET}
 EOF
 }
 
-# ── Parse Arguments ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -d|--install-deps) INSTALL_DEPS=1; shift ;;
@@ -402,7 +331,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ── Main ────────────────────────────────────────────────────────────────────
 banner
 detect_distro
 

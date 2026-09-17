@@ -17,8 +17,7 @@
 namespace canvas::gui {
 
 namespace {
-// Rec.601 steps of the Y'CbCr matrix (wave spec §2: values range roughly
-// -0.5..0.5 for in-gamut colors). Matches the decode pipeline's BT.601.
+
 constexpr double kCbR = -0.168736;
 constexpr double kCbG = -0.331264;
 constexpr double kCbB = 0.500000;
@@ -26,11 +25,6 @@ constexpr double kCrR = 0.500000;
 constexpr double kCrG = -0.418688;
 constexpr double kCrB = -0.081312;
 
-// Six color-bar targets drawn at the 75% color-bars positions — the broadcast-
-// legal amplitude used by SMPTE bars and every real vectorscope graticule
-// (Tektronix, UltraScope, DaVinci Resolve, Wolfram "SafeTargets"). Computed,
-// never hardcoded angles: the full-saturation R/Mg/B/Cy/G/Yl run through the
-// exact Rec.601 matrix (wave spec §2 step 4), then scaled by 0.75.
 struct VecTarget {
     double cb;
     double cr;
@@ -41,17 +35,11 @@ constexpr VecTarget kTargets75[6] = {
     {0.127, -0.375, "Cy"},  {-0.248, -0.314, "G"}, {-0.375, 0.061, "Yl"},
 };
 
-// Angles in the scope's polar basis (math convention: CCW from +Cb, +Cr up,
-// so +U points right and +V up — matching the kTargets75 box orientation).
-// The NTSC I axis is the skin-tone line reference at 123° (a few degrees past
-// R toward Yl — the red-to-orange band real skin tones land in); Q lags 90°.
 constexpr double kSkinAngle = 123.0 * M_PI / 180.0;
 constexpr double kQAngle = kSkinAngle - M_PI / 2.0;
 
-// Compass-rose granularity (every 30° gets a numeral, matching the Tektronix
-// graticule's major ticks).
 constexpr int kCompassStep = 30;
-}  // namespace
+}
 
 void VectorscopeScope::recompute_render() {
     scatter_.fill(ScatterCell{});
@@ -97,10 +85,6 @@ void VectorscopeScope::accumulate(const canvas::core::VideoFrame& rgba) {
 }
 
 void VectorscopeScope::accumulate(const canvas::core::Nv12Frame& nv12) {
-    // Color archive: log a [scope] spec-change line exactly once per source
-    // switch (matrix/range only change when the media under the playhead does),
-    // so wheel interactions can be correlated with the spec the vectorscope was
-    // analysing. Scopes consume the same frame->nv12 spec as the viewer shader.
     if (!spec_seen_ || nv12.matrix != last_spec_matrix_ || nv12.range != last_spec_range_) {
         spec_seen_ = true;
         last_spec_matrix_ = nv12.matrix;
@@ -110,9 +94,6 @@ void VectorscopeScope::accumulate(const canvas::core::Nv12Frame& nv12) {
             canvas::core::gpu::color_matrix_name(nv12.matrix),
             canvas::core::gpu::color_range_name(nv12.range));
     }
-    // Always-on (once): scope NV12->RGB uses the frame's resolved per-file spec
-    // (matrix + probe-reconciled range) — matching the viewer shader on this
-    // frame, NOT a compile-time BT.709 limited assumption.
     static bool yuv2rgb_logged_ = false;
     if (!yuv2rgb_logged_) {
         yuv2rgb_logged_ = true;
@@ -154,9 +135,6 @@ void VectorscopeScope::accumulate(const canvas::core::Nv12Frame& nv12) {
 }
 
 void VectorscopeScope::render_density() {
-    // Log-normalized density (wave spec §2 step 4: logarithmic exposure curve),
-    // shaded per TraceMode. The gain slider is a display-time multiplier on the
-    // bucket opacity, never a change to the accumulated math.
     content_ = QImage(kScopeVec, kScopeVec, QImage::Format_ARGB32_Premultiplied);
     content_.fill(QColor(0, 0, 0, 0));
 
@@ -166,8 +144,6 @@ void VectorscopeScope::render_density() {
     }
     const double log_max = std::log1p(static_cast<double>(max_count));
     const double gain = double(gain_percent_) / 100.0;
-    // True-color core burn: buckets whose density crosses this fraction of the
-    // brightest bucket overexpose to white, like a real scope's hot spot.
     constexpr double kCoreBurn = 0.80;
 
     const QColor phosphor = kScopeWaveRgb[1];
@@ -192,14 +168,14 @@ void VectorscopeScope::render_density() {
             int b = 255;
             switch (trace_mode_) {
                 case TraceMode::Mono:
-                    break;  // white
+                    break;
                 case TraceMode::Green:
                     r = p_r;
                     g = p_g;
                     b = p_b;
                     break;
                 case TraceMode::Color:
-                    if (d < kCoreBurn) {  // keep dense core white (overexposed)
+                    if (d < kCoreBurn) {
                         r = static_cast<int>(cell.r_sum / cell.count);
                         g = static_cast<int>(cell.g_sum / cell.count);
                         b = static_cast<int>(cell.b_sum / cell.count);
@@ -219,11 +195,6 @@ void VectorscopeScope::paint_body(QPainter& p, const QRectF& plot) {
     const QPointF c = plot.center();
     const QRectF sq(c.x() - side / 2.0, c.y() - side / 2.0, side, side);
 
-    // Density cloud, clipped to the graticule disk. 2x is a trace-gain zoom —
-    // the analogue of a real scope's VARIABLE chroma gain: only the trace
-    // scales, the graticule stays fixed on screen (scaling both would push
-    // the ring and compass ticks off the widget, which is what the old code
-    // did). The cloud always maps the full ±0.5 Cb/Cr span onto the disk.
     p.save();
     QPainterPath disk;
     disk.addEllipse(c, side / 2.0, side / 2.0);
@@ -246,46 +217,31 @@ void VectorscopeScope::paint_graticule(QPainter& p, const QRectF& plot) const {
     const QPointF c = plot.center();
     const double half = side / 2.0;
 
-    // Cb/Cr (both in [-0.5, 0.5]) → plot pixel mapping; y grows upward.
     auto to_plot = [&](double cb, double cr) {
         return QPointF(c.x() + (cb / 0.5) * half, c.y() - (cr / 0.5) * half);
     };
-    // Math-convention polar: angle CCW from +Cb (right), +Cr up. Angle 0 is
-    // +U, 90° is +V, so the compass rose matches the box geometry.
     auto polar = [&](double angle, double radius) {
         return c + QPointF(std::cos(angle), std::sin(angle)) * radius;
     };
     const double rad_deg = M_PI / 180.0;
 
-    // paint_scope_chrome leaves the painter's brush at `surface_low` for the
-    // next paint call. Clear it: the graticule rings/ellipses below must be
-    // outlines only — otherwise drawEllipse fills an opaque greyish-blue disc
-    // over the chroma cloud (the "grey circle in the middle" bug).
     p.setBrush(Qt::NoBrush);
 
     p.setClipRect(QRectF(c.x() - half, c.y() - half, side, side));
 
-    // ±U (B-Y, horizontal) / ±V (R-Y, vertical) component axes.
     p.setPen(QPen(with_alpha(t.ink, 42), 1.0));
     p.drawLine(c.x() - half, c.y(), c.x() + half, c.y());
     p.drawLine(c.x(), c.y() - half, c.x(), c.y() + half);
 
-    // I/Q diameters (NTSC graticule signature). +I lands on the skin-tone
-    // line, drawn as an amber ray past R toward Yl; the -I and Q segments are
-    // a faint dotted cross so they read as axes, not content.
     p.setPen(QPen(QColor(0xC9, 0x86, 0x3A, 170), 1.0));
     p.drawLine(c, polar(kSkinAngle, half * 0.98));
     p.setPen(QPen(with_alpha(t.ink, 52), 1.0, Qt::DotLine));
     p.drawLine(c, polar(kSkinAngle + M_PI, half * 0.98));
     p.drawLine(polar(kQAngle, half * 0.98), polar(kQAngle + M_PI, half * 0.98));
 
-    // 75% color-bar calibration ring: the six box-target centers sit exactly
-    // on it, so feeding SMPTE 75% bars lands the dots in the boxes.
     p.setPen(QPen(with_alpha(t.ink, 70), 1.0, Qt::DashLine));
     p.drawEllipse(c, half * 0.75, half * 0.75);
 
-    // Six box-target squares + labels just beyond the ring, toward the edge
-    // (Tektronix layout: label between the box and the outer circle).
     p.setFont(QFont(p.font().family(), 6));
     for (const VecTarget& tg : kTargets75) {
         const QPointF pt = to_plot(tg.cb, tg.cr);
@@ -299,8 +255,6 @@ void VectorscopeScope::paint_graticule(QPainter& p, const QRectF& plot) const {
                    Qt::AlignCenter, QString::fromLatin1(tg.label));
     }
 
-    // Outer circle = full-swing Cb/Cr limit, with a 10° compass rose; major
-    // ticks every 30° with numerals (Tektronix-style).
     p.setPen(QPen(with_alpha(t.ink, 115), 1.0));
     p.drawEllipse(c, half, half);
     for (int deg = 0; deg < 360; deg += 10) {
@@ -317,7 +271,6 @@ void VectorscopeScope::paint_graticule(QPainter& p, const QRectF& plot) const {
                    QString::number(deg) + QChar(0x00B0));
     }
 
-    // Cardinal tip dots where ±U / ±V cross the outer ring.
     p.setPen(Qt::NoPen);
     p.setBrush(with_alpha(t.ink, 170));
     for (double a : {0.0, M_PI / 2.0, M_PI, 3.0 * M_PI / 2.0}) {
@@ -325,4 +278,4 @@ void VectorscopeScope::paint_graticule(QPainter& p, const QRectF& plot) const {
     }
 }
 
-}  // namespace canvas::gui
+}

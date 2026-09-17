@@ -1,3 +1,4 @@
+#include "UX/ActionSearch.hpp"
 #include "UX/MainWindow.hpp"
 #include "UX/SettingsDialog.hpp"
 #include "UX/theme.hpp"
@@ -23,13 +24,6 @@
 namespace canvas::gui {
 
 void build_app_menus(MainWindow& mw) {
-    // 1. MENU BAR — the full editor-standard row. A leading "Nova Canvas" app
-    //    menu carries app-level commands (About / Appearance / Preferences /
-    //    Quit, per HIG's app-menu anatomy), then the workflow menus in the
-    //    Resolve order: File/Edit/Trim/Timeline/Clip/Mark/View/Playback/
-    //    Fusion/Color/Fairlight/Workspace/Help. Only File/Edit/Playback/View/
-    //    Timeline/Mark are wired for v1; the rest are present with stub items
-    //    so the chrome matches the reference.
     auto* canvas_menu = mw.ui->menubar->addMenu(MainWindow::tr("Nova Canvas"));
     canvas_menu->addAction(MainWindow::tr("&About Nova Canvas Studio"), &mw, [&mw] {
         QMessageBox::about(
@@ -44,11 +38,6 @@ void build_app_menus(MainWindow& mw) {
     });
     canvas_menu->addSeparator();
 
-    // Appearance: the three theme states as exclusive choices. On Hyprland's
-    // Wayland backend "Dark (Hyprland)" is the auto default so the palette
-    // lands as designed through the compositor's FP16 re-quantization; plain
-    // "Dark" exists for people who want the uncompensated set. Choices are
-    // remembered (appearance/hypr_dark) and override the auto rule next launch.
     auto* appearance = canvas_menu->addMenu(MainWindow::tr("A&ppearance"));
     apply_rounded_menu(appearance);
     auto* appearance_group = new QActionGroup(appearance);
@@ -84,8 +73,6 @@ void build_app_menus(MainWindow& mw) {
     QObject::connect(light_action, &QAction::triggered, &mw,
                      [select_theme] { select_theme(true, false); });
 
-    // App-level settings belong in the app menu, not the Edit menu (HIG: the
-    // app menu lists items that apply to the app as a whole).
     const auto show_preferences = [&mw]() {
         auto* dialog = new SettingsDialog(
             &mw, [&mw](bool on) { mw.controller_.set_scrub_audio_enabled(on); });
@@ -111,15 +98,25 @@ void build_app_menus(MainWindow& mw) {
     file->addSeparator();
     file->addAction(MainWindow::tr("&Import Media..."), QKeySequence(Qt::CTRL | Qt::Key_I), &mw,
                     &MainWindow::on_import_media);
+    file->addSeparator();
+    file->addAction(MainWindow::tr("Export &EDL..."), &mw, &MainWindow::export_edl);
 
     auto* edit = mw.ui->menubar->addMenu(MainWindow::tr("&Edit"));
     edit->addAction(MainWindow::tr("&Undo"), QKeySequence::Undo, &mw, &MainWindow::on_undo);
     edit->addAction(MainWindow::tr("&Redo"), QKeySequence::Redo, &mw, &MainWindow::on_redo);
+    edit->addSeparator();
+    edit->addAction(MainWindow::tr("&Find Action..."), QKeySequence(Qt::CTRL | Qt::Key_K), &mw,
+                    [&mw] {
+                        auto* search = new canvas::gui::ActionSearch(mw.ui->menubar, &mw);
+                        search->setAttribute(Qt::WA_DeleteOnClose);
+                        search->collect_actions();
+                        search->open();
+                    });
     auto* trim = mw.ui->menubar->addMenu(MainWindow::tr("&Trim"));
     trim->addAction(MainWindow::tr("Ripple Delete"), QKeySequence(Qt::Key_Delete), &mw,
-                    [&mw] { mw.delete_selected_clip(/*ripple=*/true); });
+                    [&mw] { mw.delete_selected_clip(true); });
     trim->addAction(MainWindow::tr("Lift"), QKeySequence(Qt::SHIFT | Qt::Key_Delete), &mw,
-                    [&mw] { mw.delete_selected_clip(/*ripple=*/false); });
+                    [&mw] { mw.delete_selected_clip(false); });
     trim->addAction(MainWindow::tr("Cycle Edit Point Side"), QKeySequence(Qt::Key_U));
     trim->addAction(MainWindow::tr("Remove All Transitions"), &mw, [&mw] {
         mw.remove_all_transitions();
@@ -148,8 +145,6 @@ void build_app_menus(MainWindow& mw) {
                              QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E), &mw,
                              [collapse_all] { collapse_all(false); });
 
-    // Timeline > AI Tools: local on-machine subtitle generation from the
-    // selected audio clip's media (whisper.cpp, no uploads).
     auto* ai_menu = timeline_menu->addMenu(MainWindow::tr("AI Tools"));
     apply_rounded_menu(ai_menu);
     ai_menu->addAction(MainWindow::tr("Generate Subtitles From Audio…"), &mw,
@@ -163,9 +158,6 @@ void build_app_menus(MainWindow& mw) {
     clip_menu->addAction(MainWindow::tr("Add Transition"), QKeySequence(Qt::CTRL | Qt::Key_T));
     clip_menu->addAction(MainWindow::tr("Link/Unlink"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_L));
 
-    // "Clip Colour >" submenu: the full Resolve-style pinch wheel applied to the
-    // currently selected clip. Each entry carries its 1-12 swatch index (0 = no
-    // colour) and funnels into the SAME edit op the Inspector + context menu use.
     auto* clip_color_menu = clip_menu->addMenu(MainWindow::tr("Clip Colour") + QStringLiteral(" >"));
     apply_rounded_menu(clip_color_menu);
     const auto swatch_action = [&mw](uint8_t color) {
@@ -193,7 +185,6 @@ void build_app_menus(MainWindow& mw) {
     QAction* no_color = swatch_action(0);
     no_color->setText(MainWindow::tr("&No Colour"));
     clip_color_menu->addAction(no_color);
-    // Only meaningful when a clip is selected; the whole submenu enables with it.
     QObject::connect(clip_menu, &QMenu::aboutToShow, &mw, [clip_color_menu, &mw]() {
         clip_color_menu->setEnabled(mw.selected_clip_ != 0);
     });
@@ -228,7 +219,7 @@ void build_app_menus(MainWindow& mw) {
         auto* m = mw.ui->menubar->addMenu(MainWindow::tr(name));
         if (qstrcmp(name, "Help") == 0) {
             QAction* help_item = m->addAction(MainWindow::tr("Nova Canvas Studio Help"));
-            help_item->setEnabled(false);  // stub until real docs exist
+            help_item->setEnabled(false);
         } else if (qstrcmp(name, "Workspace") == 0) {
             m->addAction(MainWindow::tr("Reset UI Layout"));
         } else {
@@ -236,8 +227,6 @@ void build_app_menus(MainWindow& mw) {
         }
     }
 
-    // Round every menubar dropdown (and any submenu, e.g. Open Recent). Must
-    // run after the menus are populated and before any is shown.
     std::function<void(QMenu*)> round_menu_tree = [&](QMenu* menu) {
         if (!menu) return;
         apply_rounded_menu(menu);
@@ -250,4 +239,4 @@ void build_app_menus(MainWindow& mw) {
         round_menu_tree(act->menu());
 }
 
-}  // namespace canvas::gui
+}

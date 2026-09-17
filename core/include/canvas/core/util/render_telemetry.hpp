@@ -1,24 +1,5 @@
 #pragma once
 
-// Windowed render/export telemetry, Qt-free, header-only.
-//
-// One instance per export_project() call. The producer thread (exporter's frame
-// loop + RenderSession::frame_gpu) and the consumer thread (encoder send/drain)
-// both feed the SAME window, so the two ~1/s reports reconcile:
-//
-//     [render] ... fast=..% (gpu=N cpu=M) comp_avg_ms=.. alloc_miss=K ...
-//     [gpu]    fastpath n=.. avg_ms=.. decode_ms=.. landed=.. bailed=.. reasons={..}
-//
-//   - render.fast == gpu.landed, render.cpu == gpu.bailed when every frame
-//     attempted the fast path (solo-clip gpu export), and
-//   - gpu.n == render.fast + render.cpu == frames attempted this window.
-//
-// Replaces the old per-file logging that (a) re-armed on n==1 after every reset
-// and therefore printed every single call, (b) carried process-static
-// accumulators that bled across exports, and (c) had the producer writing
-// counters that the consumer read+reset with no synchronization. All public
-// methods are thread-safe; every accumulator lives under one mutex.
-
 #include "canvas/core/util/log.hpp"
 
 #include <algorithm>
@@ -34,34 +15,22 @@ class RenderTelemetry {
 public:
     RenderTelemetry() = default;
 
-    // ---- RenderSession::frame_gpu (producer side) ----
-    // One GPU fast-path attempt. `landed` = the frame took the fast path
-    // (out->valid); `reason` = fallback class: 0 overlap/preconditions,
-    // 1 fade/no-track-decoder, 2 decoder-open-fail, 3 decode-fail, 4 other;
-    // -1 when landed (never counted in reasons). `total_ms` = wall time of the
-    // whole attempt; `decode_ms` = decode_to_hw axis time (0 when not measured).
     void note_gpu_attempt(bool landed, int reason, double total_ms, double decode_ms);
 
-    // ---- exporter producer thread ----
     void note_fast();
-    void note_cpu(double comp_ms);       // CPU composite + its cost
-    void note_alloc_miss();              // av_hwframe_get_buffer / av_frame_alloc miss
-    void note_stall();                   // non-sequential source decode (FRAME-DIAG)
-    void note_resize(double ms);         // async NV12 resize wait axis
+    void note_cpu(double comp_ms);
+    void note_alloc_miss();
+    void note_stall();
+    void note_resize(double ms);
 
-    // ---- exporter consumer thread ----
     void note_encode(double ms);
     void note_audio(double ms);
     void set_progress(std::int64_t done, std::int64_t total);
     void observe_queue(std::size_t depth);
     void note_pool_stalls(std::uint64_t stalls);
 
-    // Emit the two lines at most once per ~1s window. Call from the consumer
-    // loop (encode/drain); counters accumulate meanwhile under the lock.
     void tick();
 
-    // Force an emit of whatever the window holds (end of export) if anything
-    // was recorded. Also resets the cadence anchor for the next export.
     void flush();
 
 private:
@@ -184,8 +153,6 @@ inline void RenderTelemetry::emit_locked(double fps, double eta_s, double comp_a
         static_cast<long long>(fast_), static_cast<long long>(cpu_), comp_avg, audio_avg,
         enc_avg, static_cast<long long>(alloc_miss_), qmax_,
         static_cast<unsigned long long>(pool_stalls_), since_s);
-    // Only report bailed fallback classes for a GPU export; a pure-CPU export
-    // never runs frame_gpu so the whole gpu block prints n=0 once (harmless).
     ::canvas::core::log::log_info(
         "[gpu] fastpath n=%lld avg_ms=%.2f decode_ms=%.2f resize_ms=%.2f "
         "landed=%lld bailed=%lld reasons={%lld overlap, %lld fade_nodec, %lld open-fail, "
@@ -212,8 +179,6 @@ inline void RenderTelemetry::tick() {
             std::chrono::duration<double>(now - start_).count();
         emit_locked(fps, eta_s, comp_.mean(), audio_.mean(), enc_.mean(), elaps_s);
     }
-    // Anchor set on first tick (or the cadence had elapsed and we emitted):
-    // always re-arm with `now` so a stall between ticks can't double-emit.
     last_emit_ = now;
     done_at_last_emit_ = done_;
     fast_ = cpu_ = stalls_ = alloc_miss_ = 0;
@@ -249,4 +214,4 @@ inline void RenderTelemetry::flush() {
     gpu_reasons_[0] = gpu_reasons_[1] = gpu_reasons_[2] = gpu_reasons_[3] = gpu_reasons_[4] = 0;
 }
 
-}  // namespace canvas::core::log
+}

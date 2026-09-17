@@ -35,16 +35,12 @@ namespace canvas::gui {
 
 namespace {
 
-// Ordered, grouped so the Theme tab reads top-down the way the interface is
-// constructed (surfaces, then the text/border layer, then the two chromatic
-// accents, then the timeline clip wells, then functional status colors).
 struct TokenSection {
     const char* title;
     std::vector<TokenEntry> entries;
 };
 
 const std::array<TokenSection, 5>& kTokenSections() {
-    // Function-local so the heavy initializer lists are built once.
     static const std::array<TokenSection, 5> sections = {{
         {"Surfaces", {
             {"Base surface", ThemeTokenField::Surface},
@@ -80,7 +76,7 @@ const std::array<TokenSection, 5>& kTokenSections() {
     return sections;
 }
 
-}  // namespace
+}
 
 SettingsDialog::SettingsDialog(QWidget* parent,
                                std::function<void(bool)> audible_scrubbing_cb)
@@ -88,7 +84,6 @@ SettingsDialog::SettingsDialog(QWidget* parent,
       audible_scrubbing_cb_(std::move(audible_scrubbing_cb)) {
     setWindowTitle(tr("Settings"));
     setModal(true);
-    // Room for everything on either tab with breathing space below.
     resize(560, 720);
     setMinimumSize(520, 600);
 
@@ -134,14 +129,8 @@ QGroupBox* SettingsDialog::build_hardware_section() {
     auto* form = new QFormLayout(box);
     form->setContentsMargins(12, 16, 12, 12);
 
-    // GPU picker: which physical device the app should drive. Its data is the
-    // PCI slot id (empty = automatic), the same identity persisted under
-    // settings/hw_gpu and resolved at startup by main.cpp.
     gpu_combo_ = new QComboBox(box);
     gpu_combo_->addItem(tr("Automatic (best available)"), QStringLiteral(""));
-    // CPU row: pure software encode + decode on the named processor. Its data
-    // is the kCpuSentinel (never a PCI slot), persisted like a GPU pin and
-    // resolved at startup to the software backend (see main.cpp).
     const std::string cpu_name =
         canvas::core::gpu_select::cpu_name();
     QString cpu_label = cpu_name.empty()
@@ -169,19 +158,13 @@ QGroupBox* SettingsDialog::build_hardware_section() {
         gpu_now ==
         QString::fromUtf8(canvas::core::gpu_select::kCpuSentinel);
     const bool gpu_pinned =
-        gpu_idx > 0 && !cpu_pinned;  // a real GPU (not Automatic/CPU)
+        gpu_idx > 0 && !cpu_pinned;
     const canvas::core::gpu_select::GpuDevice* pinned = nullptr;
     if (gpu_pinned)
         for (const auto& g : gpus)
             if (g.pci_slot == gpu_now.toStdString()) pinned = &g;
 
     backend_combo_ = new QComboBox(box);
-    // Order mirrors the app's default probe order (auto) plus the software cap.
-    // Only backends this machine can actually drive are listed: NVIDIA CUDA
-    // only when an NVIDIA GPU is present, VAAPI labelled with the vendors that
-    // expose it (AMD and/or Intel), QSV when an Intel GPU is present, Vulkan
-    // Video when any GPU exists (it rides the same render nodes). Software
-    // decode is always possible, so it is always listed.
     backend_combo_->addItem(tr("Automatic (probe order)"), QStringLiteral(""));
 
     bool have_amd = false, have_intel = false, have_nvidia = false, any_gpu = false;
@@ -208,11 +191,6 @@ QGroupBox* SettingsDialog::build_hardware_section() {
     backend_combo_->addItem(tr("Software (no GPU decode)"),
                             QStringLiteral("software"));
 
-    // While a specific GPU is pinned its backend drives the decoder row (the
-    // combo stays populated but shows the pinned GPU's backend, not a stale
-    // backend-family preference); re-activates on "Automatic". A pinned GPU
-    // whose backend isn't in the list (e.g. a Vulkan-pinned device) falls back
-    // to the saved backend-family value unchanged.
     QString backend_now = settings
         .value(QStringLiteral("settings/hw_backend"), QStringLiteral(""))
         .toString();
@@ -237,15 +215,10 @@ QGroupBox* SettingsDialog::build_hardware_section() {
     form->addRow(tr("Decoder"), backend_combo_);
     form->addRow(QString(), hint);
 
-    // Shared policy: applying a selection means persisting the key and
-    // re-pinning the HwDeviceManager. GPU=Automatic delegates to the backend
-    // combo; a specific GPU pins backend+device together.
     connect(gpu_combo_, &QComboBox::currentIndexChanged, this, [this](int i) {
         const QString slot = gpu_combo_->itemData(i).toString();
         QSettings().setValue(QStringLiteral("settings/hw_gpu"), slot);
         if (slot.isEmpty()) {
-            // Back to automatic: the decoder row re-activates and falls back to
-            // its own backend-family selection.
             backend_combo_->setEnabled(true);
             const QString backend = backend_combo_->currentData().toString();
             canvas::core::HwDeviceManager::set_preferred_backend(
@@ -254,11 +227,6 @@ QGroupBox* SettingsDialog::build_hardware_section() {
         }
         if (slot == QString::fromUtf8(
                           canvas::core::gpu_select::kCpuSentinel)) {
-            // CPU row: pure software encode + decode. Mirror it in the decoder
-            // row (which stays disabled like a pinned GPU) and pin it live.
-            // The exporter only engages a hardware encoder when its backend
-            // matches the preferred GPU backend (see exporter.cpp), so the
-            // software pin keeps encode on the CPU too.
             backend_combo_->setEnabled(false);
             const int b_idx =
                 backend_combo_->findData(QStringLiteral("software"));
@@ -266,8 +234,6 @@ QGroupBox* SettingsDialog::build_hardware_section() {
             canvas::core::HwDeviceManager::set_preferred_backend("software");
             return;
         }
-        // A concrete GPU: reflect its backend in the decoder row immediately so
-        // the screen mirrors what is actually pinned, then pin it live.
         backend_combo_->setEnabled(false);
         const auto gpus = canvas::core::gpu_select::detect_gpus();
         for (const auto& g : gpus) {
@@ -280,9 +246,6 @@ QGroupBox* SettingsDialog::build_hardware_section() {
                 return;
             }
         }
-        // GPU disappeared between populating and selection — degrade to the
-        // backend combo rather than pinning nothing. Settings were already
-        // cleared above, so re-apply from the combo like the Automatic path.
         backend_combo_->setEnabled(true);
         const QString backend = backend_combo_->currentData().toString();
         canvas::core::HwDeviceManager::set_preferred_backend(
@@ -355,14 +318,10 @@ QWidget* SettingsDialog::build_theme_tab() {
 
     tv->addWidget(build_theme_mode_group());
 
-    // The token list is long; a scroll area keeps the tab usable at any window
-    // height (the dialog itself is sized generously, see the constructor).
     auto* scroll = new QScrollArea(theme);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     auto* host = new QWidget;
-    // ONE shared grid for every section: name column (0) and control column
-    // (1) line up straight from top to bottom across the whole tab.
     auto* grid = new QGridLayout(host);
     grid->setContentsMargins(0, 0, 4, 0);
     grid->setHorizontalSpacing(16);
@@ -446,8 +405,6 @@ void SettingsDialog::add_token_section(QGridLayout* grid, int& row,
                                        const QString& title,
                                        const std::vector<TokenEntry>& entries) {
     if (row > 0) {
-        // Breathing room between groups without breaking the two shared
-        // columns the sections all draw from.
         grid->setRowMinimumHeight(row, 10);
         ++row;
     }
@@ -471,17 +428,8 @@ void SettingsDialog::add_token_section(QGridLayout* grid, int& row,
 QWidget* SettingsDialog::build_color_row(ThemeTokenField field) {
     auto* row = new QWidget(this);
 
-    // The swatch always shows the DEFAULT designed palette (the "default set
-    // theme") so the dialog reads as a reference of what the app uses before
-    // any changes; overrides are only visible as enabled row-Reset buttons.
-    // Picking a color here overrides that field (live), Reset restores designed.
     auto* swatch = make_swatch();
     const QColor designed = designed_token_value(field);
-    // Full-box rule (fill + border + radius): with only a bare `background-color`
-    // a QPushButton delegates its bevel to the base style (HorizonStyle paints
-    // every command button as the amber accent, so the pills would all render
-    // the same color). With an explicit border the QSS engine paints the whole
-    // box itself and the tint is honored.
     auto swatch_qss = [](const QColor& c) {
         return QStringLiteral(
                    "background-color: %1; border: 1px solid %2;"
@@ -500,8 +448,6 @@ QWidget* SettingsDialog::build_color_row(ThemeTokenField field) {
     const auto apply_override = [this, field](const QColor& raw) {
         QColor stored = raw;
         if (stored.isValid()) {
-            // Keep the designed translucency for alpha-carrying tokens
-            // (border/hairlines); the picker only hands back opaque colors.
             const QColor d = designed_token_value(field);
             stored = QColor(stored.red(), stored.green(), stored.blue(),
                             d.alpha());
@@ -515,9 +461,6 @@ QWidget* SettingsDialog::build_color_row(ThemeTokenField field) {
 
     connect(swatch, &QPushButton::clicked, this,
             [this, update_bg, reset, field, designed, apply_override] {
-                // Start the picker from the designed default-set color: the
-                // dialog is a reference of the default palette, not a live
-                // view of the current overrides.
                 const QColor picked = QColorDialog::getColor(
                     designed, this, QStringLiteral("Pick a color"));
                 if (!picked.isValid()) return;
@@ -533,16 +476,10 @@ QWidget* SettingsDialog::build_color_row(ThemeTokenField field) {
             });
 
     theme_resyncs_.push_back([update_bg, reset, field] {
-        // Swatches reflect the default designed palette; the Reset button is
-        // the override indicator (mode toggles, Reset Theme and import re-sync
-        // through this).
         update_bg(QColor());
         reset->setEnabled(token_override(field).isValid());
     });
 
-    // Right side of a shared column: name on the left (grid), stretch, then
-    // the swatch and Reset hugging the right margin — so every pill lines up
-    // top to bottom in one column.
     auto* hl = new QHBoxLayout(row);
     hl->setContentsMargins(0, 0, 0, 0);
     hl->setSpacing(8);
@@ -566,8 +503,6 @@ void SettingsDialog::apply_mode(bool light, bool hypr) {
     settings.setValue(QStringLiteral("appearance/theme"),
                       light ? QStringLiteral("light") : QStringLiteral("dark"));
     settings.setValue(QStringLiteral("appearance/hypr_dark"), hypr);
-    // Non-overridden tokens swap their designed values with the mode; re-sync
-    // every swatch so the dialog reflects the mode it is previewing.
     resync_token_rows();
 }
 
@@ -575,4 +510,4 @@ void SettingsDialog::resync_token_rows() {
     for (const auto& fn : theme_resyncs_) fn();
 }
 
-}  // namespace canvas::gui
+}

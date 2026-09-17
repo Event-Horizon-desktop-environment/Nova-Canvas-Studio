@@ -63,5 +63,5 @@ bool SelectionState::contains(const canvas::core::ClipId id) const {
     return std::find(ids_.begin(), ids_.end(), id) != ids_.end();
 }
 
-}  // namespace timeline_selection
-}  // namespace canvas::gui
+}
+}

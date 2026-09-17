@@ -2,14 +2,9 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 default: build
 
-# Develop / debug build into ./build (via build.sh)
 build:
     ./build.sh
 
-# Configure the dedicated release build dir (installs into /usr, not /usr/local).
-# Pointing the whisper.cpp FetchContent at the checkout already fetched into
-# build/_deps makes this deterministic: the fresh-copy `git clone` into a new
-# build dir is what used to stall `sudo just install` on a slow network.
 configure-release:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -21,15 +16,9 @@ configure-release:
     cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr "${extra[@]}"
 
-# Compile the release build (no install)
 build-release:
     cmake --build build-release -j$(nproc)
 
-# Full release build + install into /usr. Always reconfigures, recompiles and
-# installs the newest code. Run elevated: `sudo just install`.
-#     sudo just install
-# NOTE: the whole build runs as root here. Prefer `just install-release`, which
-# compiles as your user and elevates only for the final install step.
 install:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -43,8 +32,6 @@ install:
     cmake --build build-release -j"$(nproc)"
     exec cmake --install build-release --strip
 
-# Build as your user, then install into /usr (linux only elevation for the
-# final install step via sudo). Also safe when run as root.
 install-release:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -56,8 +43,6 @@ install-release:
     just build-release
     exec sudo cmake --install build-release --strip
 
-# Remove the system-wide install from /usr. Also cleans up the stale
-# event-horizon launcher/binary/icon from the pre-Nova-Canvas name.
 uninstall:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -69,18 +54,12 @@ uninstall:
         /usr/share/applications/event-horizon.desktop \
         /usr/share/icons/hicolor/scalable/apps/event-horizon.svg
 
-# Remove build directories
 clean:
     rm -rf build build-release
 
-# Run the test suite (roundtrip + export sweep)
 test:
     ctest --test-dir build
 
-# Per-test seams. `ctest --test-dir build` re-launches the whole harness and can
-# hang on this machine, so each suite also lands as a standalone binary you can
-# run directly. Core tests land in build/core/, GUI headless tests in
-# build/gui/tests/. Run one directly: build/core/canvas_transcribe_test.
 test-core:
     #!/usr/bin/env bash
     set -euo pipefail

@@ -1,7 +1,3 @@
-// ColumnHistogram accumulation law — stride-sampled RGBA/NV12 -> column/level
-// density planes. Qt-free; the Qt scopes reduce these buffers at render time.
-// Header `histogram.hpp` documents the geometry; this file is the math.
-
 #include "canvas/core/colorsci/histogram.hpp"
 #include "canvas/core/util/log.hpp"
 
@@ -21,7 +17,6 @@ void ColumnHistogram::accumulate(const canvas::core::VideoFrame& rgba) {
     if (w <= 0 || h <= 0) return;
     const std::size_t stride = rgba.stride != 0 ? rgba.stride : std::size_t(w) * 4;
 
-    // Stride-sample so the total pixel count lands at/under kHistogramTargetSamples.
     const double need =
         std::sqrt(double(w) * double(h) / double(kHistogramTargetSamples));
     const int sy = std::max(1, static_cast<int>(need));
@@ -39,17 +34,12 @@ void ColumnHistogram::accumulate(const canvas::core::VideoFrame& rgba) {
             hist_[0 * kHistogramCellCount + xoff + lvl_r]++;
             hist_[1 * kHistogramCellCount + xoff + lvl_g]++;
             hist_[2 * kHistogramCellCount + xoff + lvl_b]++;
-            // Rec.601 luma matching the BT.601 decode pipeline (key the matrix
-            // off your pipeline's color space).
             hist_luma_[xoff + (299u * lvl_r + 587u * lvl_g + 114u * lvl_b) / 1000u]++;
         }
     }
 }
 
 void ColumnHistogram::accumulate(const canvas::core::Nv12Frame& nv12) {
-    // Always-on (once): scopes read NV12 and convert to RGB via colorspace.hpp's
-    // yuv_to_rgb with the frame's resolved per-file spec (matrix + probe-
-    // reconciled range) — the same spec the viewer shader uses on this frame.
     static bool yuv2rgb_logged_ = false;
     if (!yuv2rgb_logged_) {
         yuv2rgb_logged_ = true;
@@ -81,10 +71,9 @@ void ColumnHistogram::accumulate(const canvas::core::Nv12Frame& nv12) {
             hist_[0 * kHistogramCellCount + xoff + rgb.r]++;
             hist_[1 * kHistogramCellCount + xoff + rgb.g]++;
             hist_[2 * kHistogramCellCount + xoff + rgb.b]++;
-            // NV12's Y plane IS the luma trace — no matrix needed.
             hist_luma_[xoff + yrow[col]]++;
         }
     }
 }
 
-}  // namespace canvas::core::colorsci
+}

@@ -19,8 +19,6 @@ namespace canvas::gui {
 
 namespace {
 
-// One serial-chain node: rounded body, a placeholder thumbnail well, kind +
-// label text, and triangular in/out ports on the left/right edges.
 class NodeGraphItem final : public QGraphicsItem {
 public:
     NodeGraphItem(int index, const QString& kind, const QString& label)
@@ -47,7 +45,6 @@ public:
         painter->setRenderHint(QPainter::Antialiasing);
         painter->drawRoundedRect(body, 8.0, 8.0);
 
-        // Thumbnail well.
         const QRectF well(body.left() + 7.0, body.center().y() - 12.0, 24.0, 24.0);
         QLinearGradient wg(well.topLeft(), well.bottomRight());
         wg.setColorAt(0.0, tint_for_kind().lighter(130));
@@ -56,7 +53,6 @@ public:
         painter->setBrush(wg);
         painter->drawRoundedRect(well, 4.0, 4.0);
 
-        // Text.
         painter->setPen(isSelected() ? t.ink : with_alpha(t.ink, 210));
         painter->setFont(QFont(QStringLiteral("sans-serif"), 10, QFont::Bold));
         painter->drawText(QRectF(well.right() + 8.0, body.top() + 7.0,
@@ -69,7 +65,6 @@ public:
                                  body.width() - well.right() - 16.0, 13.0),
                           Qt::AlignLeft | Qt::AlignVCenter, meta);
 
-        // Ports.
         const QColor port = isSelected() ? t.accent : t.ink_muted;
         painter->setBrush(port);
         painter->setPen(Qt::NoPen);
@@ -105,7 +100,7 @@ private:
     QString label_;
 };
 
-}  // namespace
+}
 
 NodeGraphCanvas::NodeGraphCanvas(QWidget* parent) : QGraphicsView(parent) {
     scene_ = new QGraphicsScene(this);
@@ -127,7 +122,6 @@ NodeGraphCanvas::NodeGraphCanvas(QWidget* parent) : QGraphicsView(parent) {
     QObject::connect(this, &QGraphicsView::customContextMenuRequested, this,
                      [this](const QPoint& pos) { open_context_menu(pos); });
 
-    // Starter serial chain.
     add_node(0, "Balance", "Scene");
     add_node(1, "Contrast", "Scene");
     add_node(2, "Look", "Film");
@@ -178,12 +172,10 @@ QString node_kind_label(canvas::core::grade_graph::NodeKind kind) {
     return QStringLiteral("Node");
 }
 
-}  // namespace
+}
 
 void NodeGraphCanvas::load_graph(const canvas::core::grade_graph::GradeGraph& graph) {
     clear_nodes();
-    // The canvas is a serial-view scaffold (Milestone 0): nodes are laid out in
-    // tree order, which matches the phase-5 chains (lgg -> curves -> output).
     for (std::size_t i = 0; i < graph.num_nodes(); ++i) {
         const canvas::core::grade_graph::Node& n = graph.node(static_cast<int>(i));
         QString meta = QString::fromStdString(n.label);
@@ -195,10 +187,6 @@ void NodeGraphCanvas::load_graph(const canvas::core::grade_graph::GradeGraph& gr
         add_node(static_cast<int>(i), node_kind_label(n.kind), meta);
     }
     fit_to_content();
-    // Always-on node-canvas trace: which correctors the activated clip's tree
-    // actually carries. A bare "lgg -> out" (2 nodes) vs "lgg -> curves -> out"
-    // (3 nodes) read here is the fastest sanity check that a curves commit
-    // reached the graph at all.
     qWarning().nospace()
         << "[grade] node-canvas nodes=" << graph.num_nodes();
 }
@@ -271,7 +259,7 @@ void NodeGraphCanvas::delete_selected_nodes() {
         }
     }
     if (keep.size() == node_items_.size()) {
-        return;  // nothing was selected
+        return;
     }
     node_items_ = keep;
     for (int i = 0; i < node_items_.size(); ++i) {
@@ -300,7 +288,6 @@ void NodeGraphCanvas::mousePressEvent(QMouseEvent* event) {
         return;
     }
     if (event->button() == Qt::LeftButton) {
-        // Clicking a node bubbles index-> handler; clicking the canvas clears.
         NodeGraphItem* item = dynamic_cast<NodeGraphItem*>(itemAt(event->position().toPoint()));
         setFocus();
         if (item) {
@@ -354,4 +341,4 @@ void NodeGraphCanvas::fit_to_content() {
               Qt::KeepAspectRatio);
 }
 
-}  // namespace canvas::gui
+}

@@ -1,13 +1,3 @@
-// Phase 6b op-registry tests (core/grade_graph/op.hpp + op.cpp). Pins the
-// three duties of the registry that Phase 7 widens into the effect taxonomy:
-// pointwise dispatch parity with the colorsci laws (op_apply must be
-// byte-identical to the old evaluator inline switch), the OFX-style identity
-// fast-path (op_is_identity: exact-by-params for every current kind), and the
-// single round-trip name table (op_name/op_from_name with the forward-
-// compatible unknown->identity fallback). Also verifies the deprecated
-// `CorrectMode` alias keeps the pre-6b spelling compiling and identical.
-// Headless — links only canvas_core.
-
 #include "canvas/core/grade_graph/graph.hpp"
 #include "canvas/core/grade_graph/op.hpp"
 #include "canvas/core/grade_graph/serialize.hpp"
@@ -40,10 +30,7 @@ bool near(const colorsci::RGBF& a, const colorsci::RGBF& b) {
            a.b > b.b - kClose && a.b < b.b + kClose;
 }
 
-// ---- op_apply: parity with the colorsci laws ----------------------------------
-
 void test_apply_identity_passthrough() {
-    // CorrectMode::kIdentity is the default op slot of a fresh node.
     gg::Node n;
     const colorsci::RGBF in{0.2f, 0.6f, 0.9f};
     check(n.correct_mode == gg::OpKind::kIdentity, "fresh node defaults to identity op");
@@ -56,7 +43,7 @@ void test_apply_lgg_parity() {
     p.lift_b = -0.1f;
 
     gg::Node n;
-    n.correct_mode = gg::OpKind::kLgg;  // (OpKind canonical spelling)
+    n.correct_mode = gg::OpKind::kLgg;
     n.lgg = p;
 
     const colorsci::RGBF in{0.1f, 0.4f, 0.8f};
@@ -70,7 +57,7 @@ void test_apply_lgg_offset_parity() {
     lgg_p.gamma_master = 1.3f;
 
     gg::Node n;
-    n.correct_mode = gg::CorrectMode::kLgg;  // (deprecated alias still compiles)
+    n.correct_mode = gg::CorrectMode::kLgg;
     n.offset = off;
     n.lgg = lgg_p;
 
@@ -106,8 +93,6 @@ void test_apply_curves_parity() {
     check(near(gg::op_apply(n, in), colorsci::apply_curves(in, c)),
           "kCurves op_apply == colorsci::apply_curves");
 }
-
-// ---- op_is_identity: the OFX IsIdentity fast-path ------------------------------
 
 void test_is_identity_kinds() {
     gg::Node identity;
@@ -154,8 +139,6 @@ void test_is_identity_kinds() {
     check(!gg::op_is_identity(curves_default), "a control point kills identity");
 }
 
-// ---- op_name / op_from_name: the single round-trip table ------------------------
-
 void test_names() {
     const gg::OpKind kinds[] = {gg::OpKind::kIdentity, gg::OpKind::kLgg, gg::OpKind::kCdl,
                                 gg::OpKind::kCurves};
@@ -165,8 +148,6 @@ void test_names() {
         check(std::string(got) == expect[i], "op_name matches Phase 3 string");
         check(gg::op_from_name(got) == kinds[i], "op_from_name round-trips op_name");
     }
-    // Uniqueness: naming a different kind with the same string would silently
-    // corrupt project files.
     for (int i = 0; i < 4; ++i)
         for (int j = i + 1; j < 4; ++j)
             check(std::string(gg::op_name(kinds[i])) != gg::op_name(kinds[j]),
@@ -175,8 +156,6 @@ void test_names() {
           "unknown op string falls back to identity");
     check(gg::op_from_name("") == gg::OpKind::kIdentity, "empty op string falls back to identity");
 }
-
-// ---- serialization delegates to the registry ------------------------------------
 
 void test_serialize_delegates() {
     gg::GradeGraph g;
@@ -189,14 +168,13 @@ void test_serialize_delegates() {
     const gg::GradeGraph g2 = gg::grade_graph_from_json(j);
     check(g2.node(0).correct_mode == gg::OpKind::kCurves, "op slot survives round-trip");
 
-    // Tolerant load stays forward-compatible through op_from_name.
     nlohmann::json nodes = nlohmann::json::array();
     nodes.push_back(nlohmann::json{{"id", 0}, {"kind", "corrector"}, {"correct_mode", "ocr"}});
     const gg::GradeGraph gt = gg::grade_graph_from_json(nlohmann::json{{"nodes", nodes}});
     check(gt.node(0).correct_mode == gg::OpKind::kIdentity, "unknown op string loads as identity");
 }
 
-}  // namespace
+}
 
 int main() {
     test_apply_identity_passthrough();

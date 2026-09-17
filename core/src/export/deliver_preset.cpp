@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <sstream>
 
 namespace canvas::core {
@@ -16,25 +17,6 @@ std::string lower(std::string s) {
     return s;
 }
 
-std::string trim(std::string s) {
-    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
-    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
-    s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
-    return s;
-}
-
-const char* ffmpeg_suffix(EncoderBackend b) {
-    switch (b) {
-        case EncoderBackend::NVIDIA: return "_nvenc";
-        case EncoderBackend::AMD:    return "_vaapi";
-        case EncoderBackend::Intel:  return "_qsv";
-        case EncoderBackend::Auto:
-        case EncoderBackend::CPU:
-        default: return "";
-    }
-}
-
-// EncoderBackend -> FFmpeg hw device string; "" for CPU/Auto.
 const char* backend_device(EncoderBackend b) {
     switch (b) {
         case EncoderBackend::NVIDIA: return "cuda";
@@ -46,7 +28,7 @@ const char* backend_device(EncoderBackend b) {
     }
 }
 
-}  // namespace
+}
 
 std::string container_format_name(const std::string& format) {
     const std::string f = lower(format);
@@ -74,6 +56,42 @@ std::string container_format_name(const std::string& format) {
     return f;
 }
 
+bool scope_is_still(const RenderScope scope) noexcept {
+    return scope == RenderScope::Still;
+}
+
+bool scope_is_sequence(const RenderScope scope) noexcept {
+    return scope == RenderScope::FrameSequence;
+}
+
+bool scope_is_image(const RenderScope scope) noexcept {
+    return scope_is_still(scope) || scope_is_sequence(scope);
+}
+
+namespace {
+
+std::string image_stem(const std::string& base) {
+    const std::size_t slash = base.find_last_of("/\\");
+    const std::size_t dot = base.find_last_of('.');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+        return base.substr(0, dot);
+    return base;
+}
+
+}
+
+std::string still_output_path(const std::string& base) {
+    return image_stem(base) + ".png";
+}
+
+std::string sequence_output_path(const std::string& base, const int64_t frame_index) {
+    char buf[32];
+    const long long idx = frame_index < 1 ? 1 : static_cast<long long>(frame_index);
+    std::snprintf(buf, sizeof(buf), "%05lld", idx);
+    return image_stem(base) + "_" + buf + ".png";
+}
+
+
 VideoCodec video_codec_from_string(const std::string& codec) {
     const std::string c = lower(codec);
     std::string compact;
@@ -98,9 +116,6 @@ std::string video_encoder_name(VideoCodec codec, EncoderBackend backend,
                                const std::string& container_format, bool* sw_fallback) {
     if (sw_fallback) *sw_fallback = false;
 
-    // Strict GPU pin: a hardware backend naming a DIFFERENT GPU than the pinned
-    // one is demoted to software here, so "AMD pinned + H.264 → NVIDIA" becomes
-    // a CPU encode instead of silently opening the CUDA device.
     const std::string& pg = HwDeviceManager::preferred_gpu_backend();
     if (!pg.empty()) {
         const std::string mine = backend_device(backend);
@@ -116,7 +131,6 @@ std::string video_encoder_name(VideoCodec codec, EncoderBackend backend,
             if (backend == EncoderBackend::AMD) return "h264_vaapi";
             if (backend == EncoderBackend::Intel) return "h264_qsv";
             if (backend == EncoderBackend::Auto) {
-                // CPU-safe default; the GUI can probe and pass NVIDIA explicitly.
                 if (sw_fallback) *sw_fallback = true;
                 return "libx264";
             }
@@ -155,7 +169,6 @@ std::string video_encoder_name(VideoCodec codec, EncoderBackend backend,
             return "jpeg2000";
         }
         case VideoCodec::Uncompressed: {
-            // Raw uyvy/rgb in a container; fall back to a lossless-ish path.
             const std::string c = lower(container_format);
             if (c == "mov") return "rawvideo";
             if (sw_fallback) *sw_fallback = true;
@@ -181,27 +194,18 @@ ExportSettings to_export_settings(const DeliverSettings& ds) {
     es.audio_channels = ds.audio.channels;
     es.remove_audio = !ds.audio.export_audio;
 
-    // Width/height/fps from the resolution choice (the GUI resolves before
-    // calling; defaults here are a fallback).
     es.width = ds.video.custom_width;
     es.height = ds.video.custom_height;
     es.fps = ds.video.custom_fps;
 
-    // Encoder selection.
     bool sw_fallback = false;
     VideoCodec vc = video_codec_from_string(ds.video.codec);
     EncoderBackend backend = ds.video.encoder;
     if (backend == EncoderBackend::Auto) {
-        // Prefer a hardware encoder when the codec supports one on this machine;
-        // the GUI passes the resolved backend after probing, CPU here.
         backend = EncoderBackend::CPU;
     }
     es.video_codec = video_encoder_name(vc, backend, es.format, &sw_fallback);
 
-    // Preset names are codec-specific. x264/x265 and the hardware families
-    // (nvenc/qsv/vaapi/amf) share x264-style speed names, and the exporter maps
-    // them per-family via nv_preset_for(); forward verbatim. ProRes/FFV1/JPEG
-    // 2000/rawvideo reject them outright, so skip the preset there.
     const std::string& encn = es.video_codec;
     const bool has_preset = encn.find("x264") != std::string::npos ||
                             encn.find("x265") != std::string::npos ||
@@ -212,18 +216,17 @@ ExportSettings to_export_settings(const DeliverSettings& ds) {
                             encn.find("av1") != std::string::npos ||
                             encn.find("svt") != std::string::npos;
     es.preset = has_preset ? lower(ds.video.preset) : "";
-    es.threads = ds.advanced.threads;  // 0 = FFmpeg auto (all cores, default)
+    es.threads = ds.advanced.threads;
 
-    // Rate control mapping.
     switch (ds.video.rate_control) {
         case RateControl::ConstantQP:
             es.crf = ds.video.quality;
-            es.video_bitrate_kbps = 0;  // quality-driven: never force a bitrate
+            es.video_bitrate_kbps = 0;
             es.vid_rc_mode = "constqp";
             break;
         case RateControl::VBRQuality:
             es.crf = ds.video.quality;
-            es.video_bitrate_kbps = 0;  // quality-driven (crf-based)
+            es.video_bitrate_kbps = 0;
             es.vid_rc_mode = "constqp";
             break;
         case RateControl::VBRTargetKbps:
@@ -237,37 +240,22 @@ ExportSettings to_export_settings(const DeliverSettings& ds) {
             es.vid_rc_mode = "cbr";
             break;
     }
-    // Max bitrate ceiling (VBV buffer bound) applies to every bitrate-driven
-    // mode, constraining per-frame size so the stream lands near target; equal
-    // to the target (the UI default) it yields true CBR. Quality-driven modes
-    // ignore bitrate entirely.
     if (ds.video.rate_control == RateControl::VBRTargetKbps ||
         ds.video.rate_control == RateControl::ConstantBitrate)
         es.video_max_bitrate_kbps = ds.video.max_bitrate_kbps;
 
-    // Tuning/quality knobs pushed through as extra options for encoders that
-    // expose them (unknown opts are ignored by libav).
     std::ostringstream extra;
-    // aq-strength always emitted (0 included) so the exporter's default-8 AQ
-    // base can be pushed all the way down to off from the panel.
     extra << "aq-strength=" << ds.video.aq_strength << "\n";
     if (ds.video.lookahead_frames > 0)
         extra << "rc-lookahead=" << ds.video.lookahead_frames << "\n";
     if (ds.video.enable_b_frames()) {
-        // Send `b_adapt=1`, NOT `bf=N`: the frame pipeline feeds display order
-        // with max_b_frames=0, and pushing bf=2 makes NVENC fail with "invalid
-        // param (8)". b_adapt is a no-op without B-frames.
         extra << "b_adapt=1\n";
     }
     if (ds.video.two_pass) {
-        // libvpx-style 2-pass uses pass=1/2; x264 uses x264opts. Keep minimal.
         extra << "flags=+pass2\n";
     }
     if (ds.video.tuning == EncoderTuning::Lossless)
         extra << "lossless=1\n";
-    // Not emitted: NVENC `tune=uhq` rejects the config through FFmpeg's option
-    // surface ("InitializeEncoder failed: invalid param"). Speed-preset parity
-    // (faster->p2) is what reproduces the reference render throughput.
     extra << ds.advanced.extra_options;
     es.extra = extra.str();
 
@@ -291,4 +279,4 @@ std::vector<std::string> deliver_encoders() {
     return {"Auto", "CPU", "NVIDIA", "AMD", "Intel"};
 }
 
-}  // namespace canvas::core
+}

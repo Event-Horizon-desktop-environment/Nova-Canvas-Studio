@@ -1,15 +1,3 @@
-// Headless integration test (Phase 19): SonicSync + AudioPipeline together,
-// encoding the MLT "audio rides with its frame" invariant.
-//
-// The scenario this guards: a seek-while-playing. The worker begins decoding the
-// (slow) target frame with the picture frozen; SonicSync engages a hold that
-// must gate OFF the per-frame audio feed, else new-position audio would stream
-// ahead of the frozen picture. Only after the target frame is presented
-// (end_seek_hold) may the feed resume, re-anchoring audio to its frame.
-//
-// Drives the in-memory FakeAudioSink so no sound device is needed. Compiles
-// sonicsync.cpp + audio_pipeline.cpp directly (Qt-free seam enforced by build).
-
 #include "features/playback/audio_pipeline.hpp"
 #include "features/playback/audio_sink.hpp"
 #include "features/playback/sonicsync.hpp"
@@ -33,7 +21,7 @@ namespace {
 constexpr int kRate = 48000;
 constexpr int kChannels = 2;
 constexpr double kFps = 30.0;
-constexpr int kPerFrame = 1600;  // llround(48k / 30)
+constexpr int kPerFrame = 1600;
 constexpr int64_t kPrerollFrames = 3360;
 
 constexpr double kTau = 6.2831853071795865;
@@ -131,7 +119,7 @@ void check(bool cond, const char* what) {
     }
 }
 
-}  // namespace
+}
 
 int main() {
     const char* wav = "/tmp/canvas_av_reanchor_test.wav";
@@ -140,44 +128,34 @@ int main() {
         return 1;
     }
 
-    // --- Steady feed baseline: audio flows while playing ---
     Harness h;
     const uint64_t baseline = h.sink.written_total_;
     check(baseline == static_cast<uint64_t>(kPrerollFrames), "baseline: preroll wrote the lead");
-    // seq 10 is well past the ~70ms(≈seq 2) preroll window, so the feed must
-    // actually write audio there rather than being suppressed by the watermark.
-    h.pipe.play_step(10, 1.0 / kFps, false);  // seek_hold INACTIVE
+    h.pipe.play_step(10, 1.0 / kFps, false);
     const uint64_t after_steady = h.sink.written_total_;
     check(after_steady > baseline, "steady: feed advances while playing (hold inactive)");
 
-    // --- Seek while playing: held feed must NOT advance ---
-    h.pipe.rewind(30, true);  // re-anchor a fresh play run at seq 30
+    h.pipe.rewind(30, true);
     h.pipe.preroll(30, 70, true);
-    const uint64_t seek_anchor = h.sink.written_total_;
 
-    // Begin the seek-hold for the target the worker is about to decode.
     h.sync.begin_seek_hold(90);
     check(h.sync.seek_hold_active(), "seek: hold engages on begin_seek_hold");
     check(h.sync.pending_reanchor(), "seek: re-anchor flagged");
 
-    // While the hold is active the feed is suppressed, even if called.
     const uint64_t before = h.sink.written_total_;
     h.pipe.play_step(90, 1.0 / kFps, h.sync.seek_hold_active());
     h.pipe.play_step(91, 1.0 / kFps, h.sync.seek_hold_active());
     check(h.sink.written_total_ == before, "seek: per-frame feed suppressed while hold active");
 
-    // Presenting the target frame releases the hold and clears the re-anchor.
     h.sync.end_seek_hold();
     check(!h.sync.seek_hold_active(), "seek: hold released on end_seek_hold");
     check(!h.sync.pending_reanchor(), "seek: re-anchor cleared on release");
 
-    // Feed resumes now that audio may ride with its (presented) frame.
     const uint64_t resume_anchor = h.sink.written_total_;
     h.pipe.play_step(90, 1.0 / kFps, h.sync.seek_hold_active());
     check(h.sink.written_total_ > resume_anchor,
           "seek: feed resumes after release (audio re-anchored to its frame)");
 
-    // --- Paused seek: re-anchor flagged but no feed suppression ---
     Harness h2;
     h2.sync.on_seek_paused(120);
     check(!h2.sync.seek_hold_active(), "paused: no hold (audio irrelevant while paused)");

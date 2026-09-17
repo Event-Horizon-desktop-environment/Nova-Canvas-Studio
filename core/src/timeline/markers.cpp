@@ -16,4 +16,4 @@ std::vector<Chapter> chapters_from(const Sequence& seq) {
     return out;
 }
 
-}  // namespace canvas::core::markers
+}

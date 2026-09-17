@@ -1,16 +1,3 @@
-// Phase 1 (E2) 3-point editing tests. Pins the source-window → clip geometry
-// law (timeline/three_point.hpp) and the two placement teeth that make a
-// 3-point edit meaningful:
-//  - INSERT ripples: content at/after the in-point shifts right by the source
-//    window's duration, and a clip straddling the in-point is SPLIT (nothing is
-//    silently covered);
-//  - OVERWRITE replaces the overlapped span and splits the neighbour, shifting
-//    nothing else;
-//  - both honour the time-based duration law (src span * seq.fps / media.fps);
-//  - linked A/V variants do both tracks together;
-//  - every placement is one undoable command.
-// Headless — links only canvas_core.
-
 #include "canvas/core/timeline/edit_ops.hpp"
 #include "canvas/core/timeline/model.hpp"
 #include "canvas/core/timeline/three_point.hpp"
@@ -182,7 +169,7 @@ void test_linked_insert() {
           "linked undo restores both tracks");
 }
 
-}  // namespace
+}
 
 int main() {
     test_duration_law();

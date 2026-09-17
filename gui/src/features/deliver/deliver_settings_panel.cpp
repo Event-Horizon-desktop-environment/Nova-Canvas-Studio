@@ -82,9 +82,6 @@ QScrollArea* make_scroll(QWidget* content) {
     return sa;
 }
 
-// A grouped settings section: a recessed semi-rounded card with a small caps
-// header, appended to the given page layout. Returns the card's inner layout
-// for the caller to fill with rows.
 QVBoxLayout* make_section(const QString& title, QVBoxLayout* page) {
     auto* card = new QWidget;
     apply_theme_style(card, [] {
@@ -156,7 +153,7 @@ QString footer_band_style() {
         .arg(css(t.surface_raised), css(t.border_soft));
 }
 
-}  // namespace
+}
 
 DeliverSettingsPanel::DeliverSettingsPanel(QWidget* parent) : QWidget(parent) {
     build();
@@ -172,8 +169,6 @@ void DeliverSettingsPanel::build() {
         return QStringLiteral("QWidget{background:%1;}").arg(css(t.surface));
     });
 
-    // Header: preset + scope + file name/location. Raised card band with a
-    // hairline, matching the inspector / dock-title surfaces.
     auto* header = new QWidget(this);
     apply_theme_style(header, &header_band_style);
     auto* h = new QVBoxLayout(header);
@@ -211,8 +206,6 @@ void DeliverSettingsPanel::build() {
     apply_theme_style(loc_lbl, &muted_lbl_style);
     location_ = new QLineEdit(header);
     {
-        // Auto-detect the user's own Movies dir (falls back to the home dir when
-        // the platform has none registered). Never a hard-coded username.
         const QString movies = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
         location_->setText(movies.isEmpty() ? QDir::homePath() : movies);
     }
@@ -230,14 +223,13 @@ void DeliverSettingsPanel::build() {
     apply_theme_style(tabs_, &tabs_style);
     root->addWidget(tabs_, 1);
 
-    // ---------------- VIDEO TAB ----------------
     auto* video = new QWidget;
     auto* v = new QVBoxLayout(video);
     v->setContentsMargins(12, 10, 12, 10);
     v->setSpacing(8);
 
     export_video_ = (QCheckBox*)make_check(tr("Export Video"));
-    export_video_->setChecked(true);   // video exported by default
+    export_video_->setChecked(true);
 
     format_combo_ = new QComboBox;
     for (const auto& f : canvas::core::deliver_formats()) format_combo_->addItem(QString::fromStdString(f));
@@ -409,9 +401,6 @@ void DeliverSettingsPanel::build() {
         sec->addWidget(make_row(tr("Multi Encode"), multi_encode_combo_));
     }
 
-    // Bitrate fields are only meaningful for bitrate-driven modes (Constant
-    // Bitrate / VBR target). For quality modes they are hidden; for CBR only the
-    // single "Bit Rate" field is shown (target == max raised here).
     update_bitrate_visibility();
 
     lookahead_spin_ = new QSpinBox;
@@ -456,14 +445,13 @@ void DeliverSettingsPanel::build() {
     v->addStretch(1);
     tabs_->addTab(make_scroll(video), tr("Video"));
 
-    // ---------------- AUDIO TAB ----------------
     auto* audio = new QWidget;
     auto* au = new QVBoxLayout(audio);
     au->setContentsMargins(12, 10, 12, 10);
     au->setSpacing(8);
 
     export_audio_ = (QCheckBox*)make_check(tr("Export Audio"));
-    export_audio_->setChecked(true);   // audio exported by default
+    export_audio_->setChecked(true);
 
     audio_codec_combo_ = new QComboBox;
     for (const auto& c : canvas::core::deliver_audio_codecs()) audio_codec_combo_->addItem(QString::fromStdString(c));
@@ -495,7 +483,6 @@ void DeliverSettingsPanel::build() {
     au->addStretch(1);
     tabs_->addTab(make_scroll(audio), tr("Audio"));
 
-    // ---------------- FILE / ADVANCED TAB ----------------
     auto* file = new QWidget;
     auto* f = new QVBoxLayout(file);
     f->setContentsMargins(12, 10, 12, 10);
@@ -576,15 +563,13 @@ void DeliverSettingsPanel::build() {
     f->addStretch(1);
     tabs_->addTab(make_scroll(file), tr("File"));
 
-    // Confine codec/audio-codec choices to what the current container supports
-    // (format-dependent), so users can't create jobs the muxer rejects.
     rebuild_codec_list();
 }
 
 void DeliverSettingsPanel::set_encoder_key(const QString& key) {
     if (!encoder_combo_) return;
     const int idx = encoder_combo_->findData(key);
-    encoder_combo_->setCurrentIndex(idx >= 0 ? idx : 0);  // 0 == Auto
+    encoder_combo_->setCurrentIndex(idx >= 0 ? idx : 0);
 }
 
 void DeliverSettingsPanel::rebuild_encoder_list() {
@@ -594,17 +579,11 @@ void DeliverSettingsPanel::rebuild_encoder_list() {
     for (const auto& e : deliver_model::available_encoder_backends())
         encoder_combo_->addItem(QString::fromStdString(e.label),
                                 QString::fromStdString(e.key));
-    // Restore the previous selection by its canonical key, not display text
-    // (labels now carry the vendor+encoder family, e.g. "AMD VAAPI").
     if (cur.isValid()) {
         const int idx = encoder_combo_->findData(cur);
         if (idx >= 0) encoder_combo_->setCurrentIndex(idx);
     }
 
-    // Strict GPU pin: only hardware backends naming the pinned GPU stay
-    // enabled. NVENC etc. are greyed out (exports on them would be demoted to
-    // software anyway, per video_encoder_name). Keys are the canonical names
-    // ("Auto"/"CPU"/"NVIDIA"/"AMD"/"Intel") carried as item data.
     const std::string& pin = canvas::core::HwDeviceManager::preferred_gpu_backend();
     for (int i = 0; i < encoder_combo_->count(); ++i) {
         const QString key = encoder_combo_->itemData(i).toString();
@@ -627,8 +606,6 @@ void DeliverSettingsPanel::rebuild_encoder_list() {
 
 namespace {
 
-// <Q...>-free combo populators over the deliver_model policy lists. Kept local
-// so the panel's Qt types never leak into the Qt-free module.
 template <typename Container>
 QStringList to_string_list(const Container& c) {
     QStringList out;
@@ -636,7 +613,7 @@ QStringList to_string_list(const Container& c) {
     return out;
 }
 
-}  // namespace
+}
 
 void DeliverSettingsPanel::rebuild_codec_list() {
     if (!format_combo_ || !codec_combo_) return;
@@ -663,8 +640,6 @@ void DeliverSettingsPanel::rebuild_codec_list() {
             audio_codec_combo_->setCurrentText(acs.first());
     }
 
-    // The codec list drives the encoder backend choices too (e.g. AV1 in WebM
-    // actually routes through libsvtav1/av1_nvenc); re-sync the encoder list.
     rebuild_encoder_list();
 }
 
@@ -678,7 +653,6 @@ void DeliverSettingsPanel::connect_all() {
                           pixel_aspect_combo_, data_levels_combo_, color_space_combo_, gamma_combo_,
                           data_burn_in_combo_, flat_pass_combo_, visionos_combo_})
         connect(cb, &QComboBox::currentIndexChanged, this, onChange);
-    // Switching rate-control mode reshows/relabels the bitrate fields.
     connect(rate_control_combo_, &QComboBox::currentIndexChanged, this,
             [this] { update_bitrate_visibility(); });
     for (QCheckBox* c : {export_video_, network_opt_, vertical_res_, export_alpha_, chapters_,
@@ -705,7 +679,6 @@ void DeliverSettingsPanel::connect_all() {
         if (!dir.isEmpty()) location_->setText(dir);
     });
 
-    // Changing the container format restricts the available codecs/audio codecs.
     connect(format_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this] { rebuild_codec_list(); emit settings_changed(); });
 }
@@ -715,8 +688,6 @@ void DeliverSettingsPanel::update_bitrate_visibility() {
     const deliver_model::BitrateVisibility v =
         deliver_model::bitrate_visibility(rate_control_combo_->currentIndex());
     if (rate_control_combo_->currentIndex() == 3) {
-        // Constant bitrate: keep the single "Bit Rate" field; its value is also
-        // the max (the two never diverge in CBR).
         max_bitrate_spin_->setValue(bitrate_spin_->value());
     }
     bitrate_label_->setText(tr(v.bitrate_label));
@@ -753,13 +724,11 @@ canvas::core::DeliverSettings DeliverSettingsPanel::settings() const {
     else if (res == tr("Custom")) { ds.video.custom_width = res_w_->value(); ds.video.custom_height = res_h_->value(); }
     ds.video.use_vertical_resolution = vertical_res_->isChecked();
 
-    // Frame rate: auto-detect from source media by default; a concrete value only
-    // applies when "Custom Frame Rate" is explicitly enabled.
     if (custom_fps_chk_->isChecked()) {
         ds.video.frame_rate = "Custom";
         ds.video.custom_fps = fps_spin_->value();
     } else {
-        ds.video.frame_rate = "Auto";  // resolved to the source media fps by the caller
+        ds.video.frame_rate = "Auto";
         ds.video.custom_fps = 0.0;
     }
 
@@ -866,14 +835,10 @@ void DeliverSettingsPanel::update_estimate() {
         switch (ds.video.rate_control) {
             case RC::ConstantBitrate:
             case RC::VBRTargetKbps:
-                // VBR-target maxes at target_bitrate; use it as the estimate.
                 video_kbps = ds.video.target_bitrate_kbps;
                 break;
             case RC::ConstantQP:
             case RC::VBRQuality: {
-                // No target bitrate in quality/CRF modes — guess from a rough
-                // bits-per-pixel-per-frame figure per codec. Estimating is an
-                // art; these land within ~40% for typical content.
                 double bpp = 0.10;
                 using VC = canvas::core::VideoCodec;
                 switch (canvas::core::video_codec_from_string(ds.video.codec)) {
@@ -885,8 +850,6 @@ void DeliverSettingsPanel::update_estimate() {
                     case VC::JPEG2000:   bpp = 0.35; break;
                     case VC::Uncompressed: bpp = 24.0; break;
                 }
-                // Effective resolution: parse "W x H" from the combo, else fall
-                // back to the custom width/height fields. Vertical mode swaps.
                 long w = ds.video.custom_width;
                 long h = ds.video.custom_height;
                 const std::string res = ds.video.resolution;
@@ -896,7 +859,6 @@ void DeliverSettingsPanel::update_estimate() {
                         w = std::stol(res.substr(0, x));
                         h = std::stol(res.substr(x + 1));
                     } catch (...) {
-                        // keep the custom fallback
                     }
                 }
                 if (ds.video.use_vertical_resolution) std::swap(w, h);
@@ -927,4 +889,4 @@ void DeliverSettingsPanel::update_estimate() {
         QStringLiteral("color:%1;font-size:11px;").arg(css(tokens().accent_text)));
 }
 
-}  // namespace canvas::gui
+}

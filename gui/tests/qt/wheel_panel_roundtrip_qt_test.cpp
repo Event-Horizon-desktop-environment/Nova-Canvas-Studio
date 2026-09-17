@@ -1,16 +1,3 @@
-// Qt widget test (color-grading-phases.md Phase 4): drives the REAL
-// ColorWheelsPanel handlers offscreen — a Lift-wheel drag through the actual
-// ColorWheelWidget press/move/release events and tone-row commits through the
-// shared row's QDoubleSpinBox fields — and proves the emitted WheelPanelState
-// lands in the clip's grade exactly like the Color page turns params_committed
-// into a set_clip_grade edit-op: panel law -> one-corrector LGG graph ->
-// clip.grade -> undo/redo -> JSON round-trip -> fresh panel.
-//
-// The headless mapping laws themselves are already pinned by wheels_ui_test;
-// this test's job is the seam: the widget EVENT path really reaches the law,
-// the commit really reaches the model through the edit-op/undo machinery, and
-// a reloaded panel keeps the committed params.
-
 #include "features/color/color_widgets.hpp"
 
 #include "canvas/core/grade_graph/graph.hpp"
@@ -59,10 +46,6 @@ bool lgg_near(const cs::LGG& a, const cs::LGG& b) {
            near(a.gain_g, b.gain_g) && near(a.gain_b, b.gain_b);
 }
 
-// Send a synthetic left-button press -> move -> release to the widget's real
-// event handlers. (The offscreen platform's synthetic cursor delivery can't be
-// trusted for pixel-exact drags, so we dispatch QMouseEvents directly — this
-// still exercises the exact press/move/release code the app runs.)
 void drag_to(QWidget* w, const QPointF& press, const QPointF& drop) {
     QMouseEvent press_ev(QEvent::MouseButtonPress, press, press, Qt::LeftButton,
                          Qt::LeftButton, Qt::NoModifier);
@@ -75,9 +58,6 @@ void drag_to(QWidget* w, const QPointF& press, const QPointF& drop) {
     QApplication::sendEvent(w, &release_ev);
 }
 
-// The one-corrector LGG graph the Color page builds from a committed panel
-// state (color_page.cpp make_lgg_graph): wheel terms ride as the Primaries LGG
-// node wired straight to the output.
 gg::GradeGraph make_lgg_graph(const cs::WheelPanelState& state) {
     gg::GradeGraph g;
     const int corr = g.add_node(gg::NodeKind::kCorrector);
@@ -89,8 +69,6 @@ gg::GradeGraph make_lgg_graph(const cs::WheelPanelState& state) {
     return g;
 }
 
-// Extract the corrector's applied LGG from a grade graph. Returns false if the
-// tree has no corrector with an LGG block.
 bool corrector_lgg(const gg::GradeGraph& g, cs::LGG& out) {
     for (std::size_t n = 0; n < g.num_nodes(); ++n) {
         if (g.node(n).kind != gg::NodeKind::kCorrector) continue;
@@ -101,12 +79,11 @@ bool corrector_lgg(const gg::GradeGraph& g, cs::LGG& out) {
     return false;
 }
 
-}  // namespace
+}
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
 
-    // One video clip, no media paths (nothing decodes in this test).
     canvas::core::Sequence seq;
     seq.audio_tracks.clear();
     seq.video_tracks.resize(1);
@@ -123,7 +100,7 @@ int main(int argc, char** argv) {
     ColorWheelsPanel panel;
     panel.resize(1024, 460);
     panel.show();
-    QApplication::processEvents();  // run layout so the wheels have real geometry
+    QApplication::processEvents();
 
     int commits = 0;
     int previews = 0;
@@ -135,12 +112,6 @@ int main(int argc, char** argv) {
     QObject::connect(&panel, &ColorWheelsPanel::reset_all_requested, &panel,
                      [&reset_alls] { ++reset_alls; });
 
-    // ── Wheel drag: Lift wheel, exactly "right on the hue ring" = red. The
-    //    committed LGG must carry the puck law: dx=0.8 -> radius 0.8 times the
-    //    lift colorist reach (0.20) -> lift {0.16, -0.08, -0.08}, master stays
-    //    at identity (0.5 slider -> 0).
-    //    (A full-radius drag at 0.8·r stays inside the disc, so
-    //    ColorWheelWidget::pos_to_xy returns the exact normalized 0.8.)
     const auto wheels = panel.findChildren<ColorWheelWidget*>();
     expect(static_cast<int>(wheels.size()) == 4, "panel holds four Primaries wheels");
     bool fatal_layout = false;
@@ -165,13 +136,6 @@ int main(int argc, char** argv) {
     expect(previews >= 1, "wheel drag previews during the drag");
     expect(commits == 1, "wheel release commits once");
     cs::WheelPanelState st = panel.state();
-    // The offscreen platform's mouse delivery can't be trusted for pixel-exact
-    // positions, so assert the puck law structurally: a rightward drag pulls
-    // red, dips green AND blue nearly symmetrically (hue ring), and the master
-    // stays at its identity mid. The exact panel->model mirror is asserted
-    // below against THIS committed state. The additive wheels run at their
-    // colorist reach (~0.20 max lift since the 2026-09-10 retune from 0.35), so
-    // a pull tracking the wheel delivers roughly 0.16 red and stays well under 1.
     expect(st.lgg.lift_r > 0.10f && st.lgg.lift_r <= cs::kLiftHi,
            "Lift wheel right-drag pulls red");
     expect(st.lgg.lift_g < -0.05f && st.lgg.lift_b < -0.05f,
@@ -180,7 +144,6 @@ int main(int argc, char** argv) {
            "green/blue dip stays hue-symmetric");
     expect(near(st.lgg.lift_master, 0.0f), "Lift master stays at identity");
 
-    // ── Tone-row edit through the real QDoubleSpinBox: Temp field.
     const auto boxes = panel.findChildren<QDoubleSpinBox*>();
     expect(static_cast<int>(boxes.size()) == 7, "one spin box per shared tone-row slot");
     if (boxes.size() == 7) {
@@ -190,7 +153,6 @@ int main(int argc, char** argv) {
         expect(near(panel.state().temp, 40.0f), "Temp lands in the panel state");
     }
 
-    // ── Blk/Offset spin box drives the Offset wheel's master in lock-step.
     if (boxes.size() == 7) {
         const int before = commits;
         boxes[static_cast<int>(cs::ToneParam::kBlackOffset)]->setValue(0.35);
@@ -202,7 +164,6 @@ int main(int argc, char** argv) {
 
     st = panel.state();
 
-    // ── Panel law -> one-corrector graph -> set_clip_grade -> clip.grade.
     const gg::GradeGraph g = make_lgg_graph(st);
     auto cmd = canvas::core::set_clip_grade(seq, canvas::core::Track::Kind::Video, 0, 1, g);
     expect(cmd != nullptr, "set_clip_grade accepts the committed panel grade");
@@ -217,7 +178,6 @@ int main(int argc, char** argv) {
     expect(corrector_lgg(graded.grade, out) && lgg_near(out, st.lgg),
            "clip.grade corrector carries exactly the panel LGG");
 
-    // ── Undo/redo through the UndoStack seam (record -> undo -> redo).
     canvas::core::UndoStack undo;
     undo.record(std::move(cmd));
     expect(undo.undo(seq), "undo reverts the grade");
@@ -225,7 +185,6 @@ int main(int argc, char** argv) {
     expect(undo.redo(seq), "redo re-applies the grade");
     expect(seq.video_tracks[0].clips[0].has_grade(), "grade restored after redo");
 
-    // ── Committed grade survives JSON and reloads into a fresh panel.
     const nlohmann::json j = gg::grade_graph_to_json(g);
     const gg::GradeGraph reloaded = gg::grade_graph_from_json(j);
     cs::LGG out2;
@@ -239,10 +198,6 @@ int main(int argc, char** argv) {
                near(st2.black_offset, st.black_offset),
            "fresh panel reload keeps the committed params");
 
-    // ── Return-to-center REVERTS (destructive): drag the Lift puck back onto
-    //    the disc center and release. A center release must revert the wheel
-    //    to identity — the committed lift_r≈0.8 drag above does NOT survive —
-    //    while untouched tone params keep their committed values.
     {
         ColorWheelWidget* lift = panel.findChildren<ColorWheelWidget*>()[0];
         const QPointF disc_c = lift->rect().center();
@@ -257,12 +212,11 @@ int main(int argc, char** argv) {
         expect(near(st.temp, 40.0f), "center release keeps other panel params");
     }
 
-    // ── Per-wheel reset button reverts that wheel to identity too.
     {
         ColorWheelWidget* lift = panel.findChildren<ColorWheelWidget*>()[0];
         const QPointF disc_c = lift->rect().center();
         const qreal r = (std::min(lift->width(), lift->height()) - 6.0) / 2.0;
-        drag_to(lift, disc_c, disc_c + QPointF(0.8 * r, 0.0));  // re-grade Lift
+        drag_to(lift, disc_c, disc_c + QPointF(0.8 * r, 0.0));
         expect(panel.state().lgg.lift_r > 0.15f, "Lift re-graded before reset");
         QToolButton* reset_btn = nullptr;
         for (QToolButton* b : panel.findChildren<QToolButton*>()) {
@@ -283,9 +237,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ── Reset-all defers to the page: it reverts the panel to identity but
-    //    does NOT commit through params_committed — the page owns the single
-    //    undo so it can clear the Curves panel too before writing the grade.
     {
         QToolButton* reset_all_btn = nullptr;
         for (QToolButton* b : panel.findChildren<QToolButton*>()) {

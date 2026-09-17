@@ -1,15 +1,3 @@
-// Visual transform + composite export regression test.
-//
-// Exercises render_video_frame() against a real synthesized h264 source to lock
-// the two guarantees of the transform/compositing blit:
-//   1. An identity clip renders byte-identically to the legacy fast path.
-//   2. Flip / scale / opacity actually change the exported pixels the way the
-//      inverse affine + blend math says they should.
-// The source MP4 is generated at runtime (moving gradient, libx264) so the test
-// has no external fixtures. SKIP (exit 2) when no libx264 is available.
-//
-// Pass: exit 0.  Fail: exit 1.  Skipped: exit 2.
-
 #include "canvas/core/export/renderer.hpp"
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/edit_ops.hpp"
@@ -41,8 +29,6 @@ static void report(bool ok, const char* what) {
     if (!ok) ++g_failures;
 }
 
-// Encodes `frames` of a moving gradient as h264 MP4, mirroring scrub_bench's
-// source generator (aspect 4:3-ish, small so decode is quick).
 static bool make_source(const std::string& path, int w, int h, int fps, int frames) {
     const AVCodec* codec = avcodec_find_encoder_by_name("libx264");
     if (!codec) {
@@ -68,7 +54,6 @@ static bool make_source(const std::string& path, int w, int h, int fps, int fram
     st->id = 0;
     if (avcodec_parameters_from_context(st->codecpar, enc) < 0) return false;
     {
-        // Ensure the output directory exists (the test has no fixture files).
         const std::string::size_type slash = path.find_last_of('/');
         if (slash != std::string::npos) {
             const std::string dir = path.substr(0, slash);
@@ -147,7 +132,7 @@ int main() {
     const std::string src = "/tmp/opencode/media/visual_render_src.mp4";
     if (!make_source(src, 64, 64, 30, 24)) {
         std::printf("SKIP  could not synthesize the h264 source (no libx264?)\n");
-        return 2;  // SKIP
+        return 2;
     }
 
     Project p = make_project(src);
@@ -162,25 +147,21 @@ int main() {
         return 1;
     }
 
-    // Identity render == legacy byte-exact output (referenced by
-    // render_video_frame's fast path, now guarded by has_visual_transform()).
-    VideoFramePtr ident = render_video_frame(p, 4, 64, 64, 0, nullptr);
+    VideoFramePtr ident = render_video_frame(p, 4, 64, 64, nullptr);
     report(ident != nullptr, "visual-export: identity render succeeds");
     if (!ident) return 1;
     report(g_failures == 0 || ident->rgba.size() == 64u * 64u * 4u,
            "visual-export: identity canvas sized");
-    // The decoded gradient is non-black (source content reached the canvas).
     bool non_black = false;
     for (const uint8_t c : ident->rgba)
         if (c != 0) { non_black = true; break; }
     report(non_black, "visual-export: identity frame carries decoded pixels");
 
-    // Flip horizontal: each pixel mirrors around the vertical centerline.
     const ClipId id = p.sequence.video_tracks[0].clips[0].id;
     cmd = set_clip_transform(p.sequence, Track::Kind::Video, 0, id,
                              1.0f, 1.0f, 0.0, 0.0, 0.0f, 0.0, 0.0, true, false);
     report(cmd != nullptr, "visual-export: set flip transform");
-    VideoFramePtr flipped = render_video_frame(p, 4, 64, 64, 0, nullptr);
+    VideoFramePtr flipped = render_video_frame(p, 4, 64, 64, nullptr);
     report(flipped != nullptr, "visual-export: flipped render succeeds");
     if (flipped) {
         bool mirror = true;
@@ -188,23 +169,19 @@ int main() {
             for (int x = 0; x < 64; ++x)
                 if (std::memcmp(px(flipped, x, y), px(ident, 63 - x, y), 3) != 0) mirror = false;
         report(mirror, "visual-export: flip_h mirrors the pixels exactly");
-        // Now clear the flip to restore identity for the next checks.
         cmd = set_clip_transform(p.sequence, Track::Kind::Video, 0, id,
                                  1.0f, 1.0f, 0.0, 0.0, 0.0f, 0.0, 0.0, false, false);
         report(cmd != nullptr, "visual-export: reset transform");
     }
 
-    // Zoom OUT to 0.5 about the fitted centre: scale multiplies the content's
-    // footprint, so a half-scale clip no longer reaches the canvas border (it
-    // turns black) while the centre still samples source content.
     cmd = set_clip_transform(p.sequence, Track::Kind::Video, 0, id,
                              0.5f, 0.5f, 0.0, 0.0, 0.0f, 0.0, 0.0, false, false);
     report(cmd != nullptr, "visual-export: set scale 0.5");
-    VideoFramePtr scaled = render_video_frame(p, 4, 64, 64, 0, nullptr);
+    VideoFramePtr scaled = render_video_frame(p, 4, 64, 64, nullptr);
     report(scaled != nullptr, "visual-export: scaled render succeeds");
     if (scaled) {
         const double center = 32.0;
-        const double half = 32.0 * 0.5;  // base half-extent * scale -> 16px
+        const double half = 32.0 * 0.5;
         double in_r = 0, in_g = 0, in_b = 0, out_r = 0, out_g = 0, out_b = 0;
         for (int y = 0; y < 64; ++y) {
             for (int x = 0; x < 64; ++x) {
@@ -227,12 +204,11 @@ int main() {
                "visual-export: scaled 0.5 keeps the center lit");
     }
 
-    // Opacity 0.5 over the black background darkens each channel to ~half.
     cmd = set_clip_transform(p.sequence, Track::Kind::Video, 0, id,
                              1.0f, 1.0f, 0.0, 0.0, 0.0f, 0.0, 0.0, false, false);
     cmd = set_clip_composite(p.sequence, Track::Kind::Video, 0, id, 0.5f, BlendMode::Normal);
     report(cmd != nullptr, "visual-export: set opacity 0.5");
-    VideoFramePtr half = render_video_frame(p, 4, 64, 64, 0, nullptr);
+    VideoFramePtr half = render_video_frame(p, 4, 64, 64, nullptr);
     report(half != nullptr, "visual-export: half-opacity render succeeds");
     if (half) {
         bool darkens = true;

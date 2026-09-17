@@ -1,8 +1,3 @@
-// Phase 1 tests for the primary-grade math law (colorsci/wheels.hpp + cdl.hpp).
-// Verifies identity-at-defaults, the specified curve shapes, the luma-
-// preservation invariants that keep sat/boost/hue/lum-mix self-consistent, and
-// the closed-form LGG<->CDL conversion. Headless — links only canvas_core.
-
 #include "canvas/core/colorsci/cdl.hpp"
 #include "canvas/core/colorsci/wheels.hpp"
 
@@ -41,11 +36,9 @@ float chroma_mag(const cs::RGBF& c) {
 }
 
 void test_lgg() {
-    // Identity at defaults.
     const cs::RGBF v{0.11f, 0.71f, 0.23f};
     check(rgb_near(cs::apply_lgg(v, {}), v), "lgg identity at defaults");
 
-    // With gain=gamma=1 the law is out = in + lift*(1 - in): y(0)=lift, y(1)=1.
     cs::LGG lift_only;
     lift_only.lift_master = 0.4f;
     const cs::RGBF out_lift = cs::apply_lgg({0.0f, 0.0f, 0.0f}, lift_only);
@@ -53,19 +46,16 @@ void test_lgg() {
     check(near(cs::apply_lgg({1.0f, 1.0f, 1.0f}, lift_only).r, 1.0f),
           "lgg lift tapers to no effect at white");
 
-    // Gain scales the whole signal: y(1) = gain.
     cs::LGG gain_only;
     gain_only.gain_master = 1.5f;
     const cs::RGBF out_gain = cs::apply_lgg({1.0f, 1.0f, 1.0f}, gain_only);
     check(near(out_gain.g, 1.5f), "lgg gain scales white");
 
-    // Gamma reshapes midtones: with gain=lift=0, out = in^(1/gamma).
     cs::LGG gamma_only;
-    gamma_only.gamma_master = 2.0f;  // sqrt curve
+    gamma_only.gamma_master = 2.0f;
     const cs::RGBF out_gamma = cs::apply_lgg({0.25f, 0.25f, 0.25f}, gamma_only);
     check(near(out_gamma.r, 0.5f), "lgg gamma 2.0 -> sqrt curve at 0.25");
 
-    // Strong negative lift must clamp the pow base, never produce NaN.
     cs::LGG neg_lift;
     neg_lift.lift_master = -3.0f;
     const cs::RGBF out_neg = cs::apply_lgg(v, neg_lift);
@@ -73,7 +63,6 @@ void test_lgg() {
                         std::isfinite(out_neg.b);
     check(finite && out_neg.r >= 0.0f && out_neg.r <= 1.0f, "lgg negative lift clamped, no NaN");
 
-    // Per-channel offset biases only that channel's curve outcome.
     cs::LGG channel;
     channel.gamma_master = 1.0f;
     channel.gain_master = 1.0f;
@@ -93,7 +82,6 @@ void test_offset_contrast() {
           "offset adds uniformly (moves black AND white)");
     check(rgb_near(cs::apply_offset(v, {}), v), "offset identity at defaults");
 
-    // Contrast pivots around the fixed point; pivot is unmoved, extremes widen.
     const cs::RGBF at_pivot = cs::apply_contrast_pivot({0.435f, 0.435f, 0.435f}, 2.5f, 0.435f);
     check(near(at_pivot.r, 0.435f), "contrast keeps the pivot fixed");
     const cs::RGBF widen = cs::apply_contrast_pivot({0.3f, 0.3f, 0.3f}, 2.0f, 0.435f);
@@ -120,8 +108,6 @@ void test_hue_rotate() {
 
     check(rgb_near(cs::apply_hue_rotate(v, 0.0f), v), "hue rotate 0 is identity");
 
-    // Luma invariance across angles is the invariant that makes the rotate
-    // chroma-vector law stable (weighted R- and B-gain chroma, G derived).
     for (float deg = -135.0f; deg <= 135.0f; deg += 15.0f) {
         const cs::RGBF r = cs::apply_hue_rotate(v, deg);
         check(near(cs::luma(r), cs::luma(v)),
@@ -131,15 +117,14 @@ void test_hue_rotate() {
     const cs::RGBF full = cs::apply_hue_rotate(v, 360.0f);
     check(rgb_near(full, v), "hue rotate 360 returns to identity");
 
-    // A pure chroma vector rotates through the hue ring, then back.
     const cs::RGBF test{1.0f, 0.1f, 0.1f};
     const cs::RGBF rt = cs::apply_hue_rotate(cs::apply_hue_rotate(test, 90.0f), -90.0f);
     check(rgb_near(rt, test), "hue rotate round-trips (positive then negative)");
 }
 
 void test_color_boost_zoned() {
-    const cs::RGBF lowsat{0.49f, 0.50f, 0.52f};  // chroma ~0.03
-    const cs::RGBF highsat{1.0f, 0.0f, 0.0f};    // chroma = 1
+    const cs::RGBF lowsat{0.49f, 0.50f, 0.52f};
+    const cs::RGBF highsat{1.0f, 0.0f, 0.0f};
 
     check(rgb_near(cs::apply_color_boost(lowsat, 0.0f), lowsat), "color boost 0 is identity");
     check(near(chroma_mag(cs::apply_color_boost(highsat, 1.0f)), chroma_mag(highsat)),
@@ -147,18 +132,15 @@ void test_color_boost_zoned() {
     const float dlowsat = chroma_mag(cs::apply_color_boost(lowsat, 1.0f)) - chroma_mag(lowsat);
     check(dlowsat > 1e-3f, "color boost lifts low-saturation chroma");
 
-    const cs::RGBF dark{0.02f, 0.05f, 0.03f};   // low luma WITH chroma
-    const cs::RGBF bright{0.98f, 0.9f, 0.94f};  // high luma WITH chroma
+    const cs::RGBF dark{0.02f, 0.05f, 0.03f};
+    const cs::RGBF bright{0.98f, 0.9f, 0.94f};
     const auto zone_sat = [](const cs::RGBF& p, float shadow, float highlight) {
         return cs::apply_saturation_zoned(p, 1.0f, shadow, highlight);
     };
-    // Near-black sits in the shadow zone: the shadow term moves it, the
-    // highlight term does not.
     check(chroma_mag(zone_sat(dark, 1.0f, 0.0f)) - chroma_mag(dark) > 1e-3f,
           "shadows term desaturates near-black pixels");
     check(near(chroma_mag(zone_sat(dark, 0.0f, 1.0f)) - chroma_mag(dark), 0.0f),
           "highlight term leaves near-black pixels alone");
-    // Near-white is the mirror image.
     check(near(chroma_mag(zone_sat(bright, 1.0f, 0.0f)) - chroma_mag(bright), 0.0f),
           "shadow term leaves near-white pixels alone");
     check(chroma_mag(zone_sat(bright, 0.0f, -1.0f)) - chroma_mag(bright) < -1e-3f,
@@ -168,14 +150,12 @@ void test_color_boost_zoned() {
 
 void test_lum_mix() {
     const cs::RGBF original{0.15f, 0.45f, 0.75f};
-    // A pure saturation correction: luma unchanged, chroma doubled.
     const cs::RGBF corrected = cs::apply_saturation(original, 2.0f);
 
     check(rgb_near(cs::apply_lum_mix(corrected, original, 1.0f), corrected),
           "lum mix 1 keeps the full correction");
     check(rgb_near(cs::apply_lum_mix(corrected, original, 0.0f), original),
           "lum mix 0 of a saturation-only correction is a no-op");
-    // A luminance-only correction survives even at lum mix 0.
     const cs::RGBF brightened = cs::apply_contrast_pivot(original, 1.4f, 0.435f);
     const cs::RGBF only_luma = cs::apply_lum_mix(brightened, original, 0.0f);
     check(near(cs::luma(only_luma), cs::luma(brightened)), "lum mix 0 keeps corrected luma");
@@ -233,7 +213,6 @@ void test_cdl() {
 }
 
 void test_lgg_cdl_conversion() {
-    // lift == 0: closed form, and the two models evaluate identically.
     cs::LGG l;
     l.gain_master = 1.35f;
     l.gamma_master = 1.8f;
@@ -248,15 +227,11 @@ void test_lgg_cdl_conversion() {
               "lgg==cdl at lift 0 agrees across the range");
     }
 
-    // Non-zero lift: conversion reports inexact rather than approximating.
     l.lift_master = 0.2f;
     check(!cs::cdl_from_lgg(l).exact, "cdl_from_lgg flags inexact when lift != 0");
 }
 
 void test_preview_path_smoke() {
-    // The wheel set applied top-to-bottom on a synthetic pixel: offset before
-    // LGG, then contrast/pivot, then saturation, then hue, boost, lum mix so
-    // the full Phase-1 chain terminates finite on white and black.
     cs::LGG w;
     w.lift_master = 0.05f;
     w.gamma_master = 1.1f;
@@ -282,7 +257,7 @@ void test_preview_path_smoke() {
     check(mix.r > 0.0f && mix.b < 1.0f, "full wheel chain changes the pixel");
 }
 
-}  // namespace
+}
 
 int main() {
     test_lgg();

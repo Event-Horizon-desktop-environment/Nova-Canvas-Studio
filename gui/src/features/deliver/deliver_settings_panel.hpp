@@ -15,23 +15,16 @@ class QLabel;
 
 namespace canvas::gui {
 
-// Left-hand render settings panel for the Deliver page. Builds
-// controls over canvas::core::DeliverSettings and emits readiness changes. The
-// caller reads settings() after any change to build an export job.
 class DeliverSettingsPanel : public QWidget {
     Q_OBJECT
 
 public:
     explicit DeliverSettingsPanel(QWidget* parent = nullptr);
 
-    // Current settings, reflecting all the widgets.
     canvas::core::DeliverSettings settings() const;
 
-    // Sets the controls from a settings struct (e.g. loading a preset).
     void set_settings(const canvas::core::DeliverSettings& ds);
 
-    // Feeds the timeline length so the file-size estimate has a duration and
-    // a frame-rate to derive CRF-bitrate guesses from.
     void set_timeline_length(double duration_seconds, double timeline_fps);
 
 signals:
@@ -44,16 +37,8 @@ private:
     void rebuild_encoder_list();
     void rebuild_codec_list();
     void connect_all();
-    // Selects the Encoder combo's item whose canonical key matches `key`
-    // ("Auto"/"CPU"/"NVIDIA"/"AMD"/"Intel"), falling back to Auto when the
-    // backend is not present in the (detection-filtered) list.
     void set_encoder_key(const QString& key);
-    // Show/hide + relabel the bitrate controls to match the selected rate
-    // control mode (CBR -> one "Bit Rate" field; VBR target -> +Max; quality -> none).
     void update_bitrate_visibility();
-    // Recomputes the "Estimated File Size" footer label from the current
-    // settings + timeline length (CBR/VBR-target use the chosen bitrate;
-    // quality/CRF modes use a per-codec bits/pixel heuristic).
     void update_estimate();
 
     QTabWidget* tabs_ = nullptr;
@@ -63,7 +48,6 @@ private:
     QLineEdit* location_ = nullptr;
     QPushButton* location_browse_ = nullptr;
 
-    // Video tab
     QCheckBox* export_video_ = nullptr;
     QComboBox* format_combo_ = nullptr;
     QComboBox* codec_combo_ = nullptr;
@@ -102,14 +86,12 @@ private:
     QCheckBox* temporal_filt_ = nullptr;
     QCheckBox* uni_b_ = nullptr;
 
-    // Audio tab
     QCheckBox* export_audio_ = nullptr;
     QComboBox* audio_codec_combo_ = nullptr;
     QSpinBox* audio_bitrate_ = nullptr;
     QComboBox* audio_rate_combo_ = nullptr;
     QComboBox* audio_channels_combo_ = nullptr;
 
-    // File tab
     QComboBox* pixel_aspect_combo_ = nullptr;
     QComboBox* data_levels_combo_ = nullptr;
     QCheckBox* retain_sub_black_ = nullptr;
@@ -130,4 +112,4 @@ private:
     bool building_ = false;
 };
 
-}  // namespace canvas::gui
+}

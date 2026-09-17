@@ -1,16 +1,3 @@
-// Phase 1 (E6) track-shape edit tests: insert / remove / rename / reorder, each
-// one undoable step backed by TrackListCommand (whole-kind snapshots), because
-// track indices shift and EditCommand cannot express a track-list change.
-// Pins:
-//  - insert at head/middle/tail (+ undo/redo), invalid index rejected;
-//  - remove (clips die with the track, undo restores them), the last track of a
-//    kind is protected, invalid index rejected;
-//  - rename (+ undo), invalid index rejected, same-name no-op;
-//  - move reorder both directions, clips move with the track, undo/redo,
-//    from==to / invalid rejected;
-//  - video and audio kinds are independent.
-// Headless — links only canvas_core.
-
 #include "canvas/core/timeline/edit_ops.hpp"
 #include "canvas/core/timeline/model.hpp"
 
@@ -95,7 +82,6 @@ void test_insert() {
 
 void test_remove() {
     Sequence s = three_video_tracks();
-    // V2 (index 1) carries media 22.
     auto cmd = remove_track(s, Track::Kind::Video, 1);
     check(cmd != nullptr, "remove middle -> command");
     check(s.video_tracks.size() == 2, "remove shrinks count");
@@ -151,7 +137,6 @@ void test_move() {
     check(cmd != nullptr, "move 0->2 command");
     check(names(s.video_tracks) == std::vector<std::string>({"V2", "V3", "V1"}),
           "move 0->2 reorders");
-    // V1 carried media 11; it must now be the last track.
     check(s.video_tracks[2].clips.size() == 1 && s.video_tracks[2].clips[0].media == 11,
           "clips move with the track");
 
@@ -170,7 +155,6 @@ void test_move() {
     check(move_track(s, Track::Kind::Video, 1, 1) == nullptr, "move from==to rejected");
     check(move_track(s, Track::Kind::Video, 0, 9) == nullptr, "move invalid target rejected");
 
-    // Audio and video kinds are independent.
     auto am = move_track(s, Track::Kind::Audio, 0, 1);
     check(am != nullptr && names(s.audio_tracks) == std::vector<std::string>({"A2", "A1"}),
           "audio move independent of video");
@@ -178,7 +162,7 @@ void test_move() {
           "video order untouched by audio move");
 }
 
-}  // namespace
+}
 
 int main() {
     test_insert();

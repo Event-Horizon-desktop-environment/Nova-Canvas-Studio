@@ -1,9 +1,3 @@
-// Unit tests for the whisper.cpp engine seam (canvas::core::transcribe): the
-// error-path and model-resolution laws (no model file required), plus a live
-// 16 kHz silence transcription that runs only when a real quantized model is
-// available via CANVAS_WHISPER_MODEL or the default cache path — that part
-// SKIPs otherwise, it never fails the suite.
-
 #include "canvas/core/media/transcribe.hpp"
 #include "canvas/core/media/transcript.hpp"
 
@@ -25,21 +19,13 @@ void report(const bool ok, const char* name) {
     if (!ok) ++g_failures;
 }
 
-// Empty the env override so resolution tests are deterministic. setenv with ""
-// makes getenv return "" for this process only.
 void clear_model_env() { ::setenv("CANVAS_WHISPER_MODEL", "", 1); }
 
-// Point the default cache dir at an EMPTY scratch directory so the "-> empty"
-// resolution asserts never depend on whether a model currently sits in the
-// user's real cache (~/.cache/nova-canvas/whisper). Restored before the live
-// block so it can still find the real model.
 void push_empty_cache() { ::setenv("XDG_CACHE_HOME", "/tmp/opencode/media/empty_cache", 1); }
 void pop_empty_cache() { ::unsetenv("XDG_CACHE_HOME"); }
 
 const char* kGarbage = "/tmp/opencode/media/transcribe_not_a_model.bin";
 
-// Hand-rolled 16-bit PCM mono WAV (0.5 s of 440 Hz stereo sine at 44.1 kHz) so
-// transcribe_file has a real decodable audio fixture with no external tools.
 bool write_tone_wav(const std::string& path) {
     constexpr uint16_t kCh = 2;
     constexpr uint32_t kSr = 44100;
@@ -64,7 +50,7 @@ bool write_tone_wav(const std::string& path) {
     const char wave[] = {'W','A','V','E','f','m','t',' '};
     f.write(wave, 8);
     const uint32_t fmt_sz = 16u;
-    const uint16_t fmt = 1u;        // PCM
+    const uint16_t fmt = 1u;
     const uint16_t ch = kCh;
     const uint32_t sr = kSr;
     const uint32_t byte_rate = kSr * kCh * 2u;
@@ -85,7 +71,7 @@ bool write_tone_wav(const std::string& path) {
     return f.good();
 }
 
-}  // namespace
+}
 
 int main() {
     using canvas::core::transcribe::Options;
@@ -96,16 +82,14 @@ int main() {
     using canvas::core::transcribe::transcribe_pcm_16k;
 
     clear_model_env();
-    std::remove(kGarbage);  // fixture from a previous run must not exist yet
-    push_empty_cache();     // hermetic "-> empty" resolution (see helper)
+    std::remove(kGarbage);
+    push_empty_cache();
 
-    // --- model resolution law ------------------------------------------------
     report(resolve_model_path("/nonexistent/model.bin").empty(),
            "resolve: nonexistent override -> empty");
     report(resolve_model_path(kGarbage).empty(),
            "resolve: nonexistent default candidate -> empty");
 
-    // A real scratch file resolves via the override (env is cleared).
     if (std::FILE* f = std::fopen(kGarbage, "wb")) {
         std::fputs("this is not a ggml model", f);
         std::fclose(f);
@@ -114,7 +98,6 @@ int main() {
         std::printf("SKIP resolve override test (no /tmp/opencode/media)\n");
     }
 
-    // Env beats the override chain: point CANVAS_WHISPER_MODEL at a bogus path.
     ::setenv("CANVAS_WHISPER_MODEL", "/bogus/env/model.bin", 1);
     report(resolve_model_path().empty(),
            "resolve: unresolvable env path -> empty (env consulted)");
@@ -124,14 +107,11 @@ int main() {
     clear_model_env();
     pop_empty_cache();
 
-    // --- engine error-path laws (no model needed) ---------------------------
     {
         Report r = transcribe_pcm_16k(nullptr, 0, kGarbage);
         report(r.result == Result::kBadInput, "engine: null pcm -> kBadInput");
     }
     {
-        // A validation failure still parks the progress channel at Finished so
-        // a polling popup never spins on a stale stage.
         using canvas::core::transcribe::Progress;
         Progress prog;
         Options opt;
@@ -152,13 +132,11 @@ int main() {
         report(r.result == Result::kNoModel, "engine: missing model file -> kNoModel");
     }
     {
-        // kGarbage exists (written above) but is not a model.
         std::vector<float> silence(16000, 0.0f);
         Report r = transcribe_pcm_16k(silence.data(), silence.size(), kGarbage, Options{});
         report(r.result == Result::kCouldNotInit, "engine: corrupt model file -> kCouldNotInit");
     }
 
-    // --- transcribe_file: decode + downmix + resample + engine --------------
     const std::string tone = "/tmp/opencode/media/transcribe_tone.wav";
     const bool tone_ok = write_tone_wav(tone);
     if (tone_ok) {
@@ -172,7 +150,6 @@ int main() {
         std::printf("SKIP transcribe_file tests (could not write fixture wav)\n");
     }
 
-    // --- live engine (runs only when a real model is reachable) -------------
     {
         std::string model = resolve_model_path();
         if (model.empty()) {
@@ -182,13 +159,10 @@ int main() {
             std::printf("  using model: %s\n", model.c_str());
             Options opt;
             opt.threads = 4;
-            std::vector<float> silence(16000u, 0.0f);  // 1 s of digital silence
+            std::vector<float> silence(16000u, 0.0f);
             Report r = transcribe_pcm_16k(silence.data(), silence.size(), model, opt);
             report(r.result == Result::kDone, "live: silence transcribes to kDone");
             if (r.result != Result::kDone) std::printf("      err: %s\n", r.error.c_str());
-            // Note: whether whisper emits a (possibly empty-text) segment for
-            // pure digital silence is the engine's segmentizer policy, not our
-            // seam contract — asserting on cue count here would be brittle.
 
             if (tone_ok) {
                 Report rf = transcribe_file(tone, model, opt);
@@ -201,7 +175,6 @@ int main() {
                 if (rf.result != Result::kDone) std::printf("      err: %s\n", rf.error.c_str());
             }
 
-            // --- progress channel + perf readout -----------------------------
             {
                 using canvas::core::transcribe::Progress;
                 Progress prog;
@@ -218,7 +191,6 @@ int main() {
                 report(rp.wall_seconds > 0.0, "live: wall_seconds measures engine time");
             }
 
-            // --- cancel aborts the run ---------------------------------------
             {
                 using canvas::core::transcribe::Progress;
                 Progress abort_prog;

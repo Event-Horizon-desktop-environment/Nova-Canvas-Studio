@@ -20,29 +20,17 @@ namespace canvas::gui {
 
 namespace {
 
-// Active appearance state. The token sets are built once per mode; switching
-// re-applies palette + global stylesheet and runs registered re-apply
-// callbacks (per-widget style builders). g_hypr_dark only affects the dark
-// family: it selects the Hyprland-compensated token set (see theme_tokens.cpp).
 bool g_light = false;
 bool g_hypr_dark = false;
 QApplication* g_app = nullptr;
 std::vector<std::function<void()>> g_reapply;
 
-// Global stylesheet for the flat controls only. Buttons, tool bars and panels
-// are intentionally left OUT so HorizonStyle's flat painting owns them.
-// Token args: %1 ink, %2 surface_highest, %3 border, %4 state_hover,
-// %5 state_selected, %6 ink_faint, %7 ink_muted, %8 accent_text, %9 accent,
-// %10 surface_higher, %11 surface_highest, %12 accent_hover, %13 accent_press,
-// %14 on_accent, %15 surface, %16 surface_raised.
 QString make_flat_controls_qss() {
     const ThemeTokens& t = tokens();
     return QStringLiteral(
       "QWidget { color: %1; }"
       "QToolTip { background-color: %2; color: %1; border: 1px solid %3;"
       " padding: 4px 8px; border-radius: 8px; }"
-      // The top menu bar is screen chrome, not a floating panel: it paints the
-      // flat workspace surface so it sits flush with the bar below (no border).
       "QMenuBar { background-color: %15; color: %1;"
       "  padding: 0 4px; }"
       "QMenuBar::item { background: transparent; border-radius: 6px;"
@@ -50,9 +38,6 @@ QString make_flat_controls_qss() {
       "QMenuBar::item:selected { background: %4; }"
       "QMenuBar::item:pressed { background: %5; }"
       "QDockWidget { background: transparent; color: %1; }"
-      // Flat menu card: opaque spread-elevated panel, crisp corners, single
-      // hairline border, body-scale text — no specular catch-light line (the
-      // glass idiom is gone).
       "QMenu { background-color: %16; color: %1;"
       "  border: 1px solid %3;"
       "  border-radius: 8px; padding: 6px; "
@@ -128,8 +113,6 @@ css(t.accent), css(t.surface_higher), css(t.surface_highest),
         css(t.surface), css(t.surface_raised));
 }
 
-// Horizon-based QPalette. Nova-gold accent maps onto Highlight/Accent; surfaces are
-// the active token family (warm charcoal in dark, clean warm light).
 QPalette makeHorizonPalette() {
     const ThemeTokens& t = tokens();
     QPalette p;
@@ -155,14 +138,9 @@ QPalette makeHorizonPalette() {
     return p;
 }
 
-// Shared re-apply after either mode state (lightness or HyprDark) changes:
-// swap the palette + flat-controls stylesheet, refresh cached icon pixmaps,
-// repolish every live widget, then run the per-widget style callbacks.
 void reapply_theme() {
     g_app->setPalette(makeHorizonPalette());
     g_app->setStyleSheet(make_flat_controls_qss());
-    // Icon pixmaps are cached per QIcon; drop the whole cache so the next
-    // paint re-renders every tinted glyph against the new token set.
     QPixmapCache::clear();
     for (QWidget* w : g_app->allWidgets()) {
         w->update();
@@ -173,7 +151,7 @@ void reapply_theme() {
         fn();
 }
 
-}  // namespace
+}
 
 bool is_light() { return g_light; }
 
@@ -218,28 +196,18 @@ void register_theme_reapply(std::function<void()> fn) {
 
 void apply_theme_style(QWidget* w, const std::function<QString()>& style) {
     w->setStyleSheet(style());
-    // QPointer-guarded: the re-apply callback must outlive a transient widget
-    // (menus and popups register here), so a destroyed widget auto-nulls instead
-    // of being dereferenced on the next theme switch.
     register_theme_reapply([wp = QPointer<QWidget>(w), style] {
         if (wp)
             wp->setStyleSheet(style());
     });
 }
 
-// Popover shadow — the only place the flat language keeps a drop shadow is
-// surfaces that genuinely float OVER content (menus, popups), not workspace
-// panels. A soft, mostly vertical blur; dark mode gets roughly double the
-// opacity, matching how much less visible shadows are against a dark backdrop.
 void apply_panel_shadow(QWidget* w) {
     auto* effect = new QGraphicsDropShadowEffect(w);
     effect->setBlurRadius(44);
     effect->setOffset(0, 8);
     effect->setColor(QColor(0, 0, 0, is_light() ? 70 : 130));
     w->setGraphicsEffect(effect);
-    // The widget is typically a transient popup menu (see theme_menu.cpp), which
-    // Qt destroys on dismissal. Guard with a QPointer so a later theme re-apply
-    // skips the freed widget instead of crashing inside graphicsEffect().
     register_theme_reapply([wp = QPointer<QWidget>(w)] {
         if (!wp)
             return;
@@ -259,4 +227,4 @@ void apply_theme(QApplication& app, bool light, bool hypr_dark) {
     install_popup_rounding(app);
 }
 
-}  // namespace canvas::gui
+}

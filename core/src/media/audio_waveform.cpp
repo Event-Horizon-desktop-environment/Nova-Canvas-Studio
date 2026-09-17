@@ -14,16 +14,6 @@ extern "C" {
 
 namespace canvas::core {
 
-namespace {
-
-std::string av_err_string(int err) {
-    char buf[AV_ERROR_MAX_STRING_SIZE]{};
-    av_strerror(err, buf, sizeof(buf));
-    return buf;
-}
-
-}  // namespace
-
 AudioWaveform reduce_waveform(const AudioWaveform& src, std::size_t out_buckets) {
     return reduce_waveform(src, out_buckets, 0.0, 1.0);
 }
@@ -38,8 +28,6 @@ AudioWaveform reduce_waveform(const AudioWaveform& src, std::size_t out_buckets,
         out.rms.assign(out_buckets, 0.0f);
         return out;
     }
-    // Whole-file fallback for degenerate/out-of-band ranges; zero-width ranges
-    // still render (they pin to the same slice rather than a blank preview).
     if (!(lo_frac < hi_frac)) { lo_frac = 0.0; hi_frac = 1.0; }
     if (lo_frac >= 1.0 || hi_frac <= 0.0) { lo_frac = 0.0; hi_frac = 1.0; }
     const double lo = std::clamp(lo_frac, 0.0, 1.0);
@@ -52,8 +40,8 @@ AudioWaveform reduce_waveform(const AudioWaveform& src, std::size_t out_buckets,
         const double f1 = lo + span * static_cast<double>(b + 1) / static_cast<double>(out_buckets);
         std::size_t s0 = static_cast<std::size_t>(std::floor(f0 * static_cast<double>(src.buckets)));
         std::size_t s1 = static_cast<std::size_t>(std::ceil(f1 * static_cast<double>(src.buckets)));
-        if (s0 >= src.buckets) s0 = src.buckets - 1;  // clamp the very last bucket
-        if (s1 <= s0) s1 = std::min(src.buckets, s0 + 1);  // guarantee >= 1 sample
+        if (s0 >= src.buckets) s0 = src.buckets - 1;
+        if (s1 <= s0) s1 = std::min(src.buckets, s0 + 1);
         if (s1 > src.buckets) s1 = src.buckets;
         float peak = 0.0f;
         double sum = 0.0;
@@ -191,4 +179,4 @@ bool decode_audio_waveform(const std::string& path, std::size_t buckets, AudioWa
     return ok;
 }
 
-}  // namespace canvas::core
+}

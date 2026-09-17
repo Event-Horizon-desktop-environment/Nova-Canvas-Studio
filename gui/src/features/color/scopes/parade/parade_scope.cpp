@@ -9,8 +9,8 @@
 namespace canvas::gui {
 
 namespace {
-constexpr int kParadeCols = 3 * kScopeCols;  // three touching thirds (spec §3: no gap)
-}  // namespace
+constexpr int kParadeCols = 3 * kScopeCols;
+}
 
 void ParadeScope::recompute_render() {
     hist_.clear();
@@ -27,8 +27,6 @@ void ParadeScope::recompute_render() {
 
     const auto& h = hist_.channels();
     for (int ch = 0; ch < 3; ++ch) {
-        // Per-channel normalization (spec §2 step 4): log-scaled density so a
-        // single stray bright pixel is a faint dot while a solid region glows.
         std::uint32_t max_count = 1;
         for (int i = 0; i < kScopeCellCount; ++i) {
             max_count = std::max(max_count, h[std::size_t(ch) * kScopeCellCount + i]);
@@ -60,7 +58,7 @@ void ParadeScope::paint_body(QPainter& p, const QRectF& plot) {
         p.setRenderHint(QPainter::SmoothPixmapTransform, false);
         p.drawImage(plot, content_);
     }
-    paint_column_grid(p, plot, /*channel_split=*/true);
+    paint_column_grid(p, plot, true);
 }
 
-}  // namespace canvas::gui
+}

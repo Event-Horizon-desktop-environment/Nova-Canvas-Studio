@@ -20,11 +20,6 @@ extern "C" {
 
 namespace canvas::core {
 
-// Read-stall detector (~1/s): counts av_read_frame calls that blew past the
-// 20ms "smooth demux" bound. A spiky stall_ms while decode ms stays flat is the
-// solvent wrapper around slow/disconnected storage; it lights up long before
-// the decode-time aggregates do. (Declared in sw_decode.hpp — the audio decode
-// loop in video_decoder.cpp reports into the same counter.)
 void read_stall_tick(const double ms) {
     static auto s_at = std::chrono::steady_clock::now();
     static int s_total = 0, s_stalls = 0;
@@ -49,25 +44,17 @@ void read_stall_tick(const double ms) {
     }
 }
 
-// Consecutive-decode-failure burst tracker (declared in sw_decode.hpp so the
-// software AND hardware paths report into the SAME counter). Three errors in a
-// row across the walk loops is the signature of a dropped NVDEC session, driver
-// reset, or a corrupt media tail — one warning at the crossing, reset by
-// decode_ok() on any success.
+static int s_decode_fail_burst = 0;
+
 void decode_fail(const char* where) {
-    static int burst = 0;
-    if (++burst == 3)
-        ::canvas::core::log::log_warning("[dec] fail_burst=%d where=%s", burst, where);
+    if (++s_decode_fail_burst == 3)
+        ::canvas::core::log::log_warning("[dec] fail_burst=%d where=%s",
+                                         s_decode_fail_burst, where);
 }
 
 void decode_ok() {
-    static int burst = 0;
-    burst = 0;
+    s_decode_fail_burst = 0;
 }
-
-// ---------------------------------------------------------------------------
-// DemuxState — shared demux/decode session + services used by both decode paths
-// ---------------------------------------------------------------------------
 
 void DemuxState::close() {
     if (packet) av_packet_free(&packet);
@@ -95,25 +82,12 @@ void DemuxState::reset_stream(const int64_t resume_frame) {
     next_frame = resume_frame;
 }
 
-// Clamps a caller's target frame into the valid source-window [0, last_frame].
-// The upper bound is only an approximation until the stream actually ends (see
-// refine_last_frame / the EOF sites), but it is the crucial guard that keeps a
-// seek far past the media end from walking the whole GOP chain: even when the
-// container hands no duration (opening a paused file), the moment a single frame
-// is decoded we know the stream extends at least to frame 0 and a seek target of
-// 35k collapses to last_frame instead of triggering a many-second forward walk.
 int64_t DemuxState::clamp_target(const int64_t target) const {
     int64_t t = target < 0 ? 0 : target;
     if (last_frame > 0) t = std::min(t, last_frame);
     return t;
 }
 
-// Narrows last_frame to the stream's own encoded extent when the container
-// duration was missing at open(). Uses the video stream duration when present,
-// else the container duration (which FFmpeg fills in from the stream duration
-// during find_stream_info), else the frame-rate fallback. Always called on the
-// decode path so the clamp tightens as soon as ANY extent is available, without
-// waiting for a full demux.
 void DemuxState::refine_last_frame() {
     if (last_frame > 0 || frame_rate <= 0.0) return;
     if (fmt_ctx && video_stream >= 0) {
@@ -127,9 +101,6 @@ void DemuxState::refine_last_frame() {
     }
 }
 
-// Seek the demuxer to `target_seconds` so a subsequent decode starts there
-// (avformat_seek_file lands on the nearest keyframe at-or-before). Only the
-// container position is touched; the codec is flushed + re-armed via reset_stream.
 void DemuxState::container_seek_seconds(const double target_seconds) {
     const auto us = static_cast<int64_t>(
         std::llround(target_seconds * static_cast<double>(AV_TIME_BASE)));
@@ -141,10 +112,6 @@ void DemuxState::container_seek_seconds(const double target_seconds) {
     reset_stream(0);
 }
 
-// Reads the next VIDEO packet from the container and feeds it to the codec. On
-// success returns true. On EOF or a read error latches draining (and feeds the
-// drain sentinel so the next receive surfaces the AVERROR_EOF that records the
-// highest produced frame in last_frame) and returns false.
 bool DemuxState::read_video_packet() {
     for (;;) {
         const auto rd_t0 = std::chrono::steady_clock::now();
@@ -166,15 +133,8 @@ bool DemuxState::read_video_packet() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Keyframe (I-frame) index services
-// ---------------------------------------------------------------------------
-
 namespace {
 
-// Walks the container recording the keyframe packets of `vstream`. Backing
-// storage is the process-wide s_iframe_cache, populated on a detached thread;
-// safe to run concurrently with any decoder.
 std::shared_ptr<const std::vector<IframeEntry>> build_iframe_sync(const std::string& path,
                                                                   const AVRational stream_tb,
                                                                   const double fps,
@@ -210,7 +170,7 @@ std::shared_ptr<const std::vector<IframeEntry>> build_iframe_sync(const std::str
     return out;
 }
 
-}  // namespace
+}
 
 bool DemuxState::has_iframe_index() const {
     if (path.empty()) return false;
@@ -219,9 +179,6 @@ bool DemuxState::has_iframe_index() const {
     return it != s_iframe_cache.end() && it->second && it->second->size() > 1;
 }
 
-// Walks the container packet stream in the background recording every
-// keyframe. Callers never block: seeks fall back to plain container access
-// until the index is ready.
 void DemuxState::build_iframe_index() {
     if (path.empty() || video_stream < 0 || frame_rate <= 0.0) return;
     const std::string p = path;
@@ -241,8 +198,6 @@ void DemuxState::build_iframe_index() {
         if (built && built->size() > 1 && !s_iframe_cache.count(p))
             s_iframe_cache[p] = std::move(built);
         s_iframe_inflight.erase(p);
-        // Always-on: the I-frame index build is a one-shot, seconds-scale scan
-        // that first-touch scrub latency and export seek cost are gated on.
         const double gop_s = (built && built->size() > 2)
             ? (built->back().frame - built->front().frame) /
                   (static_cast<double>(built->size()) * std::max(fps, 1.0))
@@ -270,10 +225,6 @@ const IframeEntry* DemuxState::iframe_at_or_before(const int64_t target) const {
     return best;
 }
 
-// ---------------------------------------------------------------------------
-// SoftDecoder — the software decode loop + RGBA conversion
-// ---------------------------------------------------------------------------
-
 void SoftDecoder::close() {
     demux_ = nullptr;
     if (sws_ctx_) {
@@ -293,7 +244,7 @@ SoftDecoder::SoftDecoder(SoftDecoder&& o) noexcept { *this = std::move(o); }
 
 SoftDecoder& SoftDecoder::operator=(SoftDecoder&& o) noexcept {
     if (this == &o) return *this;
-    close();  // frees sws/hold, nulls demux_
+    close();
     demux_ = o.demux_;
     o.demux_ = nullptr;
     sws_ctx_ = o.sws_ctx_;
@@ -351,9 +302,6 @@ VideoFramePtr SoftDecoder::decode_next() {
             return out;
         }
         if (ret == AVERROR_EOF) {
-            // Stream exhausted: the highest produced frame is now known exactly,
-            // so future seeks clamp to it (a scrub past the end no longer re-
-            // walks the GOP chain to find EOF again).
             if (d.next_frame > 0 && (d.last_frame < 0 || d.next_frame - 1 < d.last_frame))
                 d.last_frame = d.next_frame - 1;
             CANVAS_LOG("video_decoder: decode_next EOF at frame %lld", (long long)d.next_frame);
@@ -366,33 +314,16 @@ VideoFramePtr SoftDecoder::decode_next() {
             return nullptr;
         }
         if (d.draining) return nullptr;
-        // Feed the next video packet; on EOF/read-error the helper latches
-        // draining and we loop so the receive above surfaces the EOF that
-        // tightens last_frame.
         if (!d.read_video_packet()) continue;
     }
 }
 
-// Decodes forward from the current position until the target frame, fast-overs
-// every intermediate frame (no RGBA conversion, no GPU->CPU copy) and converts
-// only the target to RGBA. The intervening decodes are unavoidable for HEVC (no
-// decode-time lowres), but skipping per-frame sws + ~14MB of copy traffic for
-// the other GOP frames is most of the scrub win.
-//
-// `max_over` caps the fast-overs for sparse-keyframe media (multi-second GOPs):
-// walking ~2850 frames to a far target stalls the worker for seconds and starves
-// audio. On the cap, the most recently decoded frame is converted to RGBA and
-// returned as an *approximate* preview — a low-res tease, not a frame-accurate
-// export — so preview latency stays bounded regardless of GOP density. A later
-// yonder-target preview resumes from here, so it never regresses.
 VideoFramePtr SoftDecoder::decode_forward_to(const int64_t target, const int max_over) {
     if (!demux_ || !demux_->codec_ctx || demux_->frame_rate <= 0.0) return nullptr;
     DemuxState& d = *demux_;
     d.refine_last_frame();
     const auto df_t0 = std::chrono::steady_clock::now();
     int fast_over = 0;
-    // Most recently decoded frame, kept so we can fall back to a representative
-    // frame if we hit the fast-over cap before reaching target.
     int64_t last_number = -1;
     int64_t last_ticks = AV_NOPTS_VALUE;
     double last_secs = 0.0;
@@ -410,15 +341,10 @@ VideoFramePtr SoftDecoder::decode_forward_to(const int64_t target, const int max
             last_number = number; last_ticks = ticks; last_secs = secs;
 
             if (number < target) {
-                // Fast-over this intermediate GOP frame without converting.
                 ++fast_over;
                 av_frame_unref(d.av_frame);
                 d.next_frame = number + 1;
                 if (max_over > 0 && fast_over >= max_over) {
-                    // Too far from the keyframe at preview cost: return the
-                    // nearest frame we already have (re-decoding it — the fast-over
-                    // unref'd it).
-                    auto ap0 = std::chrono::steady_clock::now();
                     if (!d.draining) {
                         for (;;) {
                             const int r2 = avcodec_receive_frame(d.codec_ctx, d.av_frame);
@@ -444,7 +370,6 @@ CANVAS_LOG(
                 }
                 continue;
             }
-            // Target (or next frame at/after it): convert to RGBA.
             auto out = convert_to_rgba(d.av_frame, ticks, secs, number);
             av_frame_unref(d.av_frame);
             if (!out) continue;
@@ -475,29 +400,12 @@ CANVAS_LOG(
     }
 }
 
-// Converts one decoded source frame to an owning RGBA VideoFrame. Hardware
-// frames are first downloaded to CPU; the single sws conversion honors the
-// preview-dim cap (set_output_dim) and the resolved per-file color spec, always
-// producing FULL-range RGB (the internal convention colorspace.hpp and the
-// consumer shaders expect).
-//
-// Buffer sizing (issue #4): the destination used to be hand-sized as
-//   stride = out_w*4; rgba.resize(stride * out_h)
-// with dst_linesize hardcoded to `stride`. libswscale may pad each row to its
-// picture-line alignment; where the padded row stride exceeds w*4 the manual
-// sizing under-allocated the destination and sws_scale wrote past the end of
-// the vector — heap corruption. Now the buffer is sized with
-// av_image_get_buffer_size(RGBA, out_w, out_h, align=32) and dst_data/dst_linesize
-// are derived by av_image_fill_arrays, so the sws write is always in-bounds and
-// the row stride (VideoFrame::stride) comes from FFmpeg's own layout.
 VideoFramePtr SoftDecoder::convert_to_rgba(const AVFrame* src, const int64_t ticks,
                                            const double seconds, const int64_t number) {
     if (!src || !demux_) return nullptr;
     DemuxState& d = *demux_;
     auto out = std::make_shared<VideoFrame>();
 
-    // Hardware frames live on the GPU. Pull a CPU-readable copy back (NV12
-    // typically) into `sw`, then convert that to RGBA below.
     const AVFrame* cvt = src;
     AVFrame* sw = nullptr;
     if (src->hw_frames_ctx) {
@@ -511,9 +419,6 @@ VideoFramePtr SoftDecoder::convert_to_rgba(const AVFrame* src, const int64_t tic
         cvt = sw;
     }
 
-    // Target output size. With a low-res preview cap set (see set_output_dim),
-    // scale during the single sws conversion so scrubbing a GOP doesn't build
-    // full-res RGBA for every frame.
     int out_w = cvt->width;
     int out_h = cvt->height;
     if (out_max_dim_ > 0 && out_max_dim_ < std::max(cvt->width, cvt->height)) {
@@ -534,7 +439,6 @@ VideoFramePtr SoftDecoder::convert_to_rgba(const AVFrame* src, const int64_t tic
     out->pts_seconds = seconds;
     out->frame_number = number;
 
-    // Robust, alignment-aware destination buffer (see comment above).
     const int align = 32;
     const int buf_bytes = av_image_get_buffer_size(AV_PIX_FMT_RGBA, out_w, out_h, align);
     if (buf_bytes <= 0) {
@@ -542,12 +446,6 @@ VideoFramePtr SoftDecoder::convert_to_rgba(const AVFrame* src, const int64_t tic
         av_frame_free(&sw);
         return nullptr;
     }
-    // SIMD tail headroom: libswscale's row-end routines can write a few bytes
-    // past the last row's exact end, so the destination needs slack beyond the
-    // exact size av_image_get_buffer_size returns. Without it the write lands in
-    // the next heap chunk's metadata — the "corrupted size vs. prev_size" abort
-    // valgrind attributes to sws (issue #4's real mechanism: not just the row
-    // stride, the tail too).
     const std::size_t sws_tail_pad = 64;
     out->rgba.resize(static_cast<std::size_t>(buf_bytes) + sws_tail_pad);
     uint8_t* dst_data[AV_NUM_DATA_POINTERS] = {nullptr};
@@ -562,11 +460,6 @@ VideoFramePtr SoftDecoder::convert_to_rgba(const AVFrame* src, const int64_t tic
 
     const bool scaled = (out_w != cvt->width) || (out_h != cvt->height);
     const auto conv_t0 = std::chrono::steady_clock::now();
-    // Pin the sws coefficients to the per-file color matrix and honor the file's
-    // RESOLVED source range (tags reconciled with the luma probe), producing
-    // full-range RGB — the internal convention colorspace.hpp and the consumer
-    // shaders expect. dstRange is always 1 so the RGBA held in VideoFrame is
-    // full-range regardless of the sample's quantization.
     sws_ctx_ = sws_getCachedContext(sws_ctx_, cvt->width, cvt->height,
                                     static_cast<AVPixelFormat>(cvt->format),
                                     out_w, out_h, AV_PIX_FMT_RGBA,
@@ -588,10 +481,8 @@ VideoFramePtr SoftDecoder::convert_to_rgba(const AVFrame* src, const int64_t tic
     const int* cs_coefs = sws_getCoefficients(sws_matrix);
     sws_setColorspaceDetails(sws_ctx_, cs_coefs, src_range, cs_coefs, 1,
                              0, 1 << 16, 1 << 16);
-    // One line per (src format, src size) actually converted: enough to see the
-    // resolved matrix/range pin on the CPU path without spamming per frame.
     static std::mutex sws_log_mu;
-    static std::set<std::tuple<int, int, int>> sws_logged;  // fmt, w, h
+    static std::set<std::tuple<int, int, int>> sws_logged;
     const bool first_cvt = [&] {
         std::lock_guard<std::mutex> lk(sws_log_mu);
         return sws_logged.insert({static_cast<int>(cvt->format), cvt->width, cvt->height}).second;
@@ -608,9 +499,6 @@ VideoFramePtr SoftDecoder::convert_to_rgba(const AVFrame* src, const int64_t tic
     sws_scale(sws_ctx_, cvt->data, cvt->linesize, 0, cvt->height, dst_data, dst_linesize);
     convert_ms_ += std::chrono::duration<double, std::milli>(
                        std::chrono::steady_clock::now() - conv_t0).count();
-    // Always-on ~1s CPU-conversion telemetry: sws (with/hw-download) cost per
-    // RGBA frame, dims, and whether we downscaled (preview cap). Sustained
-    // avg_ms here is pure CPU cost in the decode path.
     static auto sws_agg_at = std::chrono::steady_clock::now();
     static int sws_agg_n = 0;
     static double sws_agg_ms = 0.0, sws_max_ms = 0.0;
@@ -671,10 +559,6 @@ VideoFramePtr SoftDecoder::decode_to_frame(int64_t target, int max_output_dim) {
     set_output_dim(max_output_dim);
     d.refine_last_frame();
 
-    // Frozen-tail hold: requesting past the stream's final frame used to
-    // container-seek and re-decode the identical last frame on every call
-    // (~90ms each) for the whole audio-only share of a project. Serve the
-    // cached final frame instead; build the cache once by decoding it exactly.
     if (d.last_frame > 0 && target > d.last_frame) {
         if (hold_rgba_ && hold_rgba_src_ == d.last_frame && hold_rgba_dim_ == out_max_dim_)
             return hold_rgba_;
@@ -687,11 +571,6 @@ VideoFramePtr SoftDecoder::decode_to_frame(int64_t target, int max_output_dim) {
     const bool dbg_hw = d.hw_pix_fmt != AV_PIX_FMT_NONE;
     VideoFramePtr dbg_out = nullptr;
 
-    // Give sequential decode a small window of forward progress to avoid a
-    // random seek on the common playback path. If we've already moved past the
-    // target or it's far ahead, seek — a big sequential forward jump would block
-    // for (distance * ~ms/frame) and stall scrubbing, while a keyframe seek
-    // bounds decode-forward to a single GOP.
     if (target >= d.next_frame && target - d.next_frame < 64) {
         const auto seq_t0 = std::chrono::steady_clock::now();
         VideoFramePtr frame = decode_forward_to(target, kFullResMaxOver);
@@ -702,8 +581,6 @@ VideoFramePtr SoftDecoder::decode_to_frame(int64_t target, int max_output_dim) {
             dbg_out = std::move(frame);
             ++path_seq_;
             path_seq_ms_ += seq_ms;
-        } else {
-            // Fall through to a (re)seek if sequential decode stalled.
         }
     }
     if (!dbg_out) {
@@ -735,7 +612,6 @@ VideoFramePtr SoftDecoder::seek_to_frame_indexed(int64_t target, int max_output_
     d.refine_last_frame();
     target = d.clamp_target(target);
 
-    // Find the I-frame that owns this target (at-or-before).
     const IframeEntry* entry = d.iframe_at_or_before(target);
     if (!entry) {
         CANVAS_LOG("video_decoder: seek_to_frame_indexed NO IFRAME for %lld, fallback to container seek",
@@ -743,21 +619,6 @@ VideoFramePtr SoftDecoder::seek_to_frame_indexed(int64_t target, int max_output_
         return seek_to_frame(target, max_output_dim);
     }
 
-    // Jump to the keyframe's presentation time, decode-forward to `target` within
-    // this single GOP, and re-sync state.
-    // Preview path (max_output_dim > 0) caps decode-forward so a scrub never
-    // stalls on sparse-keyframe GOPs: it decodes at most ~kPreviewMaxOver frames
-    // past the keyframe and returns the nearest frame reached (an approximate
-    // low-res tease) instead of walking the entire multi-second GOP. Any other
-    // dim (0 = full-res, or a stray negative) walks at most ~kFullResMaxOver
-    // frames for the same reason.
-    //
-    // BUT a full-res far-forward seek into an ultra-sparse GOP (observed: a
-    // 19,000-frame keyframe interval) used to walk THE WHOLE GOP uncapped. A
-    // NEITHER-positive-nor-zero max_output_dim previously fell through to
-    // max_over=0 (uncapped again). Cap those too, so no caller can ever re-enable
-    // the unbounded walk: a far seek returns the nearest decoded frame as an
-    // approximate still instead of blocking the worker for tens of seconds.
     const int max_over = max_output_dim > 0 ? kPreviewMaxOver : kFullResMaxOver;
     const auto idx_t0 = std::chrono::steady_clock::now();
     d.container_seek_seconds(entry->pts_seconds);
@@ -773,4 +634,4 @@ VideoFramePtr SoftDecoder::seek_to_frame_indexed(int64_t target, int max_output_
     return frame;
 }
 
-}  // namespace canvas::core
+}

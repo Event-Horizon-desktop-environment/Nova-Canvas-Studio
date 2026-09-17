@@ -60,12 +60,11 @@ float blend_channel(BlendMode mode, float backdrop, float source) {
 
 namespace {
 
-// Straight color delivered by a premultiplied combination, guarding zero alpha.
 float unpremultiply(float premul, float alpha) {
     return alpha > 0.0f ? premul / alpha : 0.0f;
 }
 
-}  // namespace
+}
 
 CompositeSample composite_sample(float backdrop_r, float backdrop_g, float backdrop_b,
                                  float backdrop_alpha, float source_r, float source_g,
@@ -78,7 +77,6 @@ CompositeSample composite_sample(float backdrop_r, float backdrop_g, float backd
     const float t = std::clamp(additive, 0.0f, 1.0f);
     const bool over_like = op == CompositeOp::kOver || op == CompositeOp::kDisjoint;
     if (over_like) {
-        // W3C blend-with-over color (premultiplied result), then un-premultiply.
         const auto over_color = [&](float Cb, float Cs) {
             const float B = blend_channel(blend, Cb, Cs);
             return as * (1.0f - ab) * Cs + as * ab * B + (1.0f - as) * ab * Cb;
@@ -88,8 +86,6 @@ CompositeSample composite_sample(float backdrop_r, float backdrop_g, float backd
         s.g = unpremultiply(over_color(backdrop_g, source_g), s.a);
         s.b = unpremultiply(over_color(backdrop_b, source_b), s.a);
         if (t > 0.0f) {
-            // Fusion additive/subtractive knob: mix toward the premultiplied
-            // SUM (backdrop not attenuated by 1−as), which is brighter.
             const float sum_r = unpremultiply(source_r * as + backdrop_r * ab, s.a);
             const float sum_g = unpremultiply(source_g * as + backdrop_g * ab, s.a);
             const float sum_b = unpremultiply(source_b * as + backdrop_b * ab, s.a);
@@ -108,4 +104,4 @@ CompositeSample composite_sample(float backdrop_r, float backdrop_g, float backd
     return s;
 }
 
-}  // namespace canvas::core::grade_graph
+}

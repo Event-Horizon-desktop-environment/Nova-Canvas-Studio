@@ -6,8 +6,6 @@ namespace canvas::gui {
 
 namespace {
 
-// QSettings key prefix. The pair (org "Nova Canvas", app "canvas") is set in
-// main.cpp, so these land under ~/.config/Nova Canvas/canvas.conf.
 constexpr const char* kPrefix = "timeline/view/";
 
 template <typename T>
@@ -21,11 +19,8 @@ void write(QSettings& s, const char* key, const T& value) {
     s.setValue(QString::fromLatin1(kPrefix) + QLatin1String(key), value);
 }
 
-}  // namespace
+}
 
-// Loads the persisted "Set as Default View" snapshot into `opts`. Missing keys
-// keep the struct's own defaults, so a partial/default settings file loads as
-// the baseline view (matching Resolve's default-scoped behavior).
 void load_view_options(QSettings& s, TimelineViewOptions& opts) {
     opts.show_stacked_timelines = read(s, "show_stacked_timelines", opts.show_stacked_timelines);
     opts.show_subtitle_tracks = read(s, "show_subtitle_tracks", opts.show_subtitle_tracks);
@@ -63,4 +58,4 @@ void save_view_options(QSettings& s, const TimelineViewOptions& opts) {
     write(s, "audio_track_height", opts.audio_track_height);
 }
 
-}  // namespace canvas::gui
+}

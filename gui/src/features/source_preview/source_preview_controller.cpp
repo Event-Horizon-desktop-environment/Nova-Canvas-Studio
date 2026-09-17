@@ -10,10 +10,6 @@
 namespace canvas::gui::source_preview {
 
 SourcePreviewController::SourcePreviewController(QObject* parent) : QObject(parent) {
-    // Forward every player event so the shell can wire the source panel
-    // without touching SequenceController internals. position_changed is
-    // re-broadcast straight from the worker thread; the MonitorThread affinity
-    // of `this` is what makes the re-emit safe for widget slots.
     connect(&player_, &SequenceController::frame_ready, this,
             &SourcePreviewController::frame_ready);
     connect(&player_, &SequenceController::position_changed, this,
@@ -24,17 +20,12 @@ SourcePreviewController::SourcePreviewController(QObject* parent) : QObject(pare
 
 void SourcePreviewController::open_media(const canvas::core::MediaEntry& media,
                                          const double fallback_fps) {
-    // Same entry as currently shown: keep the projector warm, just re-skim.
     if (has_media_ && media_path_ == media.path) {
         if (debug_enabled())
             qDebug() << "[srcprv] open_media same-entry re-skim path="
                      << QString::fromStdString(media.path);
         return;
     }
-    // Per-tile scrub-state reset: the pool hover drives seek_preview without
-    // end_scrub tracking open-state, so scrub_audio_open_ can be left stale
-    // TRUE from a previous tile (an audible-grain device that must never reopen)
-    // and the device itself left held. end_scrub clears the gate and closes it.
     player_.end_scrub();
     release_audio();
 
@@ -46,8 +37,6 @@ void SourcePreviewController::open_media(const canvas::core::MediaEntry& media,
     current_frame_ = 0;
     media_path_ = media.path;
 
-    // Always-on: a real open is a low-frequency event and marks the exact
-    // moment the source projector rebuilt its synthetic project + decoders.
     qWarning().nospace()
         << "[srcprv] open_media path=" << QString::fromStdString(media.path)
         << " video=" << has_video_
@@ -123,4 +112,4 @@ void SourcePreviewController::on_position_changed(const int64_t frame) {
     emit position_changed(frame);
 }
 
-}  // namespace canvas::gui::source_preview
+}

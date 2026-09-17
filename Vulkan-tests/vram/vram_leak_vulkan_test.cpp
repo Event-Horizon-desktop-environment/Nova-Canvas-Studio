@@ -1,22 +1,3 @@
-// vram_leak_vulkan_test — device-memory steady-state gate via VK_EXT_memory_budget.
-//
-// Phase 0 reading for core's vram_leak (the CUDA regression gate that pinned
-// the av_frame_ref-onto-dirty-retain_hw_ leak filling 16 GB in ~90 s). When the
-// Vulkan decode path lands (Phase P-C), the SAME leak class is exercised here:
-// repeated decode sessions must drain no steady-state memory per the budget.
-//
-// Phase 0 scope: this reading exists NOW, wiring the memory_budget sampling
-// seam and the drain law headlessly, so P-C's decode drops in behind it with a
-// target already in place. It performs real allocation churn against the device
-// heap and asserts the law: steady-state free memory may move, it may not
-// monotonically drain past a fixed budget.
-//
-// PASS (0)  — allocation churn against a device heap leaves steady-state free
-//             memory within budget after warm-up.
-// FAIL (1)  — drain tracked past the budget (same failure class vram_leak pins).
-// SKIP (2)  — no device offers VK_EXT_memory_budget (lowest common denominator
-//             on others' machines; the owning phase is P-C).
-
 #include "vk_probe.hpp"
 
 #include <vulkan/vulkan.h>
@@ -29,12 +10,12 @@ using namespace canvas::vktest;
 
 namespace {
 
-constexpr std::uint64_t kWarmBytes = 256ull * 1024 * 1024;      // working set before baseline
-constexpr std::uint64_t kChurnBytes = 32ull * 1024 * 1024;      // per churn cycle
+constexpr std::uint64_t kWarmBytes = 256ull * 1024 * 1024;
+constexpr std::uint64_t kChurnBytes = 32ull * 1024 * 1024;
 constexpr int kChurnRounds = 48;
-constexpr float kBudgetSlack = 0.10f;  // free-heap may swing 10% around baseline
+constexpr float kBudgetSlack = 0.10f;
 
-}  // namespace
+}
 
 int main() {
     const ProbeResult r = run_probe();
@@ -44,7 +25,6 @@ int main() {
         return 2;
     }
 
-    // Pick the primary device that offers the memory-budget extension.
     const DeviceInfo* chosen = nullptr;
     for (const auto& d : r.devices) {
         if (d.memory_budget) {
@@ -59,7 +39,6 @@ int main() {
     }
     std::printf("info: vram_leak_vulkan using device %s\n", chosen->name.c_str());
 
-    // Instance (VK_KHR_get_physical_device_properties2 is core 1.1+, fine at 1.3).
     VkApplicationInfo app{};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app.pApplicationName = "canvas-vram-leak-vulkan";
@@ -73,7 +52,6 @@ int main() {
         return 2;
     }
 
-    // Find the sibling VkPhysicalDevice (probe only holds names).
     std::uint32_t n = 0;
     vkEnumeratePhysicalDevices(inst, &n, nullptr);
     std::vector<VkPhysicalDevice> pd(n);
@@ -93,7 +71,6 @@ int main() {
         return 2;
     }
 
-    // A compute queue family suffices for allocation churn.
     std::uint32_t qf = UINT32_MAX;
     for (const auto& q : chosen->queue_families) {
         if (q.compute) {
@@ -128,8 +105,6 @@ int main() {
         return 2;
     }
 
-    // Willing allocations: any heap counted by the budget, any memory type
-    // reachable from the chosen queue (device-local preferred).
     VkPhysicalDeviceMemoryProperties mp{};
     vkGetPhysicalDeviceMemoryProperties(phys, &mp);
 
@@ -140,7 +115,6 @@ int main() {
         props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
         props2.pNext = &budget;
         vkGetPhysicalDeviceMemoryProperties2(p, &props2);
-        // "Free" = budget (max allocatable) minus usage on the biggest heap.
         std::uint64_t budget_total = 0, usage_total = 0;
         for (std::uint32_t i = 0; i < props2.memoryProperties.memoryHeapCount; ++i) {
             budget_total += budget.heapBudget[i];
@@ -150,7 +124,6 @@ int main() {
         return true;
     };
 
-    // A single alloc + free against each memory type we may use.
     const auto churn_allocate = [&](std::uint64_t bytes, VkDeviceMemory* out) {
         for (std::uint32_t type = 0; type < mp.memoryTypeCount; ++type) {
             if (!(mp.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
@@ -164,7 +137,6 @@ int main() {
         return false;
     };
 
-    // Warm-up: build a working set, free it, let the allocator settle.
     std::vector<VkDeviceMemory> warm;
     while (true) {
         std::uint64_t held = 0;
@@ -181,7 +153,6 @@ int main() {
     free_bytes(phys, &free_b0);
     const std::uint64_t baseline = free_b0;
 
-    // Churn rounds allocating + freeing a fixed slice; track the min free.
     std::uint64_t min_free = baseline;
     std::uint64_t worst_round = 0;
     for (int r = 0; r < kChurnRounds; ++r) {

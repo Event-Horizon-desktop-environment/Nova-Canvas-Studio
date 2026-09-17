@@ -30,10 +30,8 @@ const char* wheel_page_title(WheelPage p) noexcept {
 float master_to_value(float t01, float lo, float hi, float mid) noexcept {
     const float t = std::clamp(t01, 0.0f, 1.0f);
     if (t <= 0.5f) {
-        // [0, 0.5] maps lo -> mid.
         return lo + (mid - lo) * (t / 0.5f);
     }
-    // [0.5, 1] maps mid -> hi.
     return mid + (hi - mid) * ((t - 0.5f) / 0.5f);
 }
 
@@ -48,8 +46,6 @@ float value_to_master(float v, float lo, float hi, float mid) noexcept {
 }
 
 void enforce_zero_overlap(std::array<WheelRange, 4>& bands) noexcept {
-    // Sort by low, then pin each band's low to the previous band's high so the
-    // four bands tile [0,1] with no overlaps and no gaps.
     std::sort(bands.begin(), bands.end(),
               [](const WheelRange& a, const WheelRange& b) { return a.lo < b.lo; });
     float running = 0.0f;
@@ -65,7 +61,6 @@ float log_band_weight(float luma, const WheelRange& band, bool uniform) noexcept
     if (uniform) return 1.0f;
     const float x = clamp01(luma);
     if (x <= band.lo || x >= band.hi) return 0.0f;
-    // Cross-fade over a fixed 12.5% of the band at each edge (smoothstep).
     const float frac = band.hi - band.lo;
     const float edge = frac * 0.125f;
     if (edge <= 0.0f) return 1.0f;
@@ -78,7 +73,6 @@ float hdr_zone_weight(float luma, const HdrZone& z) noexcept {
     if (z.uniform) return 1.0f;
     const float d = std::abs(clamp01(luma) - z.position);
     if (z.falloff <= 0.0f) return d <= 0.0f ? 1.0f : 0.0f;
-    // smoothstep-style falloff: 1 at center easing to 0 at `falloff` distance.
     return 1.0f - smoothstep01(0.0f, std::min(z.falloff, 1.0f), d);
 }
 
@@ -87,8 +81,6 @@ LGG lgg_from_cdl(const Cdl& c) noexcept {
     p.lift_master = 0.0f;
     p.gamma_master = 1.0f;
     p.gain_master = 1.0f;
-    // gain=slope, gamma=1/power, lift=0 (dropping CDL offset: no taper => no
-    // closed-form Lift equivalent, per spec §5).
     p.gain_r = c.slope_r;
     p.gain_g = c.slope_g;
     p.gain_b = c.slope_b;
@@ -181,4 +173,4 @@ void restore_primaries_wheel(WheelPanelState& to, const WheelPanelState& from,
     }
 }
 
-}  // namespace canvas::core::colorsci
+}

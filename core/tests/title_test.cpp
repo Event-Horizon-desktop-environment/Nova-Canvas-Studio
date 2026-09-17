@@ -1,12 +1,3 @@
-// Unit tests for the Qt-free title-overlay module (core/include/canvas/core/...
-// timeline/title.hpp): size/glyph laws, measurement, and RGBA rasterisation
-// invariance, plus the set_clip_title edit-op contract.
-//
-// Font-dependent assertions auto-skip (exit 2) when no system font resolves —
-// the renderer path degrades to "draw nothing" there, so a CI box without
-// fonts must not fail the build. This machine carries DejaVu, so the full
-// raster path is normally exercised.
-
 #include "canvas/core/media/frame.hpp"
 #include "canvas/core/export/renderer.hpp"
 #include "canvas/core/timeline/edit_ops.hpp"
@@ -34,8 +25,6 @@ static void report(bool ok, const char* what) {
     if (!ok) ++g_failures;
 }
 
-// Count of fully-dark pixels (all channels <= threshold). A rendered title must
-// turn some black-area pixels non-zero; a no-op must leave the canvas untouched.
 static std::size_t dark_pixels(const std::vector<std::uint8_t>& rgba,
                                int threshold = 8) {
     std::size_t n = 0;
@@ -48,7 +37,6 @@ static std::size_t dark_pixels(const std::vector<std::uint8_t>& rgba,
 }
 
 int main() {
-    // --- size law -----------------------------------------------------------
     report(title::clamp_size(0.0f) == title::kSizeMin,
            "clamp_size: below-range saturates at min");
     report(title::clamp_size(9.9f) == title::kSizeMax,
@@ -68,7 +56,6 @@ int main() {
     report(title::glyph_height(big, 720) > title::glyph_height(c, 720),
            "glyph_height: larger size fraction -> taller glyphs");
 
-    // --- measurement --------------------------------------------------------
     const std::string font = title::find_font_path();
     if (font.empty()) {
         std::printf("SKIP  no system font found; raster assertions skipped\n");
@@ -98,15 +85,12 @@ int main() {
         const title::Layout longer = title::measure("iii", 48, font);
         report(longer.width > shorty.width, "measure: more letters -> wider box");
 
-        // --- fit_caption (the "always fits the frame, bottom-anchored" law) ---
         constexpr int FW = 1920;
         constexpr int FH = 1080;
         {
             const title::Layout bad = title::measure("", 108, font);
             report(bad.width == 0 && bad.height == 0, "fit: sanity — empty text measures {0,0}");
 
-            // Short text at the hint fits unshrunk; a long line that overflows
-            // the width safe area forces a proportional shrink.
             const title::SubtitleFit short_cap =
                 title::fit_caption("Hi", FW, FH, font, title::kSizeDefault);
             report(short_cap.size == title::kSizeDefault,
@@ -130,8 +114,6 @@ int main() {
             report(long_cap.block_height > 0 && long_cap.block_height <= max_fit_h,
                    "fit: the fitted block respects the height safe area");
 
-            // Bottom anchor: the fitted block's bottom edge rests exactly
-            // kFitBottomMarginFraction of the frame above the bottom edge.
             const int margin = static_cast<int>(std::lround(FH * title::kFitBottomMarginFraction));
             const int block_top = static_cast<int>(
                 std::lround((FH - long_cap.block_height) / 2.0 + long_cap.pos_y));
@@ -139,8 +121,6 @@ int main() {
                    "fit: the block bottom hugs the subtitle bottom margin");
             report(long_cap.pos_y > 0, "fit: the block is shifted down from centre");
 
-            // 3-line stacked block: height band, not width, is the binding
-            // constraint when a caption has the max three lines at full width.
             const title::SubtitleFit three =
                 title::fit_caption("one line\nsecond line\nthird line", FW, 1080, font,
                                    title::kSizeDefault);
@@ -150,7 +130,6 @@ int main() {
                        three.size < title::kSizeDefault,
                    "fit: more lines either shrink further or stack taller");
 
-            // Degenerate inputs never crash and pin the bottom anchor.
             const title::SubtitleFit no_text = title::fit_caption("", FW, FH, font);
             report(no_text.size == title::kSizeDefault,
                    "fit: empty text keeps the hint fraction");
@@ -163,11 +142,6 @@ int main() {
                    "fit: zero frame dims degrades to the hint and no offset");
         }
 
-        // --- installed-font enumeration ---------------------------------
-        // Sandbox the scan roots at a directory holding one copy of the
-        // resolved font: the catalogue must then hold exactly that family,
-        // proving the scan honours CANVAS_TITLE_FONT_DIRS (and the process
-        // cache is still cold — nothing above enumerates).
         const std::string sandbox = "/tmp/opencode/media/title_fonts";
         ::setenv("CANVAS_TITLE_FONT_DIRS", sandbox.c_str(), 1);
         {
@@ -207,8 +181,6 @@ int main() {
                     report(title::find_font_path_for("No Such Family XYZ") == font,
                            "fonts: unknown family falls back to the default face");
 
-                    // The family-aware render path paints through the resolved
-                    // face (and through the fallback for unknown families).
                     constexpr int FW = 64, FH = 64;
                     const std::vector<std::uint8_t> fblack(
                         static_cast<std::size_t>(FW) * FH * 4, 0);
@@ -232,7 +204,6 @@ int main() {
         }
         ::unsetenv("CANVAS_TITLE_FONT_DIRS");
 
-        // --- rasterisation ----------------------------------------------
         const int W = 64, H = 64;
         std::vector<std::uint8_t> black(W * H * 4, 0);
 
@@ -246,7 +217,6 @@ int main() {
         const std::size_t lit = (W * H) - dark_pixels(canvas);
         report(lit > 0, "render: paints pixels on black");
 
-        // Centred: the painted bbox's centre must sit near the canvas centre.
         int min_x = W, max_x = -1, min_y = H, max_y = -1;
         for (int y = 0; y < H; ++y)
             for (int x = 0; x < W; ++x) {
@@ -263,9 +233,6 @@ int main() {
         report(std::abs(cx - W / 2) <= 2 && std::abs(cy - H / 2) <= 2,
                "render: bbox is centred both axes");
 
-        // Multi-line: "A\nB" stacks two centred lines, so ink lands on both
-        // sides of the midline and the buffer differs from the flattened
-        // single-line render of the same words.
         constexpr int MW = 160, MH = 120;
         const std::vector<std::uint8_t> mblack(
             static_cast<std::size_t>(MW) * MH * 4, 0);
@@ -293,8 +260,6 @@ int main() {
         report(lit_at(canvas_multi, 0, MH / 2) > 0 && lit_at(canvas_multi, MH / 2, MH) > 0,
                "render: multi-line inks both halves");
 
-        // --- faux styles ------------------------------------------------
-        // "Ag" exercises ascender + descender (underline must clear the tail).
         Clip styled;
         styled.title.text = "Ag";
         styled.title.size = 0.25f;
@@ -333,9 +298,6 @@ int main() {
                    bottom_row(under_cv) > bottom_row(plain_cv),
                "render: underline bars below the descenders");
 
-        // --- position offset --------------------------------------------
-        // pos_x/pos_y translate the whole block in output px (Video-tab and
-        // Subtitles-tab sliders edit these same fields).
         const auto bbox_cx = [&](const std::vector<std::uint8_t>& cv) {
             int min_x = W, max_x = -1;
             for (int y = 0; y < H; ++y)
@@ -367,9 +329,6 @@ int main() {
         report(bbox_cx(moved_cv) - cx == 20 && bbox_cy(moved_cv) - cy == 10,
                "render: pos_x/pos_y translate the block in px");
 
-        // --- drop shadow ------------------------------------------------
-        // A red shadow offset right casts a red-tinted copy outside the glyph
-        // bbox; the tint proves it is the shadow colour, not a style bleed.
         const auto red_dom = [](const std::vector<std::uint8_t>& cv) {
             std::size_t n = 0;
             for (std::size_t i = 0; i < cv.size(); i += 4)
@@ -418,9 +377,6 @@ int main() {
         report(red_dom(ghost_cv) < red_dom(eyed_cv) && red_dom(ghost_cv) > 0,
                "render: shadow opacity dims the shadow");
 
-        // --- background box ---------------------------------------------
-        // Full-opacity red box padded 32 px around the "Ag" block: the bbox
-        // grows on both sides well past the glyphs and the field tints red.
         Clip bxd = styled;
         bxd.title.box = true;
         bxd.title.box_r = 1.0f;
@@ -446,10 +402,6 @@ int main() {
         const std::vector<std::uint8_t> sealed_cv = paint(sealed);
         report(red_dom(sealed_cv) == 0, "render: disabled box draws nothing");
 
-        // Corner radius: rounding the box cuts the far corner pixel off the
-        // sharp fill (the corner pixel is dark where the square box lit it)
-        // while the box interior keeps its fill — and the shed area shrinks
-        // the red footprint measurably.
         const auto red_at = [](const std::vector<std::uint8_t>& cv, const int x,
                                const int y) {
             if (x < 0 || y < 0 || x >= W || y >= H) return false;
@@ -475,14 +427,12 @@ int main() {
                    red_at(round_cv, (sharp_min_x + sharp_max_x) / 2, sharp_min_y + 8),
                "render: rounded box keeps its interior but sheds area");
 
-        // Empty title: canvas must be byte-identical.
         Clip blank = t;
         blank.title.text.clear();
         std::vector<std::uint8_t> canvas_blank = black;
         title::render_clip_title_with_font(blank, font, canvas_blank, W, H, W * 4);
         report(dark_pixels(canvas_blank) == W * H, "render: empty text -> no-op");
 
-        // Clip opacity 0 -> nothing dissolves in; full opacity -> opaque glyphs.
         Clip dim = t;
         dim.opacity = 0.0f;
         std::vector<std::uint8_t> canvas_dim = black;
@@ -490,7 +440,6 @@ int main() {
         report(dark_pixels(canvas_dim) == W * H,
                "render: zero clip opacity draws nothing");
 
-        // Colour law: red glyphs are red-dominant where lit.
         Clip red = t;
         red.title.r = 1.0f;
         red.title.g = red.title.b = 0.0f;
@@ -508,12 +457,6 @@ int main() {
         }
         report(n > 0 && sr > sg && sr > sb, "render: red glyphs stay red-dominant");
 
-        // --- tight sprite (GPU fast-path overlay) --------------------------
-        // raster_title_sprite bakes the exact CPU layering law into one
-        // premultiplied box that the export kernels fuse. It must be valid
-        // exactly when the CPU path would paint, invalid on the degenerate
-        // inputs, and reproduce the CPU composite (over an opaque background)
-        // up to the final rounding pass.
         {
             const title::TitleSprite no_title = title::raster_title_sprite(t, W, H, font);
             report(no_title.valid(), "sprite: a titled clip produces a valid sprite");
@@ -526,8 +469,6 @@ int main() {
             report(!title::raster_title_sprite(t, 0, H, font).valid(),
                    "sprite: zero canvas width -> invalid");
 
-            // Coverage footprint: the sprite bbox bounds the CPU bbox and the
-            // CPU-painted pixels carry sprite coverage.
             std::vector<std::uint8_t> cpu = black;
             title::render_clip_title_with_font(t, font, cpu, W, H, W * 4);
             const title::TitleSprite spr = title::raster_title_sprite(t, W, H, font);
@@ -560,11 +501,6 @@ int main() {
             report(covered > 0, "sprite: CPU-lit pixels carry sprite coverage");
         }
 
-        // Composite equivalence: box + shadow + glyphs at partial opacity,
-        // composed two ways over the same opaque background — the CPU
-        // compositor writes into the canvas directly, the sprite path adds its
-        // premultiplied box over the identical background. They must agree to
-        // the final rounding (<= 5 LSB) and be byte-identical outside the box.
         {
             Clip full = t;
             full.title.text = "Qp";
@@ -643,8 +579,6 @@ int main() {
                 report(worst_out == 0, "sprite: output is byte-identical outside the box");
             }
 
-            // Placement invariance: a pos_x/pos_y bump shifts the sprite origin
-            // by the same integer px the CPU bbox shifts.
             const title::TitleSprite s0 = title::raster_title_sprite(full, CW, CH, font);
             Clip shifted = full;
             shifted.pos_x += 9.0;
@@ -655,11 +589,6 @@ int main() {
         }
     }
 
-    // --- export glue --------------------------------------------------------
-    // Mirrors add_title_clip(): a media < 0 clip whose video IS the text
-    // raster, run through the same pipeline the Deliver page uses — the
-    // render_video_frame one-shot and RenderSession (the export worker's
-    // per-track decoder reuse).
     if (!g_skip) {
         Project tp;
         tp.name = "Smoke";
@@ -683,7 +612,7 @@ int main() {
         report(tcmd != nullptr, "glue: title-only clip places");
 
         const int W = 160, H = 90;
-        VideoFramePtr shot = render_video_frame(tp, 0, W, H, 0, nullptr);
+        VideoFramePtr shot = render_video_frame(tp, 0, W, H, nullptr);
         report(shot != nullptr, "glue: render_video_frame title frame succeeds");
         if (shot) {
             bool lit = false;
@@ -724,9 +653,8 @@ int main() {
         }
         rs.end();
 
-        // Disabled title clip -> pure black canvas.
         tp.sequence.video_tracks[0].clips[0].enabled = false;
-        VideoFramePtr black = render_video_frame(tp, 0, W, H, 0, nullptr);
+        VideoFramePtr black = render_video_frame(tp, 0, W, H, nullptr);
         report(black != nullptr, "glue: disabled title renders");
         if (black) {
             bool any = false;
@@ -736,7 +664,6 @@ int main() {
         }
     }
 
-    // --- edit-op contract ---------------------------------------------------
     Project p;
     p.sequence.fps = 30.0;
     p.sequence.video_tracks.emplace_back();
@@ -792,21 +719,16 @@ int main() {
     report(undo.redo(p.sequence) && p.sequence.video_tracks[0].clips[0].has_title(),
            "edit-op: redo restores title");
 
-    // Clear back to empty via the op itself.
     Clip::Title empty_title;
     cmd = set_clip_title(p.sequence, Track::Kind::Video, 0, cid, empty_title);
     report(cmd != nullptr && !p.sequence.video_tracks[0].clips[0].has_title(),
            "edit-op: empty title clears has_title");
 
-    // No-op EditCommand: identical re-sets return an equal-snapshot command,
-    // so undo/redo around it changes nothing (repo convention, like transform
-    // and composite). Run last so the settled no-op entry does not skew the
-    // absolute undo steps above.
     cmd = set_clip_title(p.sequence, Track::Kind::Video, 0, cid, want);
-    undo.record(std::move(cmd));  // real: empty -> want
+    undo.record(std::move(cmd));
     cmd = set_clip_title(p.sequence, Track::Kind::Video, 0, cid, want);
     report(cmd != nullptr, "edit-op: identical re-set returns a command");
-    undo.record(std::move(cmd));  // no-op: want -> want
+    undo.record(std::move(cmd));
     report(undo.undo(p.sequence) && p.sequence.video_tracks[0].clips[0].has_title() &&
                p.sequence.video_tracks[0].clips[0].title.text == want.text,
            "edit-op: undo of no-op leaves the title in place");

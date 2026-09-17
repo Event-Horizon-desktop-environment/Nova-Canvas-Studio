@@ -23,8 +23,6 @@ namespace canvas::gui {
 
 namespace {
 
-// Display labels for the core preset slugs; unknown slugs fall back to the
-// slug itself. Reset below whenever a core preset is renamed.
 const char* preset_label(const char* slug) {
     if (std::string_view(slug) == "standard") return "Standard";
     if (std::string_view(slug) == "classic") return "Classic Subtitle";
@@ -34,7 +32,7 @@ const char* preset_label(const char* slug) {
 }
 
 struct LangEntry {
-    const char* code;  // empty = auto-detect
+    const char* code;
     const char* label;
 };
 const LangEntry kLanguages[] = {
@@ -56,7 +54,7 @@ const LangEntry kLanguages[] = {
     {"pl", "Polish"},
 };
 
-}  // namespace
+}
 
 SubtitleDialog::SubtitleDialog(QWidget* parent) : QDialog(parent) {
     setWindowTitle(tr("Generate Subtitles From Audio"));
@@ -160,8 +158,6 @@ SubtitleDialog::SubtitleDialog(QWidget* parent) : QDialog(parent) {
     });
     root->addWidget(buttons);
 
-    // Named presets drive the raw fields; editing a field while a named preset
-    // is selected stows it back into "Custom" so the readout never lies.
     connect(preset_, &QComboBox::currentIndexChanged, this, &SubtitleDialog::apply_preset);
     connect(chars_, &QSpinBox::valueChanged, this, &SubtitleDialog::note_custom_change);
     connect(lines_, &QComboBox::currentIndexChanged, this, &SubtitleDialog::note_custom_change);
@@ -239,8 +235,6 @@ void SubtitleDialog::set_cancelling() {
 }
 
 void SubtitleDialog::reject() {
-    // Mid-run Cancel/Esc/X requests an abort and leaves the dialog open; the
-    // caller's finish path re-arms it (success, error, or cancelled).
     if (running_) {
         emit cancelRequested();
         return;
@@ -271,4 +265,4 @@ void SubtitleDialog::note_custom_change() {
     if (preset_->currentIndex() != custom_index) preset_->setCurrentIndex(custom_index);
 }
 
-}  // namespace canvas::gui
+}

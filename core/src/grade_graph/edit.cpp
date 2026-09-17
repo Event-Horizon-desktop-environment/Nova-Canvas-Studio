@@ -8,9 +8,6 @@ namespace canvas::core::grade_graph {
 
 namespace {
 
-// Same-type check shared by every wiring law: both ends must carry the same
-// pipe AND the from end must actually be an output of that pipe while the to
-// end is an input. Port/target lookup and cycle/occupancy are the callers'.
 bool is_legal_binding(const NodePorts& from_ports, PipeType type, int from_port,
                       const NodePorts& to_ports) {
     const bool to_holds_input = type == PipeType::kRgb
@@ -32,8 +29,6 @@ bool is_legal_binding(const NodePorts& from_ports, PipeType type, int from_port,
     return from_ports.channel_out > 0 && from_port >= 0 && from_port < 3;
 }
 
-// Reverse-lookup of an edge's occupant on one destination pipe/port (nullptr
-// when the port is free).
 const Edge* occupant_on(const GradeGraph& g, PipeId to) {
     for (const Edge& e : g.edges()) {
         if (e.to.node == to.node && e.to.type == to.type && e.to.port == to.port) {
@@ -43,7 +38,7 @@ const Edge* occupant_on(const GradeGraph& g, PipeId to) {
     return nullptr;
 }
 
-}  // namespace
+}
 
 NodePorts node_ports(NodeKind kind) {
     switch (kind) {
@@ -78,9 +73,6 @@ WireRule can_wire(const GradeGraph& g, PipeId from, PipeId to) {
     const NodePorts fp = node_ports(g.node(from.node).kind);
     const NodePorts tp = node_ports(g.node(to.node).kind);
 
-    // Port existence on the destination. rgb_in special: fixed counts admit
-    // ports [0, rgb_in); a Layer Mixer additionally admits ANY port >= its
-    // fixed base count (layer slots 1..N).
     const bool port_exists = to.type == PipeType::kRgb
                                  ? to.port >= 0 &&
                                        (to.port < tp.rgb_in ||
@@ -124,7 +116,6 @@ int insert_branch(GradeGraph& g, NodeKind kind, int sink) {
     if (sink < 0 || static_cast<std::size_t>(sink) >= static_cast<std::size_t>(g.num_nodes())) {
         return -1;
     }
-    // The sink must expose a feedable rgb input (a Key Mixer has none).
     const NodePorts sp = node_ports(g.node(sink).kind);
     if (!(sp.rgb_in > 0 || sp.unbounded_rgb_in)) {
         return -1;
@@ -133,9 +124,6 @@ int insert_branch(GradeGraph& g, NodeKind kind, int sink) {
     if (base && (*base < 0 || static_cast<std::size_t>(*base) >= static_cast<std::size_t>(g.num_nodes()))) {
         return -1;
     }
-    // Both mixers need a real wired source on the sink (see edit.hpp): the
-    // evaluator's A slot is the mixer's FIRST rgb edge, and a lone layer edge
-    // would be promoted to base — skipping its key gate.
     if (!base) {
         return -1;
     }
@@ -145,11 +133,6 @@ int insert_branch(GradeGraph& g, NodeKind kind, int sink) {
                                                              : NodeKind::kLayerMixer);
     g.node(mixer).shared_source = *base;
 
-    // The base->sink wire is stripped first and the mixer's rgb inputs wired
-    // base-before-branch: the evaluator's A slot is the mixer's FIRST rgb
-    // edge (WIRE-ORDER CONTRACT, see edit.hpp). All five wires below are
-    // validated above (bounds, arity, acyclicity), so the guard only ever
-    // trips on internal inconsistency.
     if (!g.remove_edge({*base, PipeType::kRgb, 0}, {sink, PipeType::kRgb, 0}) ||
         g.add_edge({*base, PipeType::kRgb, 0}, {branch, PipeType::kRgb, 0}) < 0 ||
         g.add_edge({*base, PipeType::kRgb, 0}, {mixer, PipeType::kRgb, 0}) < 0 ||
@@ -171,10 +154,6 @@ int add_layer(GradeGraph& g, int mixer, int layer) {
     if (g.node(mixer).kind != NodeKind::kLayerMixer) {
         return -1;
     }
-    // The mixer's FIRST rgb edge is its base (the evaluator's ins[0]); every
-    // subsequent one is a layer. Highest-tracked port assigns the next free
-    // slot; legacy port-0-only stacks (Phase 2 add_rgb_edge) still append at
-    // port 1.
     int highest = 0;
     bool seen_base = false;
     for (const Edge& e : g.edges()) {
@@ -182,11 +161,11 @@ int add_layer(GradeGraph& g, int mixer, int layer) {
             if (!seen_base) {
                 seen_base = true;
                 if (e.from.node == layer) {
-                    return -1;  // already the base
+                    return -1;
                 }
             } else {
                 if (e.from.node == layer) {
-                    return -1;  // already a layer
+                    return -1;
                 }
                 highest = std::max(highest, static_cast<int>(e.to.port));
             }
@@ -205,10 +184,7 @@ int set_layer_order(GradeGraph& g, int mixer, const std::vector<int>& ordered) {
     if (g.node(mixer).kind != NodeKind::kLayerMixer) {
         return -1;
     }
-    // The mixer's FIRST rgb edge is the base (the evaluator's ins[0]); every
-    // edge after it is a layer. Tolerates legacy port-0-only stacks by
-    // re-porting the layers to 1..N rather than refusing them.
-    std::vector<std::pair<int, int>> layers;  // (port, source), layers only
+    std::vector<std::pair<int, int>> layers;
     bool seen_base = false;
     for (const Edge& e : g.edges()) {
         if (e.to.node == mixer && e.to.type == PipeType::kRgb) {
@@ -228,7 +204,7 @@ int set_layer_order(GradeGraph& g, int mixer, const std::vector<int>& ordered) {
     }
     for (const int src : ordered) {
         if (!current.erase(src)) {
-            return -1;  // duplicate or unknown layer
+            return -1;
         }
     }
     if (!current.empty()) {
@@ -248,4 +224,4 @@ int set_layer_order(GradeGraph& g, int mixer, const std::vector<int>& ordered) {
     return static_cast<int>(ordered.size());
 }
 
-}  // namespace canvas::core::grade_graph
+}

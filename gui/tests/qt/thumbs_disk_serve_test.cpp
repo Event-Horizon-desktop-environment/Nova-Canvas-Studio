@@ -1,25 +1,3 @@
-// Qt test (2026-09-16 filmstrip "never fully populates" / submit-jank
-// regression): pins the thumbnail service's WORKER-side contract:
-//
-//   A. Disk fallback serves from the WORKER thread (Bug F). A request whose
-//      media cannot possibly be decoded (path does not exist) is still served
-//      from the on-disk PNG cache. If the fallback regressed back into submit()
-//      (or disappeared), this request would never deliver — the cell would stay
-//      blank on every cold session.
-//   B. A disk hit warms the in-memory LRU (Bug G). The SAME key requested again
-//      resolves synchronously from the memory cache inside submit() — no worker
-//      round-trip — which is what makes rebuilt passes free after the first.
-//   C. Total decode failure drains parked dedupe waiters with a null QImage and
-//      erases the pending key (Bug B). A key requested after a failed pass is
-//      RE-ENQUEUED and served again (null) instead of parking forever on a dead
-//      pending entry that no worker will ever serve (the "cell never backfills
-//      until a rebuild" bug).
-//
-// The on-disk filename contract is pinned here too: seed "t2|"+path+"|"+frame+
-// "|"+width, FNV-1a hashed to a 16-hex-char name with a .png extension (the
-// service's cache_file_name). A seed/format bump that invalidates existing
-// caches must update this mirror or the test fails loudly.
-
 #include "features/thumbnails/thumbnail_service.hpp"
 
 #include <QCoreApplication>
@@ -44,7 +22,6 @@ using namespace canvas::gui;
 
 namespace {
 
-// Mirrors ThumbnailService::fnv1a_hex (stable algorithm, filesystem filename).
 std::string fnv1a_hex(const std::string& s) {
     std::uint64_t h = 0xcbf29ce484222325ULL;
     for (unsigned char c : s) {
@@ -58,7 +35,6 @@ std::string fnv1a_hex(const std::string& s) {
     return out;
 }
 
-// Mirrors disk_path_thumbnail: "<cache_dir>/<hex>.png" for the t2 seed grid.
 QString thumb_disk_path(const QString& cache_dir, const std::string& path, int64_t frame,
                         int width) {
     const std::string seed =
@@ -67,8 +43,6 @@ QString thumb_disk_path(const QString& cache_dir, const std::string& path, int64
            QLatin1String(".png");
 }
 
-// Pumps the event loop until `predicate` (worker deliveries arrive as queued
-// signals, so the main thread must spin) or the timeout fires.
 bool wait_for(QCoreApplication& app, const std::function<bool()>& predicate, int timeout_ms) {
     const auto t0 = std::chrono::steady_clock::now();
     while (!predicate()) {
@@ -92,7 +66,7 @@ bool same_pixels(const QImage& a, const QImage& b) {
                            static_cast<std::size_t>(ca.height())) == 0;
 }
 
-}  // namespace
+}
 
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
@@ -105,7 +79,6 @@ int main(int argc, char** argv) {
         }
     };
 
-    // Fresh per-run cache dir so no stale disk files can mask a regression.
     const QString cache_dir = QDir::temp().filePath(
         QStringLiteral("canvas_thumbs_svc_test_%1").arg(QCoreApplication::applicationPid()));
     QDir(cache_dir).removeRecursively();
@@ -113,9 +86,6 @@ int main(int argc, char** argv) {
     ThumbnailService service;
     service.set_cache_dir(cache_dir);
 
-    // Delivery sink: records every thumbnail_ready; tracks deliveries that land
-    // synchronously INSIDE request() (memory-cache hits — a worker delivery can
-    // never be processed mid-call because no event loop spins inside request).
     std::vector<std::pair<uint64_t, QImage>> deliveries;
     bool inside_request = false;
     bool sync_delivery_seen = false;
@@ -146,12 +116,10 @@ int main(int argc, char** argv) {
         return QImage();
     };
 
-    // --- A. Disk fallback serves from the worker thread (Bug F) ---
     {
         const std::string path = "/nonexistent/ncs/fake_media_a.mov";
         const int64_t frame = 42;
         const int width = 64;
-        // Pre-seed the on-disk cache exactly as a previous session would have.
         QImage written(width, 36, QImage::Format_ARGB32);
         written.fill(QColor(205, 30, 45));
         QPainter p(&written);
@@ -170,7 +138,6 @@ int main(int argc, char** argv) {
         expect("disk-seeded delivery is EXACTLY the cached PNG", same_pixels(got, written));
     }
 
-    // --- B. Disk hit warms the in-memory LRU (Bug G) ---
     {
         const std::string path = "/nonexistent/ncs/fake_media_a.mov";
         const int64_t frame = 42;
@@ -183,7 +150,6 @@ int main(int argc, char** argv) {
         expect("memory-served delivery is the same PNG", same_pixels(image_for(2), image_for(1)));
     }
 
-    // --- C. Failure drain + re-enqueue (Bug B) ---
     {
         const std::string path = "/nonexistent/ncs/fake_media_b.mov";
         const int64_t frame = 7;
@@ -191,15 +157,12 @@ int main(int argc, char** argv) {
         expect("no disk file exists for the failing path",
                !QFileInfo::exists(thumb_disk_path(cache_dir, path, frame, width)));
         request(101, path, frame, width);
-        request(102, path, frame, width);  // dedupe-parks on 101's pending key
+        request(102, path, frame, width);
         const bool drained = wait_for(app, [&] { return got_id(101) && got_id(102); }, 8000);
         expect("both parked waiters drained after total failure", drained);
         expect("waiter 101 gets a null QImage (drain signal)", image_for(101).isNull());
         expect("waiter 102 gets a null QImage (drain signal)", image_for(102).isNull());
 
-        // The pending key was ERASED, so a later request for the same cell is
-        // re-enqueued (and, media still missing, fails + drains again) instead of
-        // parking forever on a pending entry no worker will ever serve.
         request(103, path, frame, width);
         const bool reenqueued = wait_for(app, [&] { return got_id(103); }, 8000);
         expect("request after a failed pass is re-enqueued, not parked (got a serve)",

@@ -1,33 +1,3 @@
-// Per-clip retime engine: WSOLA ("Waveform Similarity Overlap-Add") streaming
-// time-stretch with a windowed-sinc resampling front-end for pitch shift and
-// the shared audio_mix pan law baked into its output. Snapshot of the
-// well-known constant-rate algorithm for the stretch stage: the output
-// timeline is a lattice of synthesis hops S apart; each grain is one W-sample
-// Hann-windowed copy of the source waveform whose analysis start is chosen
-// (within a +/-D search radius of the nominal ratio*S advance) to best match
-// the previous grain's tail, which keeps the stitched waveform continuous and
-// therefore pitch-identical to the source. Only the hop distance differs, so
-// the tempo (grains per output second) changes while the pitch inside each
-// grain stays.
-//
-// Overlap-add bookkeeping: with S = W/2 the Hann windows of successive grains
-// sum to unity in their S-sample overlap, so each grain emits exactly its S
-// head samples (windowed source + the previous grain's windowed tail), then
-// its [S..W) tail becomes the overlap carry for the next grain. The engine is
-// stateful across calls: an input history ring keeps source samples around for
-// windows that reach backward, the analysis/synthesis cursors advance
-// monotonically, and a short call simply defers the seam grain until the next
-// call's contiguous input arrives.
-//
-// Pitch shift: a `pitch_factor` p != 1 runs the media through a windowed-sinc
-// resampler first (output length /p, pitch xp); the WSOLA stage then consumes
-// `speed_ratio / p` resampled frames per output frame, so the two geometric
-// rates cancel and the final output length obeys only the speed law while the
-// pitch lands on p. When |speed_ratio - p| ~ 0 the WSOLA stage is bypassed
-// (its unity-ratio OLA would re-corrupt a clean resample), and when p == 1
-// the resampler is skipped outright so the speed-only path is byte-identical
-// to the pre-pitch engine.
-
 #include "canvas/core/timeline/time_stretch.hpp"
 
 #include <algorithm>
@@ -42,14 +12,13 @@ namespace canvas::core {
 
 namespace {
 
-// ~40 ms synthesis window at any rate, forced even so S = W/2 is integral.
 int window_samples(int sample_rate) {
     const int w = static_cast<int>(
         2 * std::max(1LL, std::llround(0.04 * static_cast<double>(sample_rate) / 2.0)));
     return w < 256 ? 256 : w;
 }
 
-}  // namespace
+}
 
 int TimeStretch::lookahead_frames(int sample_rate) noexcept {
     if (sample_rate <= 0) return 0;
@@ -98,9 +67,6 @@ void TimeStretch::setup(int sample_rate, int channels) {
     prev_sig_.assign(static_cast<std::size_t>(S_) * channels, 0.0f);
 }
 
-// Drop resampled history at least a full hop before the newest analysis
-// position the next grain can reach (the search may step back up to +/-D
-// from `a_`). Operates on the SRC-OUTPUT ring (in_hist_).
 void TimeStretch::compact_history() {
     const int64_t keep = std::max<int64_t>(0, static_cast<int64_t>(std::floor(a_)) - D_);
     const int64_t drop = keep - in_base_;
@@ -115,9 +81,6 @@ void TimeStretch::compact_history() {
     in_base_ = keep;
 }
 
-// Drop RAW media history the resampler can never need again: its taps reach
-// up to kSrcTapsHalf ahead of the cursor and back the same distance, so once
-// the cursor has moved past a sample it is dead.
 void TimeStretch::compact_media() {
     const int64_t keep =
         std::max<int64_t>(0, static_cast<int64_t>(std::floor(src_pos_)) - kSrcTapsHalf);
@@ -133,13 +96,6 @@ void TimeStretch::compact_media() {
     media_base_ = keep;
 }
 
-// Windowed-sinc (Lanczos-style, 2*kSrcTapsHalf taps, DC-normalised per
-// sample) resample of the raw media ring into the SRC-output ring. The step
-// is `pitch`: output sample m reads media at position m*pitch, so the output
-// has in/pitch samples (duration /pitch) reconstructed with the signal's
-// pitch multiplied by `pitch`. The anti-alias cutoff shrinks to 1/pitch when
-// downsampling (pitch > 1); taps that fall off the retained ring (only at
-// stream start) are skipped and the remaining taps renormalised.
 void TimeStretch::emit_src(int64_t media_end) {
     const double step = pitch_;
     const double alpha = std::min(1.0, 1.0 / pitch_);
@@ -182,9 +138,6 @@ void TimeStretch::emit_src(int64_t media_end) {
     }
 }
 
-// WSOLA-inactive mode: the SRC output IS the result (speed == pitch, or a
-// pan-only unity stream). Copy up to `out_frames` frames off the front of the
-// SRC/output ring into `stage_`, consume them, and advance the ring base.
 int TimeStretch::run_passthrough(int out_frames) {
     const int64_t avail = static_cast<int64_t>(in_hist_.size() / channels_);
     const int take = static_cast<int>(std::min<int64_t>(avail, out_frames));
@@ -228,11 +181,6 @@ int TimeStretch::search_best_offset(int64_t candidate) const {
     return best_d;
 }
 
-// WSOLA synthesis lattice, unchanged in geometry from the speed-only engine,
-// reading the SRC-output ring and writing the pre-pan lane buffer `stage_`:
-// each grain emits exactly S head samples (windowed source + previous grain's
-// windowed tail), then its [S..W) tail becomes the next grain's overlap carry,
-// advancing with the nominal-analysis cursor a_.
 int TimeStretch::run_synth(int out_frames) {
     stage_.resize(static_cast<std::size_t>(out_frames) * channels_);
     std::fill(stage_.begin(), stage_.end(), 0.0f);
@@ -241,9 +189,6 @@ int TimeStretch::run_synth(int out_frames) {
 
     while (written < out_frames) {
         if (!first_) {
-            // Continue the current grain's head if we stopped mid-way; each
-            // grain emits exactly S samples (windowed source + previous
-            // grain's windowed tail), so a partial last call resumes cleanly.
             if (out_base_ < cur_s_ + S_) {
                 const int n0 = static_cast<int>(out_base_ - cur_s_);
                 const int take = std::min(S_ - n0, out_frames - written);
@@ -258,25 +203,17 @@ int TimeStretch::run_synth(int out_frames) {
                 out_base_ += take;
                 continue;
             }
-            // Else out_base_ == cur_s_ + S_: the previous grain is spent; fall
-            // through and place the next one on the synthesis lattice.
         }
 
-        // Place the next grain on the lattice: nominal analysis advance
-        // ratio*S from the previous grain, refined by waveform similarity up
-        // to +/-D so the new head continues the old tail phase-coherently.
         const int64_t candidate = static_cast<int64_t>(std::llround(a_));
         int best_d = first_ ? 0 : search_best_offset(candidate);
         int64_t a_k = candidate + best_d;
         if (a_k < 0) a_k = 0;
-        if (a_k + W_ > avail_end) break;  // need more input; defer seam grain
+        if (a_k + W_ > avail_end) break;
         const std::size_t grain_off =
             static_cast<std::size_t>(a_k - in_base_) * channels_;
         const float* src = in_hist_.data() + grain_off;
 
-        // This grain's OLA carry for the next one is the current window's
-        // tail; its waveform-similarity reference is the current window's raw
-        // tail. Grab both before overwriting cur_win_.
         if (!first_) {
             std::copy(cur_win_.begin() + static_cast<std::ptrdiff_t>(S_) * channels_,
                       cur_win_.end(), prev_tail_.begin());
@@ -302,10 +239,6 @@ int TimeStretch::run_synth(int out_frames) {
     return written;
 }
 
-// Push the engine-lane `stage_` into `out` with the pan balance and the mono
-// upmix. The pan law is audio_mix::pan_gains — the SAME law the boundary
-// mix still applies to clips the engine never touched — so a panned source is
-// applied exactly once regardless of which path rendered it.
 void TimeStretch::finalize(std::vector<float>& out, int written, float pan) {
     if (written <= 0) return;
     const std::size_t n = static_cast<std::size_t>(written);
@@ -351,14 +284,10 @@ int TimeStretch::process(const float* in, int in_frames, int channels, double sp
     const std::size_t add = static_cast<std::size_t>(in_frames) * channels;
     const bool srcing = std::fabs(pitch_factor - 1.0) > 1e-9;
     if (srcing) {
-        // Resampled path: hold the raw media ring, stream it through the SRC
-        // into the WSOLA/output ring.
         media_hist_.insert(media_hist_.end(), in, in + static_cast<std::ptrdiff_t>(add));
         emit_src(media_base_ + static_cast<int64_t>(media_hist_.size() / channels));
         compact_media();
     } else {
-        // Unity pitch: the input history IS the output ring (the speed-only
-        // and pan-only paths, byte-identical to the pre-pitch engine).
         in_hist_.insert(in_hist_.end(), in, in + static_cast<std::ptrdiff_t>(add));
     }
 
@@ -401,8 +330,6 @@ int TimeStretchBank::tick(std::uint64_t clip_id, double speed_ratio, double pitc
                           int* out_channels) {
     Entry& e = entries_[clip_id];
     if (e.ratio != 0.0 && (e.ratio != speed_ratio || e.pitch != pitch_factor)) {
-        // A clip's speed or pitch changing mid-stream tears the timeline law
-        // apart; drop the old stream so the new pair starts clean.
         e.engine.reset();
     }
     e.ratio = speed_ratio;
@@ -427,4 +354,4 @@ void TimeStretchBank::drop(std::uint64_t clip_id) {
 
 void TimeStretchBank::clear() { entries_.clear(); }
 
-}  // namespace canvas::core
+}

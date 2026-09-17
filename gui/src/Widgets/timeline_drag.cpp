@@ -1,6 +1,3 @@
-// TimelineDragController — Qt-free clip-drag math (splitplan Phase 29).
-// See timeline_drag.hpp for the contract and the split boundaries.
-
 #include "Widgets/timeline_drag.hpp"
 
 namespace canvas::gui {
@@ -19,10 +16,6 @@ int64_t DragController::snap_tl_in(const int64_t frame, const int64_t duration,
                                    const bool snap_enabled, const double frames_per_pixel,
                                    const std::span<const int64_t> snap_targets) {
     if (!snap_enabled || frames_per_pixel <= 0.0) return frame;
-    // Resolve-style magnetic edge snap first: both clip edges compete against
-    // the supplied targets (other clips' in/out, playhead, bookmarks). If no
-    // edge is within the pixel-derived radius, fall back to the zoom-dependent
-    // grid so zoomed-out placement still quantizes sensibly.
     if (!snap_targets.empty()) {
         const int64_t edge =
             timeline_snap::snap_dragged_edges(frame, duration, snap_targets, frames_per_pixel);
@@ -63,5 +56,5 @@ DragController::CommitResult DragController::commit(int64_t pointer_frame,
     return {new_tl_in, changed};
 }
 
-}  // namespace timeline_drag
-}  // namespace canvas::gui
+}
+}

@@ -11,8 +11,6 @@ namespace {
 
 using json = nlohmann::json;
 
-// --- string-enum mapping (forward-compatible: unknown -> default) ------------
-
 template <typename E>
 struct EnumStrings {
     const char* name;
@@ -190,13 +188,12 @@ json node_to_json(const Node& n) {
     return j;
 }
 
-}  // namespace
+}
 
 json grade_graph_to_json(const GradeGraph& g) {
     json nodes = json::array();
     for (std::size_t i = 0; i < g.num_nodes(); ++i) nodes.push_back(node_to_json(g.node(static_cast<int>(i))));
     json edges = json::array();
-    // Id-order stable so the round trip byte-matches when nothing changed.
     std::vector<const Edge*> by_key;
     by_key.reserve(g.edges().size());
     for (const Edge& e : g.edges()) by_key.push_back(&e);
@@ -214,8 +211,6 @@ json grade_graph_to_json(const GradeGraph& g) {
 
 GradeGraph grade_graph_from_json(const json& j) {
     GradeGraph g;
-    // Node ids must be re-applied in file order; add_node() assigns ids
-    // sequentially (0..N-1), which the writer guarantees by construction.
     std::vector<int> file_to_local;
     for (const auto& nj : j.value("nodes", json::array())) {
         const std::string ks = nj.value("kind", std::string("corrector"));
@@ -223,7 +218,7 @@ GradeGraph grade_graph_from_json(const json& j) {
         for (const auto& e : kind_table())
             if (ks == e.name) { known = true; break; }
         if (!known) {
-            file_to_local.push_back(-1);  // skip; edges to it are dropped below
+            file_to_local.push_back(-1);
             continue;
         }
         const int local = g.add_node(from_string(kind_table(), ks, NodeKind::kCorrector));
@@ -316,7 +311,7 @@ GradeGraph grade_graph_from_json(const json& j) {
         const int tl = static_cast<std::size_t>(to.node) < file_to_local.size()
                            ? file_to_local[static_cast<std::size_t>(to.node)]
                            : -1;
-        if (fl < 0 || tl < 0) continue;  // edge touched a skipped node
+        if (fl < 0 || tl < 0) continue;
         if (from.type == PipeType::kChannel) {
             g.add_channel_edge(fl, from.port, tl, to.port);
         } else if (from.type == PipeType::kKey) {
@@ -328,4 +323,4 @@ GradeGraph grade_graph_from_json(const json& j) {
     return g;
 }
 
-}  // namespace canvas::core::grade_graph
+}

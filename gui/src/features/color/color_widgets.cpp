@@ -40,22 +40,9 @@ namespace canvas::gui {
 
 using namespace canvas::core::colorsci;
 
-// A color knob released within this normalized radius of the disc center
-// ([-1,1]^2) is a "return-to-center" gesture: the wheel keeps its last
-// committed grade rather than committing the neutral knob values. ~5% of the
-// disc radius, in line with the small center ring drawn over the wheel face.
 constexpr double kCenterReleaseRadius = 0.05;
 
-// ── ToneField ────────────────────────────────────────────────────────────────
-// The parameter rows across the panel are drag-scrub fields, not slider
-// tracks: click on the box and drag vertically to change the value. A small
-// drag threshold keeps a plain click available for keyboard editing.
-
 namespace {
-// ScrubSpinBox: a QDoubleSpinBox that scrubs on horizontal drag. Drag distance
-// (px) maps to value via `units_per_px`; press stores the anchor, so repeated
-// drags accumulate from the value at press time rather than the mid-drag
-// value. A click without movement passes through to normal editing.
 class ScrubSpinBox : public QDoubleSpinBox {
 public:
     explicit ScrubSpinBox(QWidget* parent = nullptr) : QDoubleSpinBox(parent) {
@@ -122,9 +109,6 @@ private:
     bool dragging_ = false;
 };
 
-// Extreme color-knob geometry for the archive traces: normalized xy on the
-// wheel disc -> radius (0..1) and hue angle in degrees (0..360). Printed on
-// every press/move/release so the color.log records the knob's exact path.
 double knob_radius(const QPointF& xy) { return std::hypot(xy.x(), xy.y()); }
 
 double knob_angle_deg(const QPointF& xy) {
@@ -132,13 +116,8 @@ double knob_angle_deg(const QPointF& xy) {
     if (a < 0.0) a += 360.0;
     return a;
 }
-}  // namespace
+}
 
-// SwatchStrip (at canvas::gui scope so it completes the header forward
-// declaration): the mockup's "swatch-slot" — a thin 4px gradient strip under a
-// parameter field's box with a small non-interactive marker at the current
-// value. kNone renders a transparent slot so every box on a shared row keeps
-// the same baseline.
 class SwatchStrip : public QWidget {
 public:
     explicit SwatchStrip(SwatchKind kind, QWidget* parent = nullptr)
@@ -223,7 +202,6 @@ ToneField::ToneField(const QString& label, double lo, double hi, double value,
     scrub->setValue(value);
     scrub->setDecimals(2);
     scrub->setFixedWidth(box_width);
-    // Full range over a ~200px drag.
     scrub->set_units_per_px((hi - lo) / 200.0);
     scrub->set_field_range(lo, hi);
     apply_theme_style(scrub, [] {
@@ -366,11 +344,6 @@ void ToneField::sync_slider_from_spin() {
     syncing_ = false;
 }
 
-// ── MiniKnob ────────────────────────────────────────────────────────────
-// A small rotary dial in the style of an old cassette-player volume wheel.
-// Grab with the mouse and roll: vertical drag up = increase, down = decrease
-// (horizontal movement is ignored so a wheel drag never fights the panel).
-
 MiniKnob::MiniKnob(QWidget* parent) : QWidget(parent) {
     setCursor(Qt::PointingHandCursor);
     setMinimumSize(24, 24);
@@ -389,7 +362,6 @@ void MiniKnob::paintEvent(QPaintEvent* event) {
     const QPointF c = rect().center();
     const qreal r = std::min(width(), height()) / 2.0 - 2.0;
 
-    // Body: machined wheel (radial gradient + ridge ring).
     QRadialGradient body(c, r, c, 0.4 * r);
     body.setColorAt(0.0, t.surface_highest);
     body.setColorAt(1.0, t.surface_low);
@@ -397,7 +369,6 @@ void MiniKnob::paintEvent(QPaintEvent* event) {
     p.setBrush(body);
     p.drawEllipse(c, r, r);
 
-    // Ridge lip where a cassette wheel would have its knurling.
     p.setPen(QPen(with_alpha(t.ink, 60), 1.0));
     for (int i = 0; i < 12; ++i) {
         const qreal a = i * 2 * M_PI / 12;
@@ -405,8 +376,6 @@ void MiniKnob::paintEvent(QPaintEvent* event) {
                    c + QPointF(std::cos(a), std::sin(a)) * r);
     }
 
-    // Indicator: a pointer that sweeps -135°..+135° with value01, plus a
-    // center cap so it reads as a volume knob rather than a clock.
     const qreal deg = -135.0 + 270.0 * t01_;
     const qreal a = deg * M_PI / 180.0;
     p.setPen(QPen(t.accent, 2.0, Qt::SolidLine, Qt::RoundCap));
@@ -428,7 +397,6 @@ void MiniKnob::mouseMoveEvent(QMouseEvent* event) {
     if (!dragging_) return;
     const qreal dy = press_pos_.y() - event->position().y();
     const float before = t01_;
-    // Full range over ~80px of roll.
     set_value01(press_t01_ + static_cast<float>(dy / 80.0));
     if (t01_ != before) {
         CANVAS_COLOR_LOG(
@@ -448,8 +416,6 @@ void MiniKnob::mouseReleaseEvent(QMouseEvent* event) {
     emit value_committed(t01_);
 }
 
-// ── ColorWheelWidget ─────────────────────────────────────────────────────────
-
 ColorWheelWidget::ColorWheelWidget(QWidget* parent) : QWidget(parent) {
     setCursor(Qt::PointingHandCursor);
     setMinimumSize(72, 72);
@@ -466,8 +432,8 @@ QPointF ColorWheelWidget::pos_to_xy(const QPointF& pos) const {
     const qreal r = disc_rect().width() / 2.0;
     QPointF d(pos.x() - c.x(), pos.y() - c.y());
     const qreal len = std::hypot(d.x(), d.y());
-    if (r > 0.0) d /= r;             // xy normalized to [-1,1] on the disc
-    if (len > r) d *= r / len;       // clamp inside the disc: radius preserved
+    if (r > 0.0) d /= r;
+    if (len > r) d *= r / len;
     return d;
 }
 
@@ -526,10 +492,6 @@ void ColorWheelWidget::paintEvent(QPaintEvent* event) {
     const qreal r = disc.width() / 2.0;
     const QPointF c = disc.center();
 
-    // Hue wheel: per-pixel HSV bake (angle -> hue) cached in face_cache_ —
-    // covers the ENTIRE disc (core + rim band) with every hue around the rim,
-    // no white core, no RGB-interpolation banding. The rim band is the same hue
-    // map at a higher value so it matches the core colors but stands out.
     const QRectF face = disc.adjusted(r * 0.11, r * 0.11, -r * 0.11, -r * 0.11);
     const QSize disc_px = disc.size().toSize();
     if (disc_px != face_cache_size_) {
@@ -544,7 +506,6 @@ void ColorWheelWidget::paintEvent(QPaintEvent* event) {
     p.drawImage(disc, face_cache_);
     p.restore();
 
-    // Crosshair lines + center ring (mockup wheel-face anatomy).
     p.setPen(QPen(QColor(255, 255, 255, 40), 1.0));
     p.drawLine(QPointF(face.left(), c.y()), QPointF(face.right(), c.y()));
     p.drawLine(QPointF(c.x(), face.top()), QPointF(c.x(), face.bottom()));
@@ -552,7 +513,6 @@ void ColorWheelWidget::paintEvent(QPaintEvent* event) {
     p.setBrush(Qt::NoBrush);
     p.drawEllipse(c, r * 0.055, r * 0.055);
 
-    // Position marker: the color knob.
     const QPointF dot = xy_to_pos(xy_);
     p.setPen(QPen(active_ ? t.accent : t.ink, 2.0));
     p.setBrush(active_ ? t.accent_soft : QColor(Qt::transparent));
@@ -622,16 +582,11 @@ void ColorWheelWidget::mouseReleaseEvent(QMouseEvent* event) {
     update();
 }
 
-// ── ColorWheelsPanel ─────────────────────────────────────────────────────────
-
 ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(10, 10, 10, 10);
     root->setSpacing(8);
 
-    // Header: title (left) + icon-button cluster (right), the shared
-    // panel-header contract every Grading-Workspace panel follows — title
-    // left · icon cluster right (reset-all, view options, overflow).
     auto* header = new QWidget(this);
     auto* header_l = new QHBoxLayout(header);
     header_l->setContentsMargins(0, 0, 0, 0);
@@ -660,9 +615,6 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
         return b;
     };
 
-    // Reset-all: resets the whole panel state to identity; the page owns the
-    // single undo so it can also clear the Curves panel (see
-    // reset_all_requested in the header) and write a truly empty grade.
     make_header_icon("reset", tr("Reset all grades"), [this] {
         qWarning().nospace() << "[grade] reset-all";
         CANVAS_COLOR_LOG(
@@ -677,8 +629,6 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
         set_state(state_);
         emit reset_all_requested();
     });
-    // View options / overflow: structural placeholders to match the panel
-    // header contract; no behavior yet.
     make_header_icon("mode", tr("View options"), {});
     make_header_icon("menu", tr("More options"), {});
     root->addWidget(header);
@@ -696,14 +646,6 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
         return t;
     };
 
-    // NOTE: no parameter row above the wheels — mockup layout keeps the tone
-    // fields in a single shared row BELOW the wheels only.
-
-    // Spec §9a item 2: exactly four circular wheels, evenly spaced, in fixed
-    // order Lift, Gamma, Gain, Offset. Each wheel column follows the mockup's
-    // `wtop` anatomy: a dial-block on the LEFT (small cassette master knob +
-    // its value), the wheel NAME centered, and the reset icon on the right —
-    // symmetric fixed-width ends so the name centers on the wheel's axis.
     const char* const kWheelNames[4] = {"Lift", "Gamma", "Gain", "Offset"};
     auto* wheels_row = new QWidget(this);
     auto* wheels_layout = new QHBoxLayout(wheels_row);
@@ -715,16 +657,11 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
         cell_layout->setContentsMargins(0, 0, 0, 0);
         cell_layout->setSpacing(2);
 
-        // wtop: three-column header — dial-block | name | reset.
         auto* wheel_header = new QWidget(cell);
         auto* wheel_header_l = new QHBoxLayout(wheel_header);
         wheel_header_l->setContentsMargins(0, 0, 0, 0);
         wheel_header_l->setSpacing(0);
 
-        // Dial-block: hidden master state (identity mid by default) + the
-        // current master-term readout text. The cassette knob visual is gone;
-        // the master stays at its identity mid so the wheel response law keeps
-        // working, and the readout text + reset button remain.
         auto* dial_block = new QWidget(wheel_header);
         auto* dial_l = new QVBoxLayout(dial_block);
         dial_l->setContentsMargins(0, 0, 0, 0);
@@ -732,7 +669,6 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
         auto* master = new MiniKnob(dial_block);
         master->setToolTip(tr("Master"));
         master->setFixedSize(20, 20);
-        // Start at the law's identity mid (0.5 -> Lift=0, Gamma/Gain=1, Offset=0).
         master->set_value01(0.5f);
         master->hide();
         auto* dial_val = new QLabel("0.00", dial_block);
@@ -768,7 +704,6 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
         auto* wheel = new ColorWheelWidget(cell);
         cell_layout->addWidget(wheel, 1);
 
-        // Three small boxed per-channel numeric readouts (spec item 2).
         auto* channel_row = new QWidget(cell);
         auto* channel_layout = new QHBoxLayout(channel_row);
         channel_layout->setContentsMargins(0, 0, 0, 0);
@@ -815,7 +750,6 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
                 static_cast<double>(wheels_[idx]->xy().y()));
             wheels_[idx]->set_xy(QPointF(0.0, 0.0));
             masters_[idx]->set_value01(0.5f);
-            // Reset through the controller law so the state matches the widgets.
             reset_primaries_wheel(state_, static_cast<PrimariesWheel>(idx));
             refresh_wheel_readout(idx);
             commit();
@@ -823,11 +757,6 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
     }
     root->addWidget(wheels_row, 1);
 
-    // The ONE shared tone row BELOW the wheels, matching the mockup's shared
-    // row exactly: Temp, Tint, Hue, Contrast, Pivot, Mid/Detail, Blk/Offset.
-    // Enum order == construction order below, so set_state's enum-int indexing
-    // stays valid. Color Boost, Shadows, Highlights, Saturation, Lum Mix are
-    // retained in WheelPanelState but no longer surfaced in the panel.
     auto* param_row = new QWidget(this);
     auto* param_layout = new QHBoxLayout(param_row);
     param_layout->setContentsMargins(0, 0, 0, 0);
@@ -851,8 +780,6 @@ ColorWheelsPanel::ColorWheelsPanel(QWidget* parent) : QWidget(parent) {
              static_cast<int>(ToneParam::kBlackOffset), param_row, param_layout);
     root->addWidget(param_row);
 
-    // The tone reset button also commits (its value already snapped to the
-    // reset value via set_value -> value_changed).
     for (ToneField* t : tone_fields_) {
         QObject::connect(t, &ToneField::reset_clicked, this, [this, t] {
             qWarning().nospace() << "[grade] tone-reset field=" << t->label_text();
@@ -870,7 +797,6 @@ bool ColorWheelsPanel::interaction_log_gate() {
 
 void ColorWheelsPanel::set_state(const canvas::core::colorsci::WheelPanelState& state) {
     state_ = state;
-    // Push the loaded wheels/tone back into the widgets without committing.
     for (int i = 0; i < wheels_.size(); ++i) {
         wheels_[i]->set_xy(QPointF(0.0, 0.0));
         const auto& meta = canvas::core::colorsci::detail::kWheelMeta[i];
@@ -894,9 +820,6 @@ void ColorWheelsPanel::set_state(const canvas::core::colorsci::WheelPanelState& 
     tone_fields_[static_cast<int>(ToneParam::kPivot)]->set_value(state_.pivot);
     tone_fields_[static_cast<int>(ToneParam::kMidDetail)]->set_value(state_.mid_detail);
     tone_fields_[static_cast<int>(ToneParam::kBlackOffset)]->set_value(state_.black_offset);
-    // Always-on load trace: proves a clip's saved grade actually reached the
-    // boards (the wheels come up CENTERED, so this line is the only proof the
-    // panel is not showing fresh identity defaults).
     qWarning().nospace()
         << "[grade] wheel-panel load lift_m=" << state_.lgg.lift_master
         << " gamma_m=" << state_.lgg.gamma_master
@@ -925,14 +848,8 @@ canvas::core::colorsci::WheelPanelState ColorWheelsPanel::state() const {
 void ColorWheelsPanel::wheel_moved(int index, const QPointF& xy) {
     const auto wheel = static_cast<PrimariesWheel>(index);
     const float master01 = masters_[index]->value01();
-    // Feed the wheel through the controller law. The lift/gamma/gain/offset
-    // per-channel terms land in the state and the boxes below the wheel track
-    // them exactly.
     apply_primaries_wheel(state_, wheel, xy.x(), xy.y(), master01);
     if (is_center_release(xy)) {
-        // Center = revert: a color knob moved back onto the disc center reverts this
-        // wheel to identity (same law as the per-wheel reset button). Preview
-        // matches the commit rule so a center release commits what was shown.
         reset_primaries_wheel(state_, wheel);
         masters_[index]->set_value01(0.5f);
     }
@@ -974,11 +891,6 @@ bool ColorWheelsPanel::is_center_release(const QPointF& xy) const {
     return std::hypot(xy.x(), xy.y()) <= kCenterReleaseRadius;
 }
 
-// Post-law per-channel offset that a wheel's state currently holds — the exact
-// terms the LUT bake consumes (not the color-knob xy, which the scale law
-// transforms before it reaches the state). Printed alongside radius/scale in the
-// move/release traces so a "small-feeling drag" can be checked end-to-end:
-// radius -> scaled offset -> committed grade, all in one log.
 std::array<float, 3> ColorWheelsPanel::wheel_offset_for_roundtrip(int index) const {
     switch (static_cast<PrimariesWheel>(index)) {
         case PrimariesWheel::kLift:
@@ -1004,17 +916,10 @@ void ColorWheelsPanel::wheel_committed(int index, const QPointF& xy) {
     const float master01 = masters_[index]->value01();
     apply_primaries_wheel(state_, wheel, xy.x(), xy.y(), master01);
     if (is_center_release(xy)) {
-        // Return-to-center reverts, not cancels: releasing a color knob back on the
-        // disc center clears this wheel's grade to identity, same law as the
-        // per-wheel reset button. The committed params below carry identity for
-        // this wheel (other wheels/tone keep their committed values).
         reset_primaries_wheel(state_, wheel);
         masters_[index]->set_value01(0.5f);
     }
     refresh_wheel_readout(index);
-    // Always-on release trace: the xy + revert flag make the return-to-center
-    // semantic legible — a center release logs revert=1 and the commit below
-    // writes identity for this wheel.
     {
         const float radius = std::hypot(xy.x(), xy.y());
         const float scale = canvas::core::colorsci::detail::kWheelMeta[index].scale;
@@ -1088,7 +993,6 @@ void ColorWheelsPanel::refresh_wheel_readout(int index) {
         master_values_[index]->setText(QString::number(master, 'f', 2));
     }
     if (static_cast<PrimariesWheel>(index) == PrimariesWheel::kOffset) {
-        // Keep the Blk/Offset field in lock-step with the Offset wheel's master.
         state_.black_offset = state_.offset.master;
         tone_fields_[static_cast<int>(ToneParam::kBlackOffset)]->set_value(state_.black_offset);
     }
@@ -1103,9 +1007,6 @@ void ColorWheelsPanel::tone_param_changed(int param, double value) {
         case ToneParam::kPivot: state_.pivot = static_cast<float>(value); break;
         case ToneParam::kMidDetail: state_.mid_detail = static_cast<float>(value); break;
         case ToneParam::kBlackOffset: {
-            // Blk/Offset drives the Offset wheel's master through the same
-            // master01->value law as the cassette knob. Sync the knob so the
-            // wheel's master term and the field never diverge.
             state_.black_offset = static_cast<float>(value);
             state_.offset.master = static_cast<float>(value);
             const auto& meta = canvas::core::colorsci::detail::kWheelMeta[static_cast<int>(PrimariesWheel::kOffset)];
@@ -1132,10 +1033,6 @@ void ColorWheelsPanel::tone_param_changed(int param, double value) {
 }
 
 void ColorWheelsPanel::commit() {
-    // Gates shared with the interaction taps: tone scrubs commit per value
-    // change, so an ungated line here would still flush at mouse-move rate.
-    // Each interaction surface (wheel release / tone-param / reset) logs its
-    // own explicit line on top of this digest.
     if (interaction_log_gate()) {
         qWarning().nospace()
             << "[grade] wheel-commit lift_m=" << state_.lgg.lift_master
@@ -1154,8 +1051,6 @@ void ColorWheelsPanel::commit() {
     emit params_committed(state_);
 }
 
-
-// ── ScopesPanel ──────────────────────────────────────────────────────────────
 
 ScopesPanel::ScopesPanel(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
@@ -1197,8 +1092,6 @@ ScopesPanel::ScopesPanel(QWidget* parent) : QWidget(parent) {
     header_row->addWidget(fifty);
     root->addWidget(header);
 
-    // One page per ScopeMode value (stack index == enum value). Every scope is a
-    // real widget fed the presented frame; see scopes/<name>/ for each one.
     waveform_scope_ = new WaveformScope(this);
     parade_scope_ = new ParadeScope(this);
     vectorscope_scope_ = new VectorscopeScope(this);
@@ -1212,15 +1105,11 @@ ScopesPanel::ScopesPanel(QWidget* parent) : QWidget(parent) {
     stack_->addWidget(chromaticity_);
     root->addWidget(stack_, 1);
 
-    // Sub-display dropdown: Waveform (Luma/RGB/YRGB), later Histogram
-    // (Luma/RGB); hidden for every other mode.
     display_sub_ = new QComboBox(header);
     apply_theme_style(display_sub_, &flat_tool_style);
     display_sub_->hide();
     header_row->addWidget(display_sub_);
 
-    // Vectorscope options (wave spec §2 panel-specific): trace shading mode,
-    // gain slider + 2x zoom.
     vector_opts_ = new QWidget(header);
     auto* vopt_row = new QHBoxLayout(vector_opts_);
     vopt_row->setContentsMargins(0, 0, 0, 0);
@@ -1253,9 +1142,6 @@ ScopesPanel::ScopesPanel(QWidget* parent) : QWidget(parent) {
     vector_opts_->hide();
     header_row->addWidget(vector_opts_);
 
-    // Wire the dropdown BEFORE selecting the default mode, so the initial
-    // setCurrentIndex below actually flips the stacked widget to the real
-    // Parade scope on startup instead of leaving the placeholder on screen.
     QObject::connect(mode, qOverload<int>(&QComboBox::currentIndexChanged),
                      this, [this](int i) { set_mode(static_cast<ScopeMode>(i)); });
     QObject::connect(display_sub_, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -1271,7 +1157,6 @@ ScopesPanel::ScopesPanel(QWidget* parent) : QWidget(parent) {
     QObject::connect(zoom2x_btn_, &QToolButton::toggled,
                      vectorscope_scope_, &VectorscopeScope::set_zoom2x);
 
-    // Parade is the live-fed default so a fresh project shows real signal.
     mode->setCurrentIndex(int(ScopeMode::Parade));
 }
 
@@ -1296,7 +1181,6 @@ void ScopesPanel::set_mode(ScopeMode mode) {
 
     vector_opts_->setVisible(mode == ScopeMode::Vectorscope);
 
-    // Re-feed the newest presented frame so a reclaimed page shows real signal.
     feed_frame_to_page();
     if (mode == ScopeMode::CIE) chromaticity_->refresh();
 }
@@ -1328,4 +1212,4 @@ void ScopesPanel::update_frame(canvas::core::RenderFramePtr frame) {
     feed_frame_to_page();
 }
 
-}  // namespace canvas::gui
+}

@@ -1,22 +1,3 @@
-// Software-decode RGBA conversion unit test: pins the sws buffer-sizing law
-// behind SoftDecoder::convert_to_rgba, the seam that fixed GitHub issue #4
-// (heap corruption). The old destination sizing was
-//   stride = out_w*4; rgba.resize(stride * out_h)
-// with dst_linesize hardcoded to that stride; libswscale pads each destination
-// row to its picture-line alignment, so wherever the aligned stride exceeds
-// w*4 (any output width that is not already a multiple of 32/4) sws_scale wrote
-// past the end of the vector. This test
-//  - proves the destination obeys the aligned layout for full-res, downscaled,
-//    and odd intermediate output dims across portrait/landscape sources;
-//  - proves every converted frame satisfies the two invariants the corruption
-//    violated: stride >= width*4 and rgba.size() >= stride*height;
-//  - exercises the low-res preview cap (set_output_dim) — the scrub path that
-//    converts frames by the hundreds.
-//
-// All sources are synthesized YUV420P frames (mid-gray, even dims); the color
-// spec defaults to BT709/Limited, which convert_to_rgba resolves to full-range
-// RGB. No media file, no GPU, no device.
-
 #include "canvas/core/media/sw_decode.hpp"
 #include "canvas/core/media/frame.hpp"
 
@@ -51,8 +32,6 @@ AVFrame* make_gray_yuv(int w, int h) {
         av_frame_free(&f);
         return nullptr;
     }
-    // Mid-gray: luma 128, both chroma planes 128. Fill padded row extent so the
-    // buffer contents are fully initialized (get_buffer's alignment is honored).
     const struct {
         int plane;
         int rows;
@@ -65,9 +44,6 @@ AVFrame* make_gray_yuv(int w, int h) {
     return f;
 }
 
-// Converts one synthesized frame through a fresh SoftDecoder. The AVFrame is
-// freed before return; the VideoFrame comes back as an owning shared_ptr (the
-// SoftDecoder is local, so nothing outlives the call).
 VideoFramePtr convert_gray(int w, int h, int cap, int ticks, double seconds, int number) {
     AVFrame* f = make_gray_yuv(w, h);
     if (!f) return nullptr;
@@ -80,11 +56,9 @@ VideoFramePtr convert_gray(int w, int h, int cap, int ticks, double seconds, int
     return out;
 }
 
-}  // namespace
+}
 
 int main() {
-    // Full-res conversion (no cap): a 1920x1080 luma stream converted to
-    // 1920x1080 RGBA. stride is the aligned row stride from av_image_fill_arrays.
     {
         VideoFramePtr out = convert_gray(1920, 1080, 0, 0, 0.0, 1);
         check(out != nullptr, "convert 1920x1080 full-res succeeds");
@@ -97,7 +71,6 @@ int main() {
         }
     }
 
-    // Portrait source, full-res.
     {
         VideoFramePtr out = convert_gray(1080, 1920, 0, 0, 0.0, 2);
         check(out != nullptr, "convert 1080x1920 full-res succeeds");
@@ -109,7 +82,6 @@ int main() {
         }
     }
 
-    // Landscape downscale cap (preview scrub path): longest edge -> 640.
     {
         VideoFramePtr out = convert_gray(1920, 1080, 640, 0, 0.0, 3);
         check(out != nullptr, "convert 1920x1080 cap 640 succeeds");
@@ -121,7 +93,6 @@ int main() {
         }
     }
 
-    // Portrait downscale cap: longest edge -> 640.
     {
         VideoFramePtr out = convert_gray(1080, 1920, 640, 0, 0.0, 4);
         check(out != nullptr, "convert 1080x1920 cap 640 succeeds");
@@ -133,11 +104,6 @@ int main() {
         }
     }
 
-    // ODD intermediate output dims — the exact case the old hand-sizing broke.
-    // 1920x1080 sawn to a 641 cap rounds to 641x361; 641*4 = 2564 is not a
-    // multiple of the 32-byte alignment, so the true stride is padded to 2592
-    // and the old w*4-based allocation under-sized the buffer. Assert the pad
-    // exists (stride > w*4) AND the buffer covers it.
     {
         VideoFramePtr out = convert_gray(1920, 1080, 641, 0, 0.0, 5);
         check(out != nullptr, "convert 1920x1080 cap 641 succeeds");
@@ -150,7 +116,6 @@ int main() {
         }
     }
 
-    // Cap larger than the source is a no-op (no upscale in the convert path).
     {
         VideoFramePtr out = convert_gray(640, 480, 1280, 0, 0.0, 6);
         check(out != nullptr, "cap larger than source succeeds");
@@ -161,7 +126,6 @@ int main() {
         }
     }
 
-    // Frame metadata (ticks / seconds / number) round-trips onto the frame.
     {
         VideoFramePtr out = convert_gray(320, 240, 0, 9876, 42.5, 77);
         check(out != nullptr, "convert carries metadata");
@@ -172,8 +136,6 @@ int main() {
         }
     }
 
-    // Feeding no output-dim cap but a source whose longest edge is below the
-    // cap must keep the source dims (floor at the source, never upscale).
     {
         VideoFramePtr out = convert_gray(854, 480, 640, 0, 0.0, 8);
         check(out != nullptr, "convert 854x480 with cap 640 succeeds (no upscale)");

@@ -34,9 +34,6 @@ Options sanitize(const Options& opts) noexcept {
 
 namespace {
 
-// Pure word-wrap: `text` (assumed normalized) broken into lines of at most
-// `max_chars` columns at word boundaries. A word longer than the column keeps
-// all of its characters on its own line (unbreakable token fallback).
 [[nodiscard]] std::vector<std::string> wrap_into_lines(std::string_view text,
                                                        int max_chars) {
     std::vector<std::string> words;
@@ -77,10 +74,6 @@ namespace {
     return lines;
 }
 
-// Chunks a segment's text into one string per output caption: words wrap to
-// `max_chars` columns, and the caption closes once `max_lines` lines are
-// laid out and the next word no longer fits (the leftover opens the next
-// caption). Text that fits is one chunk.
 [[nodiscard]] std::vector<std::string> chunk_text(std::string_view text,
                                                   int max_chars, int max_lines) {
     std::vector<std::string> words;
@@ -141,7 +134,7 @@ namespace {
     return chunks;
 }
 
-}  // namespace
+}
 
 std::string wrap_line(std::string_view text, int max_chars) {
     const int width = std::max(1, max_chars);
@@ -201,10 +194,6 @@ std::vector<Caption> shape_captions(const std::vector<transcript::Segment>& segm
 
     if (gap_ms <= 0) return shaped;
 
-    // Enforce the minimum empty interval between consecutive captions: pull a
-    // caption's start forward (keeping its end) until the gap is respected. A
-    // start pushed beyond its own end collapses to a zero-length caption
-    // (kept as-authored; the placement layer decides).
     std::vector<Caption> out;
     out.reserve(shaped.size());
     int64_t prev_end = std::numeric_limits<int64_t>::min();
@@ -219,4 +208,4 @@ std::vector<Caption> shape_captions(const std::vector<transcript::Segment>& segm
     return out;
 }
 
-}  // namespace canvas::core::captions
+}

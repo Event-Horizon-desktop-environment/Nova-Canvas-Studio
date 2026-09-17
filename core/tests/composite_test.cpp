@@ -1,12 +1,3 @@
-// Phase 6a Porter–Duff compositing law tests (core/grade_graph/composite.hpp +
-// the evaluator's Layer Mixer integration). Verifies the classic coverage
-// coefficients for every operator, the separable blend functions, the
-// over-with-blend equation (including the degenerate opaque case == legacy
-// "replace"), premultiplied/straight boundaries, the Fusion additive↔
-// subtractive knob, Disjoint alpha clamping, the source-alpha folding the
-// Layer Mixer does with key*opacity, and JSON round-trip of the new node
-// fields. Headless — links only canvas_core.
-
 #include "canvas/core/grade_graph/graph.hpp"
 #include "canvas/core/grade_graph/eval.hpp"
 #include "canvas/core/grade_graph/composite.hpp"
@@ -57,8 +48,6 @@ float alpha_of(const gg::FrameF& f, int x, int y) {
     return f.rgba[static_cast<std::size_t>(y * f.w + x) * 4u + 3];
 }
 
-// ---- law: coverage coefficients ----------------------------------------------
-
 void test_coverage_coefficients() {
     const float as = 0.4f;
     const float ab = 0.3f;
@@ -83,8 +72,6 @@ void test_coverage_coefficients() {
     check(near(stencil.fs, 0.0f) && near(stencil.fb, 1.0f - as), "stencil: hole cut by 1-as");
 }
 
-// ---- law: blend functions ----------------------------------------------------
-
 void test_blend_channel() {
     const float bk = 0.5f;
     const float src = 0.2f;
@@ -102,8 +89,6 @@ void test_blend_channel() {
     check(near(gg::blend_channel(BlendMode::kDifference, bk, src), 0.3f), "difference");
 }
 
-// ---- law: opaque over degenerates to legacy replace ---------------------------
-
 void test_opaque_over_replaces() {
     const gg::CompositeSample s =
         gg::composite_sample(0.5f, 0.5f, 0.5f, 1.0f, 0.2f, 0.2f, 0.2f, 1.0f,
@@ -115,10 +100,7 @@ void test_opaque_over_replaces() {
     check(near(m.r, 0.1f), "opaque over + multiply == blend result");
 }
 
-// ---- law: the non-over Porter–Duff operators ---------------------------------
-
 void test_porter_duff_ops() {
-    // Opaque: every operator resolves to a legible closed form.
     auto s = [](gg::CompositeOp op) {
         return gg::composite_sample(0.5f, 0.6f, 0.7f, 1.0f, 0.2f, 0.3f, 0.9f, 1.0f, op,
                                     BlendMode::kNormal, 0.0f);
@@ -137,7 +119,6 @@ void test_porter_duff_ops() {
     const gg::CompositeSample stencil = s(gg::CompositeOp::kStencil);
     check(near(stencil.r, 0.0f) && near(stencil.a, 0.0f), "opaque stencil: full hole");
 
-    // Semi-transparent in: source clipped to backdrop coverage.
     const gg::CompositeSample semi_in =
         gg::composite_sample(0.5f, 0.5f, 0.5f, 0.8f, 1.0f, 1.0f, 1.0f, 0.4f,
                              gg::CompositeOp::kIn, BlendMode::kNormal, 0.0f);
@@ -145,12 +126,7 @@ void test_porter_duff_ops() {
           "semi in: alpha = as*ab, color = source");
 }
 
-// ---- law: W3C over-with-blend on semi-transparent pixels ----------------------
-
 void test_semi_transparent_over() {
-    // as=0.4, ab=0.8; source (1,1,1), backdrop (0.6,0.6,0.6):
-    //   ao = 0.4 + 0.8*0.6 = 0.88
-    //   co (premul) = 0.4*1 + 0.6*0.8*0.6 = 0.688 -> straight = 0.688/0.88 = 0.781818
     const gg::CompositeSample s =
         gg::composite_sample(0.6f, 0.6f, 0.6f, 0.8f, 1.0f, 1.0f, 1.0f, 0.4f,
                              gg::CompositeOp::kOver, BlendMode::kNormal, 0.0f);
@@ -158,16 +134,11 @@ void test_semi_transparent_over() {
     check(near(s.r, 0.688f / 0.88f), "semi over: W3C blend equation, then unpremultiply");
     check(near(s.g, 0.688f / 0.88f) && near(s.b, 0.688f / 0.88f), "semi over: all channels equal");
 
-    // Screen blend on the same pair: B = 1-(1-0.6)(1-1) = 1, but the backdrop
-    // term (1-as)*ab*Cb = 0.288 still leaks, so the result is the same
-    // premultiplied number as the normal path (0.688/0.88), not full white.
     const gg::CompositeSample scr =
         gg::composite_sample(0.6f, 0.6f, 0.6f, 0.8f, 1.0f, 1.0f, 1.0f, 0.4f,
                              gg::CompositeOp::kOver, BlendMode::kScreen, 0.0f);
     check(near(scr.r, 0.688f / 0.88f), "semi over + screen equals the W3C equation");
 }
-
-// ---- law: Disjoint alpha clamp + additive knob --------------------------------
 
 void test_disjoint_and_additive() {
     const gg::CompositeSample over =
@@ -178,13 +149,10 @@ void test_disjoint_and_additive() {
                              gg::CompositeOp::kDisjoint, BlendMode::kNormal, 0.0f);
     check(near(over.a, 0.7f + 0.7f * 0.3f), "over: 0.91 alpha");
     check(near(disjoint.a, 1.0f), "disjoint: alpha clamped to min(1, as+ab)");
-    // Same premultiplied color (0.826) unpremultiplied by its own alpha: the
-    // straight values differ only because the alphas differ.
     check(near(disjoint.r * disjoint.a, over.r * over.a),
           "disjoint: premultiplied color identical to over");
     check(near(disjoint.r, 0.826f), "disjoint: straight color under clamped alpha");
 
-    // Additive knob on opaque pixels: 0.2 (subtractive) -> 0.7 (premul sum).
     auto t = [](float g) {
         return gg::composite_sample(0.5f, 0.5f, 0.5f, 1.0f, 0.2f, 0.2f, 0.2f, 1.0f,
                                     gg::CompositeOp::kOver, BlendMode::kNormal, g);
@@ -194,8 +162,6 @@ void test_disjoint_and_additive() {
     const gg::CompositeSample mid = t(0.5f);
     check(near(mid.r, 0.45f), "additive 0.5: linear mix of the two color laws");
 }
-
-// ---- public blend_into: opaque parity + real alpha now ------------------------
 
 void test_blend_into() {
     std::vector<float> acc = {0.5f, 0.5f, 0.5f, 1.0f, 0.3f, 0.3f, 0.3f, 1.0f};
@@ -212,7 +178,6 @@ void test_blend_into() {
     check(near(out[0], 0.2f), "blend_into normal keeps the layer (opaque)");
     check(near(out[3], 1.0f), "blend_into alpha recomputed to 1 on opaque inputs");
 
-    // Semi-transparent: alpha genuinely recomputed now (was: copied from acc).
     std::vector<float> sacc = {0.5f, 0.5f, 0.5f, 0.8f};
     std::vector<float> slay = {0.2f, 0.2f, 0.2f, 0.4f};
     std::vector<float> sout(4, 0.0f);
@@ -221,10 +186,6 @@ void test_blend_into() {
     check(near(sout[0], 0.32f / 0.88f), "blend_into: premultiplied over color");
 }
 
-// ---- evaluator integration -----------------------------------------------------
-
-// base(gain 1) + layer(gain 0.5, kLayer) over a semi-transparent source: the
-// mixer must composite premultiplied and build alpha, not just veil.
 void test_layer_mixer_premultiplied() {
     gg::GradeGraph g;
     const int base = add_gain(g, 1.0f);
@@ -239,21 +200,17 @@ void test_layer_mixer_premultiplied() {
     const gg::EvalResult r = gg::evaluate_graph(g, src);
     check(!!r.frame, "layer mixer evaluates a premultiplied stack");
     if (!r.frame) return;
-    // as=0.5, ab=0.5: ao=0.75; co=0.5*0.4 + 0.5*0.5*0.8 = 0.4; straight=0.4/0.75.
     check(near(alpha_of(*r.frame, 0, 0), 0.75f), "premultiplied stack builds alpha (0.5 -> 0.75)");
     check(near(at(*r.frame, 0, 0, 0), 0.4f / 0.75f), "premultiplied stack darkens the composite");
-    // Channel independence: green/blue follow the same law with their values.
     const float co_g = 0.5f * (0.6f * 0.5f) + 0.5f * 0.5f * 0.6f;
     check(near(at(*r.frame, 0, 0, 1), co_g / 0.75f), "premultiplied stack: green channel");
 }
 
-// key*opacity folds into coverage; on opaque media it must equal the legacy
-// veil exactly (base + (layer-base)*eff), and alpha stays 1.
 void test_layer_mixer_key_fold() {
     gg::GradeGraph g;
-    const int base = add_gain(g, 1.0f);       // base = source (0.4)
-    const int layer = add_gain(g, 2.0f, gg::NodeKind::kLayer);  // layer = 0.8
-    g.node(layer).opacity = 0.5f;             // eff = 0.5
+    const int base = add_gain(g, 1.0f);
+    const int layer = add_gain(g, 2.0f, gg::NodeKind::kLayer);
+    g.node(layer).opacity = 0.5f;
     const int mix = g.add_node(gg::NodeKind::kLayerMixer);
     const int ox = g.add_node(gg::NodeKind::kOutput);
     g.add_rgb_edge(base, mix);
@@ -267,8 +224,6 @@ void test_layer_mixer_key_fold() {
     check(near(alpha_of(*r.frame, 0, 0), 1.0f), "opaque stack keeps alpha 1");
 }
 
-// composite_op kOut through the evaluator: the layer is held out of the opaque
-// base, leaving transparent black (alpha builds from the mixer law).
 void test_layer_mixer_composite_op() {
     gg::GradeGraph g;
     const int base = add_gain(g, 1.0f);
@@ -287,7 +242,6 @@ void test_layer_mixer_composite_op() {
     check(near(alpha_of(*r.frame, 0, 0), 0.0f), "kOut alpha cancels");
 }
 
-// additive=1 rides the same law through the evaluator (opaque source).
 void test_layer_mixer_additive() {
     gg::GradeGraph g;
     const int base = add_gain(g, 1.0f);
@@ -306,8 +260,6 @@ void test_layer_mixer_additive() {
           "additive premul sum (0.4 + 0.8, scene-linear, unclamped)");
 }
 
-// ---- serialization ------------------------------------------------------------
-
 void test_serialize_composite_fields() {
     gg::GradeGraph g;
     const int layer = g.add_node(gg::NodeKind::kLayer);
@@ -320,7 +272,6 @@ void test_serialize_composite_fields() {
     check(g2.node(0).composite_op == gg::CompositeOp::kIn, "serialize: composite_op survives");
     check(near(g2.node(0).additive, 0.35f), "serialize: additive survives");
 
-    // Tolerant load: unknown composite_op string falls back to Over.
     nlohmann::json nodes = nlohmann::json::array();
     nlohmann::json n;
     n["id"] = 0;
@@ -333,7 +284,7 @@ void test_serialize_composite_fields() {
     check(near(gt.node(0).additive, 0.25f), "serialize: additive still loads");
 }
 
-}  // namespace
+}
 
 int main() {
     test_coverage_coefficients();

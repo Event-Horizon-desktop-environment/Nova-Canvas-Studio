@@ -18,8 +18,6 @@ std::shared_ptr<const canvas::core::Project> build_source_project(
     if (fps <= 0.0) fps = 30.0;
     project->sequence.fps = fps;
 
-    // A single whole-media clip on a fresh track; tl_out/src_out are
-    // end-exclusive, so covering `total_frames` frames spans [0, total_frames).
     const int64_t frames = media.total_frames > 0 ? media.total_frames : 1;
     canvas::core::ClipId next_id = project->sequence.next_clip_id;
 
@@ -49,7 +47,6 @@ std::shared_ptr<const canvas::core::Project> build_source_project(
         clip.tl_out = frames;
         clip.src_in = 0;
         clip.src_out = frames;
-        // Link the pair so the A/V mate moves as one during preview playback.
         if (!project->sequence.video_tracks.empty() &&
             !project->sequence.video_tracks.front().clips.empty()) {
             const canvas::core::ClipId video_id =
@@ -77,4 +74,4 @@ double frame_to_fraction(const int64_t frame, const int64_t total_frames) {
     return static_cast<double>(f) / static_cast<double>(total_frames - 1);
 }
 
-}  // namespace canvas::gui::source_preview
+}

@@ -25,18 +25,13 @@ namespace canvas::gui {
 using canvas::core::colorsci::eval_curve;
 
 namespace {
-// Extreme curve-gesture geometry: plot px -> normalized point (0..1) on both
-// axes, clamped to the editor's 2% inset. One line per mouse event in the
-// archive, so color.log captures the exact path every control point takes.
 QPointF plot_px_to_p01(const QRectF& r, const QPointF& pos) {
     QPointF p((pos.x() - r.left()) / r.width(), 1.0 - (pos.y() - r.top()) / r.height());
     p.setX(std::clamp(p.x(), 0.02, 0.98));
     p.setY(std::clamp(p.y(), 0.02, 0.98));
     return p;
 }
-}  // namespace
-
-// ── CurveEditor ──────────────────────────────────────────────────────────────
+}
 
 CurveEditor::CurveEditor(QWidget* parent) : QWidget(parent) {
     tint_ = QColor(255, 255, 255);
@@ -54,7 +49,6 @@ QPointF CurveEditor::to_plot(const QPointF& p) const {
 }
 
 int CurveEditor::hit_point(const QPointF& pos) const {
-    const QRectF r = plot_rect();
     for (int i = 0; i < points_.size(); ++i) {
         const QPointF pp = to_plot(points_[i]);
         if (QLineF(pp, pos).length() <= 9.0) return i;
@@ -84,24 +78,19 @@ void CurveEditor::paintEvent(QPaintEvent* event) {
     const ThemeTokens& t = tokens();
     const QRectF r = plot_rect();
 
-    // Panel well.
     p.setBrush(t.surface_low);
     p.setPen(QPen(t.border, 1.0));
     p.drawRoundedRect(r, 8.0, 8.0);
 
-    // Grid: quarters.
     p.setPen(QPen(with_alpha(t.ink, 22), 1.0));
     p.drawLine(QPointF(r.left(), r.center().y()), QPointF(r.right(), r.center().y()));
     p.drawLine(QPointF(r.center().x(), r.top()), QPointF(r.center().x(), r.bottom()));
 
-    // Bounding frame ticks.
     p.setPen(QPen(with_alpha(t.ink, 40), 1.0));
     p.drawRect(r);
 
     p.setClipRect(r);
 
-    // Luminance histogram veil: per-column bars rising from the bottom, driven
-    // by the panel's per-column luma profile (0..1). Empty vector = no veil.
     if (!veil_.empty()) {
         const double bar_w = r.width() / static_cast<double>(veil_.size());
         p.setPen(Qt::NoPen);
@@ -115,8 +104,6 @@ void CurveEditor::paintEvent(QPaintEvent* event) {
         }
     }
 
-    // Curve itself: the headless law sampled over the plot, so the editor is a
-    // faithful view of what the evaluator runs (empty points = identity line).
     QVector<QPointF> sorted = points_;
     std::sort(sorted.begin(), sorted.end(),
               [](const QPointF& a, const QPointF& b) { return a.x() < b.x(); });
@@ -142,7 +129,6 @@ void CurveEditor::paintEvent(QPaintEvent* event) {
     p.setPen(QPen(tint_, 1.8));
     p.drawPath(path);
 
-    // Control points.
     for (const QPointF& pt : sorted) {
         p.setPen(QPen(t.surface_highest, 1.0));
         p.setBrush(t.accent);
@@ -241,8 +227,6 @@ void CurveEditor::mouseDoubleClickEvent(QMouseEvent* event) {
     }
 }
 
-// ── CurvesPanel ──────────────────────────────────────────────────────────────
-
 CurvesPanel::CurvesPanel(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(10, 10, 10, 10);
@@ -294,8 +278,6 @@ CurvesPanel::CurvesPanel(QWidget* parent) : QWidget(parent) {
     root->addWidget(editor_, 1);
     set_channel(kLuma);
 
-    // Soft-clip tone row: field order == SoftClip member order. Stored/displayed
-    // in percent (Law uses 0..1); High defaults to 100 (top rail untouched).
     auto* soft = new QWidget(this);
     auto* soft_grid = new QGridLayout(soft);
     soft_grid->setContentsMargins(0, 0, 0, 0);
@@ -387,8 +369,6 @@ void CurvesPanel::editor_points_changed() {
 void CurvesPanel::editor_points_committed() {
     if (syncing_) return;
     save_active_channel();
-    // Always-on committed trace: point add/remove/drag-end/reset per channel,
-    // plus the resulting point count so a reset (→ 0 points) is legible.
     qWarning().nospace()
         << "[grade] curve-commit channel=" << active_channel_
         << " pts=" << channel_points_[active_channel_].size();
@@ -421,7 +401,6 @@ void CurvesPanel::tone_changed(int field, double value) {
         "high=%.1f)",
         field, value, tone_fields_[0]->value(), tone_fields_[1]->value(),
         tone_fields_[2]->value(), tone_fields_[3]->value());
-    // Soft-clip rows commit on every change, matching the wheels' tone rows.
     emit curves_committed(params());
 }
 
@@ -472,4 +451,4 @@ void CurvesPanel::set_veil(const std::vector<float>& col_heights) {
     editor_->set_veil(col_heights);
 }
 
-}  // namespace canvas::gui
+}

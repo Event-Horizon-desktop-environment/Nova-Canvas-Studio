@@ -1,13 +1,3 @@
-// Headless AudioPipeline unit tests (Phase 17). Compiles audio_pipeline.cpp
-// directly into the binary (like timeline_decoder_test) so the module is
-// verified exactly as shipped; the Qt-free seam is enforced by the build.
-//
-// Uses a synthesized deterministic stereo WAV so playback regions can be
-// asserted exactly. Primary regression: a clip trimmed at its HEAD (src_in>0)
-// must serve the trim region from the first sample — before the AudioDecoder
-// resync-walk fix, a fresh request far forward of the decoder's position served
-// the file's beginning (garbled audio at the head of a trimmed clip).
-
 #include "features/playback/audio_pipeline.hpp"
 #include "features/playback/audio_sink.hpp"
 #include "features/playback/sync_constants.hpp"
@@ -33,15 +23,13 @@ namespace {
 constexpr int kRate = 48000;
 constexpr int kChannels = 2;
 constexpr double kFps = 30.0;
-constexpr int64_t kPerFrame = 1600;        // llround(48k / 30)
-constexpr int64_t kPrerollFrames = 3360;   // llround(70ms * 48k)
-constexpr int64_t kGrainFrames = 1920;     // llround(40ms * 48k)
-constexpr int64_t kScrubChunkFrames = 5760;  // llround(120ms * 48k)
+constexpr int64_t kPerFrame = 1600;
+constexpr int64_t kPrerollFrames = 3360;
+constexpr int64_t kGrainFrames = 1920;
+constexpr int64_t kScrubChunkFrames = 5760;
 
 constexpr double kTau = 6.2831853071795865;
 
-// Channel-configurable tone writer (16-bit PCM). Channel c is a sine at
-// (base_freq + 100*c) Hz with its own phase `phases[c]`.
 bool write_wav_channels(const char* path, int seconds, double base_freq, float amp,
                         int channels, const double* phases) {
     std::FILE* f = std::fopen(path, "wb");
@@ -84,7 +72,7 @@ bool write_wav_channels(const char* path, int seconds, double base_freq, float a
     return true;
 }
 
-float exp_wave_ch(int64_t frame, int ch, double base_freq, float amp, int channels,
+float exp_wave_ch(int64_t frame, int ch, double base_freq, float amp,
                   const double* phases) {
     const double ph = kTau * (base_freq + 100.0 * ch) / kRate *
                           static_cast<double>(frame) +
@@ -93,9 +81,6 @@ float exp_wave_ch(int64_t frame, int ch, double base_freq, float amp, int channe
     return static_cast<float>(std::llround(v * 32767.0f)) / 32768.0f;
 }
 
-// Generic stereo test-tone writer: each channel is a sine at
-// (base_freq + 100*ch) Hz with its own phase offset, at `amp` amplitude,
-// stored as 16-bit PCM so the decoded floats land on exact /32768 steps.
 bool write_wav(const char* path, int seconds, double base_freq, float amp,
                double start_l, double start_r) {
     std::FILE* f = std::fopen(path, "wb");
@@ -139,7 +124,6 @@ bool write_test_wav(const char* path, int seconds = 6) {
     return write_wav(path, seconds, 300.0, 0.8f, 0.0, 1.7);
 }
 
-// Ground-truth float for the same waveform (must match write_wav).
 float exp_wave(int64_t frame, int ch, double base_freq, float amp,
                double start_l, double start_r) {
     const double ph = kTau * (base_freq + 100.0 * ch) / kRate *
@@ -153,8 +137,6 @@ float exp_sample(int64_t frame, int ch) {
     return exp_wave(frame, ch, 300.0, 0.8f, 0.0, 1.7);
 }
 
-// Every float in v[begin..end) (interleaved, absolute source frame `abs_frame`
-// at index `begin`) must match the synthesized waveform.
 bool region_matches(const std::vector<float>& v, std::size_t begin, std::size_t end,
                     int64_t abs_frame) {
     if (end > v.size()) return false;
@@ -228,7 +210,7 @@ void check(bool cond, const char* what) {
     }
 }
 
-}  // namespace
+}
 
 int main() {
     if (std::getenv("CANVAS_PLAYBACK_DEBUG")) check(true, "notice: playback debug env set (accepted)");
@@ -236,7 +218,6 @@ int main() {
     check(write_test_wav(wav), "write test wav");
     if (!write_test_wav(wav)) return 1;
 
-    // --- A. Untrimmed: preroll + steady play is one contiguous region ---------
     {
         Harness h;
         check(h.pipe.is_active(), "A: output open");
@@ -255,7 +236,6 @@ int main() {
               "A: unfushed device still holds all 17.6k frames pending");
     }
 
-    // --- B. rewind re-anchors: a second run rewrites the same region ----------
     {
         Harness h;
         h.pipe.rewind(0, true);
@@ -275,21 +255,19 @@ int main() {
         check(h.pipe.feed_watermark_active(), "B: feed watermark active after preroll within a clip");
     }
 
-    // --- C. TRIMMED HEAD regression: fresh decoder serves the trim region ------
     {
-        Harness h(/*src_in=*/32, /*src_out=*/180);
+        Harness h(32, 180);
         h.pipe.rewind(0, true);
         h.pipe.preroll(0, 70, true);
         h.play(0, 10);
         const uint64_t total = h.sink.written_total_;
         check(total == static_cast<uint64_t>(3360 + 1440 + 1600 * 8),
               "C: trimmed run writes 17.6k frames (3360+1440+8*1600)");
-        const int64_t head_sample = 32 * kPerFrame;  // 51200
+        const int64_t head_sample = 32 * kPerFrame;
         check(region_matches(h.sink.all_, 0, static_cast<std::size_t>(total) * 2, head_sample),
               "C: trimmed clip serves the TRIM region [51200,68800), not the file start");
     }
 
-    // --- D. audible scrub grain + media queries ---------------------------------
     {
         Harness h(32, 180);
         h.pipe.rewind(10, false);
@@ -302,18 +280,16 @@ int main() {
         check(h.pipe.audio_media_at(148) == -1, "D: no audio clip past the clip end (seq 148)");
     }
 
-    // --- E. audible_seq_frame AnMa exact math (latency-free sink) --------------
     {
         Harness h(32, 180);
-        h.pipe.rewind(30, true);   // anchor = (32+30)*1600 = 99200
-        h.play(60, 3);             // 3 frames = 4800; zero-latency sink (audible==written)
+        h.pipe.rewind(30, true);
+        h.play(60, 3);
         check(h.pipe.audible_seq_frame(70) == 33,
               "E: audible_seq_frame maps audible sample 104000 (= anchor 99200 + 4800) back to seq 33");
         check(h.pipe.audible_seq_frame(148) == -1,
               "E: nothing audible past the clip end -> -1");
     }
 
-    // --- F. feed_scrub_audio: reposition + throttle -----------------------------
     {
         Harness h(32, 180);
         h.pipe.begin_scrub();
@@ -325,25 +301,20 @@ int main() {
         check(h.sink.all_.empty(),
               "F: reposition fed the device queue only (cumulative history untouched)");
         check(h.pipe.repositions_since_begin() == 1, "F: first feed countss one reposition");
-        h.pipe.feed_scrub_audio(41);  // within the 45ms throttle window -> no-op
+        h.pipe.feed_scrub_audio(41);
         check(h.pipe.repositions_since_begin() == 1,
               "F: rapid second feed is throttled (no extra reposition)");
         check(h.sink.pending_frames() == static_cast<std::size_t>(kScrubChunkFrames),
               "F: throttled feed did not replace the pending chunk");
     }
 
-    // --- G. AUDIO TRANSITION FADE is AUDIBLE in playback -----------------------
-    // A clip with an OUT fade must deliver attenuated samples to the output
-    // device inside the fade window (unity before it). This is what makes the
-    // linked-pair feature real: the translated AudioFade* type on the audio mate
-    // changes what you HEAR when playing the timeline.
     {
-        Harness h;  // clip tl 0..180, src 0..180
+        Harness h;
         Clip& clip = h.project.sequence.audio_tracks[0].clips[0];
         clip.transition_out = TransitionType::AudioFadeConstantGain;
-        clip.transition_out_duration = 10;  // window = tl frames [170,180)
+        clip.transition_out_duration = 10;
         h.pipe.rewind(166, true);
-        h.play(166, 14);  // media samples [265600, 288000), 14*1600 frames
+        h.play(166, 14);
         const uint64_t total = h.sink.written_total_;
         check(total == 14u * kPerFrame, "G: fade window run writes 14 frames (22.4k samples)");
         bool ok = total == 14u * kPerFrame;
@@ -360,13 +331,6 @@ int main() {
               "G: audio before the fade window is at unity gain");
     }
 
-    // --- G2. MULTI-TRACK MIX  (the new multi-channel feature) -----------------
-    // A second audio track (A2) with its own tone media overlays A1 in time.
-    //  * With defaults the mix is the SUM of both tracks (both centered at unity).
-    //  * Muting A1 silences that track only; the other keeps playing.
-    //  * Solo on A2 isolates it (A1 falls silent even though enabled).
-    //  * Hard-panning A2 right removes it from the left channel only.
-    //  * -6 dB on A2 halves its contribution (10^(-6/20) ≈ 0.5012).
     {
         const char* wav2 = "/tmp/canvas_audio_pipe_test2.wav";
         check(write_wav(wav2, 6, 300.0, 0.5f, 0.9, 0.2), "G2: write second tone wav");
@@ -397,8 +361,6 @@ int main() {
         a2.clips.push_back(c2);
         p.sequence.audio_tracks.push_back(std::move(a2));
 
-        // Run a fresh pipeline over the CURRENT model state in `p` (mutated
-        // between scenarios) and return the full received stream.
         const auto run = [&]() -> std::vector<float> {
             canvas::gui::test::FakeAudioSink sink;
             canvas::gui::AudioPipeline pipe{sink};
@@ -413,7 +375,6 @@ int main() {
 
         const float g6 = canvas::core::audio_mix::db_to_gain(-6.0f);
 
-        // Baseline: both tracks at unity, centers -> straight sum.
         {
             const auto all = run();
             check(all.size() == 16000u * 2, "G2: two-track run writes the same frame count");
@@ -429,7 +390,6 @@ int main() {
             check(ok, "G2: two audio tracks SUM at unity");
         }
 
-        // Track mute: A1 muted -> only A2 audible.
         {
             p.sequence.audio_tracks[0].muted = true;
             const auto all = run();
@@ -443,7 +403,6 @@ int main() {
             p.sequence.audio_tracks[0].muted = false;
         }
 
-        // Solo: A2 soloed -> A1 falls silent despite being enabled.
         {
             p.sequence.audio_tracks[1].solo = true;
             const auto all = run();
@@ -457,7 +416,6 @@ int main() {
             p.sequence.audio_tracks[1].solo = false;
         }
 
-        // Hard-pan A2 RIGHT: A2 leaves the left channel, stays on the right.
         {
             p.sequence.audio_tracks[1].clips[0].pan = 1.0f;
             const auto all = run();
@@ -473,7 +431,6 @@ int main() {
             p.sequence.audio_tracks[1].clips[0].pan = 0.0f;
         }
 
-        // Clip volume: A2 at -6 dB -> its samples scaled by ~0.5012.
         {
             p.sequence.audio_tracks[1].clips[0].volume_db = -6.0f;
             const auto all = run();
@@ -490,7 +447,6 @@ int main() {
             p.sequence.audio_tracks[1].clips[0].volume_db = 0.0f;
         }
 
-        // Track gain: A1 at -6 dB -> A1's samples scaled by ~0.5012, A2 untouched.
         {
             p.sequence.audio_tracks[0].gain_db = -6.0f;
             const auto all = run();
@@ -507,7 +463,6 @@ int main() {
             p.sequence.audio_tracks[0].gain_db = 0.0f;
         }
 
-        // Track-at-unity shortcut: a 0 dB track gain leaves the samples unchanged.
         {
             const auto all = run();
             bool ok = !all.empty();
@@ -525,10 +480,6 @@ int main() {
         std::remove(wav2);
     }
 
-    // --- G4. N-CHANNEL DEVICE MIX -----------------------------------------
-    // set_channels(4) before open: a 4-channel source maps channel-for-channel,
-    // a stereo source occupies only the front pair, and a mono source
-    // broadcasts to the front pair with no spill into the surrounds.
     {
         const char* wav4 = "/tmp/canvas_audio_pipe_ch4.wav";
         const double ph4[4] = {0.0, 0.5, 1.1, 2.2};
@@ -557,7 +508,7 @@ int main() {
         for (std::size_t i = 0; i < sink4.all_.size() && ok4; ++i) {
             const int64_t fr = static_cast<int64_t>(i / 4);
             const int ch = static_cast<int>(i % 4);
-            const float want = exp_wave_ch(fr, ch, 300.0, 0.5f, 4, ph4);
+            const float want = exp_wave_ch(fr, ch, 300.0, 0.5f, ph4);
             if (std::fabs(sink4.all_[i] - want) > 1e-3f) ok4 = false;
         }
         check(ok4, "G4: 4ch source maps channel-for-channel on a 4ch device");
@@ -603,7 +554,7 @@ int main() {
         for (std::size_t i = 0; i < sinkm.all_.size() && okm; ++i) {
             const int64_t fr = static_cast<int64_t>(i / 4);
             const int ch = static_cast<int>(i % 4);
-            const float mono = exp_wave_ch(fr, 0, 250.0, 0.6f, 1, phm);
+            const float mono = exp_wave_ch(fr, 0, 250.0, 0.6f, phm);
             const float want = ch < 2 ? mono : 0.0f;
             if (std::fabs(sinkm.all_[i] - want) > 1e-3f) okm = false;
         }
@@ -613,11 +564,6 @@ int main() {
         std::remove(wavm);
     }
 
-    // --- K. LIVE LEAD BUFFER ----------------------------------------------
-    // The pipeline maintains kAudioLeadMs of pending device audio: coverage is
-    // reached within a few steps via a bounded catch-up (never more than a
-    // step's worth beyond the deficit per call), and after the lead is covered
-    // pending never runs away (no unbounded pre-fill / EAGAIN storm).
     {
         Project p = make_project(0, 180);
         canvas::gui::test::FakeAudioSink sink;
@@ -668,15 +614,6 @@ int main() {
         check(!pipe.is_active(), "G: reset leaves the pipeline inactive");
     }
 
-    // --- H. NO SILENT STEPS in a multi-track steady play -----------------------
-    // Regression for the audio-garbling in the field log (`wrote=0 ... churn=1`,
-    // `decode produced no samples` every frame for a stretch): every play_step
-    // over a two-track mix must hand audio to the device. A source whose
-    // decoded chunk is shorter than the step's `want` (fixed-length chunk, EOF)
-    // used to over-advance the feed watermark by the FULL want, leaving the next
-    // step's `from` past its start_sample and writing nothing. Now the watermark
-    // advances only by the frames actually decoded, so playback stays contiguous
-    // and no step ever silently skips.
     {
         const char* wavH2 = "/tmp/canvas_audio_pipe_mix2.wav";
         check(write_wav(wavH2, 6, 300.0, 0.5f, 0.9, 0.2), "H: write second mix wav");
@@ -714,8 +651,6 @@ int main() {
         pipe.open_output();
         pipe.rewind(0, true);
 
-        // Walk every frame with the normal per-frame step (the common playback
-        // path) and assert each step writes exactly one frame's worth — never 0.
         const auto before = sink.written_total_;
         bool all_wrote = true;
         for (int k = 0; k < 180; ++k) {
@@ -734,18 +669,8 @@ int main() {
         std::remove(wavH2);
     }
 
-    // --- J. SAME-MEDIA CONSECUTIVE CLIPS keep independent feed positions ------
-    // Regression for the field log's clip-boundary audio gap: two timeline clips
-    // of the SAME media (a film split into segments) used to share a MEDIA-keyed
-    // feed watermark, so the second clip's audio started N seconds into the
-    // source (or wrote nothing) at the boundary. Feed progress is per-CLIP, so
-    // the audio for the second placement starts at its own src_in.
     {
         Project p = make_project(0, 180);
-        // Track A1 holds the film twice: clip K1 covers [0,90) from the file's
-        // start; clip K2 covers [90,180) ALSO from the file's start (src_in=0).
-        // At the crossing the audible source switches K1 -> K2, whose media
-        // position resets to 0 — far below K1's feed watermark.
         Clip& k1 = p.sequence.audio_tracks[0].clips[0];
         k1.tl_out = 90;
         k1.src_out = 90;
@@ -764,11 +689,9 @@ int main() {
         pipe.open_output();
         pipe.rewind(0, true);
         for (int k = 0; k < 90; ++k) pipe.play_step(k, 1.0 / kFps, false);
-        const uint64_t before90 = sink.written_total_;  // frames written before K2's first step
+        const uint64_t before90 = sink.written_total_;
         for (int k = 90; k < 95; ++k) pipe.play_step(k, 1.0 / kFps, false);
 
-        // The FIRST frame the k=90 step hands to the device must be clip K2's
-        // own source start (media frame 0), not K1's leftover feed head.
         auto at_written = [&](int64_t written_frame) {
             return std::array<float, 2>{
                 sink.all_[static_cast<std::size_t>(written_frame) * kChannels + 0],
@@ -788,15 +711,6 @@ int main() {
         check(boundary_ok, "J: same-media clip boundary feeds K2 from its own source start (no jump)");
     }
 
-    // --- I. SELF-HEALING RE-ANCHOR on an un-anchored playhead jump ------------
-    // Regression for the field log's second garbled-audio episode: while playing
-    // the playhead moved BACKWARD (transport-wheel scrub / timeline nudge with
-    // no committed seek -> no rewind()), so the old run's front feed watermark
-    // sat ahead of the new playhead. write_mixed then computed `span <= 0` for
-    // every source and wrote 0 for the ENTIRE rest of the run (`wrote=0` +
-    // `decode produced no samples` every frame) while the device drained the
-    // previously buffered audio ~9s ahead of the picture. play_step() must
-    // detect the discontinuity and re-anchor in place.
     {
         const char* wavI = "/tmp/canvas_audio_pipe_jump.wav";
         check(write_wav(wavI, 20, 300.0, 0.7f, 0.1, 0.6), "I: write jump wav");
@@ -814,9 +728,6 @@ int main() {
         pipe.open_output();
         pipe.rewind(0, true);
 
-        // Stream forward a while (the feed watermark tracks the playhead). The
-        // first steps carry the kAudioLeadMs pre-fill, so per-step totals stay
-        // within [exact, exact + lead] instead of byte-exact.
         const uint64_t leadI = static_cast<uint64_t>(
             static_cast<double>(kRate) * canvas::gui::kAudioLeadMs / 1000.0);
         bool forward_ok = true;
@@ -830,16 +741,11 @@ int main() {
         }
         check(forward_ok, "I: forward segment writes one frame per step (plus bounded lead)");
 
-        // Un-anchored BACKWARD jump: play_step(30) with NO rewind() in between.
-        // Pre-fix: wrote 0 here AND on every later frame (watermark pinned near
-        // frame 59's sample). Post-fix: the step re-anchors itself and resumes
-        // contiguously from the new playhead.
         pipe.play_step(30, 1.0 / kFps, false);
         const uint64_t after_jump = sink.written_total_;
         check(after_jump > static_cast<uint64_t>(60) * kPerFrame,
               "I: backward-jump step writes audio (self re-anchor, no silent step)");
 
-        // And the run continues to write every frame forward from 30.
         bool resumed_ok = true;
         for (int k = 31; k < 100; ++k) {
             const uint64_t before = sink.written_total_;
@@ -848,9 +754,6 @@ int main() {
         }
         check(resumed_ok,
               "I: after the un-anchored backward jump playback keeps writing every frame");
-        // The re-built lead shifts the exact per-step total by up to the lead
-        // window (the pre-fill is spent across the first few steps), so assert
-        // the count stays within that band instead of byte-exact.
         const uint64_t after_exact =
             after_jump + static_cast<uint64_t>(100 - 31) * kPerFrame;
         check(sink.written_total_ >= after_exact - leadI,
@@ -861,11 +764,6 @@ int main() {
         std::remove(wavI);
     }
 
-    // --- J. Device-bound mix capture: set_wave_capture() writes the exact float
-    // mix handed to the sink as a playable float32 WAV, patched on close. This
-    // validates the diagnostic path used to chase the field "garbled music"
-    // report (the capture must be parseable, frame-accurate, and include mixes
-    // that EXCEED 0 dBFS so clipping shows up in the file, not just the log).
     {
         const char* capWav = "/tmp/canvas_audio_pipe_capture.wav";
         std::remove(capWav);
@@ -892,12 +790,10 @@ int main() {
                 static_cast<std::uint32_t>(h.sink.written_total_ * kChannels * 4u);
             check(data_sz == expected && riff_sz == 36 + expected,
                   "J: capture data size matches written frames");
-            // Format must be 3 (IEEE float) so the file is lossless vs the mix.
             std::uint16_t fmt_id = 0;
             std::fseek(f, 20, SEEK_SET);
             std::fread(&fmt_id, 2, 1, f);
             check(fmt_id == 3, "J: capture is float32 PCM");
-            // Spot-check that the first frames are the synthesized tone.
             std::vector<float> samples(8 * kChannels);
             std::fseek(f, 44, SEEK_SET);
             std::fread(samples.data(), sizeof(float), samples.size(), f);

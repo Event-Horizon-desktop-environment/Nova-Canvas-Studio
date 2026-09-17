@@ -1,6 +1,8 @@
 #include "canvas/core/export/render_queue.hpp"
 
 #include "canvas/core/export/exporter.hpp"
+#include "canvas/core/export/chapters.hpp"
+#include "canvas/core/export/queue_policy.hpp"
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/util/log.hpp"
 
@@ -15,8 +17,6 @@ namespace canvas::core {
 
 namespace {
 
-// Wall-clock stamp for finished jobs: "HH:MM:SS" (local time) so the queue's
-// finished cards read like Resolve's ("Finished 14:22:03").
 std::string wall_clock_hhmmss() {
     const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm local{};
@@ -30,7 +30,7 @@ std::string wall_clock_hhmmss() {
     return std::string(buf);
 }
 
-}  // namespace
+}
 
 RenderJobSnapshot render_job_snapshot(const RenderJob& job) {
     RenderJobSnapshot s;
@@ -39,6 +39,7 @@ RenderJobSnapshot render_job_snapshot(const RenderJob& job) {
     s.output_path = job.output_path;
     s.settings = job.settings;
     s.total_frames = job.total_frames;
+    s.priority = job.priority;
     s.status = static_cast<int>(job.status);
     s.progress = job.progress;
     s.render_fps = job.render_fps;
@@ -56,9 +57,8 @@ RenderJob render_job_from_snapshot(const RenderJobSnapshot& snap) {
     j.output_path = snap.output_path;
     j.settings = snap.settings;
     j.total_frames = snap.total_frames;
+    j.priority = snap.priority;
     j.status = static_cast<RenderJob::Status>(snap.status);
-    // A job persisted while it was actively rendering cannot resume; stage it
-    // so the user can re-run it (or drop it) with the rest of the queue.
     if (j.status == RenderJob::Status::Rendering) j.status = RenderJob::Status::Queued;
     j.progress = snap.progress;
     j.render_fps = snap.render_fps;
@@ -79,9 +79,6 @@ RenderQueue::~RenderQueue() {
         std::lock_guard<std::mutex> lk(mutex_);
         stop_ = true;
     }
-    // Abort any in-flight render so worker_() can settle promptly instead of
-    // join()ing until the export completes (this was the kill-and-hang bug:
-    // ~RenderQueue blocked on join() for the whole render).
     cancel_current_.store(true);
     cv_.notify_all();
     if (worker_.joinable()) worker_.join();
@@ -170,8 +167,6 @@ void RenderQueue::cancel(uint64_t id) {
                 prog = j.progress;
                 const bool was_rendering = j.status == RenderJob::Status::Rendering;
                 j.status = RenderJob::Status::Cancelled;
-                // Only an in-flight render needs the polled abort; flipping a
-                // queued job's status is enough for it (it will be skipped).
                 if (was_rendering && prog < 1.0) cancel_current_.store(true);
             }
     }
@@ -211,6 +206,27 @@ void RenderQueue::clear_all() {
     if (on_changed) on_changed();
 }
 
+void RenderQueue::set_paused(const bool paused) {
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        paused_ = paused;
+    }
+    cv_.notify_all();
+    if (on_changed) on_changed();
+}
+
+bool RenderQueue::is_paused() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return paused_;
+}
+
+void RenderQueue::set_priority(const uint64_t id, const int priority) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (auto& j : jobs_)
+        if (j.id == id && j.status == RenderJob::Status::Queued) j.priority = priority;
+    if (on_changed) on_changed();
+}
+
 void RenderQueue::restore(const std::vector<RenderJob>& jobs) {
     std::lock_guard<std::mutex> lk(mutex_);
     jobs_ = jobs;
@@ -229,7 +245,7 @@ double RenderQueue::queue_progress() const {
         if (j.status == RenderJob::Status::Completed) done += 1.0;
         else if (j.status == RenderJob::Status::Rendering) done += j.progress;
         else if (j.status == RenderJob::Status::Cancelled || j.status == RenderJob::Status::Failed)
-            done += 1.0;  // treat as settled
+            done += 1.0;
     }
     return total > 0 ? done / total : 0.0;
 }
@@ -249,8 +265,6 @@ std::vector<RenderJob> RenderQueue::jobs() const {
 
 void RenderQueue::worker() {
     using Project = canvas::core::Project;
-    // Idle->busy->idle edge tracker for the always-on [render:q] lines. `idle`
-    // means the worker just found nothing to drain (pre-start or between batches).
     static bool s_was_busy = false;
     static uint64_t s_last_dispatch = 0;
     while (true) {
@@ -260,9 +274,8 @@ void RenderQueue::worker() {
             std::unique_lock<std::mutex> lk(mutex_);
             cv_.wait(lk, [this] {
                 if (stop_) return true;
+                if (paused_) return false;
                 if (!start_requested_) return false;
-                // A batch is being drained; as soon as every queued job has been
-                // picked up, clear the start flag so the queue waits again.
                 bool any_queued = false;
                 for (auto& j : jobs_)
                     if (j.status == RenderJob::Status::Queued) { any_queued = true; break; }
@@ -270,18 +283,20 @@ void RenderQueue::worker() {
                 return true;
             });
             if (stop_) return;
-            for (auto& j : jobs_) {
-                if (j.status != RenderJob::Status::Queued) continue;
-                j.status = RenderJob::Status::Rendering;
-                local = j;  // copy to a local so we stay valid across enqueue/clear
-                id = j.id;
-                break;
+            std::vector<queue_policy::Candidate> candidates;
+            candidates.reserve(jobs_.size());
+            for (const auto& j : jobs_)
+                candidates.push_back(
+                    {j.priority, j.id, j.status == RenderJob::Status::Queued});
+            const int pick = queue_policy::next_candidate(candidates);
+            if (pick >= 0) {
+                RenderJob& chosen = jobs_[static_cast<std::size_t>(pick)];
+                chosen.status = RenderJob::Status::Rendering;
+                local = chosen;
+                id = chosen.id;
             }
         }
         if (id == 0) {
-            // Worker found nothing to pick up: idle tick. Log the edge ONCE per
-            // idle session (not every cv wake), so idle->busy->idle churn around
-            // a batch shows up without spamming.
             if (s_was_busy) {
                 s_was_busy = false;
                 log::log_warning("[render:q] worker IDLE after job %llu",
@@ -295,10 +310,6 @@ void RenderQueue::worker() {
             log::log_warning("[render:q] worker BUSY dispatch id=%llu", (unsigned long long)id);
         }
 
-        // Always-on dispatch line: time this job sat in the queue (user staged it
-        // then hit start), how many others were queued behind it, and whether the
-        // worker was coming from idle. A backlog here with a busy renderer means
-        // the user queued more frames than the machine can chew through.
         double wait_ms = 0.0;
         {
             std::lock_guard<std::mutex> lk(mutex_);
@@ -333,8 +344,6 @@ void RenderQueue::worker() {
 
         auto started = std::chrono::steady_clock::now();
 
-        // Fresh poll state per job: a cancel request targeting a PREVIOUS job
-        // must not abort this one.
         cancel_current_.store(false);
 
         std::string error;
@@ -343,8 +352,9 @@ void RenderQueue::worker() {
             ExportSettings es = to_export_settings(local.settings);
             es.output_path = local.output_path;
             es.duration_frames = local.total_frames;
-            // Match the exporter's internal total_video so progress/fps counters
-            // stay in sync when export fps != sequence fps.
+            if (project)
+                chapters::apply(es, project->sequence,
+                                local.settings.video.chapters_from_markers);
             const double seq_fps = project ? project->sequence.fps : 0.0;
             const double export_fps = (es.fps > 0.0) ? es.fps
                                         : (seq_fps > 0.0 ? seq_fps : 30.0);
@@ -352,21 +362,11 @@ void RenderQueue::worker() {
                 ? (int64_t)std::llround((double)local.total_frames / seq_fps * export_fps)
                 : local.total_frames;
             ExportControl ctrl;
-            // Rolling-window throughput, same law as the exporter's own ~1/s
-            // telemetry (done-delta over wall-delta per ~1 s bucket), not the
-            // whole-run average f/secs — session open would dilute that ~3x on
-            // a short export (the artifact the benches used to show). The first
-            // bucket anchors without emitting, mirroring telemetry.tick(). The
-            // PEAK window becomes the card's "max fps": it only ever ramps up
-            // as the pipeline warms, so final ≈ max, and it persists on the job.
             std::atomic<double> fps{0.0};
             double win_done = 0.0;
             std::chrono::steady_clock::time_point win_t = started;
             bool win_armed = false;
             double win_peak = 0.0;
-            // Polled abort: cancel()/cancel_all()/remove()/~RenderQueue trip
-            // cancel_current_, which export_project's render loop observes between
-            // frames so the worker settles promptly.
             ctrl.should_cancel = [&] { return cancel_current_.load(); };
             ctrl.on_progress = [&](double p, const std::string& phase) {
                 (void)phase;
@@ -396,12 +396,10 @@ void RenderQueue::worker() {
                 }
                 if (on_changed) on_changed();
             };
-            // Route the exporter's throttled live-preview frames up to whoever
-            // bound on_preview_frame (the GUI marshals onto the main thread).
             ctrl.on_frame = [&](VideoFramePtr frame) {
                 if (on_preview_frame) on_preview_frame(std::move(frame));
             };
-            ok = run_job(project, es, resolver, &ctrl, &cancel_current_, &error);
+            ok = run_job(project, es, resolver, &ctrl, &error);
         }
 
         auto now = std::chrono::steady_clock::now();
@@ -449,7 +447,7 @@ bool RenderQueue::run_job(
     const std::shared_ptr<const canvas::core::Project>& project, const ExportSettings& es,
     const std::function<bool(const ExportSettings&, std::shared_ptr<const canvas::core::Project>&)>&
         resolver,
-    ExportControl* ctrl, std::atomic<bool>* cancelled, std::string* error) {
+    ExportControl* ctrl, std::string* error) {
     if (resolver) {
         std::shared_ptr<const canvas::core::Project> resolved;
         if (resolver(es, resolved) && resolved)
@@ -462,4 +460,4 @@ bool RenderQueue::run_job(
     return export_project(*project, es, ctrl, error);
 }
 
-}  // namespace canvas::core
+}

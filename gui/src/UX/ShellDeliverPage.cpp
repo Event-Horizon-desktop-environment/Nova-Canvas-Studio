@@ -11,13 +11,7 @@
 
 namespace canvas::gui {
 
-// The Deliver page: settings panel + render queue, docked left/right, with all
-// the render-queue signal plumbing and error dialogs. Extracted from
-// ShellCenter.cpp (splitplan refactor) so the center workspace builds the
-// viewer/timeline without dragging the deliver chrome along; the page is
-// hidden by default and re-shown when the page bar switches to Deliver.
 void build_deliver_docks(MainWindow& mw) {
-    // ---- 7b. DELIVER page docks — settings left, render queue right ----
     mw.deliver_settings_ = new DeliverSettingsPanel(&mw);
     mw.deliver_settings_->setObjectName(QStringLiteral("deliverSettings"));
     mw.deliver_settings_dock_ = new QDockWidget(MainWindow::tr("Deliver Settings"), &mw);
@@ -39,7 +33,6 @@ void build_deliver_docks(MainWindow& mw) {
     mw.addDockWidget(Qt::RightDockWidgetArea, mw.deliver_queue_dock_);
     mw.deliver_queue_dock_->hide();
 
-    // Deliver widget signals -> MainWindow actions.
     QObject::connect(mw.deliver_settings_, &DeliverSettingsPanel::add_to_queue_clicked, &mw,
             &MainWindow::add_current_to_render_queue);
     QObject::connect(mw.deliver_settings_, &DeliverSettingsPanel::render_all_clicked, &mw,
@@ -56,18 +49,11 @@ void build_deliver_docks(MainWindow& mw) {
             [&mw] { mw.render_queue_.cancel_all(); mw.has_unsaved_changes_ = true;
                     mw.reflect_render_queue(); });
 
-    // Reflect queue changes into the UI panel (called on the main thread via a
-    // queued-style refresh using QMetaObject to stay thread-safe with the
-    // worker thread).
     mw.render_queue_.on_changed = [&mw] {
         QMetaObject::invokeMethod(&mw, [&mw] { mw.reflect_render_queue(); },
                                   Qt::QueuedConnection);
     };
 
-    // Live export preview: the render worker pushes throttled composited export
-    // frames; marshal them onto the GUI thread and present on the shared viewer
-    // (the Deliver page's media preview) — exactly the pixels being encoded,
-    // audio-free. The last preview frame stays on screen after the export ends.
     mw.render_queue_.on_preview_frame = [&mw](canvas::core::VideoFramePtr frame) {
         auto rf = std::make_shared<canvas::core::RenderFrame>();
         rf->a = std::move(frame);
@@ -76,20 +62,8 @@ void build_deliver_docks(MainWindow& mw) {
                                   Qt::QueuedConnection);
     };
 
-    // While a job is being exported, park the thumbnail workers so their
-    // full-res NVDEC decodes don't steal the render's GPU/disk bandwidth.
-    // set_paused is atomic + CV-notified, so it can be driven straight from
-    // the worker thread; requests queue up meanwhile and flush on finish.
     mw.render_queue_.on_job_started = [&mw](uint64_t) { mw.thumbnails_.set_paused(true); };
 
-    // Pop a dialog when a render job fails, so the user isn't left guessing at
-    // a bare "Failed" status. Errors are categorized so each kind of failure
-    // gets its own popup type instead of a single generic message:
-    //   - Configuration problems (missing output path / no codec selected) are
-    //     shown as a persistent Information prompt to fix settings and retry.
-    //   - Encoder/container/open-file failures are shown as a Warning with the
-    //     FFmpeg detail.
-    //   - Anything unexpected is shown as a Critical error.
     mw.render_queue_.on_job_finished = [&mw](uint64_t id) {
         mw.thumbnails_.set_paused(false);
         QMetaObject::invokeMethod(&mw, [&mw, id] {
@@ -125,4 +99,4 @@ void build_deliver_docks(MainWindow& mw) {
     };
 }
 
-}  // namespace canvas::gui
+}

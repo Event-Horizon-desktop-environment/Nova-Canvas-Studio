@@ -26,11 +26,6 @@
 
 namespace canvas::gui::source_preview {
 
-// Painted audio-preview page: the full-file spectrum (produced by
-// ThumbnailService) scaled to fit, over which a live scrub playhead tracks the
-// hover/panel position. Scrub moves only redraw a line — zero decode cost —
-// which keeps the source preview realtime for audio while the worker is
-// otherwise idle. Plain QWidget paint, no signals/slots.
 class SourceViewerPanel::AudioSpectrumView final : public QWidget {
 public:
     explicit AudioSpectrumView(QWidget* parent = nullptr) : QWidget(parent) {
@@ -88,8 +83,6 @@ SourceViewerPanel::SourceViewerPanel(QWidget* parent) : QWidget(parent) {
     auto* empty_lay = new QVBoxLayout(empty);
     empty_lay->setContentsMargins(16, 16, 16, 16);
     empty_lay->setSpacing(8);
-    // Branded two-tier empty state, matching the Program viewer's voice: a
-    // gold title line over a faint hint.
     auto* empty_title = new QLabel(tr("Source preview"), empty);
     empty_title->setAlignment(Qt::AlignCenter);
     apply_theme_style(empty_title, [] {
@@ -184,9 +177,6 @@ void SourceViewerPanel::set_media_info(const QString& name, const bool is_video,
         QSignalBlocker b(mini_scrub_);
         mini_scrub_->setValue(0);
     }
-    // Audio-only media have no video track to present, so they preview as a
-    // spectrum page (ThumbnailService feeds the full-file image via
-    // set_audio_waveform) with a scrub playhead instead of an empty GL pane.
     audio_mode_ = is_audio && !is_video;
     qWarning().nospace() << "[srcprv] panel set_media_info name=" << name
                          << " video=" << is_video
@@ -215,16 +205,12 @@ void SourceViewerPanel::set_media_position(const int64_t frame, const double fps
 }
 
 void SourceViewerPanel::set_audio_waveform(const QImage& image) {
-    // Always-on: a null waveform landing here means the audio-only source pane
-    // shows "Audio spectrum" text forever — the exact "missing spectrum" report.
     qWarning().nospace() << "[srcprv] panel audio_waveform set"
                          << " sz=" << image.width() << "x" << image.height()
                          << " null=" << image.isNull();
     if (audio_spectrum_) audio_spectrum_->set_waveform(image);
 }
 
-// Format the position as HH:MM:SS:FF at the media's frame rate (the shared
-// gui timecode law).
 void SourceViewerPanel::update_time_label(const int64_t frame, const double fps) {
     time_label_->setText(fps > 0.0
                              ? timecode(std::max<int64_t>(0, frame), fps)
@@ -250,4 +236,4 @@ void SourceViewerPanel::clear_media() {
     play_button_->setIcon(icon("play"));
 }
 
-}  // namespace canvas::gui::source_preview
+}

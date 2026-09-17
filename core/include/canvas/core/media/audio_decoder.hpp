@@ -8,9 +8,6 @@
 
 namespace canvas::core {
 
-// Decodes a single media file's audio stream to interleaved float PCM at an
-// arbitrary output sample rate. Owns an independent AVFormatContext and decoder
-// state, so concurrent video decoding of the same file is undisturbed.
 class AudioDecoder {
 public:
     AudioDecoder();
@@ -24,28 +21,14 @@ public:
     [[nodiscard]] bool has_audio() const;
     [[nodiscard]] int source_sample_rate() const;
     [[nodiscard]] int source_channels() const;
-    // Total duration in seconds (used to derive a frame count for media-pool
-    // import). Prefers the container duration, falls back to the audio stream's
-    // own; returns 0.0 when unknown.
     [[nodiscard]] double duration_seconds() const;
 
-    // True once the sequential decode walk has reached the physical end of the
-    // stream. After this point decode() serves synthetic silence (so playback
-    // never strands), so a whole-file drain should stop when this flips true
-    // rather than keep consuming those fabricated silence chunks.
     [[nodiscard]] bool at_stream_end() const;
 
-    // Decodes up to `max_frames` interleaved float frames at `out_sample_rate`
-    // starting at `start_sample` (output sample units: seconds * out_sample_rate).
-    // Returns empty when no audio is available.
     AudioChunkPtr decode(int64_t start_sample, int max_frames, int out_sample_rate);
     void seek(int64_t start_sample, int out_sample_rate);
     void reset();
 
-    // Cumulative number of container-seek-and-discard resyncs performed. Every
-    // resync restarts the sequential walk from the stream start, so a steady
-    // playback run should never tick this; growth mid-playback is a red flag the
-    // playhead keeps jumping outside the decoded window (feed/watermark mismatch).
     [[nodiscard]] std::uint64_t resync_count() const;
 
 private:

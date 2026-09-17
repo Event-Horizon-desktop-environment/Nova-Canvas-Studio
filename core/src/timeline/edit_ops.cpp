@@ -17,14 +17,6 @@ namespace canvas::core {
 
 namespace {
 
-// Maps a timeline position inside a clip to the corresponding SOURCE position,
-// honoring the clip's own src/tl rate (a clip placed from fps-mismatched media,
-// e.g. 60fps footage on a 30fps timeline, spans 2 source frames per timeline
-// frame; its src window is exactly `rate` x wider than its tl window). Every
-// edit that splits a clip (blade, overwrite re-cut, lift/ripple re-cut) must use
-// this so BOTH halves keep the original rate — a naive 1:1 split collapses the
-// left half's rate toward 1.0, plays pieces at the wrong speed, and positions
-// the cut at the wrong audio frame.
 int64_t src_at_tl(const Clip& c, const int64_t tl) {
     const int64_t tl_span = c.tl_out - c.tl_in;
     if (tl_span <= 0) return c.src_in;
@@ -74,12 +66,6 @@ void shift_from(std::vector<Clip>& clips, const int64_t from, const int64_t delt
         }
 }
 
-// Split any clip that STRADDLES `at` into [.., at) and [at, ..) so a following
-// shift_from(at, delta) ripples the tail cleanly. Without this a ripple INSERT
-// onto an occupied frame would leave the existing clip untouched and the new
-// clip overlapping it (nothing "ripples", content is silently covered). Both
-// halves keep the original src/tl rate via src_at_tl. A clip that merely
-// touches `at` (tl_in == at or tl_out == at) is left whole.
 void split_at(std::vector<Clip>& clips, const int64_t at) {
     bool split = false;
     for (const auto& c : clips)
@@ -167,29 +153,19 @@ std::vector<TrackSnapshot> take_snapshots(const Sequence& seq, const std::vector
     return out;
 }
 
-// Which edge of a clip a transition applies to. OUT (trailing) is the original
-// concept (blend into whatever follows); IN (leading) fades the clip in at its
-// head with no preceding clip required.
 enum class TransitionEdge { Out, In };
 
-// Per-kind transition mapping for a LINKED A/V pair. A transition stored on a
-// video clip must also exist on its audio mate in AUDIO form (and vice versa),
-// or it is inert: the video renderer ignores AudioFade* and the audio mixers
-// ignore CrossDissolve/Fade/Wipe. Mapping the mate into its own domain means one
-// edit puts BOTH a visual transition on the video clip AND an audible fade on
-// the audio clip (standard linked-pair behavior).
 TransitionType audio_transition_from_video(const TransitionType t) {
     switch (t) {
         case TransitionType::CrossDissolve:
-            return TransitionType::AudioFadeConstantPower;  // dissolve = equal-power crossfade
+            return TransitionType::AudioFadeConstantPower;
         case TransitionType::DipToBlack:
-            return TransitionType::AudioFadeConstantGain;   // dip = dip to silence
+            return TransitionType::AudioFadeConstantGain;
         case TransitionType::FadeOut:
-            return TransitionType::AudioFadeConstantGain;   // fade out = fade to silence
+            return TransitionType::AudioFadeConstantGain;
         case TransitionType::FadeIn:
-            return TransitionType::AudioFadeConstantGain;   // fade in = fade up from silence
+            return TransitionType::AudioFadeConstantGain;
         default:
-            // Wipes etc.: the closest audio analogue is the equal-power crossfade.
             return TransitionType::AudioFadeConstantPower;
     }
 }
@@ -206,9 +182,6 @@ TransitionType video_transition_from_audio(const TransitionType t, const Transit
     }
 }
 
-// Shared implementation for set_clip_transition*: writes `type`/`duration` to
-// either the IN or OUT edge of the clip (and its linked mate, if any), inside a
-// single undoable snapshot pair. Returns nullptr if the clip is not found.
 std::unique_ptr<ICommand> set_clip_transition_edge(Sequence& seq, const Track::Kind kind,
                                                    const std::size_t track_index, const ClipId id,
                                                    const TransitionEdge edge, const TransitionType type,
@@ -228,10 +201,6 @@ std::unique_ptr<ICommand> set_clip_transition_edge(Sequence& seq, const Track::K
             mate_id = c->linked_id;
         }
     }
-    // The linked mate lives on the opposite kind of track. Translate the
-    // requested type into the DOMAIN the mate actually renders so both sides of
-    // the pair get a live transition (video type on the video clip, audio fade
-    // on the audio clip). A type that already matches the mate's kind is kept.
     const Track::Kind mate_kind =
         kind == Track::Kind::Video ? Track::Kind::Audio : Track::Kind::Video;
     const bool mate_wants_audio = mate_kind == Track::Kind::Audio;
@@ -271,9 +240,6 @@ std::unique_ptr<ICommand> set_clip_transition_edge(Sequence& seq, const Track::K
     return std::make_unique<EditCommand>("set transition", std::move(before), std::move(after));
 }
 
-// Logs every clip that disappeared between the `before` and `after` snapshots
-// of a delete operation. This is the ground truth of which clips an edit
-// actually removed (across all involved tracks, including any linked mates).
 void log_deleted_clips(const std::vector<TrackSnapshot>& before,
                        const std::vector<TrackSnapshot>& after) {
     for (const auto& b : before) {
@@ -295,11 +261,6 @@ void log_deleted_clips(const std::vector<TrackSnapshot>& before,
 
 enum class TrimEdge { Head, Tail };
 
-// One clip's allowable edge position for a head/tail trim: the range [lo, hi]
-// the moving edge may land in without overlapping a neighbor or running past
-// the available source content. For the head, extending left is bounded by 0,
-// the track's left neighbor, and src_in reaching the source start. For the
-// tail, extending right is bounded by `media_frames` and the right neighbor.
 struct TrimRange {
     int64_t lo = 0;
     int64_t hi = 0;
@@ -311,7 +272,6 @@ TrimRange head_trim_range(const std::vector<Clip>& clips, const Clip& c) {
         if (o.id == c.id || o.tl_out > c.tl_in) continue;
         prev_out = std::max(prev_out, o.tl_out);
     }
-    // src_in' = src_in + delta must stay >= 0 -> new_tl_in >= tl_in - src_in.
     const int64_t src_low = c.tl_in - c.src_in;
     return {std::max(std::max<int64_t>(0, prev_out), src_low), c.tl_out - 1};
 }
@@ -323,15 +283,10 @@ TrimRange tail_trim_range(const std::vector<Clip>& clips, const Clip& c,
         if (o.id == c.id || o.tl_in < c.tl_out) continue;
         next_in = std::min(next_in, o.tl_in);
     }
-    // src_out' = src_out + delta must stay <= media_frames -> new_tl_out <= tl_out + (media_frames - src_out).
     const int64_t src_high = media_frames > 0 ? c.tl_out + (media_frames - c.src_out) : c.tl_out;
     return {c.tl_in + 1, std::min(next_in, src_high)};
 }
 
-// Shared implementation for trim_clip_head/trim_clip_tail. Applies the same
-// frame delta to the clip and (if any) its linked mate on its own track,
-// clamping via each clip's own range and intersecting the two so the A/V pair
-// always moves together.
 std::unique_ptr<ICommand> trim_clip_edge(Sequence& seq, const TrimEdge edge, const Track::Kind kind,
                                          const std::size_t track_index, const ClipId id,
                                          const int64_t new_edge, const int64_t media_frames) {
@@ -343,8 +298,6 @@ std::unique_ptr<ICommand> trim_clip_edge(Sequence& seq, const TrimEdge edge, con
         return edge == TrimEdge::Head ? cc.tl_in : cc.tl_out;
     };
 
-    // Per-clip allowable delta range (lo may exceed hi when a clip sits against
-    // a fixed neighbor and its own source limit that leaves no room either way).
     auto delta_range = [&](const std::vector<Clip>& clips, const Clip& cc) {
         const TrimRange r = edge == TrimEdge::Head ? head_trim_range(clips, cc)
                                                    : tail_trim_range(clips, cc, media_frames);
@@ -416,7 +369,7 @@ std::unique_ptr<ICommand> trim_clip_edge(Sequence& seq, const TrimEdge edge, con
                                          std::move(before), std::move(after));
 }
 
-}  // namespace
+}
 
 EditCommand::EditCommand(std::string name, std::vector<TrackSnapshot> before,
                          std::vector<TrackSnapshot> after)
@@ -528,9 +481,6 @@ std::unique_ptr<ICommand> place_clip(Sequence& seq, const Track::Kind kind,
     if (mode == Placement::AppendAtEnd) clip.tl_in = target->end_frame();
 
     SingleTrackEdit edit(seq, kind, track_index, "place clip");
-    // Time-based duration: see the declaration. Frame-for-frame (media_fps ==
-    // seq.fps or the 0.0 default) keeps the historical law; fps-mismatched media
-    // spans its real length instead of overclaiming by the fps ratio.
     const double ratio = seq.fps > 0.0 && media_fps > 0.0 ? seq.fps / media_fps : 1.0;
     clip.tl_out = clip.tl_in + std::llround((clip.src_out - clip.src_in) * ratio);
 
@@ -580,8 +530,6 @@ std::unique_ptr<ICommand> place_linked_clip(Sequence& seq, const std::size_t vid
     audio.id = seq.next_clip_id++;
     video.linked_id = audio.id;
     audio.linked_id = video.id;
-    // Time-based duration shared by both halves (linked clips come from the same
-    // source media; see place_clip for the fps law).
     const double ratio = seq.fps > 0.0 && media_fps > 0.0 ? seq.fps / media_fps : 1.0;
     video.tl_out = video.tl_in + std::llround((video.src_out - video.src_in) * ratio);
     audio.tl_out = audio.tl_in + std::llround((audio.src_out - audio.src_in) * ratio);
@@ -634,8 +582,6 @@ std::unique_ptr<ICommand> link_clip(Sequence& seq, const Track::Kind kind,
 
     const Track::Kind other = kind == Track::Kind::Video ? Track::Kind::Audio : Track::Kind::Video;
 
-    // Find the unlinked clip of the opposite kind whose time range best overlaps
-    // the source clip's range.
     const Clip* mate = nullptr;
     std::size_t mate_track = 0;
     std::size_t best_overlap = 0;
@@ -744,14 +690,10 @@ std::unique_ptr<ICommand> blade_at(Sequence& seq, const Track::Kind kind,
         if (c.id == hit->id) {
             c.tl_out = pos;
             c.src_out = cut_src;
-            // A blade is a plain edit point: the left half's tail is now an
-            // interior cut, so it must not keep an OUT fade that would plant a
-            // transition on the fresh seam.
             c.transition_out = TransitionType::None;
             c.transition_out_duration = 0;
             break;
         }
-    // The right half's head is an interior cut too: never inherit an IN fade.
     right.transition_in = TransitionType::None;
     right.transition_in_duration = 0;
     const auto halve_rate = [](const Clip& c) {
@@ -786,11 +728,6 @@ std::unique_ptr<ICommand> blade_linked_at(Sequence& seq, const Track::Kind kind,
             mate = mate_track->clip_with_id(hit->linked_id);
         }
     }
-    // Unlinked clip: fall back to the source-sibling — the clip on the opposite
-    // track kind for the SAME media whose timeline range strictly contains the
-    // cut. This keeps a dropped A/V pair cutting as one even when their link was
-    // lost (legacy projects, older saves); unattached audio (different media) is
-    // never pulled in. Best-aligned (min |tl_in diff| + |tl_out diff|) wins.
     std::size_t mate_index = 0;
     if (!mate) {
         const Track::Kind other = kind == Track::Kind::Video ? Track::Kind::Audio
@@ -839,12 +776,6 @@ std::unique_ptr<ICommand> blade_linked_at(Sequence& seq, const Track::Kind kind,
 
     std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
 
-    // Cut the primary clip. A blade is a plain edit point on BOTH sides of the
-    // cut: the right (new) half's head is an interior cut, so it never inherits
-    // an IN fade (which would plant a transition on the fresh seam). The source
-    // position follows the clip's src/tl rate (see src_at_tl): fps-mismatched
-    // media keeps its stride so both halves play at the clip's original speed
-    // and the cut lands on the audio frame the razor was pointing at.
     const int64_t cut_src = src_at_tl(*hit, pos);
     CANVAS_LOG("blade: kind=%d track=%zu pos=%lld clip=%lld tl=[%lld,%lld) src=[%lld,%lld) "
                "rate=%.3f tl_span=%lld cut_src=%lld",
@@ -858,7 +789,6 @@ std::unique_ptr<ICommand> blade_linked_at(Sequence& seq, const Track::Kind kind,
     right.transition_in = TransitionType::None;
     right.transition_in_duration = 0;
 
-    // Cut the linked mate at the same position, if present and unlocked.
     std::optional<Clip> mright;
     if (mate_track && mate && !mate_track->locked && pos > mate->tl_in && pos < mate->tl_out) {
         mright = *mate;
@@ -869,10 +799,6 @@ std::unique_ptr<ICommand> blade_linked_at(Sequence& seq, const Track::Kind kind,
         mright->transition_in_duration = 0;
     }
 
-    // Shorten the left halves in place. Their links (left video <-> left audio)
-    // are unchanged and remain correct. Each left half's tail is now an
-    // interior cut, so its OUT fade must not linger on the fresh seam. An
-    // unlinked source-sibling pair is linked here so it stays a unit.
     for (auto& c : target->clips)
         if (c.id == hit->id) {
             c.tl_out = pos;
@@ -892,14 +818,10 @@ std::unique_ptr<ICommand> blade_linked_at(Sequence& seq, const Track::Kind kind,
                 c.linked_id = hit->id;
                 break;
             }
-        // Re-pair the two right halves so they link to each other rather than
-        // both pointing back at the left halves.
         right.linked_id = mright->id;
         mright->linked_id = right.id;
     }
 
-    // Snapshot the left halves while the track vectors are still stable, then
-    // insert the right halves (which reallocate and may invalidate the pointers).
     const Clip left_hit = *hit;
     const Clip left_mate = mright ? *mate : Clip{};
     const bool have_left_mate = static_cast<bool>(mright);
@@ -951,11 +873,6 @@ std::unique_ptr<ICommand> lift_clip(Sequence& seq, const Track::Kind kind,
 
     std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
 
-    // Capture everything we need from `c` *before* erasing from `target->clips`:
-    // erase() may free/reallocate the vector, leaving `c` dangling. Reading
-    // `c->linked_id` after the erase is use-after-free and can remove a
-    // *different* clip than the intended mate (e.g. the clip to the right of a
-    // split pair).
     const int64_t in = c->tl_in, out = c->tl_out;
     const bool linked = c->is_linked();
     const ClipId lid = c->linked_id;
@@ -1017,10 +934,6 @@ std::unique_ptr<ICommand> ripple_delete_clip(Sequence& seq, const Track::Kind ki
             std::remove_if(mate_track->clips.begin(), mate_track->clips.end(),
                            [&](const Clip& x) { return x.id == mate->id; }),
             mate_track->clips.end());
-        // When the mate lives on a *different* track (typical video<->audio
-        // link) the primary track was already rippled above; ripple the mate's
-        // track by the same gap so the pair stays in sync. A same-track mate
-        // shares the already-rippled track, so it is not shifted again.
         if (mate_track != target) shift_from(mate_track->clips, in, -gap);
     }
 
@@ -1091,8 +1004,6 @@ std::unique_ptr<ICommand> move_clip(Sequence& seq, const Track::Kind src_kind,
 std::unique_ptr<ICommand> move_clips_batch(Sequence& seq, const std::vector<BatchMove>& moves) {
     if (moves.empty()) return nullptr;
 
-    // Resolve every entry's source/mate BEFORE mutating anything: the whole set
-    // is extracted first, then placed, so dragged clips never clip each other.
     struct Planned {
         Clip copy;
         Track::Kind dst_kind;
@@ -1143,7 +1054,6 @@ std::unique_ptr<ICommand> move_clips_batch(Sequence& seq, const std::vector<Batc
 
     std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
 
-    // Phase 1 — pull every moved clip out of its source track.
     for (const auto& p : planned) {
         Track* t = seq.track(p.src_ref.kind, p.src_ref.index);
         if (!t) continue;
@@ -1162,8 +1072,6 @@ std::unique_ptr<ICommand> move_clips_batch(Sequence& seq, const std::vector<Batc
         }
     }
 
-    // Phase 2 — place every entry at its target; the destination now contains
-    // only stationary clips, so clipped_range trims just true overlaps.
     for (const auto& p : planned) {
         Track* dst = seq.track(p.dst_kind, p.dst_index);
         if (!dst) continue;
@@ -1231,8 +1139,6 @@ std::unique_ptr<ICommand> create_top_track_move(Sequence& seq, const ClipId id,
     const int64_t prim_old_tl_in = copy.tl_in;
     const int64_t dur = copy.duration();
 
-    // Insert brand-new topmost channels; the moved clips land on an empty lane,
-    // so no destination clipping is ever needed.
     Track new_video;
     new_video.kind = Track::Kind::Video;
     new_video.name = "V" + std::to_string(seq.track_count(Track::Kind::Video) + 1);
@@ -1249,13 +1155,10 @@ std::unique_ptr<ICommand> create_top_track_move(Sequence& seq, const ClipId id,
     }
     std::vector<TrackSnapshot> before = take_snapshots(seq, refs);
 
-    // The insertion reallocated the track vectors; re-resolve the live tracks
-    // (each original lane shifted down by one) before editing them.
     Track* live_src = seq.track(src_kind, src_index + 1);
     Track* live_mate = mate_ref ? seq.track(mate_ref->kind, mate_ref->index + 1) : nullptr;
     if (!live_src) return nullptr;
 
-    // Move the primary onto the new video lane at new_tl_in.
     live_src->clips.erase(
         std::remove_if(live_src->clips.begin(), live_src->clips.end(),
                        [id](const Clip& c) { return c.id == id; }),
@@ -1265,7 +1168,6 @@ std::unique_ptr<ICommand> create_top_track_move(Sequence& seq, const ClipId id,
     moved.tl_out = new_tl_in + dur;
     seq.track(Track::Kind::Video, 0)->insert_sorted(std::move(moved));
 
-    // Move the linked mate to the new audio lane, preserving A/V sync.
     if (live_mate) {
         const Clip* live_mate_clip = live_mate->clip_with_id(mate_id);
         if (live_mate_clip) {
@@ -1349,7 +1251,6 @@ std::unique_ptr<ICommand> delete_through_edit(Sequence& seq, const Track::Kind k
         return nullptr;
     }
 
-    // The incoming clip B starts exactly where A ends.
     const Clip* b = nullptr;
     for (const auto& c : t->clips) {
         if (&c != a && c.tl_in == a->tl_out) { b = &c; break; }
@@ -1359,7 +1260,6 @@ std::unique_ptr<ICommand> delete_through_edit(Sequence& seq, const Track::Kind k
                static_cast<int>(kind), track_index, (long long)out_id, (long long)a->tl_out);
         return nullptr;
     }
-    // A genuine "through" edit joins continuous source from the same media.
     if (a->media != b->media || b->src_in != a->src_out || b->tl_out <= a->tl_out) {
         CANVAS_LOG("delete_through_edit: kind=%d track=%zu OUT=%lld media=%d [%lld,%lld) -> IN=%lld media=%d "
                "src_in=%lld src_out=%lld REJECTED (not a continuous through edit)",
@@ -1371,8 +1271,6 @@ std::unique_ptr<ICommand> delete_through_edit(Sequence& seq, const Track::Kind k
 
     std::vector<TrackRef> involved{{kind, track_index}};
 
-    // If A is linked, we must also break the mate link so the merged clip does
-    // not dangle an A/V pairing that no longer matches its span.
     Track* mate_track = nullptr;
     ClipId mate_id = 0;
     if (a->linked_id != 0) {
@@ -1384,8 +1282,6 @@ std::unique_ptr<ICommand> delete_through_edit(Sequence& seq, const Track::Kind k
 
     std::vector<TrackSnapshot> before = take_snapshots(seq, involved);
 
-    // Build the merged clip: A's identity/metadata extended over B's span. The
-    // outgoing transition that lived on the removed cut is dropped.
     Clip merged = *a;
     merged.tl_out = b->tl_out;
     merged.src_out = b->src_out;
@@ -1867,8 +1763,6 @@ std::unique_ptr<ICommand> set_clip_transition_curve(Sequence& seq, const Track::
     const int n_end =
         std::clamp(end_ratio, static_cast<int>(audio_processing::kTransitionRatioMin),
                    static_cast<int>(audio_processing::kTransitionRatioMax));
-    // Per-edge shaping: `in_edge` targets the IN fields (End sub-tab), OUT keeps
-    // the distinct default profile the reference inspector expects.
     const auto set_fields = [&](Clip& cc) {
         if (in_edge) {
             cc.transition_in_curve_value = n_curve;
@@ -1937,11 +1831,6 @@ std::unique_ptr<ICommand> set_clip_metadata(Sequence& seq, const Track::Kind kin
     return std::make_unique<EditCommand>("clip metadata", std::move(before), std::move(after));
 }
 
-// ---------------------------------------------------------------------------
-// Track-shape edits. The ops mutate the sequence in place (like every other
-// edit op) and return a TrackListCommand carrying the whole-kind before/after
-// vectors, so one Undo restores the exact track list including clip contents.
-// ---------------------------------------------------------------------------
 namespace {
 
 std::vector<Track>& tracks_of(Sequence& seq, const Track::Kind kind) {
@@ -1950,7 +1839,7 @@ std::vector<Track>& tracks_of(Sequence& seq, const Track::Kind kind) {
 
 std::ptrdiff_t as_index(const std::size_t i) { return static_cast<std::ptrdiff_t>(i); }
 
-}  // namespace
+}
 
 std::unique_ptr<ICommand> insert_track(Sequence& seq, const Track::Kind kind,
                                        const std::size_t index, const std::string& name) {
@@ -1973,7 +1862,7 @@ std::unique_ptr<ICommand> insert_track(Sequence& seq, const Track::Kind kind,
 std::unique_ptr<ICommand> remove_track(Sequence& seq, const Track::Kind kind,
                                        const std::size_t index) {
     const std::size_t count = seq.track_count(kind);
-    if (index >= count || count <= 1) return nullptr;  // keep >= 1 track of each kind
+    if (index >= count || count <= 1) return nullptr;
 
     std::vector<Track>& tracks = tracks_of(seq, kind);
     std::vector<Track> before = tracks;
@@ -1992,11 +1881,7 @@ std::unique_ptr<ICommand> rename_track(Sequence& seq, const Track::Kind kind,
     std::vector<Track> before = tracks;
     std::vector<Track> after = before;
     after[index].name = name;
-    if (before[index].name == name) {  // null-op, still undoable
-        // `before` and `after` are semantically identical here; pass two distinct
-        // objects (never std::move the SAME vector twice — argument evaluation
-        // order is unspecified, so one argument could receive an empty
-        // moved-from vector).
+    if (before[index].name == name) {
         std::vector<Track> same = before;
         return std::make_unique<TrackListCommand>("rename track", kind, std::move(before),
                                                   std::move(same));
@@ -2022,4 +1907,4 @@ std::unique_ptr<ICommand> move_track(Sequence& seq, const Track::Kind kind, cons
                                               std::move(after));
 }
 
-}  // namespace canvas::core
+}

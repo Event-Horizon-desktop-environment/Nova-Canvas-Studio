@@ -15,16 +15,11 @@ namespace {
 
 void apply_rounded_menu_impl(QMenu* menu) {
     if (!menu) return;
-    // Translucent + frameless make the popup's QSS border-radius really clip;
-    // without them the native popup window keeps square corners.
     menu->setAttribute(Qt::WA_TranslucentBackground, true);
     menu->setWindowFlag(Qt::FramelessWindowHint, true);
     apply_panel_shadow(menu);
 }
 
-// Safety net for popups not created through make_rounded_menu: menubar-owned
-// submenus and QComboBox dropdown containers. QEvent::Polish fires on creation
-// (before the native window exists), Show is a last-chance retry.
 class PopupRounder : public QObject {
 public:
     using QObject::QObject;
@@ -47,7 +42,7 @@ public:
     }
 };
 
-}  // namespace
+}
 
 QMenu* make_rounded_menu(QWidget* parent) {
     auto* menu = new QMenu(parent);
@@ -63,4 +58,4 @@ void install_popup_rounding(QApplication& app) {
     app.installEventFilter(new PopupRounder(&app));
 }
 
-}  // namespace canvas::gui
+}

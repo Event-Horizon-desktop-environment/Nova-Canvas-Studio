@@ -1,13 +1,5 @@
-# Headless unit tests for GUI-side logic that is deliberately Qt-free.
-#
-# Each test links ONLY the Qt-free sources it exercises (plus canvas_core). No Qt is
-# linked here, which is what guarantees the extracted modules stay usable without
-# a display — the "unbreakable" seam. The no-Qt invariant is enforced compilation
-# time: if a tested module #includes <Q...>, this target simply fails to build.
-
 get_filename_component(CANVAS_GUI_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../src" ABSOLUTE)
 
-# Build a headless Qt-free test executable from the given test source(s).
 function(canvas_add_headless_test name)
     add_executable(${name} ${ARGN})
     target_include_directories(${name} PRIVATE
@@ -19,53 +11,33 @@ function(canvas_add_headless_test name)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-# sync_constants_test: header-only, no extra object library.
 canvas_add_headless_test(sync_constants_test
     sync_constants_test.cpp
 )
 
-# timeline_decoder_test: exercises TimelineDecoder headless (Qt-free seam).
-# Compiles timeline_decoder.cpp into the test binary so the module is verified
-# exactly as shipped (a stray <Q...> include breaks this build on purpose).
 canvas_add_headless_test(timeline_decoder_test
     timeline_decoder_test.cpp
     ../src/features/playback/timeline_decoder.cpp
     ../src/features/playback/vaapi_import_state.cpp
 )
 
-# transition_bake_test: exercises the off-thread transition pre-render's pure
-# DISCOVERY (next_transition_bake_candidate) headlessly — the
-# 1-frame same-media cross-dissolve from the far-source freeze fix. The
-# thread/GPU half of the bake needs a CUDA device + running timeline, so only
-# the scan is unit-tested here (same seam guarantee: linked no-Qt).
 canvas_add_headless_test(transition_bake_test
     transition_bake_test.cpp
     ../src/features/playback/timeline_decoder.cpp
     ../src/features/playback/vaapi_import_state.cpp
 )
 
-# audio_pipeline_test: exercises AudioPipeline headless against an in-memory
-# fake sink. Compiles audio_pipeline.cpp directly (same seam guarantee). The
-# trim-head + forward-jump cases are the regression guards for the AudioDecoder
-# resync-walk fix.
 canvas_add_headless_test(audio_pipeline_test
     audio_pipeline_test.cpp
     fake_audio_sink.hpp
     ../src/features/playback/audio_pipeline.cpp
 )
 
-# sonicsync_test: exercises SonicSync headless (Qt-free seam). Compiles
-# sonicsync.cpp directly (same guarantee: a stray <Q...> include breaks the
-# build).
 canvas_add_headless_test(sonicsync_test
     sonicsync_test.cpp
     ../src/features/playback/sonicsync.cpp
 )
 
-# av_reanchor_test: integration test encoding the MLT "audio rides with its
-# frame" invariant — Sonicsync's seek-hold must gate the AudioPipeline feed off
-# until the target frame is presented. Compiles both modules directly (Qt-free
-# seam enforced by the build).
 canvas_add_headless_test(av_reanchor_test
     av_reanchor_test.cpp
     fake_audio_sink.hpp
@@ -73,78 +45,47 @@ canvas_add_headless_test(av_reanchor_test
     ../src/features/playback/audio_pipeline.cpp
 )
 
-# timeline_snap_test: pure grid-snap math (zoom-dependent quantization). Compiles
-# timeline_snap.cpp directly (Qt-free seam enforced by the build).
 canvas_add_headless_test(timeline_snap_test
     timeline_snap_test.cpp
     ../src/Widgets/timeline_snap.cpp
 )
 
-# timeline_selection_test: selection model (range membership + linked-mate
-# coalescing). Compiles timeline_selection.cpp directly (Qt-free seam enforced
-# by the build).
 canvas_add_headless_test(timeline_selection_test
     timeline_selection_test.cpp
     ../src/Widgets/timeline_selection.cpp
 )
 
-# timeline_drag_test: clip-drag session math (grab-frames freeze, snap-aware
-# tl_in, clamp-to-zero, same-kind track targeting, release commit decision).
-# Compiles timeline_drag.cpp + timeline_snap.cpp directly (Qt-free seam enforced
-# by the build).
 canvas_add_headless_test(timeline_drag_test
     timeline_drag_test.cpp
     ../src/Widgets/timeline_drag.cpp
     ../src/Widgets/timeline_snap.cpp
 )
 
-# transition_handle_editor_test: transition cut-handle session math (duration
-# bounds, edge seeding + left/right derivation, drag anchors/clamps, the press/
-# commit helpers). Compiles transition_handle_editor.cpp directly (Qt-free seam
-# enforced by the build).
 canvas_add_headless_test(transition_handle_editor_test
     transition_handle_editor_test.cpp
     ../src/Widgets/transition_handle_editor.cpp
 )
 
-# audio_targets_test: mixer-target resolution for multi-clip Volume/Pan edits
-# (audio clip direct, linked video->audio mate, no-audio skip, linked-pair
-# de-dup, selection-order + duplicate collapse). Compiles audio_targets.cpp
-# directly (Qt-free seam enforced by the build).
 canvas_add_headless_test(audio_targets_test
     audio_targets_test.cpp
     ../src/features/timeline/audio_targets.cpp
 )
 
-# timeline_volume_line_test: audio volume-line math (db<->y law, band clamping,
-# monotonicity, degenerate boxes). Compiles timeline_volume_line.cpp directly
-# (Qt-free seam enforced by the build).
 canvas_add_headless_test(timeline_volume_line_test
     timeline_volume_line_test.cpp
     ../src/Widgets/timeline_volume_line.cpp
 )
 
-# deliver_settings_model_test: Deliver-panel policy model (container<->codec
-# restriction lists, encoder/preset lists, bitrate-field visibility law).
-# Compiles deliver_settings_model.cpp directly (Qt-free seam enforced by the
-# build).
 canvas_add_headless_test(deliver_settings_model_test
     deliver_settings_model_test.cpp
     ../src/features/deliver/deliver_settings_model.cpp
 )
 
-# source_preview_model_test: Dual-Viewer / media-pool-scrub model (synthetic
-# single-clip preview project + scrub fraction<->source frame law). Compiles
-# source_preview_model.cpp directly (Qt-free seam enforced by the build).
 canvas_add_headless_test(source_preview_model_test
     source_preview_model_test.cpp
     ../src/features/source_preview/source_preview_model.cpp
 )
 
-# volume_line_drag_qt_test: full-widget (Qt) regression test that drives the
-# audio volume-line drag through the real press/move/release handlers and checks
-# the emitted preview/commit dB values stay inside the audio law band and point
-# the RIGHT way (up = louder, down = quieter). Qt-linked on purpose.
 qt_add_executable(volume_line_drag_qt_test
     qt/volume_line_drag_qt_test.cpp
     ../resources.qrc
@@ -182,11 +123,6 @@ add_test(NAME volume_line_drag_qt_test COMMAND volume_line_drag_qt_test)
 set_tests_properties(volume_line_drag_qt_test PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-# waveform_placement_qt_test: Qt regression test for the wrong-cut bug. Feeds a
-# synthetic waveform through the real on_waveform_ready placement path and pins
-# the drawn pixmap to the SAME geometry law frame_at_x() (and the razor) cut on:
-# left scene-x == kSceneMargin + kTrackHeaderWidth + tl_in/fpp and pixmap width
-# == clip body width. Guards the cx+2 inset AND the width-4 rescale regressions.
 qt_add_executable(waveform_placement_qt_test
     qt/waveform_placement_qt_test.cpp
     ../resources.qrc
@@ -224,12 +160,6 @@ add_test(NAME waveform_placement_qt_test COMMAND waveform_placement_qt_test)
 set_tests_properties(waveform_placement_qt_test PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-# thumbs_id_namespace_test: Qt regression test for the filmstrip wrong-frame /
-# "never fully populated" bug (2026-09-16). Verifies the thumbnail request-id
-# namespace constants are distinct, outside every existing consumer's region, and
-# that both counters never collide over a realistic workload. Also exercises the
-# O(1) gate predicates (is_timeline_thumb_id / is_mini_strip_thumb_id) that
-# reject foreign deliveries before scanning any cells. Qt-linked on purpose.
 qt_add_executable(thumbs_id_namespace_test
     qt/thumbs_id_namespace_test.cpp
     ../resources.qrc
@@ -268,15 +198,6 @@ add_test(NAME thumbs_id_namespace_test COMMAND thumbs_id_namespace_test)
 set_tests_properties(thumbs_id_namespace_test PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-# thumbs_disk_serve_test: Qt regression test for the filmstrip "never fully
-# populates" bug family (2026-09-16). Pins the thumbnail service's worker-side
-# contract: (A) the on-disk cache fallback serves from the WORKER thread — not
-# from submit() on the caller's thread, the GUI-thread PNG-decode jank; (B) a
-# disk hit warms the in-memory LRU so the same key re-serves synchronously; (C)
-# a total decode failure drains parked dedupe waiters with a null QImage and
-# ERASES the pending key so the next request is re-enqueued instead of parking
-# forever (the "blank cells never backfill until a rebuild" bug). The on-disk
-# filename contract (t2| seed, FNV-1a hex) is pinned here too.
 qt_add_executable(thumbs_disk_serve_test
     qt/thumbs_disk_serve_test.cpp
     ../src/features/thumbnails/thumbnail_service.cpp
@@ -302,12 +223,6 @@ add_test(NAME thumbs_disk_serve_test COMMAND thumbs_disk_serve_test)
 set_tests_properties(thumbs_disk_serve_test PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-# wheel_panel_roundtrip_qt_test: Qt regression test for the color wheel panel
-# (color-grading-phases.md Phase 4). Drives the REAL ColorWheelsPanel handlers
-# offscreen (Lift-wheel press/move/release + tone-row spin boxes) and proves the
-# emitted WheelPanelState lands in the clip's grade through the same
-# one-corrector set_clip_grade seam the Color page uses, survives undo/redo and
-# JSON, and round-trips into a fresh panel. Qt-linked on purpose.
 qt_add_executable(wheel_panel_roundtrip_qt_test
     qt/wheel_panel_roundtrip_qt_test.cpp
     ../resources.qrc
@@ -341,12 +256,6 @@ add_test(NAME wheel_panel_roundtrip_qt_test COMMAND wheel_panel_roundtrip_qt_tes
 set_tests_properties(wheel_panel_roundtrip_qt_test PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-# theme_roundtrip_qt_test: Qt regression test for the Theme-tab foundation —
-# the generalized token-override API and the shareable theme file. Pins the
-# field<->name<->QSettings-key law, override-clear semantics, the derived-family
-# recoloring (accent/playhead/ink/border recolor their hover/soft/state
-# members while preserving designed alpha), the JSON export/import round-trip,
-# and foreign-format rejection. Qt-linked on purpose (QColor/QJson/QFile).
 qt_add_executable(theme_roundtrip_qt_test
     qt/theme_roundtrip_qt_test.cpp
     ../src/UX/theme_clip_colors.cpp

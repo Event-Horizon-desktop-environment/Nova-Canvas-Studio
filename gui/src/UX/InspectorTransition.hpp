@@ -1,10 +1,5 @@
 #pragma once
 
-// Transition inspector page (splitplan refactor): Start/End sub-tab pills plus
-// Video + Audio property categories shown when a transition bubble is selected
-// on the timeline. Edits commit through the normal edit_ops path so every
-// change is undoable.
-
 class QToolButton;
 class QVBoxLayout;
 
@@ -17,4 +12,4 @@ void build_inspector_transition(MainWindow& main_window, QVBoxLayout* transition
 void attach_inspector_transition(MainWindow& main_window, TimelineWidget* timeline);
 void update_inspector_transition(MainWindow& main_window);
 void apply_inspector_transition(MainWindow& main_window);
-}  // namespace canvas::gui
+}

@@ -1,37 +1,3 @@
-// Scrub-preview latency benchmark / regression gate, modeled on how the editor
-// actually decodes.
-//
-// The editor has three distinct forward-decode workloads, each exercised by a
-// sub-bench on a worst-case sparse-keyframe source (10s GOP):
-//
-//   1. CPU scrub preview     -> seek_to_frame_indexed(640), an editor-style
-//                               drag/jump playhead sweep.
-//   2. GPU scrub preview     -> decode_to_hw_indexed(kPreviewMaxOver), the
-//                               keyframe-anchored jump path for NV12 previews.
-//   3. GPU sequential decode -> decode_to_hw(0) forward-walk, the path the
-//                               off-thread transition bake and steady playback
-//                               ride on. A per-call container re-seek (the
-//                               regression that made the dissolve bake pay a
-//                               full far-jump per frame) blows this up.
-//
-// Budget law (shared): every sub-bench runs its own identical sweep once as a
-// "warm" calibration pass under the CURRENT machine/GPU load, then asserts a
-// budget of max(absolutefloor, factor * warm_p95). A busy NVDEC (an editor
-// session playing on the same GPU while tests run) inflates every decode call
-// for the test and the editor together, so an absolute budget would measure the
-// load, not the decode logic; a regression that multiplies the work (multi-GOP
-// walks, per-call re-seeks) still trips the factor on an idle box. The absolute
-// floor keeps that idle box strict.
-//
-// The source (a real h264 MP4 with a multi-second GOP) is synthesized at
-// runtime, so there is no dependency on external fixtures or a system ffmpeg.
-// SKIP (exit 2) when no libx264 is available, mirroring the export_sweep
-// convention.
-//
-// Pass:      exit 0 + a timing table per sub-bench.
-// Fail:      exit 1 when a sub-bench p95 exceeds its calibrated budget.
-// Skipped:   exit 2 when the source can't be built (no libx264).
-
 #include "canvas/core/gpu/cuda_convert.hpp"
 #include "canvas/core/media/hw_device.hpp"
 #include "canvas/core/media/video_decoder.hpp"
@@ -62,9 +28,6 @@ static void report(bool ok, const char* what) {
     if (!ok) ++g_failures;
 }
 
-// Encodes `frames` of a moving gradient as h264 MP4 with a keyframe every
-// `gop_frames` frames. A large `gop_frames` (e.g. ~10s) reproduces the
-// sparse-keyframe worst case that made scrubbing stall.
 static bool make_source(const std::string& path, int w, int h, int fps,
                         int frames, int gop_frames) {
     const AVCodec* codec = avcodec_find_encoder_by_name("libx264");
@@ -134,7 +97,6 @@ static bool make_source(const std::string& path, int w, int h, int fps,
     return true;
 }
 
-// Percentile helper over the raw sample vector (ms double).
 static double ms_pct(std::vector<double>& v, double q) {
     std::sort(v.begin(), v.end());
     const int idx = std::min(static_cast<int>(std::ceil(q * (v.size() - 1))),
@@ -148,24 +110,18 @@ static double ms_now() {
         .count();
 }
 
-// Load-adaptive budget: a same-run warm p95 calibrates the machine's decode rate
-// under its current load; the assertion budget is floor | factor. See the file
-// header for the rationale.
 static double calibrated_budget(double warm_p95_ms, double floor_ms) {
     return std::max(floor_ms, 1.75 * warm_p95_ms);
 }
 
 static const char* kOutDir = "/tmp/canvas_scrub_bench";
 static const int kFps = 30;
-static const int kGopFrames = 300;   // ~10s keyframe interval: worst-case sparse GOP
-static const int kFrames = 1800;     // 60s of media
-static const int kPreviewDim = 640;  // matches the GUI's kPreviewMaxDim
+static const int kGopFrames = 300;
+static const int kFrames = 1800;
+static const int kPreviewDim = 640;
 
-// Absolute floors: a compliant decode stays well under these even lightly
-// loaded; a regression that multiplies the work clears them and trips the
-// factor, but the floor keeps the gate strict when the box is idle.
-static constexpr double kScrubFloorMs = 250.0;       // scrub/preview p95
-static constexpr double kSeqFloorMs = 1000.0 / 60.0; // sequential per-frame = one 60fps frame budget
+static constexpr double kScrubFloorMs = 250.0;
+static constexpr double kSeqFloorMs = 1000.0 / 60.0;
 
 int main() {
     std::string src = std::string(kOutDir) + "/sparse.mp4";
@@ -177,7 +133,6 @@ int main() {
 
     const bool have_cuda = canvas::core::gpu::cuda_available();
 
-    // ---- Sub-bench 1: CPU scrub preview, editor drag/jump sweep ----
     {
         std::printf("CPU  preview seek_to_frame_indexed (editor drag/jump mix)\n");
         VideoDecoder dec;
@@ -190,10 +145,6 @@ int main() {
         if (!dec.has_iframe_index())
             std::printf("note  iframe index unavailable\n");
 
-        // Editor-style scrub sweep: half small/medium moves local to the prior
-        // target (real playhead dragging), half large jumps that cross GOP
-        // boundaries (worst case). Fixed LCG seed so the sweep is deterministic
-        // and reproducible across runs.
         std::vector<int64_t> targets;
         targets.reserve(24);
         uint32_t lcg = 0x1234abcd;
@@ -216,7 +167,6 @@ int main() {
             return std::pair<double, bool>(ms_now() - t0, static_cast<bool>(f));
         };
 
-        // Warm + calibrate under the current load, then measure the same sweep.
         std::vector<double> warm;
         warm.reserve(targets.size());
         for (int64_t t : targets) warm.push_back(scrub(t).first);
@@ -246,7 +196,6 @@ int main() {
     }
 
     if (!have_cuda) {
-        // GPU NV12 paths couldn't run even warmed; still report the skip.
         std::printf("GPU  (CUDA unavailable - GPU sub-benchmarks not exercised)\n");
     } else {
         HwDeviceManager hw{"test"};
@@ -257,13 +206,9 @@ int main() {
         if (!gpu_ok) {
             std::printf("note  no hardware decode on this machine; skipping GPU sub-benchmarks\n");
         } else {
-            // ---- Sub-bench 2: GPU scrub preview, keyframe-anchored jumps ----
             std::printf("GPU  preview decode_to_hw_indexed (bounded, kPreviewMaxOver=%d)\n",
                         VideoDecoder::kPreviewMaxOver);
             const int budget = VideoDecoder::kPreviewMaxOver;
-            // Worst case: a single forward walk across several GOPs. With the
-            // keyframe anchor this should cost only one GOP regardless of span;
-            // kPreviewMaxOver keeps even that bounded.
             const int64_t kSpans[] = {90, 299, 600, 1499, 3000};
             const std::size_t kNSpans = sizeof(kSpans) / sizeof(kSpans[0]);
             auto sweep_gpu = [&](std::vector<double>& out) {
@@ -276,11 +221,10 @@ int main() {
                     dec.decode_to_hw_indexed(cur, budget);
                     out.push_back(ms_now() - t0);
                     cur += span;
-                    if (cur >= kFrames) { dec.seek_to_frame(0); cur = 0; }  // wrap cleanly
+                    if (cur >= kFrames) { dec.seek_to_frame(0); cur = 0; }
                 }
             };
 
-            // Warm + calibrate, then measure the same span sweep.
             std::vector<double> warm;
             sweep_gpu(warm);
             const double warm_p95 = ms_pct(warm, 0.95);
@@ -297,7 +241,7 @@ int main() {
                             (long long)span, (long long)cur, dt,
                             hw_f && hw_f->data[0] ? "hit" : "MISS");
                 cur += span;
-                if (cur >= kFrames) { dec.seek_to_frame(0); cur = 0; }  // wrap cleanly
+                if (cur >= kFrames) { dec.seek_to_frame(0); cur = 0; }
             }
             const double gp = ms_pct(bounded, 0.95),
                          g50 = ms_pct(bounded, 0.50);
@@ -305,23 +249,16 @@ int main() {
                         warm_p95, g50, gp, budget_ms);
             report(gp < budget_ms, "GPU scrub preview p95 under calibrated budget on sparse GOP");
 
-            // ---- Sub-bench 3: GPU sequential forward decode (transition bake) ----
-            // The off-thread transition pre-render (TimelineDecoder's bake) and
-            // steady playback advance the decoder in a contiguous forward walk.
-            // Each step must be a cheap in-place advance; a container re-seek per
-            // call (the dissolve-stall regression) pushes per-frame cost past the
-            // 60fps frame budget and trips this gate. The anchor seek here is the
-            // bake's own "position the walk at the window head" step.
             std::printf("GPU  sequential decode_to_hw forward walk (%d frames, bake/playback profile)\n",
                         static_cast<int>(kNSpans * 30));
-            const int64_t kWalkFrames = kNSpans * 30;  // 150 frames, crosses no sparse boundary
+            const int64_t kWalkFrames = kNSpans * 30;
             auto sweep_seq = [&](std::vector<double>& out) {
                 out.clear();
                 out.reserve(static_cast<std::size_t>(kWalkFrames));
                 dec.seek_to_frame(0);
                 for (int64_t f = 0; f < kWalkFrames; ++f) {
                     const double t0 = ms_now();
-                    const AVFrame* hw_f = dec.decode_to_hw(f, 0);  // exact, sequential
+                    const AVFrame* hw_f = dec.decode_to_hw(f, 0);
                     const double dt = ms_now() - t0;
                     out.push_back(dt);
                     if (!hw_f || !hw_f->data[0]) {

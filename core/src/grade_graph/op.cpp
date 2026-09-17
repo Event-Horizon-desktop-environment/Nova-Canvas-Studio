@@ -32,7 +32,7 @@ constexpr struct OpEntry {
            c.sat == 1.0f;
 }
 
-}  // namespace
+}
 
 colorsci::RGBF op_apply(const Node& node, const colorsci::RGBF& in) {
     switch (node.correct_mode) {
@@ -80,4 +80,4 @@ OpKind op_from_name(const std::string& name) {
     return OpKind::kIdentity;
 }
 
-}  // namespace canvas::core::grade_graph
+}

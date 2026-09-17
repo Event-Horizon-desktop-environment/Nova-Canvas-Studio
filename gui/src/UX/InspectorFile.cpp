@@ -1,11 +1,3 @@
-// File inspector page. Built once per MainWindow (registry keyed by window),
-// refreshed from whichever clip is selected. Header info is read-only (what the
-// model knows about the source); Metadata (timecode/tag/colour/name/notes) and
-// the clip Name field commit live through edit_ops so every change is undoable.
-// Audio Configuration lists one row per audio channel of the source; the
-// per-channel audition buttons are not connected to a playback engine in this
-// build (v1), so they render disabled with a tooltip.
-
 #include "UX/InspectorFile.hpp"
 
 #include <QCheckBox>
@@ -143,12 +135,10 @@ QString hms_frames(const int64_t frame, const double fps) {
 }
 
 struct FileControls {
-    // Media preview header.
     QLabel* preview_icon = nullptr;
     QLabel* preview_name = nullptr;
     QToolButton* open_folder = nullptr;
 
-    // Header Info (read-only).
     QLabel* r_media = nullptr;
     QLabel* r_path = nullptr;
     QLabel* r_video = nullptr;
@@ -158,7 +148,6 @@ struct FileControls {
     QLabel* r_source_tc = nullptr;
     QLabel* r_tc_rate = nullptr;
 
-    // Metadata (editable).
     QLineEdit* ed_timecode = nullptr;
     QComboBox* ed_tag = nullptr;
     QLabel* tag_swatch = nullptr;
@@ -169,18 +158,16 @@ struct FileControls {
     QCheckBox* auto_select = nullptr;
     QCheckBox* next_box = nullptr;
 
-    // Audio Configuration.
     QVBoxLayout* audio_body = nullptr;
     QLabel* audio_hint = nullptr;
     std::vector<QWidget*> channel_rows;
 
-    // Timecode.
     QLineEdit* tc_current = nullptr;
     QLineEdit* tc_slate = nullptr;
     QLineEdit* tc_offset = nullptr;
 
-    bool updating = false;   // guards against committing while populating
-    bool attached = false;   // selection signals already connected
+    bool updating = false;
+    bool attached = false;
     std::optional<std::string> pending_name;
     std::optional<std::string> pending_comments;
     std::optional<uint8_t> pending_color;
@@ -220,16 +207,13 @@ QLabel* make_readonly_label(QWidget* parent) {
     return l;
 }
 
-}  // namespace
+}
 
 void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     FileControls& fc = file_registry()[&mw];
     auto* host = file_layout->parentWidget();
     const auto tr = [](const char* s) { return MainWindow::tr(s); };
 
-    // ---- Media preview header ----------------------------------------------
-    // Rounded raised card that caps the page, matching the inspector's
-    // semi-rounded category cards below it.
     auto* preview = new QWidget(host);
     preview->setObjectName(QStringLiteral("inspectorPreviewCard"));
     apply_theme_style(preview, &preview_card_style);
@@ -252,8 +236,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     preview_layout->addWidget(fc.open_folder);
     file_layout->addWidget(preview);
 
-    // ---- Header Info ---------------------------------------------------------
-    auto* info = new InspectorCategory(tr("Header Info"), /*expanded=*/true, host);
+    auto* info = new InspectorCategory(tr("Header Info"), true, host);
     auto* info_body = info->body_layout();
     const auto add_ro_row = [&](const char* label, QLabel*& out) {
         out = make_readonly_label(host);
@@ -276,8 +259,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     add_ro_row("TC Rate", fc.r_tc_rate);
     file_layout->addWidget(info);
 
-    // ---- Metadata ------------------------------------------------------------
-    auto* meta = new InspectorCategory(tr("Metadata"), /*expanded=*/true, host);
+    auto* meta = new InspectorCategory(tr("Metadata"), true, host);
     auto* meta_body = meta->body_layout();
 
     auto* tc_row = new QHBoxLayout;
@@ -369,8 +351,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     meta_body->addLayout(checks_row);
     file_layout->addWidget(meta);
 
-    // ---- Audio Configuration --------------------------------------------------
-    auto* audio = new InspectorCategory(tr("Audio Configuration"), /*expanded=*/false, host);
+    auto* audio = new InspectorCategory(tr("Audio Configuration"), false, host);
     fc.audio_body = audio->body_layout();
     fc.audio_hint = new QLabel(
         tr("No audio channels for this source — drag an audio clip to the timeline first."),
@@ -380,8 +361,7 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     fc.audio_body->addWidget(fc.audio_hint);
     file_layout->addWidget(audio);
 
-    // ---- Timecode --------------------------------------------------------------
-    auto* tc_groups = new InspectorCategory(tr("Timecode"), /*expanded=*/false, host);
+    auto* tc_groups = new InspectorCategory(tr("Timecode"), false, host);
     auto* tc_body = tc_groups->body_layout();
     fc.tc_current = make_readonly_line(host);
     fc.tc_slate = make_readonly_line(host);
@@ -403,7 +383,6 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
     add_tc_row("Offset", fc.tc_offset);
     file_layout->addWidget(tc_groups);
 
-    // ---- Committing -------------------------------------------------------------
     const auto commit_metadata = [&mw, &fc]() {
         if (fc.updating) return;
         canvas::core::Track::Kind kind;
@@ -442,7 +421,6 @@ void build_inspector_file(MainWindow& mw, QVBoxLayout* file_layout) {
         if (!fc.updating) fc.pending_comments = fc.ed_notes->toPlainText().toStdString();
     });
 
-    // Colour swatches commit immediately (single click = one undo step).
     const auto apply_swatch = [&mw, &fc, commit_metadata](uint8_t color) {
         fc.pending_color = color;
         const QColor c = clip_color_for(color);
@@ -459,7 +437,6 @@ QObject::connect(sw, &QToolButton::clicked, &mw,
     QObject::connect(no_color, &QToolButton::clicked, &mw,
                      [apply_swatch]() { apply_swatch(0); });
 
-    // Timecode edits relocate the clip on its own track (in-place move).
     QObject::connect(fc.ed_timecode, &QLineEdit::editingFinished, &mw, [&mw, &fc]() {
         if (fc.updating) return;
         if (!mw.project_) return;
@@ -490,7 +467,6 @@ QObject::connect(sw, &QToolButton::clicked, &mw,
         fc.ed_timecode->setText(hms_frames(frame, fps));
     });
 
-    // Open the source file's folder with the system file manager.
     QObject::connect(fc.open_folder, &QToolButton::clicked, &mw, [&mw, &fc]() {
         if (!mw.project_) return;
         canvas::core::Track::Kind kind;
@@ -590,7 +566,6 @@ void update_inspector_file(MainWindow& mw) {
 
     fc->tc_current->setText(hms_frames(clip.tl_in, fps));
 
-    // Audio configuration rows: rebuild per selected clip.
     const int channels = has_audio ? 1 : 0;
     for (QWidget* w : fc->channel_rows) {
         w->setVisible(false);
@@ -628,7 +603,7 @@ void update_inspector_file(MainWindow& mw) {
 }
 
 void apply_inspector_file(MainWindow& mw) {
-    (void)mw;  // commits are event-driven from the control signals
+    (void)mw;
 }
 
-}  // namespace canvas::gui
+}

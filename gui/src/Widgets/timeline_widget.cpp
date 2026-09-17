@@ -25,23 +25,11 @@
 namespace canvas::gui {
 
 TimelineWidget::~TimelineWidget() {
-    // Detach the scene while it (and every item it owns, including the pinned
-    // chrome groups) is still intact. QGraphicsScene::~QGraphicsScene re-arms
-    // each attached view via QGraphicsView::setScene(nullptr), which recalculates
-    // the scrollbar range and calls scrollContentsBy() — touching torn-down
-    // items there (top_pinned_ et al.) is a use-after-free. Detaching first
-    // keeps member (scene_) -> base (QGraphicsView) teardown clean.
     if (scene() == &scene_) setScene(nullptr);
 }
 
 TimelineWidget::TimelineWidget(QWidget* parent) : QGraphicsView(parent) {
     setScene(&scene_);
-    // Default raster backing store. A QOpenGLWidget viewport used to render the
-    // scene here, but QGraphicsView's GL paint engine re-uploads every visible
-    // QPixmap (filmstrip cells, waveform strips) to a texture on EACH repaint,
-    // which cost ~2.3ms per pixmap (40-70ms/frame with thumbnails visible).
-    // Raster paint is backed by the widget backing store, so pixmap draws are
-    // cached blits; the scene is flat rects/paths/pixmaps, so nothing needs GL.
     setRenderHint(QPainter::Antialiasing, true);
     setDragMode(QGraphicsView::NoDrag);
     setMouseTracking(true);
@@ -51,27 +39,16 @@ TimelineWidget::TimelineWidget(QWidget* parent) : QGraphicsView(parent) {
     setAlignment(Qt::AlignLeft | Qt::AlignTop);
     setAcceptDrops(true);
     scene_.setBackgroundBrush(tokens().surface);
-    // Track-row resize rebuilds are coalesced to 16ms (see track_resize_timer_):
-    // a rebuild per MouseMove tore down + rebuilt the whole scene (and re-issued
-    // every thumbnail request) for each pixel of height drag.
     track_resize_timer_ = new QTimer(this);
     track_resize_timer_->setSingleShot(true);
     track_resize_timer_->setInterval(16);
     connect(track_resize_timer_, &QTimer::timeout, this, [this] { rebuild_timeline(); });
-    // Manual scrollbar interaction must not be defeated by playhead-follow:
-    // QGraphicsView delivers wheel/press events to the scrollbar (not the view),
-    // so watch both directly and treat any such gesture as "user navigated away".
     if (horizontalScrollBar()) horizontalScrollBar()->installEventFilter(this);
     if (verticalScrollBar()) verticalScrollBar()->installEventFilter(this);
-    // The whole scene re-derives its colors from the active tokens, so rebuild
-    // it whenever the appearance mode flips (see set_light()).
     register_theme_reapply([this] { rebuild_timeline(); });
 }
 
 bool TimelineWidget::eventFilter(QObject* watched, QEvent* event) {
-    // Manual scrollbar interaction (press, thumb-drag, wheel) is navigation:
-    // stop following the playhead so the next rebuild/playhead update doesn't
-    // yank the view back. All events pass through untouched.
     if (watched == horizontalScrollBar() || watched == verticalScrollBar()) {
         const auto type = event->type();
         if (type == QEvent::Wheel || type == QEvent::MouseButtonPress ||
@@ -85,9 +62,6 @@ bool TimelineWidget::eventFilter(QObject* watched, QEvent* event) {
 
 void TimelineWidget::set_sequence(const canvas::core::Sequence* sequence) {
     sequence_ = sequence;
-    // Reconcile the ruler/playhead timecode rate from the live sequence so a
-    // project (re)loaded at a different fps re-derives its tick labels instead
-    // of carrying the previous project's rate.
     if (sequence && sequence->fps > 0.0) fps_ = sequence->fps;
     rebuild_timeline();
     update_playhead_position(playhead_frame_);
@@ -128,9 +102,6 @@ void TimelineWidget::zoom_fit() {
     if (!sequence_) return;
     const int64_t dur = std::max<int64_t>(sequence_->duration_frames(), 1);
     const int view_w = std::max(viewport()->width() - kTrackHeaderWidth - 40, 1);
-    // Clamp the low end to the 100% baseline so fitting a tiny clip lands on
-    // one frame per pixel (whole clip visible) instead of pinning the zoom-in
-    // max; the high end guards absurdly long timelines.
     set_frames_per_pixel(std::clamp(static_cast<double>(dur) / view_w,
                                     kDefaultFramesPerPixel, kMaxFramesPerPixel));
 }
@@ -139,10 +110,6 @@ double TimelineWidget::interactive_floor_percent() const {
     if (!sequence_) return kZoomMinPercent;
     const int view_w = std::max(viewport()->width() - kTrackHeaderWidth - 40, 1);
     const int64_t dur = std::max<int64_t>(sequence_->duration_frames(), 1);
-    // Fit math scaled 5x further out than zoom_fit's "whole timeline fills the
-    // viewport" target, so the zoom-out end still has room to roam past fit;
-    // never sharper than the 100% baseline (a clip that needs that is already
-    // fully visible) and never beyond the hard frames-per-pixel cap.
     const double fit_fpp = std::clamp(5.0 * static_cast<double>(dur) / view_w,
                                       kDefaultFramesPerPixel, kMaxFramesPerPixel);
     return kDefaultFramesPerPixel / fit_fpp * 100.0;
@@ -159,21 +126,11 @@ void TimelineWidget::zoom_in() { set_zoom_percent(zoom_percent() * 1.2); }
 void TimelineWidget::zoom_out() { set_zoom_percent(zoom_percent() / 1.2); }
 
 double TimelineWidget::tracks_origin_y() const {
-    // pan_down_room_ is the small "sink room" below the parked seat of the
-    // channels: it offsets the track area down the scene so grab-and-follow
-    // panning can dip the rows briefly, while the parked scroll value
-    // (pan_down_room_ + top pad) is the up limit that seats them under the ruler
-    // strip. The room is fixed and modest (kPanDownRoomMin), so the timeline
-    // never opens with a huge empty band under the last track.
     return static_cast<double>(kRulerHeight + kMinimapHeight + kSceneMargin)
            + kTimecodeBarHeight + pan_down_room_ + track_v_pad_top_;
 }
 
 double TimelineWidget::track_height(int track_index, int v_count) const {
-    // A collapsed track renders at 55% of its stored height (thumbnails +
-    // waveforms still fit), scaled by kCollapsedHeightFactor. Consult the model
-    // flag so every geometry caller (track_top, content height, scroll math)
-    // stays consistent without duplicating the check.
     double stored = kDefaultTrackHeight;
     if (track_index < v_count) {
         if (track_index >= 0 && track_index < static_cast<int>(video_track_heights_.size()))
@@ -194,12 +151,6 @@ double TimelineWidget::track_height(int track_index, int v_count) const {
 }
 
 double TimelineWidget::track_top(int track_index, int v_count) const {
-    // Rows stack from the top: video flats descend v-1..0 (Vn on top of V1),
-    // then audio flats ascend v..total-1 (A1 on top of A2). Walking in screen
-    // order lets each row's top depend on the heights of the rows above it. The
-    // fixed Video/Audio divider band sits between the two sections in the slot
-    // a single row gap used to occupy, so the audio section starts that much
-    // lower.
     double y = tracks_origin_y();
     if (track_index < v_count) {
         for (int f = v_count - 1; f > track_index; --f) y += track_height(f, v_count) + kTrackGap;
@@ -216,21 +167,10 @@ double TimelineWidget::tracks_content_height(int v_count, int a_count) const {
     for (int f = 0; f < v_count; ++f) h += track_height(f, v_count) + kTrackGap;
     for (int f = 0; f < a_count; ++f) h += track_height(v_count + f, v_count) + kTrackGap;
     h += (v_count > 0 && a_count > 0) ? kSectionDividerHeight : 0.0;
-    // tracks_origin_y() sits below kSceneMargin; add the top margin back so the
-    // returned height is measured from the scene's own top edge. The trailing
-    // kTrackGap + track_v_pad_bottom_ leave a matching empty strip below the last
-    // row.
     return (tracks_origin_y() - static_cast<double>(kSceneMargin)) + h + track_v_pad_bottom_;
 }
 
 int TimelineWidget::desired_timeline_height() const {
-    // Dock height that shows every channel flush at the parked scroll position.
-    // At park (scroll = pan room + top pad) the viewport reveals scene rows from
-    // `park` downward, so the viewport must be (content bottom - park) tall; the
-    // +40 covers the dock title bar + frame margins. 0 while the timeline holds
-    // no clips yet (the caller keeps the compact floor). Only computed off
-    // geometry that changes with the channel count, so zoom/scrub never resize
-    // the dock.
     if (!sequence_ || !has_timeline_content()) return 0;
     const int v_count = static_cast<int>(sequence_->video_tracks.size());
     const int a_count = static_cast<int>(sequence_->audio_tracks.size());
@@ -243,9 +183,6 @@ int TimelineWidget::desired_timeline_height() const {
 double TimelineWidget::tracks_stack_top() const { return tracks_origin_y(); }
 
 double TimelineWidget::empty_state_top() const {
-    // Anchor to the ruler's bottom edge (the ticks/grid) rather than to the
-    // full tracks_origin_y() which includes pan_down_room_ + track_v_pad_top_.
-    // With no content those offsets float the panel ~247px below the ruler.
     return tracks_origin_y() - pan_down_room_ - track_v_pad_top_
            + static_cast<double>(kSceneMargin);
 }
@@ -263,9 +200,6 @@ double TimelineWidget::edge_y(int edge, int v_count, int a_count) const {
     const int band = (v_count > 0 && a_count > 0) ? 1 : 0;
     const int total_elems = v_count + a_count + band;
     if (edge >= total_elems) return tracks_stack_bottom(v_count, a_count);
-    // Walk the screen-order elements (video rows, divider band, audio rows)
-    // accumulating boundary Y positions; the divider band is a fixed band that
-    // replaces the ordinary row gap at the video/audio boundary.
     double y = tracks_stack_top();
     int e = edge;
     for (int f = v_count - 1; f >= 0; --f) {
@@ -292,13 +226,9 @@ bool TimelineWidget::in_section_divider_band(double scene_y, int v_count, int a_
 }
 
 int TimelineWidget::header_resize_target(double scene_y, int v_count, int a_count) const {
-    // No clip on any track yet: the rows are hidden, so no divider is live.
     if (!sequence_ || !has_timeline_content()) return -1;
     const int band = (v_count > 0 && a_count > 0) ? 1 : 0;
     const int total_elems = v_count + a_count + band;
-    // The tolerance is wide enough to cover the kTrackGap between rows plus a
-    // little of each adjacent row's header, so users can aim at the divider
-    // comfortably either side of it.
     for (int edge = 0; edge <= total_elems; ++edge) {
         if (std::abs(scene_y - edge_y(edge, v_count, a_count)) <= kResizeGrabHalf) return edge;
     }
@@ -342,9 +272,6 @@ const TimelineViewOptions& TimelineWidget::eff_view_options() const {
 
 void TimelineWidget::notify_view_options_changed() {
     if (!sequence_) return;
-    // A full rebuild re-renders clip bodies (names/durations/thumbnail-mode
-    // cells/waveforms) and re-issues thumbnail + waveform requests inside
-    // rebuild_timeline(), so a toggle always re-serves under the new flags.
     rebuild_timeline();
 }
 
@@ -361,9 +288,6 @@ void TimelineWidget::set_all_audio_heights(double height) {
 }
 
 void TimelineWidget::wheelEvent(QWheelEvent* event) {
-    // Any wheel invocation (scroll or Ctrl+zoom) is manual navigation: the user
-    // wants to look somewhere else, so stop following the playhead until the
-    // next explicit playhead jump re-enables it.
     follow_playhead_ = false;
     if (event->modifiers().testFlag(Qt::ControlModifier)) {
         const double factor_pct = event->angleDelta().y() > 0 ? 1.15 : 1.0 / 1.15;
@@ -377,11 +301,8 @@ void TimelineWidget::wheelEvent(QWheelEvent* event) {
 void TimelineWidget::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Shift && event->modifiers().testFlag(Qt::ShiftModifier)) {
         if (frames_per_pixel() > 0) {
-            // Shift+Z handled at MainWindow level
         }
     }
-    // Delete/Backspace on a selected transition bubble clears that transition
-    // instead of deleting a clip.
     if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) &&
         delete_selected_transition()) {
         event->accept();
@@ -395,11 +316,6 @@ void TimelineWidget::keyReleaseEvent(QKeyEvent* event) { QGraphicsView::keyRelea
 void TimelineWidget::resizeEvent(QResizeEvent* event) {
     const auto rz_t0 = std::chrono::steady_clock::now();
     QGraphicsView::resizeEvent(event);
-    // A pure viewport resize must NOT run the full scene rebuild (that tore
-    // down every clip item + re-requested thumbnails on each resize tick — the
-    // "changing height is slow on clip-heavy timelines" stall). relayout_scene()
-    // only re-renders the view chrome; clip items survive. If the chrome was
-    // never built yet (pre-first-layout), fall back to the full build.
     const bool full_rebuild = !(chrome_ && top_pinned_);
     if (chrome_ && top_pinned_)
         relayout_scene();
@@ -407,11 +323,6 @@ void TimelineWidget::resizeEvent(QResizeEvent* event) {
         rebuild_timeline();
     update_playhead_position(playhead_frame_);
     update_minimap_viewport();
-    // Per-resize cost of the whole UX path on the UI thread. Sustained
-    // ms_avg >> frame budget while dragging a dock edge = "resizing is sticky".
-    // The relayout-vs-rebuild split tells you whether a viewer/dock resize is
-    // still paying full scene teardown (then relayout_scene isn't routing here)
-    // or is dominated by the chrome-only path.
     const double rz_ms = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - rz_t0).count();
     static auto s_rz_at = std::chrono::steady_clock::now();
@@ -437,10 +348,6 @@ void TimelineWidget::resizeEvent(QResizeEvent* event) {
 
 void TimelineWidget::scrollContentsBy(int dx, int dy) {
     QGraphicsView::scrollContentsBy(dx, dy);
-    // Keep the ruler + minimap pinned to the top of the viewport: the group's
-    // children live in original scene coords, so shifting the group to the
-    // current vertical scroll value makes it sit exactly at the viewport top no
-    // matter how far the track content pans underneath it.
     if (top_pinned_ && verticalScrollBar())
         top_pinned_->setPos(0.0, static_cast<double>(verticalScrollBar()->value()));
     update_minimap_viewport();
@@ -449,11 +356,6 @@ void TimelineWidget::scrollContentsBy(int dx, int dy) {
 void TimelineWidget::paintEvent(QPaintEvent* event) {
     const auto pt_t0 = std::chrono::steady_clock::now();
     QGraphicsView::paintEvent(event);
-    // Timeline scene paint cost on the UI thread. This is the OTHER half of a
-    // resize cycle: relayout_scene() rebuilds chrome in ~0.2ms, then the scene
-    // has to actually repaint the whole viewport here. Sustained paint time
-    // >> the relayout number on a clip-heavy timeline = the scene items
-    // themselves (not the chrome) are the paint bottleneck.
     const double pt_ms = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - pt_t0).count();
     static auto s_pt_at = std::chrono::steady_clock::now();
@@ -464,9 +366,6 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
     s_max_ms = std::max(s_max_ms, pt_ms);
     const auto pt_now = std::chrono::steady_clock::now();
     if (s_pt_n == 1 || pt_now - s_pt_at >= std::chrono::seconds(1)) {
-        // Per-class count of the items intersecting the visible viewport, so a
-        // paint hotspot can be attributed to a specific item type (pixmap
-        // uploads vs vector paths vs text) rather than just "the scene".
         const QRectF visible = mapToScene(viewport()->rect()).boundingRect();
         const QRectF exposed = visible.intersected(scene_.sceneRect());
         QHash<QString, int> classes;
@@ -504,8 +403,6 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     QMenu menu(this);
     apply_rounded_menu(&menu);
 
-    // Right-clicking directly on an edit point (cut) between two clips shows the
-    // cut context menu: delete-through-edit + preset cross-dissolve lengths.
     const CutTarget cut = cut_at_scene_pos(scene_pos);
     if (cut.is_cut()) {
         emit clip_selected(cut.a);
@@ -543,10 +440,6 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
         return;
     }
 
-    // Right-clicking directly on a single-clip edge (no neighbouring cut) shows a
-    // menu identical in spirit to the cut menu: preset frame lengths for the edge
-    // transition. A Start edge (clip head) targets the IN (fade-in) transition; an
-    // End edge (clip tail, no incoming clip) targets the OUT (fade-out) transition.
     if (cut.valid() && !cut.is_cut()) {
         emit clip_selected(cut.a);
         bool is_in = cut.edge == Edge::Start;
@@ -613,22 +506,13 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     std::vector<QAction*> color_actions;
     if (hit_clip) {
         emit clip_selected(hit_clip->clip);
-        // Checkable "Link Clips" action: checked when this clip is part of a
-        // linked A/V pair; clicking it toggles the link on/off.
         link_action = menu.addAction(tr("Link Clips"));
         link_action->setCheckable(true);
         link_action->setChecked(hit_clip->clip->is_linked());
 
-        // "Out Transition >" submenu (the clip's trailing edge). Each entry maps
-        // 1:1 to a TransitionType, carrying its default duration. It is always
-        // available: at a cut it crossfades into the next clip, but on a clip with
-        // no right neighbour it fades that clip OUT to black at its tail.
         auto* transition_menu = menu.addMenu(tr("Out Transition") + QStringLiteral(" >"));
         transition_menu->setIcon(icon("transition_out"));
         apply_rounded_menu(transition_menu);
-        // "In Transition >" (the clip's leading edge) fades the clip IN from black
-        // at its head, with no preceding clip/cut required. Independent of the OUT
-        // transition.
         auto* transition_in_menu = menu.addMenu(tr("In Transition") + QStringLiteral(" >"));
         transition_in_menu->setIcon(icon("transition_in"));
         apply_rounded_menu(transition_in_menu);
@@ -655,7 +539,6 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
         const auto add_entries = [&](QMenu* m, std::vector<QAction*>* into) {
             for (std::size_t i = 0; i < n_entries; ++i) {
                 QAction* act = m->addAction(tr(entries[i].label));
-                // Pack transition type + default duration into the action data.
                 const qulonglong packed = (static_cast<qulonglong>(entries[i].type) << 48) |
                                           (static_cast<qulonglong>(entries[i].dur) & 0xFFFFFFFFu);
                 act->setData(QVariant::fromValue(packed));
@@ -667,10 +550,6 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
         clear_transition_action = menu.addAction(tr("Clear Out Transition"));
         clear_transition_in_action = menu.addAction(tr("Clear In Transition"));
 
-        // "Clip Colour >" submenu (Resolve-style): the full 12-swatch palette
-        // plus "No Colour". Carries the swatch index in the action data so the
-        // post-exec handler just reads it back; the CLIP itself is captured by
-        // the hit_clip variable at the top of this block.
         auto* color_menu = menu.addMenu(tr("Clip Colour") + QStringLiteral(" >"));
         apply_rounded_menu(color_menu);
         const auto swatch_icon = [](const QColor& c) {
@@ -703,10 +582,7 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     }
 
     const int v_count = sequence_ ? static_cast<int>(sequence_->video_tracks.size()) : 1;
-    const int a_count = sequence_ ? static_cast<int>(sequence_->audio_tracks.size()) : 0;
 
-    // If the click is in the track-header strip, identify which channel row it
-    // is over so we can offer to delete that channel.
     int header_track = -1;
     if (scene_pos.x() >= kSceneMargin && scene_pos.x() < kSceneMargin + kTrackHeaderWidth) {
         header_track = track_at_y(scene_pos.y(), v_count);
@@ -751,8 +627,6 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
                      << "color=" << static_cast<int>(color);
         emit clip_color_requested(hit_clip->clip, color);
     } else if (chosen) {
-        // A transition submenu entry was chosen; resolve OUT vs IN by which
-        // action list the chosen action belongs to.
         auto unpack = [](QVariant v) {
             const qulonglong packed = v.toULongLong();
             const auto type = static_cast<canvas::core::TransitionType>((packed >> 48) & 0xFFFFu);
@@ -774,4 +648,4 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     event->accept();
 }
 
-}  // namespace canvas::gui
+}

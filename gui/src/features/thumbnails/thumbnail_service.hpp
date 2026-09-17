@@ -18,9 +18,6 @@
 #include "canvas/core/media/audio_waveform.hpp"
 
 namespace canvas::core {
-// Forward decl only: `generate` may reuse the CALLER's persistent decoder, but
-// the service never owns one itself, so no need for the full decode machinery
-// in a header that is moc'd by every widget TU that links the service.
 class VideoDecoder;
 }
 
@@ -33,21 +30,9 @@ struct ThumbRequest {
     int target_width = 0;
     int max_height = 0;
     bool is_audio = false;
-    // For audio waveform previews: the source fraction [src_lo, src_hi) the
-    // clip displays (its src_in..src_out window), so each clip renders exactly
-    // its own audio and a blade cut doesn't change the visible spectrum.
     float src_lo = 0.0f;
     float src_hi = 1.0f;
-    // For audio waveform previews: the clip's volume as an amplitude gain in
-    // [0,1] (db_to_gain(clip.volume_db) clamped). Baked into the drawn peak
-    // heights so the timeline spectrum visibly shrinks/rises with the volume.
     float gain = 1.0f;
-    // Diagnostics for the audio-time vs video-frame grid cross-check (always-on
-    // [wave] logs, not used for rendering): the clip's source/timeline window
-    // plus the media timing the window fractions were derived from. Lets the
-    // generator audit whether the drawn spectrum's audio time matches the
-    // source frames the user aims the razor at, and to what fraction of a frame
-    // they drift apart.
     int64_t src_in = 0;
     int64_t src_out = 0;
     int64_t tl_in = 0;
@@ -69,13 +54,7 @@ public:
                           int64_t tl_in = 0, int64_t tl_out = 0, double media_fps = 0.0,
                           int64_t media_total_frames = 0);
     void clear_cache();
-    // Sets the directory used to persist generated thumbnails and waveforms so
-    // they survive across zooms and app restarts. Empty disables disk caching.
     void set_cache_dir(QString dir);
-    // Parks the worker threads so no decode/IO competes with an active export
-    // (the render's NVDEC bandwidth). Requests still queue up; they flush as
-    // soon as the render finishes and this is cleared. Thread-safe — intended
-    // to be driven from the render-queue worker thread.
     void set_paused(bool paused);
 
 signals:
@@ -114,23 +93,11 @@ private:
     void create_workers();
     void worker_loop();
     void submit(ThumbRequest req);
-    // Generates the image for `req`. When `reuse_decoder` is non-null AND already
-    // open, it is reused instead of opening a fresh VideoDecoder (the worker's
-    // persistent per-path decoder, see worker_loop) — without this, every cell
-    // and every retry probe reopened the file/demux/hw device. `served_frame`
-    // (optional) receives the SOURCE frame the returned image actually encodes:
-    // normally req.frame, but on a retry probe that lands a neighbour frame the
-    // caller must cache/disk-write under THAT frame, never req.frame, or the next
-    // request for the true frame gets a poisoned neighbour image forever.
     QImage generate(const ThumbRequest& req, canvas::core::HwDeviceManager& hw,
                     canvas::core::VideoDecoder* reuse_decoder = nullptr,
                     int64_t* served_frame = nullptr);
-    // Inserts `img` under `key` inside cache_/lru_ (mutex_ held), touching LRU
-    // recency and enforcing the kCacheMax cap — the ONE place disk loads and
-    // worker generations may write the cache, so the cap can never be bypassed.
     void store_cached(const CacheKey& key, const QImage& img);
 
-    // Disk-cache helpers. Keyed files are written/read under cache_dir_.
     QString disk_path_thumbnail(const std::string& path, int64_t frame, int width) const;
     QString disk_path_waveform(const std::string& path, int width, int height, float src_lo,
                                float src_hi, int gain_pct = 100) const;
@@ -149,24 +116,10 @@ private:
     std::deque<ThumbRequest> queue_;
     std::deque<CacheKey> lru_;
     std::unordered_map<CacheKey, QImage, CacheKeyHash> cache_;
-    // In-flight dedupe: every filmstrip rebuild re-issues one request per cell
-    // (unique ids) while the previous pass is still decoding (~500ms/cell, 4
-    // workers). Un-deduped, a clip whose cells have been requested before they
-    // generated is re-enqueued wholesale on each rebuild — the queue blew past
-    // 1200 jobs for 275 unique cells and the strip never visibly filled. Each
-    // queued key lists the request ids waiting on it; the worker fans the
-    // finished QImage out to every waiter so all cells fill from one decode.
     std::unordered_map<CacheKey, std::vector<uint64_t>, CacheKeyHash> pending_ids_;
-    // In-memory LRU of decoded thumbnails/waveforms. Sized for the full
-    // filmstrip across zoom passes: every cell of every clip must stay resident
-    // so zooming in/out re-fills the strip from memory instead of re-decoding.
     static constexpr std::size_t kCacheMax = 1024;
     QString cache_dir_;
 
-    // Full-resolution waveform per media path. Decoding a whole audio file is
-    // expensive, so we decode it once (at a fixed high bucket count) and then
-    // cheaply re-bucket to the pixel width each clip needs for its preview.
-    // Accessed by all worker threads, so it is mutex-guarded.
     static constexpr std::size_t kWaveformRawBuckets = 16384;
     mutable std::mutex waveform_mutex_;
     std::unordered_map<std::string, canvas::core::AudioWaveform> waveform_cache_;
@@ -176,4 +129,4 @@ private:
     bool pending_ = false;
 };
 
-}  // namespace canvas::gui
+}

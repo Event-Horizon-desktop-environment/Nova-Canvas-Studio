@@ -39,9 +39,6 @@ namespace canvas::gui {
 void TimelineWidget::rebuild_timeline() {
     const ThemeTokens& t = tokens();
     const auto rebuild_t0 = std::chrono::steady_clock::now();
-    // Whole-scene teardown+rebuild. This is the dominant timeline UX cost on
-    // every edit/scrub/resize: bytes of scene items reallocated per second is
-    // the "why is the editor getting sticky" tell.
     static int64_t s_rb_n = 0;
     static auto s_rb_at = std::chrono::steady_clock::now();
     static double s_rb_ms = 0.0, s_rb_max = 0.0;
@@ -59,7 +56,6 @@ void TimelineWidget::rebuild_timeline() {
     minimap_viewport_ = nullptr;
     minimap_background_ = nullptr;
     timecode_item_ = nullptr;
-    // scene_.clear() above deleted the previous pinned ruler/minimap group.
     top_pinned_ = nullptr;
     chrome_ = nullptr;
     blade_preview_item_ = nullptr;
@@ -70,10 +66,6 @@ void TimelineWidget::rebuild_timeline() {
     drop_lane_flat_ = -1;
     drop_overlay_ = nullptr;
 
-    // scene_.clear() above already deleted live transition-cut-handle items.
-    // Drop the dangling pointers WITHOUT deleting again, and reset the editor
-    // state so a later hover/commit rebuilds cleanly instead of calling
-    // scene_.removeItem() on an item whose scene is null (crash).
     transition_items_.clear();
     transition_bubbles_.clear();
     transition_overlay_ = nullptr;
@@ -82,37 +74,23 @@ void TimelineWidget::rebuild_timeline() {
 
     sync_track_heights();
 
-    // Classic "endless timeline": the scene width is the sequence duration at the
-    // current zoom, at least wide enough to fill the viewport, with a generous
-    // empty tail so scrolling (and the ruler/grid markers) continues past the
-    // last clip.
     const double dur_frames = sequence_ ? static_cast<double>(sequence_->duration_frames()) : 0.0;
     const double content_end = kSceneMargin + kTrackHeaderWidth + dur_frames / frames_per_pixel_;
     const double visible_end = kSceneMargin + viewport()->width();
     const double width = std::max(content_end, visible_end) - kSceneMargin + 400.0;
     const int v_count = sequence_ ? static_cast<int>(sequence_->video_tracks.size()) : 1;
     const int a_count = sequence_ ? static_cast<int>(sequence_->audio_tracks.size()) : 0;
-    // With no clips on any track yet the track rows stay hidden and the scene
-    // shows the compact empty-state placeholder panel instead.
     const bool has_content = has_timeline_content();
     const double content_height = has_content
         ? tracks_content_height(v_count, a_count)
         : (empty_state_top() - static_cast<double>(kSceneMargin)) + kEmptyStateHeight
               + track_v_pad_bottom_;
-// Grab-and-follow panning: pulling the divider UP parks the channels flush
-    // under the ruler strip (that parked scroll value is the UP LIMIT); pulling
-    // it DOWN sinks the channels with the cursor through a small, fixed room, so
-    // the timeline hugs its tracks instead of showing an endless void below them.
     const double vp_h = static_cast<double>(viewport()->height());
     pan_down_room_ = kPanDownRoomMin;
     const double height = std::max(content_height, vp_h) + kVerticalPanTailMin;
 
     scene_.setSceneRect(kSceneMargin, kSceneMargin, width, height);
 
-    // Unpinned scene chrome that scales with the scene rect (full-scene
-    // background, ruler gridlines, header divider) lives in a group at a low z
-    // so clip/track items always paint above it. relayout_scene() re-renders
-    // this group on resize without touching the clip items.
     chrome_ = new QGraphicsItemGroup();
     chrome_->setAcceptedMouseButtons(Qt::NoButton);
     chrome_->setHandlesChildEvents(false);
@@ -123,9 +101,6 @@ void TimelineWidget::rebuild_timeline() {
     bg->setAcceptedMouseButtons(Qt::NoButton);
     chrome_->addToGroup(bg);
 
-    // Ruler + minimap live in a viewport-pinned overlay group: the track content
-    // pans underneath while the timecode strip stays glued to the top.
-    // scrollContentsBy() re-snaps the group to the current vertical scroll.
     top_pinned_ = new QGraphicsItemGroup();
     top_pinned_->setAcceptedMouseButtons(Qt::NoButton);
     top_pinned_->setHandlesChildEvents(false);
@@ -142,28 +117,17 @@ void TimelineWidget::rebuild_timeline() {
     request_clip_thumbnails();
     update_playhead_position(playhead_frame_);
     apply_selection_highlight();
-    // Park the channels under the ruler strip and set that as the UP LIMIT: the
-    // scroll range keeps the parked value as its top, pulling down sinks
-    // through the whole room below it. When the channel stack is taller than the
-    // viewport the range extends so every channel stays reachable. A rebuild
-    // must NOT stomp the user's scroll: re-park only on a structural change
-    // (channel count / empty->content transition) or while still following the
-    // playhead; plain edits/zoom rebuilds otherwise preserve the scroll.
     const bool content_transitioned = has_content != last_had_content_;
     const bool structural = track_count_changed_ || content_transitioned;
     last_had_content_ = has_content;
     const int park = has_content
         ? static_cast<int>(lround(pan_down_room_ + track_v_pad_top_))
-        : 0;  // nothing to seat under the ruler when the timeline is empty
+        : 0;
     const int reach = std::max(park, static_cast<int>(lround(kSceneMargin + content_height - vp_h)));
     verticalScrollBar()->setRange(0, std::max(reach, 0));
     if (structural || follow_playhead_) verticalScrollBar()->setValue(park);
-    if (!has_content) verticalScrollBar()->setValue(0);  // panel hugs the ticks
+    if (!has_content) verticalScrollBar()->setValue(0);
     if (top_pinned_) top_pinned_->setPos(0.0, static_cast<double>(verticalScrollBar()->value()));
-    // Refit the dock only on structural changes: a channel-count change or the
-    // empty->content transition. Track-height drags (rebuild per pixel with the
-    // same channel count / content state) must not resize the dock underneath
-    // the user's drag.
     if (structural) {
         track_count_changed_ = false;
         if (has_content)
@@ -196,19 +160,8 @@ void TimelineWidget::rebuild_timeline() {
 }
 
 void TimelineWidget::relayout_scene() {
-    // View-only relayout on a pure viewport resize. Unlike rebuild_timeline(),
-    // this recomputes the scene rect and re-renders ONLY the view chrome (scene
-    // background, ruler/minimap/timecode strip, gridlines, divider, playhead).
-    // Clip items, track headers, filmstrip/waveform pixmaps and their pending
-    // thumbnail requests all survive: their geometry is anchored to timeline
-    // coords (frame + track height), never to the viewport size, so a height
-    // change with a clip-heavy timeline is now O(viewport chrome) instead of a
-    // full scene_ teardown + thumbnail re-request.
     const ThemeTokens& t = tokens();
     if (!sequence_) return;
-    // The empty-state placeholder is a scene-level rect (not in chrome_), so a
-    // width resize wouldn't re-draw it; an empty timeline is trivially cheap to
-    // fully rebuild anyway.
     if (!has_timeline_content()) {
         rebuild_timeline();
         return;
@@ -231,8 +184,6 @@ void TimelineWidget::relayout_scene() {
 
     scene_.setSceneRect(kSceneMargin, kSceneMargin, width, height);
 
-    // Tear down ONLY the chrome (background + pinned strip + gridlines), leaving
-    // every clip/track/filmstrip item and its decoded pixmaps in the scene.
     if (chrome_) {
         scene_.removeItem(chrome_);
         delete chrome_;
@@ -272,11 +223,6 @@ void TimelineWidget::relayout_scene() {
     draw_minimap();
     draw_ruler();
 
-    // Playhead survived the chrome teardown; re-anchor it to the new scene rect
-    // and re-park the channels under the ruler strip (reach extends to keep
-    // every channel scrollable when the stack is taller than the viewport).
-    // The re-park is follow-only: a pure resize must not stomp the vertical
-    // scroll of a user who has scrolled away.
     update_playhead_position(playhead_frame_);
     const int park = has_content
         ? static_cast<int>(lround(pan_down_room_ + track_v_pad_top_))
@@ -287,10 +233,6 @@ void TimelineWidget::relayout_scene() {
     if (!has_content) verticalScrollBar()->setValue(0);
     if (top_pinned_) top_pinned_->setPos(0.0, static_cast<double>(verticalScrollBar()->value()));
 
-    // Per-relayout cost of the chrome-only resize fast path. This is the number
-    // to watch when a dock/viewer resize feels sticky: if this stays low but
-    // [ui:timeline] resize is high, the fat is elsewhere in resizeEvent (or a
-    // full rebuild is sneaking back in).
     const double rl_ms = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - rl_t0).count();
     static auto s_rl_at = std::chrono::steady_clock::now();
@@ -317,8 +259,6 @@ void TimelineWidget::relayout_scene() {
 
 void TimelineWidget::draw_timecode_bar() {
     const ThemeTokens& t = tokens();
-    // Pinned "current time" bar: a persistent playhead readout at the very top of
-    // the timeline (above the minimap), refreshed whenever the playhead moves.
     auto* bg = scene_.addRect(
         QRectF(kSceneMargin, 0.0, scene_.sceneRect().width(), kTimecodeBarHeight),
         QPen(t.border), QBrush(t.surface_raised));
@@ -393,7 +333,6 @@ void TimelineWidget::update_minimap_viewport() {
     const double vp_x = left + kTrackHeaderWidth + strip_w * (vp_start / dur);
     const double vp_w = std::max(4.0, strip_w * (std::min(scene_visible_frames, dur) / dur));
     const double max_x = width - kTrackHeaderWidth;
-    const double x = std::min(vp_x + vp_w, left + strip_w);
     minimap_viewport_->setRect(QRectF(std::min(vp_x, max_x), top,
                                       std::min(vp_w, std::max(4.0, max_x - std::min(vp_x, max_x))),
                                       kMinimapHeight));
@@ -401,11 +340,6 @@ void TimelineWidget::update_minimap_viewport() {
 
 namespace {
 
-// Shared ruler tick geometry: minor ticks land every `step` frames (~8-18px on
-// screen at the current zoom); every `major_mod`-th tick is a major tick with a
-// full-height gridline + timecode label (~90px label spacing so they never
-// collide). Both procedural painters below use this so gridlines and ruler
-// marks can never drift from each other.
 void compute_ruler_steps(const double fpp, double& step, int& major_mod) {
     step = 1.0;
     while (step / fpp < 8.0) step *= 2.0;
@@ -413,7 +347,7 @@ void compute_ruler_steps(const double fpp, double& step, int& major_mod) {
     major_mod = std::max(1, static_cast<int>(std::ceil(90.0 / (step / fpp))));
 }
 
-}  // namespace
+}
 
 class TimelineWidget::RulerMarksItem : public QGraphicsItem {
 public:
@@ -432,9 +366,6 @@ public:
 
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget*) override {
         if (owner_->frames_per_pixel_ <= 0.0) return;
-        // Draw ONLY the ticks/labels inside the exposed (visible) x-range. At
-        // 100% zoom a ~2k-px viewport exposes ~125 ticks — not the ~10k ticks
-        // that a 125k-px scene would otherwise allocate as scene items.
         double step = 0.0;
         int major_mod = 1;
         compute_ruler_steps(owner_->frames_per_pixel_, step, major_mod);
@@ -455,7 +386,6 @@ public:
         QFont label_font;
         label_font.setPointSizeF(8);
 
-        // First tick index whose x >= exposed left.
         const double i_max = (right - x0) * fpp / step;
         int64_t i = std::max<int64_t>(
             0, static_cast<int64_t>(std::ceil((left - x0) * fpp / step)));
@@ -468,10 +398,6 @@ public:
                 painter->drawLine(QLineF(x, top, x, top + (i == 0 ? 16.0 : 12.0)));
                 painter->setPen(t.ink_muted);
                 painter->setFont(label_font);
-                // Vertically center the label in the gap between the longest
-                // major tick (top+16) and the minor ticks (top+22): the clean
-                // band with no tick marks, matching where the numbers used to
-                // read against the old ruler padding.
                 const QString label = timecode(static_cast<int64_t>(i * step), owner_->fps_);
                 const double gap_top = top + 16.0;
                 const double gap_bot = top + kRulerHeight - 8.0;
@@ -544,12 +470,6 @@ void TimelineWidget::draw_ruler() {
         top_pinned_->addToGroup(bg);
     }
 
-    // Procedural chrome: one item paints the pinned ruler ticks + timecode
-    // labels, one paints the full-height major gridlines behind the tracks.
-    // Both repaint only the exposed x-range (see compute_ruler_steps), so these
-    // two items replace the ~10k+ QGraphicsLineItem/QGraphicsTextItem the old
-    // per-tick loop allocated across the whole scene width on every rebuild AND
-    // every relayout — the root of "resizing is slow" on wide timelines.
     if (top_pinned_) {
         auto* marks = new RulerMarksItem(this);
         top_pinned_->addToGroup(marks);
@@ -559,7 +479,6 @@ void TimelineWidget::draw_ruler() {
         chrome_->addToGroup(grids);
     }
 
-    // Bookmarks (Mark > Add Marker, M): small amber diamonds in the ruler.
     if (sequence_) {
         const QPen bk_pen(QColor(0xFF, 0xC1, 0x07), 1);
         const QBrush bk_brush(QColor(0xFF, 0xC1, 0x07));
@@ -574,8 +493,6 @@ void TimelineWidget::draw_ruler() {
         }
     }
 
-    // Continuous vertical divider between the header column and the scrollable
-    // track area, running through every track (unpinned, in the chrome group).
     auto* divider = scene_.addLine(
         QLineF(kSceneMargin + kTrackHeaderWidth, top, kSceneMargin + kTrackHeaderWidth, scene_.sceneRect().bottom()),
         QPen(t.border));
@@ -584,9 +501,6 @@ void TimelineWidget::draw_ruler() {
 
 namespace {
 
-// Blends `over` onto `base` by `t` (0 = base, 1 = over). Used to tone the clip
-// swatches a little toward the dark body fills so a coloured clip reads as
-// tinted rather than neon.
 QColor blend_colors(const QColor& over, const QColor& base, double t) {
     const auto l = [t](int oc, int bc) {
         return static_cast<int>(std::lround(bc + (oc - bc) * t));
@@ -595,8 +509,6 @@ QColor blend_colors(const QColor& over, const QColor& base, double t) {
                   l(over.blue(), base.blue()), base.alpha());
 }
 
-// Renders one bundled SVG icon to a tinted pixmap and places it as a
-// QGraphicsPixmapItem at (x, y) in the scene, returning the item.
 QGraphicsPixmapItem* add_icon(QGraphicsScene& scene, const QString& name, double x, double y,
                               const QColor& color, int size = 14) {
     QPixmap pm(size, size);
@@ -618,17 +530,11 @@ QGraphicsPixmapItem* add_icon(QGraphicsScene& scene, const QString& name, double
     return item;
 }
 
-// The pieces of a track-type badge (V1/A1 pill + its label).
 struct TrackBadge {
     QGraphicsPathItem* pill = nullptr;
     QGraphicsSimpleTextItem* text = nullptr;
 };
 
-// Builds the track-type badge: a quiet raised pill carrying a colored bold
-    // label dead-centered via tight font metrics so padding can never shift it
-    // off-center. The label color (not the fill) is the track-type identity:
-    // gold=video, cyan=dialogue audio, amber=music audio — same code as the
-    // far-left accent bar, so the header reads as one coherent system.
     TrackBadge add_badge(QGraphicsScene& scene, const QString& text, const QPointF& top_left,
                      const QColor& fill, const QColor& text_color) {
     QFont bf;
@@ -650,15 +556,13 @@ struct TrackBadge {
     text_item->setBrush(text_color);
     text_item->setFont(bf);
     text_item->setAcceptedMouseButtons(Qt::NoButton);
-    // Dead-center on the pill using the simple-text item's tight glyph box, so
-    // the label reads optically centered.
     const QRectF br = text_item->boundingRect();
     text_item->setPos(r.center() - br.center());
     text_item->setZValue(3);
     return {pill_item, text_item};
 }
 
-}  // namespace
+}
 
 void TimelineWidget::draw_tracks() {
     const ThemeTokens& t = tokens();
@@ -666,21 +570,15 @@ void TimelineWidget::draw_tracks() {
     const int a_count = sequence_ ? static_cast<int>(sequence_->audio_tracks.size()) : 0;
 
     const double left = kSceneMargin;
-    const QColor kIconColor = t.ink_muted;        // muted ink for icons
-    const QColor kIconColorDim = t.ink_faint;     // faint ink for dim icons
-    const QColor kIconAccent = t.accent_text;     // active-state ink (lock/mute/solo)
+    const QColor kIconColor = t.ink_muted;
+    const QColor kIconColorDim = t.ink_faint;
+    const QColor kIconAccent = t.accent_text;
 
-    // With no clips yet the header column and rows stay hidden; a single
-    // placeholder panel explains the empty state instead.
     if (!has_timeline_content()) {
         draw_empty_state();
         return;
     }
 
-    // The whole track-header column is ONE continuous panel: a single
-    // background rect spanning all rows plus a vertical divider at its right
-    // edge. Rows no longer paint their own background — only the accent bar,
-    // badge and icons are per-row.
     const double h_top = tracks_stack_top();
     const double h_bot = tracks_stack_bottom(v_count, a_count);
     scene_.addRect(QRectF(left, h_top, kTrackHeaderWidth, h_bot - h_top),
@@ -694,13 +592,8 @@ void TimelineWidget::draw_tracks() {
         const double th = track_height(i, v_count);
         QString tname = QString::fromStdString(sequence_->video_tracks[i].name);
 
-        // Track-header content is tiered so it always fits whatever row height the
-        // user dragged to: tall rows get the full two-tier layout, compact rows
-        // collapse the icons onto one centered row and drop the label/count.
         const bool full = th >= 52.0;
 
-        // Colored track-type badge (top-left of the header): quiet raised pill
-        // with a gold label (video identity lives in the label color, not the pill).
         const QString badge_text = tname.isEmpty() ? QStringLiteral("V%1").arg(i + 1) : tname;
         const double badge_top = full ? y + 8.0 : y + (th - 15.0) / 2.0;
         TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 28, badge_top),
@@ -708,22 +601,15 @@ void TimelineWidget::draw_tracks() {
         auto* badge_pill = tb.pill;
         auto* badge = tb.text;
 
-        // Collapse chevron on the far-left edge (just right of the accent bar),
-        // left of the badge, mirroring Resolve's track-header collapse control.
-        // Points down on an expanded track (click to collapse), right on a
-        // collapsed one (click to expand).
         const bool vcollapsed = sequence_->video_tracks[i].collapsed;
         QGraphicsPixmapItem* collapse_icon =
             add_icon(scene_, vcollapsed ? QStringLiteral("chevron_right")
                                         : QStringLiteral("chevron_down"),
                      left + 8, y + (th - 13.0) / 2.0, kIconColor);
 
-        // Thin full-height accent bar on the far-left edge (per-track-type code).
         scene_.addRect(QRectF(left, y + 1, 4, th - 2), QPen(Qt::NoPen),
                        QBrush(t.accent))->setZValue(1);
 
-        // Reorder / lock icon row, right-aligned in the header. Collapsed tracks
-        // drop the lock/reorder chrome and keep just the badge + chevron.
         QGraphicsPixmapItem* lock_icon = nullptr;
         const bool vlocked = sequence_->video_tracks[i].locked;
         if (!vcollapsed && full) {
@@ -739,8 +625,6 @@ void TimelineWidget::draw_tracks() {
                                  vlocked ? kIconAccent : kIconColor);
         }
 
-        // "Video N" label. Hidden below 56px rows so it can never bleed out of the
-        // header into the track below (fixed offsets once did).
         QGraphicsTextItem* label = nullptr;
         if (full && th >= 56.0) {
             label = scene_.addText(QStringLiteral("Video %1").arg(i + 1));
@@ -753,8 +637,6 @@ void TimelineWidget::draw_tracks() {
             label->setZValue(1);
         }
 
-        // "N Clips" count, bottom-anchored and clamped so a short row can never push
-        // it out of the header (the old fixed offset ghosted onto the track below).
         QGraphicsTextItem* count = nullptr;
         if (full) {
             count = scene_.addText(QStringLiteral("%1 Clips").arg(sequence_->video_tracks[i].clips.size()));
@@ -766,7 +648,7 @@ void TimelineWidget::draw_tracks() {
             count->setZValue(1);
         }
         TrackHeader header;
-        header.background = nullptr;  // one column-wide background, not per-row ones
+        header.background = nullptr;
         header.label = label;
         header.badge = badge;
         header.badge_pill = badge_pill;
@@ -782,31 +664,16 @@ void TimelineWidget::draw_tracks() {
             const double cw = clip.duration() / frames_per_pixel_;
             const double cy = y + 2;
             const double ch = th - 6;
-            // View options pulled once per clip body so the render below reads
-            // the same snapshot for every toggled feature (names / durations /
-            // thumbnail mode / waveforms all live in one struct).
             const TimelineViewOptions& vopts = eff_view_options();
             const double label_h = std::min(kClipLabelHeight, ch * 0.35);
             const double body_h = ch - label_h;
-            // blue (selection) applied on top by apply_selection_highlight.
             auto* rect = scene_.addRect(
                 QRectF(0, 0, cw, ch), QPen(Qt::NoPen), QBrush(Qt::transparent));
             rect->setPos(QPointF(cx, cy));
             rect->setAcceptedMouseButtons(Qt::NoButton);
-            // Flat fill exactly abutting neighbours (a centred pen on the bounding
-            // rect would overhang into the adjacent clip at a cut). The outline
-            // stroke is inset by pen/2 so its outer edge lands on the clip's edge.
-            // Clip colour recolours the shell itself (Resolve-style): the whole
-            // body takes the swatch as its real fill — the filmstrip cells ride
-            // ABOVE it (z 1) so thumbnails are never covered by the colour.
             const QColor cc_v = clip_color_for(clip.clip_color);
-            // Shell gets the swatch blended 65% onto the normal dark body fill so
-            // a coloured clip reads as a bold tint, not a flat neon slab.
             const QColor shell_v =
                 cc_v.isValid() ? blend_colors(cc_v, t.clip_video, 0.65) : t.clip_video;
-            // 1px baseline shadow: a rounded copy offset down by kClipShadowOffset
-            // so the clip casts a soft drop onto the track. The ClipClipGroup clips
-            // it to this clip's own rect, so only a hairline under the body shows.
             auto* shadow = scene_.addPath(
                 rounded_rect_path(QRectF(0, kClipShadowOffset, cw, ch), 6),
                 QPen(Qt::NoPen), QBrush(t.clip_shadow));
@@ -825,11 +692,6 @@ void TimelineWidget::draw_tracks() {
             outline->setZValue(2.0);
             outline->setAcceptedMouseButtons(Qt::NoButton);
 
-            // Semi-rounded label bar: flat muted blue strip with the clip filename,
-            // hugging the bottom of the clip. Toned toward black a bit more than
-            // the shell (135 = ~0.74x) so the filename stays legible. Hidden when
-            // the view option suppresses clip names (the body then reads as a
-            // full-bleed filmstrip, Resolve-style).
             QGraphicsPathItem* label_bar = nullptr;
             if (vopts.show_clip_names) {
                 label_bar = scene_.addPath(
@@ -852,8 +714,6 @@ void TimelineWidget::draw_tracks() {
                 text->setAcceptedMouseButtons(Qt::NoButton);
             }
 
-            // "Display Clip Durations": the clip's timeline duration as a small
-            // timecode chip pinned to the body's top-right corner.
             QGraphicsTextItem* duration = nullptr;
             if (vopts.show_clip_durations && cw > 84.0) {
                 duration = scene_.addText(timecode(clip.duration(), fps_));
@@ -876,44 +736,23 @@ void TimelineWidget::draw_tracks() {
             item.track_index = track_index;
             item.track_kind = canvas::core::Track::Kind::Video;
 
-            // Clip every child to the clip's own rect so an abutting clip's
-            // content (filmstrip, outline) can never overlap its neighbour.
             auto* clip_group = new ClipClipGroup(QRectF(cx, cy, cw, ch));
             scene_.addItem(clip_group);
             for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{shadow, rect, shell, outline, label_bar, text, duration})
                 if (child) child->setParentItem(clip_group);
 
-            // OUT-transition badge: a small SVG mark near the clip's trailing edge for
-            // an outgoing transition, or a fade-to-black at the tail. Audio
-            // fades get their own teal badge in the audio loop below.
             if (clip.has_transition_out() &&
                 !canvas::core::is_audio_transition(clip.transition_out) && cw > 40.0) {
                 add_icon(scene_, QStringLiteral("transition_out"), cx + cw - 16, cy + 3,
                          QColor(0xF2, 0xA9, 0x4A), 12);
             }
 
-            // IN-transition badge: marks a fade-in-from-black at the clip's head.
             if (clip.has_transition_in() &&
                 !canvas::core::is_audio_transition(clip.transition_in) && cw > 40.0) {
                 add_icon(scene_, QStringLiteral("transition_in"), cx + 4, cy + 3,
                          QColor(0x4A, 0xA9, 0xF2), 12);
             }
 
-            // Filmstrip thumbnails butted together to fill the body region edge
-            // to edge. The pitch is fixed (kFilmstripCellWidth) so the strip
-            // packs many distinct frame samples per clip at any track height; a
-            // 16:9 clip tiles ~24px-wide cells all the way to the clip's end,
-            // never a handful of wide frames. The cell count is capped
-            // (kFilmstripMaxCells) so pathological zoom-in widths can't queue
-            // thousands of decodes — but the cap is deliberately far above the
-            // count where a 16:9 picture stops spanning a whole-frame cell, so
-            // the strip keeps reading edge to edge instead of showing wide gaps
-            // of shell between thumbnails (the old 320-cell cap made cells
-            // widen to ~128px at deep zoom-in and the pictures floated centered
-            // in them). The "Thumbnail View" submenu drives how many cells
-            // render: Off shows none (the tinted shell fills the body),
-            // SingleFrame asks for exactly one full-width frame, Filmstrip uses
-            // the fixed pitch.
             int num_cells = 0;
             if (vopts.thumbnails == ThumbnailMode::Filmstrip)
                 num_cells = std::min(std::max(1, static_cast<int>(cw / kFilmstripCellWidth)), kFilmstripMaxCells);
@@ -927,8 +766,6 @@ void TimelineWidget::draw_tracks() {
                 cell->setAcceptedMouseButtons(Qt::NoButton);
                 item.cells.push_back(ClipCell{cell, 0});
             }
-            // Reparent the filmstrip into the clip group so the thumbnails clip to the
-            // clip's rect AND travel with it while dragging.
             for (const auto& cell : item.cells)
                 if (cell.item) cell.item->setParentItem(clip_group);
             clip_items_.push_back(std::move(item));
@@ -940,24 +777,17 @@ void TimelineWidget::draw_tracks() {
         const double th = track_height(v_count + i, v_count);
         const QString tname = QString::fromStdString(sequence_->audio_tracks[i].name);
         const QString badge_text = tname.isEmpty() ? QStringLiteral("A%1").arg(i + 1) : tname;
-        // Audio badge labels carry the role tint (amber for music-role tracks
-        // A3/A4, cyan for dialogue); the pill itself stays the quiet raised
-        // surface so the label color is the identity signal.
         const bool is_music_role = i >= 2;
         const QColor role_color = is_music_role ? QColor(0xC9, 0x86, 0x3A) : QColor(0x2E, 0x8F, 0xC0);
         const bool full = th >= 52.0;
 
         const double badge_top = full ? y + 8.0 : y + (th - 15.0) / 2.0;
-        // Quiet raised pill; the label carries the role identity (cyan=dialogue,
-        // amber=music) so the header reads as one system with the accent bar.
         TrackBadge tb = add_badge(scene_, badge_text, QPointF(left + 28, badge_top),
                                   t.surface_highest,
                                   is_music_role ? t.accent_text : t.playhead);
         auto* badge_pill = tb.pill;
         auto* badge = tb.text;
 
-        // Collapse chevron on the far-left edge, mirroring the video rows (and
-        // Resolve's own header): down = expanded, right = collapsed.
         const auto& hdr_track = sequence_->audio_tracks[i];
         const bool acollapsed = hdr_track.collapsed;
         QGraphicsPixmapItem* collapse_icon =
@@ -965,8 +795,6 @@ void TimelineWidget::draw_tracks() {
                                         : QStringLiteral("chevron_down"),
                      left + 8, y + (th - 13.0) / 2.0, kIconColor);
 
-        // Thin full-height accent bar on the far-left edge. Music-role tracks
-        // (A3/A4) get the warm orange mark; dialogue tracks get the audio cyan.
         scene_.addRect(QRectF(left, y + 1, 4, th - 2), QPen(Qt::NoPen),
                        QBrush(role_color))->setZValue(1);
 
@@ -997,7 +825,6 @@ void TimelineWidget::draw_tracks() {
                                  amuted ? QColor(0xEF, 0x44, 0x44) : kIconColor);
         }
 
-        // "Audio N" label (tall rows only; see the video branch).
         QGraphicsTextItem* label = nullptr;
         if (full && th >= 56.0) {
             label = scene_.addText(QStringLiteral("Audio %1").arg(i + 1));
@@ -1010,7 +837,6 @@ void TimelineWidget::draw_tracks() {
             label->setZValue(1);
         }
 
-        // "N Clips" count, bottom-anchored/clamped (see video branch).
         QGraphicsTextItem* count = nullptr;
         if (full) {
             count = scene_.addText(QStringLiteral("%1 Clips").arg(sequence_->audio_tracks[i].clips.size()));
@@ -1034,7 +860,7 @@ void TimelineWidget::draw_tracks() {
         }
 
         TrackHeader header;
-        header.background = nullptr;  // one column-wide background, not per-row ones
+        header.background = nullptr;
         header.label = label;
         header.badge = badge;
         header.badge_pill = badge_pill;
@@ -1057,16 +883,10 @@ void TimelineWidget::draw_tracks() {
             const double body_h = ch - label_h;
             const TimelineViewOptions& vopts = eff_view_options();
 
-            // Semi-rounded flat clip block; neutral green-cast outline when
-            // unselected, amber (selection) applied on top; sage fill.
             auto* rect = scene_.addRect(
                 QRectF(0, 0, cw, ch), QPen(Qt::NoPen), QBrush(Qt::transparent));
             rect->setPos(QPointF(cx, cy));
             rect->setAcceptedMouseButtons(Qt::NoButton);
-            // Flat sage fill abutting neighbours exactly; the outline stroke is
-            // inset by pen/2 so it never overhangs into an abutting clip.
-            // Clip colour recolours the shell itself (see video branch): the
-            // waveform rides ABOVE it (z 1) and is never covered.
             const QColor cc_a = clip_color_for(clip.clip_color);
             const QColor shell_a =
                 cc_a.isValid() ? blend_colors(cc_a, t.clip_audio, 0.65) : t.clip_audio;
@@ -1099,7 +919,6 @@ void TimelineWidget::draw_tracks() {
                 text->setZValue(2);
                 text->setAcceptedMouseButtons(Qt::NoButton);
             }
-            // Clip-duration timecode chip (top-right), same law as the video side.
             QGraphicsTextItem* duration = nullptr;
             if (vopts.show_clip_durations && cw > 84.0) {
                 duration = scene_.addText(timecode(clip.duration(), fps_));
@@ -1111,14 +930,6 @@ void TimelineWidget::draw_tracks() {
                 duration->setZValue(2);
                 duration->setAcceptedMouseButtons(Qt::NoButton);
             }
-            // The wave pixmap must sit EXACTLY on the clip body's left edge (cx).
-            // frame_at_x() has no x-inset: scene_x = kSceneMargin + kTrackHeaderWidth
-            // + frame/fpp. Any horizontal inset here shifts the drawn spectrum
-            // relative to the razor grid -> blade aims land N frames off (the
-            // 2026-09-08 wrong-cut bug). The vertical +2 inset is fine (y has no
-            // frame meaning). When "Display Audio Waveforms" is off the pixmap is
-            // never created and no cell is registered, so no waveform is served
-            // either (request_clip_thumbnails skips clips with no cells).
             QGraphicsPixmapItem* wf = nullptr;
             if (vopts.show_waveforms) {
                 wf = scene_.addPixmap(QPixmap());
@@ -1127,13 +938,7 @@ void TimelineWidget::draw_tracks() {
                 wf->setAcceptedMouseButtons(Qt::NoButton);
             }
 
-            // Persistent audio volume line (Phase 5): a luminous hairline at the
-            // clip's current gain. It doubles as a drag handle (see the volume
-            // drag session in timeline_interaction) and a readout. The travel
-            // box spans the FULL clip body (2px inset like the waveform top),
-            // so the lowest volume lands on the clip's very bottom edge — not
-            // stopping above the label strip where the name is drawn.
-            const double vol_y0 = cy + 2.0;  // matches the waveform pixmap's box
+            const double vol_y0 = cy + 2.0;
             const double vol_h = std::max(1.0, ch - 4.0);
             const double vol_y = vol_y0 + timeline_volume_line::volume_line_y(clip.volume_db, vol_h);
             auto* vol = scene_.addLine(QLineF(cx + 2.5, vol_y, cx + cw - 2.5, vol_y),
@@ -1141,8 +946,6 @@ void TimelineWidget::draw_tracks() {
             vol->setZValue(1.5);
             vol->setAcceptedMouseButtons(Qt::NoButton);
 
-            // AUDIO fade indicator: audio transitions get their own teal badge so a
-            // linked video+audio pair carries the indicator on BOTH clips.
             if (clip.has_transition_out() &&
                 canvas::core::is_audio_transition(clip.transition_out) && cw > 40.0) {
                 add_icon(scene_, QStringLiteral("transition_out"), cx + cw - 16, cy + 3,
@@ -1168,7 +971,6 @@ void TimelineWidget::draw_tracks() {
             item.volume_y0 = vol_y0;
             item.volume_h = vol_h;
 
-            // Clip every child to the clip's own rect (see video branch).
             auto* clip_group = new ClipClipGroup(QRectF(cx, cy, cw, ch));
             scene_.addItem(clip_group);
             for (QGraphicsItem* child : std::initializer_list<QGraphicsItem*>{shadow, rect, shell, outline, text, duration, vol})
@@ -1179,22 +981,16 @@ void TimelineWidget::draw_tracks() {
         }
     }
 
-    // Rows separated by thin horizontal dividers spanning the full width. The
-    // hairline below V1 is skipped: the Video/Audio divider band takes over.
     const int total_t = v_count + a_count;
     const double right_edge = scene_.sceneRect().right();
     const QPen row_pen(t.border_soft);
     for (int t = 0; t < total_t; ++t) {
-        if (t == v_count - 1 && a_count > 0) continue;  // video/audio boundary
+        if (t == v_count - 1 && a_count > 0) continue;
         const double bottom = track_top(t, v_count) + track_height(t, v_count);
         scene_.addLine(QLineF(left, bottom, right_edge, bottom), row_pen);
     }
 
     if (v_count > 0 && a_count > 0) {
-        // Dedicated full-width Video/Audio divider band, sealed off from V1 above
-        // and A1 below: the band's top/bottom edges are the resize boundaries
-        // and the strip between them is the grab-and-scroll pan handle. A
-        // centered accent line + grip pill mark the grab zone exactly.
         const double band_top = edge_y(v_count, v_count, a_count);
         const double band_bot = edge_y(v_count + 1, v_count, a_count);
         const double band_w = std::max(0.0, right_edge - left);
@@ -1210,7 +1006,6 @@ void TimelineWidget::draw_tracks() {
                                     QBrush(t.surface_low));
         grip->setZValue(2);
         grip->setAcceptedMouseButtons(Qt::NoButton);
-        // Notch tick at the exact center of the band's grab zone.
         scene_.addLine(QLineF(left + kTrackHeaderWidth / 2.0, mid - 3,
                               left + kTrackHeaderWidth / 2.0, mid + 3),
                        QPen(grip_pen_c))->setZValue(3);
@@ -1235,8 +1030,6 @@ void TimelineWidget::draw_empty_state() {
     scene_.addRect(QRectF(x, top, w, kEmptyStateHeight),
                    QPen(t.border), QBrush(t.surface_low));
 
-    // Branded empty state: a Nova-gold film-strip mark above the copy, painted
-    // once per empty rebuild (no scene-wide tile loop), sized to the token grid.
     QColor mark = t.accent;
     mark.setAlpha(190);
     add_icon(scene_, QStringLiteral("film-strip"), x + 20, top + 22, mark, 22);
@@ -1261,14 +1054,8 @@ void TimelineWidget::draw_empty_state() {
 }
 
 void TimelineWidget::refresh_transition_bubble(TransitionBubble& b, int64_t duration_frames) {
-    // Crisp glass pill drawn ON the clip, spanning the full clip/channel height.
-    // Anchored to the cut (spanning both clips) or the clip's IN/OUT edge;
-    // no duration text on the canvas — the pill shape carries the info.
     if (!b.pill) return;
     const ThemeTokens& t = tokens();
-    // Width tracks the transition's real span at the current zoom (dur/fpp) so
-    // the pill grows and shrinks with zoom-in/out; only a thin clickable floor
-    // keeps it grabbable at extreme zoom-out instead of a fat invariant bubble.
     constexpr double kMinPillW = 10.0;
     const double w = std::round(std::max(kMinPillW, duration_frames / frames_per_pixel_));
     const double bx = kSceneMargin + kTrackHeaderWidth + b.frame / frames_per_pixel_;
@@ -1277,17 +1064,11 @@ void TimelineWidget::refresh_transition_bubble(TransitionBubble& b, int64_t dura
 
     b.pill->setPath(rounded_rect_path(r, 6.0));
     b.pill->setPen(QPen(t.ink, 1.8));
-    // Faint frost fill — nearly clear, just enough tint to soften the pill's
-    // edge while still letting the clip thumbnails read behind it.
     b.pill->setBrush(t.state_hover);
     b.hit = r;
 }
 
 void TimelineWidget::add_transition_bubbles() {
-    // Glass "transition" bubble drawn on the clip(s): one per video track and one
-    // per audio track for every edit point that carries a transition. A
-    // transition spanning two clips collapses into a single bubble centered on
-    // the edit point; single-clip IN/OUT edges hug the clip's start/end.
     if (!sequence_) return;
     const int v_count = static_cast<int>(sequence_->video_tracks.size());
 
@@ -1296,8 +1077,8 @@ void TimelineWidget::add_transition_bubbles() {
                                 canvas::core::Track::Kind kind) {
         struct Boundary {
             int64_t frame = 0;
-            const canvas::core::Clip* left = nullptr;  // clip ending at frame (owns transition_out)
-            const canvas::core::Clip* right = nullptr; // clip starting at frame (owns transition_in)
+            const canvas::core::Clip* left = nullptr;
+            const canvas::core::Clip* right = nullptr;
             int64_t dur = 0;
         };
         for (int ti = 0; ti < static_cast<int>(tracks.size()); ++ti) {
@@ -1316,8 +1097,6 @@ void TimelineWidget::add_transition_bubbles() {
                 if (c.has_transition_out())
                     bounds.push_back(Boundary{c.tl_out, &c, next, c.transition_out_duration});
                 if (c.has_transition_in()) {
-                    // Merge with an existing boundary at the same edit point so
-                    // a two-sided cut transition yields ONE bubble, not two.
                     bool merged = false;
                     for (auto& bn : bounds) {
                         if (bn.frame == c.tl_in) {
@@ -1349,9 +1128,6 @@ void TimelineWidget::add_transition_bubbles() {
                 auto* pill = scene_.addPath(QPainterPath());
                 pill->setZValue(50);
                 pill->setAcceptedMouseButtons(Qt::NoButton);
-                // Subtle frosted-glass interior: the faint fill below + a tiny
-                // blur soften the pill's edges so it reads as glass, not a
-                // hard wireframe.
                 auto* frost = new QGraphicsBlurEffect;
                 frost->setBlurRadius(1.2);
                 pill->setGraphicsEffect(frost);
@@ -1361,9 +1137,6 @@ void TimelineWidget::add_transition_bubbles() {
                 local.push_back(std::move(b));
             }
 
-            // Adjacent bubbles on the same track can never overlap: greedily shrink each
-            // bubble's left edge so it clears the previous one, keeping its far
-            // edge — and thus its anchor boundary — in place.
             std::sort(local.begin(), local.end(),
                       [](const TransitionBubble& x, const TransitionBubble& y) {
                           return x.hit.left() < y.hit.left();
@@ -1390,7 +1163,6 @@ void TimelineWidget::add_transition_bubbles() {
     emit_track(sequence_->video_tracks, 0, canvas::core::Track::Kind::Video);
     emit_track(sequence_->audio_tracks, v_count, canvas::core::Track::Kind::Audio);
 
-    // Restore the selected pill's highlight after a rebuild (re-matched by id).
     if (selected_transition_.valid) {
         for (auto& b : transition_bubbles_) {
             if (!b.pill) continue;
@@ -1419,8 +1191,6 @@ void TimelineWidget::shift_transition_bubbles(
         const ClipItem* item = find_clip_item(anchor);
         if (!item || !item->rect) continue;
         const double x = item->rect->scenePos().x();
-        // Right edge in frames from the LIVE rect (a drag/trim preview moves the
-        // rect before the model commits, so the model's duration would be stale).
         const double w = item->rect->rect().width();
         const int64_t cur_in =
             static_cast<int64_t>(std::llround((x - left_edge) * frames_per_pixel_));
@@ -1428,14 +1198,10 @@ void TimelineWidget::shift_transition_bubbles(
             ? static_cast<int64_t>(std::llround(w * frames_per_pixel_))
             : (item->clip ? item->clip->duration() : 0);
         if (from_left && !b.in_edge && !b.cut) {
-            // Single out-edge: pill hugs the clip's CURRENT right edge.
             b.frame = cur_in + span;
         } else if (from_left && b.cut) {
-            // Cut carried by its left clip: edit point = its current tl_out.
             b.frame = cur_in + span;
         } else {
-            // In-edge single, or cut carried by its right clip: the anchor's
-            // current tl_in IS the edit point.
             b.frame = cur_in;
         }
         refresh_transition_bubble(b, b.dur);
@@ -1443,34 +1209,21 @@ void TimelineWidget::shift_transition_bubbles(
 }
 
 void TimelineWidget::set_live_clip_gain(canvas::core::ClipId id, float db) {
-    // Live volume-line move: re-anchor the clip's gain line at `db` within its
-    // stored waveform box. The model is untouched — the commit arrives from
-    // volume_line_committed on release. Scene-space: the line is a child of the
-    // (0,0)-positioned clip group, so its line coordinates ARE scene coords.
     ClipItem* item = find_clip_item(id);
     if (!item || !item->volume_line || !item->rect) return;
     const QLineF cur = item->volume_line->line();
     const double y = item->volume_y0 + timeline_volume_line::volume_line_y(db, item->volume_h);
     item->volume_line->setLine(QLineF(cur.x1(), y, cur.x2(), y));
-    // Keep the spectrum in step with the line while dragging (floored scale, so
-    // the readout can never collapse into a line).
     apply_waveform_volume_scale(*item, db);
 }
 
 void TimelineWidget::apply_waveform_volume_scale(ClipItem& item, float db) {
-    // Scales the audio clip's waveform pixmap vertically, about the box's
-    // vertical center, by the floored gain law (timeline_volume_line). The
-    // spectrum therefore tracks the volume up/down without flattening — and the
-    // item's filled height stays inside the waveform box.
     if (item.track_kind != canvas::core::Track::Kind::Audio || item.cells.empty()) return;
     QGraphicsPixmapItem* wf = item.cells[0].item;
     if (!wf || wf->pixmap().isNull()) return;
     const double h = wf->pixmap().height();
     if (h <= 1.0) return;
     const double s = timeline_volume_line::volume_waveform_scale(db);
-    // Scale about the vertical center so the bars stay anchored to the 0 dB
-    // midline of the box (louder = taller above AND below it, quieter = shorter
-    // both ways — the same meaning the gain line itself carries).
     QTransform t;
     t.translate(0.0, h / 2.0);
     t.scale(1.0, s);
@@ -1479,7 +1232,6 @@ void TimelineWidget::apply_waveform_volume_scale(ClipItem& item, float db) {
 }
 
 void TimelineWidget::draw_disabled_marks() {
-    // Dim disabled clips (toggled with Ctrl+D) so they read as muted/offline.
     for (const auto& item : clip_items_) {
         if (!item.clip || item.clip->enabled) continue;
         if (item.shell) item.shell->setOpacity(0.35);
@@ -1507,15 +1259,10 @@ void TimelineWidget::update_playhead_position(int64_t frame) {
     playhead_item_->setLine(QLineF(x, kSceneMargin, x, scene_.sceneRect().bottom()));
     if (timecode_item_) timecode_item_->setPlainText(timecode(frame, fps_));
     const QRectF visible = mapToScene(viewport()->rect()).boundingRect();
-    // Follow only while the user hasn't scrolled away: manual scroll/zoom turns
-    // follow_playhead_ off, and an explicit playhead jump re-enables it.
     if (follow_playhead_ && (x < visible.left() || x > visible.right())) {
-        // Scroll horizontally to follow the playhead, keeping the current
-        // vertical position (the scene extends far into the pan room and tail,
-        // so vertical centering would fling the tracks out of view).
         centerOn(x, mapToScene(viewport()->rect().center()).y());
     }
     update_minimap_viewport();
 }
 
-}  // namespace canvas::gui
+}

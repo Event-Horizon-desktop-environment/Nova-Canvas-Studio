@@ -1,6 +1,3 @@
-// vk_session — live-instance session helper (Phase 0 — Vulkan-tests).
-// See vk_session.hpp.
-
 #include "vk_session.hpp"
 
 #include <cstdio>
@@ -52,4 +49,4 @@ Session::~Session() {
     if (instance != VK_NULL_HANDLE) vkDestroyInstance(instance, nullptr);
 }
 
-}  // namespace canvas::vktest
+}

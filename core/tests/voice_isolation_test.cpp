@@ -1,9 +1,3 @@
-// Voice-isolation test: the headless engine seam (VoiceIsolation /
-// VoiceIsolationBank), the per-clip model field, its edit op (incl. linked-mate
-// inheritance + undo), and project JSON round-trip. The RNNoise stage runs a
-// real network on synthetic PCM — the assertions pin the STREAMING contract,
-// not the denoise quality (that is a perceptual property, not a unit one).
-
 #include "canvas/core/media/voice_isolation.hpp"
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/edit_ops.hpp"
@@ -66,7 +60,6 @@ Project make_project() {
 void test_streaming() {
     VoiceIsolation vi;
 
-    // Mono 48k block-aligned sine: every call returns a full 480-frame block.
     std::vector<float> buf(480);
     for (int call = 0; call < 4; ++call) {
         for (int i = 0; i < 480; ++i)
@@ -77,9 +70,6 @@ void test_streaming() {
         check(all_finite(buf.data(), 480), "RNNoise output is finite");
     }
 
-    // Sub-block pipe: a 256-frame call that cannot complete a 480 block emits
-    // nothing (lookahead), then drains the backlog in later calls. Never write
-    // more than requested, never read uninitialized memory.
     VoiceIsolation vs;
     std::vector<float> small(256);
     for (int i = 0; i < 256; ++i)
@@ -90,12 +80,10 @@ void test_streaming() {
     check(got >= 0 && got <= 256, "second sub-block call drains backlog in-bounds");
     check(all_finite(small.data(), 256), "drained sub-block output is finite");
 
-    // Wrong rate / channel count: engine refuses (writes nothing, returns 0).
     VoiceIsolation bad;
     check(bad.process(44100, 1, buf.data(), 480) == 0, "44.1 kHz refused by engine");
     check(bad.process(48000, 0, buf.data(), 480) == 0, "0 channels refused by engine");
 
-    // Stereo end-to-end runs without crashing and stays in-bounds.
     VoiceIsolation st;
     std::vector<float> stbuf(480 * 2);
     got = st.process(48000, 2, stbuf.data(), 480);
@@ -107,25 +95,19 @@ void test_bank() {
     VoiceIsolationBank bank;
     std::vector<float> buf(480, 0.125f);
 
-    // Pass-through when nothing is wanted: None and unsupported modes return
-    // num_frames untouched, preserving the caller's audio.
     check(bank.tick(1, VoiceIsolationMode::None, 48000, 1, buf.data(), 480) == 480,
           "None mode is a pass-through");
     check(bank.tick(1, VoiceIsolationMode::DeepFilterNet, 48000, 1, buf.data(), 480) == 480,
           "unsupported mode is a pass-through");
 
-    // Active engine runs; the bank streams per clip id.
     const int got = bank.tick(7, VoiceIsolationMode::RnNoise, 48000, 1, buf.data(), 480);
     check(got > 0 && got <= 480, "RNNoise tick streams frames for clip 7");
     check(all_finite(buf.data(), 480), "RNNoise tick output is finite");
 
-    // A different clip id keeps independent state (no crash, sane count).
     std::vector<float> buf2(480, 0.1f);
     const int got2 = bank.tick(8, VoiceIsolationMode::RnNoise, 48000, 1, buf2.data(), 480);
     check(got2 > 0 && got2 <= 480, "RNNoise tick streams frames for clip 8");
 
-    // Mode flip resets the network for that clip (fresh state, again a full
-    // block from the first post-flip call).
     std::vector<float> buf3(480, 0.1f);
     int g1 = bank.tick(7, VoiceIsolationMode::RnNoise, 48000, 1, buf3.data(), 480);
     const int gnone = bank.tick(7, VoiceIsolationMode::None, 48000, 1, buf3.data(), 480);
@@ -133,7 +115,6 @@ void test_bank() {
     check(gnone == 480, "None tick after RnNoise is a pass-through");
     check(g1 > 0 && g1 <= 480 && g2 > 0 && g2 <= 480, "mode flip runs a fresh network");
 
-    // drop()/clear() leave the bank usable (state is dropped, not corrupted).
     bank.drop();
     bank.drop(7);
     bank.clear();
@@ -164,7 +145,6 @@ void test_edit_op_and_roundtrip() {
               "vi: default is None");
         check(vc.is_linked() && ac.is_linked(), "vi: pair is linked");
 
-        // Set on the audio half: both halves inherit the mode.
         cmd = set_clip_voice_isolation(p.sequence, Track::Kind::Audio, 0, ac.id,
                                        VoiceIsolationMode::RnNoise);
         check(cmd != nullptr, "vi: set_clip_voice_isolation returns command");
@@ -173,12 +153,10 @@ void test_edit_op_and_roundtrip() {
               p.sequence.video_tracks[0].clips[0].voice_isolation == VoiceIsolationMode::RnNoise,
               "vi: linked mate inherits the mode");
 
-        // Unknown clip -> nullptr (no crash).
         cmd = set_clip_voice_isolation(p.sequence, Track::Kind::Video, 0, 9999,
                                        VoiceIsolationMode::RnNoise);
         check(cmd == nullptr, "vi: unknown clip returns nullptr");
 
-        // Undo restores None on both; redo re-applies.
         check(undo.undo(p.sequence), "vi: undo isolation");
         check(p.sequence.audio_tracks[0].clips[0].voice_isolation == VoiceIsolationMode::None &&
               p.sequence.video_tracks[0].clips[0].voice_isolation == VoiceIsolationMode::None,
@@ -187,7 +165,6 @@ void test_edit_op_and_roundtrip() {
         check(p.sequence.audio_tracks[0].clips[0].voice_isolation == VoiceIsolationMode::RnNoise,
               "vi: redo re-applied the mode");
 
-        // JSON round-trip preserves the mode.
         check(save_project(p, "/tmp/opencode/media/voice_isolation.ehproj") == true,
               "vi: save project");
         Project loaded;
@@ -198,7 +175,6 @@ void test_edit_op_and_roundtrip() {
               "vi: project round-trip preserves the mode");
     }
 
-    // Mode-name / supported table.
     check(std::string(voice_isolation_mode_name(VoiceIsolationMode::None)) == "None",
           "vi: None name");
     check(voice_isolation_supported(VoiceIsolationMode::RnNoise),
@@ -207,7 +183,7 @@ void test_edit_op_and_roundtrip() {
           "vi: DeepFilterNet not built (reserved seam)");
 }
 
-}  // namespace
+}
 
 int main() {
     test_streaming();

@@ -13,21 +13,16 @@
 
 #include <cmath>
 
-// PipeWire
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/audio/raw-utils.h>
 
-// ALSA
 #include <alsa/asoundlib.h>
 
 namespace canvas::gui {
 
 namespace {
-// Cap the PCM queued for the PipeWire callback before we start dropping, so the
-// process thread can't run unboundedly ahead of the graph or stall the decode
-// worker in write_float().
-constexpr std::size_t kPwQueuedLimit = 48000 * 4;  // 1s at 48kHz mono-frames
+constexpr std::size_t kPwQueuedLimit = 48000 * 4;
 
 void default_channel_map(int channels, uint32_t* map) {
     static constexpr uint32_t kStereo[2] = {SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR};
@@ -41,13 +36,12 @@ void default_channel_map(int channels, uint32_t* map) {
             map[i] = SPA_AUDIO_CHANNEL_UNKNOWN;
     }
 }
-}  // namespace
+}
 
 struct AudioOutput::Impl {
     int rate = 0;
     int channels = 0;
 
-    // ---- PipeWire ----
     pw_main_loop* loop = nullptr;
     pw_context* ctx = nullptr;
     pw_core* core = nullptr;
@@ -57,33 +51,22 @@ struct AudioOutput::Impl {
     bool pw_stopping_ = false;
 
     std::mutex q_mutex;
-    std::vector<float> q;         // interleaved float samples
-    std::size_t q_start = 0;      // index of first unconsumed sample
+    std::vector<float> q;
+    std::size_t q_start = 0;
 
-    // ---- ALSA ----
     snd_pcm_t* pcm = nullptr;
     bool alsa_ok = false;
     std::thread alsa_thread_;
     std::condition_variable q_cv;
     bool alsa_stopping_ = false;
-    std::size_t q_max = 0;  // max queued samples (bounding latency)
-    // When true the writer feeds silence-between real chunks so the device never
-    // underruns during live playback (see set_hold_active).
+    std::size_t q_max = 0;
     std::atomic<bool> hold_active{false};
-    // Generation counter: bumped by every reposition_enqueue(). The writer
-    // captures it per batch and aborts if it changed mid-write, so audio from an
-    // old position can't be pushed through a freshly-repositioned device.
     std::atomic<uint64_t> gen{0};
 
-    // Always-on pipeline accounting (see AudioOutput stat getters).
     std::atomic<uint64_t> stat_enqueued_frames{0};
     std::atomic<uint64_t> stat_dropped_frames{0};
     std::atomic<uint64_t> stat_written_frames{0};
     std::atomic<uint64_t> stat_write_errors{0};
-    // Live-playback silence holds fed by the writer (holding the device open
-    // between real chunks) and XRUN recoveries — the audible pop signature. A
-    // silence hold that outpaces real data means the decode/feed is starving the
-    // device; XRUNs mean we fell far enough behind to corrupt the stream.
     std::atomic<uint64_t> stat_silence_holds{0};
     std::atomic<uint64_t> stat_silence_hold_frames{0};
     std::atomic<uint64_t> stat_xruns{0};
@@ -110,9 +93,8 @@ struct AudioOutput::Impl {
             return;
         }
 
-        // The device provides one interleaved plane; fill as much as fits.
         std::size_t avail_bytes = static_cast<std::size_t>(d->maxsize);
-        avail_bytes = (avail_bytes / 16) * 16;  // keep alignment sane
+        avail_bytes = (avail_bytes / 16) * 16;
         const std::size_t max_samples = avail_bytes / sizeof(float);
         std::size_t written = 0;
         std::vector<float> to_copy;
@@ -122,10 +104,6 @@ struct AudioOutput::Impl {
                 self->q.clear();
                 self->q_start = 0;
             }
-            // Copy the samples under the lock: write_float/reposition_enqueue may
-            // reallocate q's backing store the instant we release it, and any
-            // pointer kept into the queue would then dangle. The ALSA writer makes
-            // the same copy-under-lock choice for the same reason.
             const std::size_t take =
                 std::min(self->q.size() - self->q_start, max_samples);
             if (take > 0) {
@@ -144,7 +122,7 @@ struct AudioOutput::Impl {
 
         if (written > 0)
             std::memcpy(d->data, to_copy.data(), written * sizeof(float));
-        b->size = written / static_cast<std::size_t>(self->channels);  // frames
+        b->size = written / static_cast<std::size_t>(self->channels);
 
         if (playback_debug()) {
             static unsigned pw_dbg_ = 0;
@@ -164,20 +142,12 @@ struct AudioOutput::Impl {
         return e;
     }
 
-    // Dedicated ALSA writer: the decode/present worker never blocks on the
-    // realtime-paced device, it only pushes into the queue and this thread drains
-    // it (snd_pcm_writei on the worker would gate video pacing to ~30Hz).
     static void alsa_worker(Impl* self) {
-        // Throttle verbose writer logs to ~1/s.
         auto last_log = std::chrono::steady_clock::now();
         uint64_t wrote_batch = 0, errs_batch = 0;
-        // Pause-hold was tried but on `default` (PipeWire/PulseAudio plugin) devices
-        // snd_pcm_pause is unreliable and leaves the device frozen. Instead a short
-        // silence hold keeps it RUNNING (no XRUN) with the clock advancing in step
-        // with the writer, so audio resumes at the right place.
         const std::size_t silence_ch = static_cast<std::size_t>(self->channels);
         const std::size_t silence_hold =
-            silence_ch * (static_cast<std::size_t>(self->rate) / 100);  // ~10ms per feed
+            silence_ch * (static_cast<std::size_t>(self->rate) / 100);
         std::vector<float> silence(silence_hold, 0.0f);
         for (;;) {
             std::vector<float> to_write;
@@ -186,8 +156,6 @@ struct AudioOutput::Impl {
                 std::unique_lock<std::mutex> lock(self->q_mutex);
                 if (!self->alsa_stopping_ && self->q_start >= self->q.size()) {
                     if (!self->hold_active.load(std::memory_order_relaxed)) {
-                        // Idle (paused): block until audio arrives or stop is set —
-                        // don't spin feeding silence.
                         self->q_cv.wait(lock, [self] {
                             return self->alsa_stopping_ ||
                                    self->hold_active.load(std::memory_order_relaxed) ||
@@ -199,11 +167,9 @@ struct AudioOutput::Impl {
                             self->q.clear();
                             self->q_start = 0;
                         } else {
-                            starved = true;  // hold active + empty queue -> silence-hold
+                            starved = true;
                         }
                     } else {
-                        // Live playback, no pending audio: brief silence hold so
-                        // the device stays running.
                         starved = true;
                     }
                 } else if (!self->alsa_stopping_) {
@@ -214,8 +180,6 @@ struct AudioOutput::Impl {
             }
             if (self->alsa_stopping_) break;
             if (starved) {
-                // No audio pending and held live: write a short silence chunk to
-                // keep the device running and underrun-free (never pause/freeze).
                 if (self->pcm && silence_ch > 0) {
                     const snd_pcm_sframes_t want =
                         static_cast<snd_pcm_sframes_t>(silence.size() / silence_ch);
@@ -232,7 +196,6 @@ struct AudioOutput::Impl {
                         self->stat_silence_hold_frames.fetch_add(
                             static_cast<uint64_t>(err), std::memory_order_relaxed);
                 }
-                // Non-blocking device: give the PCM time between retries.
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;
             }
@@ -240,12 +203,9 @@ struct AudioOutput::Impl {
 
             std::size_t idx = 0;
             const std::size_t total = to_write.size();
-            // Capture the generation this batch belongs to; if a scrub reposition bumps
-            // it while we write, this batch is stale and must be discarded.
             const uint64_t batch_gen = self->gen.load(std::memory_order_relaxed);
             while (idx < total && !self->alsa_stopping_) {
                 if (self->gen.load(std::memory_order_relaxed) != batch_gen) {
-                    // Reposition mid-write: always logged so stale audio is visible.
                     qWarning() << "audio: writer DISCARDED stale batch "
                                   "(repositioned mid-write) discarded_frames="
                                << ((total - idx) / static_cast<std::size_t>(self->channels));
@@ -259,16 +219,11 @@ struct AudioOutput::Impl {
                 if (err < 0) {
                     self->stat_write_errors.fetch_add(1, std::memory_order_relaxed);
                     ++errs_batch;
-                    // -EAGAIN means "buffer full, try again"; sleep briefly rather
-                    // than hot-spinning, then re-check the generation.
                     if (err == -EAGAIN) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         continue;
                     }
-                    // A stale -EPIPE after a reposition is expected: drop it instead of
-                    // streaming through the new position's device.
                     if (self->gen.load(std::memory_order_relaxed) != batch_gen) {
-                        // Reposition-critical: always logged.
                         qWarning() << "audio: writer aborted batch on reposition (err="
                                    << err << ") discarded_frames="
                                    << ((total - idx) / static_cast<std::size_t>(self->channels));
@@ -299,11 +254,6 @@ struct AudioOutput::Impl {
             static uint64_t s_prev_sil = 0;
             if (playback_debug() && now - last_log >= std::chrono::seconds(1)) {
                 last_log = now;
-                // Device buffer-depth telemetry: the ALSA `delay` (frames still
-                // queued in the device/plugin) directly measures how far ahead of
-                // the audible position we are feeding. min/avg/max per second
-                // show whether the pipeline rides a healthy short cushion or
-                // drifts deep ahead (which hides as extra latency on scrub/seek).
                 long long buf_min = 0, buf_avg = 0, buf_max = 0;
                 {
                     snd_pcm_sframes_t d = 0;
@@ -428,12 +378,8 @@ bool AudioOutput::open(const int sample_rate, const int channels) {
     if (debug_enabled())
         qDebug() << "audio: open requested rate=" << sample_rate << "channels=" << channels;
 
-    // ---- Prefer ALSA (blocking writei gives reliable, realtime-paced playback) ----
     int err = snd_pcm_open(&impl_->pcm, "default", SND_PCM_STREAM_PLAYBACK, 0);
     if (err < 0) {
-        // Always-on: only shows when ALSA is genuinely absent/unusable, and that
-        // is exactly when a user can't hear output ("why is audio silent?") —
-        // capturing the precise reason here beats a blank fallback.
         qWarning() << "[audio] ALSA open FAILED"
                    << "(" << snd_strerror(err) << ")"
                    << "-> falling back to PipeWire";
@@ -442,7 +388,7 @@ bool AudioOutput::open(const int sample_rate, const int channels) {
         snd_pcm_nonblock(impl_->pcm, 1);
         err = snd_pcm_set_params(impl_->pcm, SND_PCM_FORMAT_FLOAT_LE,
                                  SND_PCM_ACCESS_RW_INTERLEAVED, channels, sample_rate, 1,
-                                 50000 /* ~50ms buffer */);
+                                 50000);
         if (err < 0) {
             qWarning() << "[audio] ALSA set_params FAILED"
                        << "(" << snd_strerror(err) << ")"
@@ -453,7 +399,7 @@ bool AudioOutput::open(const int sample_rate, const int channels) {
         } else {
             impl_->alsa_ok = true;
             open_ = true;
-            impl_->q_max = static_cast<std::size_t>(sample_rate) * 3;  // ~64ms
+            impl_->q_max = static_cast<std::size_t>(sample_rate) * 3;
             impl_->alsa_thread_start();
             qDebug() << "[audio] ALSA OPENED rate=" << sample_rate
                        << "channels=" << channels;
@@ -461,7 +407,6 @@ bool AudioOutput::open(const int sample_rate, const int channels) {
         }
     }
 
-    // ---- Fall back to PipeWire ----
     pw_init(nullptr, nullptr);
     impl_->pw_init_done_ = true;
 
@@ -501,7 +446,6 @@ bool AudioOutput::open(const int sample_rate, const int channels) {
                                               PW_STREAM_FLAG_AUTOCONNECT),
                                           params, 1) == 0) {
                         impl_->pw_ok = true;
-                        // Run the loop so the process callback drains our queue.
                         impl_->pw_start();
                     } else if (impl_->stream) {
                         if (debug_enabled())
@@ -567,8 +511,6 @@ bool AudioOutput::write_float(const float* data, const int frames) {
     const int ch = impl_->channels;
     const std::size_t n = static_cast<std::size_t>(frames) * ch;
 
-    // Monitoring volume: scale every sample toward the current gain. Unscaled data
-    // passes through with no copy.
     const float gain = effective_volume();
     std::vector<float> scaled;
     const float* src = data;
@@ -589,8 +531,6 @@ bool AudioOutput::write_float(const float* data, const int frames) {
                     static_cast<uint64_t>(buffered / static_cast<std::size_t>(ch) +
                                           n / static_cast<std::size_t>(ch)),
                     std::memory_order_relaxed);
-// Bound latency: drop oldest to make room rather than blocking the worker on
-                // the realtime-paced device.
                 impl_->q.clear();
                 impl_->q_start = 0;
             }
@@ -618,7 +558,6 @@ bool AudioOutput::write_float(const float* data, const int frames) {
                     static_cast<uint64_t>(buffered / static_cast<std::size_t>(ch) +
                                           n / static_cast<std::size_t>(ch)),
                     std::memory_order_relaxed);
-                // Drop the oldest to make room (best-effort playback).
                 impl_->q.clear();
                 impl_->q_start = 0;
             }
@@ -638,16 +577,11 @@ bool AudioOutput::write_float(const float* data, const int frames) {
 void AudioOutput::flush() {
     if (debug_enabled()) qDebug() << "audio: flush";
     if (!open_) return;
-    // Full re-arm used by the COMMIT path (seek / play / scrub release): stop +
-    // join the writer, clear the queue, drop + prepare the device, restart the
-    // writer. Heavy — fine at seek/release rate, too heavy per scrub-move (that's
-    // reposition_enqueue()'s job).
     impl_->alsa_thread_stop();
     {
         std::lock_guard<std::mutex> lock(impl_->q_mutex);
         impl_->q.clear();
         impl_->q_start = 0;
-        // Reposition semantics: future batches must start clean too.
         impl_->gen.fetch_add(1, std::memory_order_relaxed);
     }
     if (impl_->alsa_ok && impl_->pcm) {
@@ -660,12 +594,6 @@ void AudioOutput::flush() {
     impl_->alsa_thread_start();
 }
 
-// Scrub reposition (cheap enough for per-mouse-move use): discard all pending
-// queue audio AND device-buffered audio, then queue `data` as the next thing the
-// device plays, so the audible position jumps to the new scrub target. Unlike
-// flush() it does not stop/join the writer — it clears the queue, bumps the
-// generation counter and drop/prepares the PCM while the writer stays alive; the
-// writer drops any stale in-flight batch via the generation.
 bool AudioOutput::reposition_enqueue(const float* data, const int frames) {
     if (!open_ || frames <= 0 || !data) return false;
     const int ch = impl_->channels;
@@ -690,8 +618,6 @@ bool AudioOutput::reposition_enqueue(const float* data, const int frames) {
         impl_->q.insert(impl_->q.end(), src, src + n);
         impl_->stat_enqueued_frames.fetch_add(static_cast<uint64_t>(frames),
                                               std::memory_order_relaxed);
-        // Reposition-critical diagnostic: ALWAYS logged so the scrub-audio
-        // audit can see each drop/reprepare and exact queue size.
         qDebug().nospace()
             << "audio: reposition gen=" << impl_->gen.load(std::memory_order_relaxed)
             << " drop=" << dr << " prepare=" << pr
@@ -728,7 +654,6 @@ uint64_t AudioOutput::audible_position_frames() const {
         snd_pcm_sframes_t delay = 0;
         if (snd_pcm_delay(impl_->pcm, &delay) == 0 && delay >= 0) {
             const std::size_t bufsz = static_cast<std::size_t>(delay);
-            // Raw buffered-ahead frames we still hold (not yet handed to ALSA).
             std::size_t held = 0;
             {
                 std::lock_guard<std::mutex> lock(impl_->q_mutex);
@@ -736,7 +661,6 @@ uint64_t AudioOutput::audible_position_frames() const {
             }
             const std::size_t channels = static_cast<std::size_t>(
                 impl_->channels > 0 ? impl_->channels : 1);
-            // held is in interleaved samples -> convert to frames
             const std::size_t held_frames = held / channels;
             const uint64_t played = written >= (bufsz + held_frames)
                 ? written - bufsz - held_frames
@@ -745,7 +669,6 @@ uint64_t AudioOutput::audible_position_frames() const {
         }
         return written;
     }
-    // PipeWire / fallback: best-effort, approximate with the written cursor.
     return written;
 }
 uint64_t AudioOutput::stat_write_errors() const {
@@ -768,8 +691,6 @@ void AudioOutput::set_hold_active(bool on) {
                  << "queue_pending=" << (impl_->q.size() - impl_->q_start);
     impl_->hold_active.store(on, std::memory_order_relaxed);
     if (on) {
-        // Wake the writer so it starts holding the device (it may be blocked
-        // waiting in the idle path).
         impl_->q_cv.notify_all();
     }
 }
@@ -777,7 +698,7 @@ void AudioOutput::set_hold_active(bool on) {
 void AudioOutput::set_volume(float volume) {
     volume = volume < 0.0f ? 0.0f : (volume > 1.0f ? 1.0f : volume);
     volume_.store(volume);
-    muted_.store(false);  // explicitly dragging the slider un-mutes
+    muted_.store(false);
     if (debug_enabled())
         qDebug() << "audio: set_volume" << volume;
 }
@@ -788,8 +709,6 @@ void AudioOutput::set_muted(bool muted) {
         qDebug() << "audio: set_muted" << muted << "(volume=" << volume_.load() << ")";
 }
 
-// Dim dips monitoring to ~-15dB (0.18x) of the slider level — loud enough to
-// follow the material, low enough to talk over it.
 static constexpr float kDimGain = 0.18f;
 
 void AudioOutput::set_dimmed(bool dimmed) {

@@ -1,7 +1,3 @@
-// Unit tests for the Qt-free transcript/SRT seam (canvas::core::transcript):
-// the cue-time law, the text-normalization law, the SRT assembly law, and the
-// file writer. SKIPs (exit 2) on machines without a writable scratch dir.
-
 #include "canvas/core/media/transcript.hpp"
 
 #include <cstdio>
@@ -17,7 +13,7 @@ void report(const bool ok, const char* name) {
     if (!ok) ++g_failures;
 }
 
-}  // namespace
+}
 
 int main() {
     using canvas::core::transcript::Segment;
@@ -26,7 +22,6 @@ int main() {
     using canvas::core::transcript::srt_timestamp;
     using canvas::core::transcript::write_srt;
 
-    // --- timestamp law -------------------------------------------------------
     report(srt_timestamp(0) == "00:00:00,000", "time: zero -> 00:00:00,000");
     report(srt_timestamp(65'123) == "00:01:05,123", "time: 65s123ms -> 00:01:05,123");
     report(srt_timestamp(3'600'000 + 1'000) == "01:00:01,000", "time: 1h1s -> 01:00:01,000");
@@ -35,7 +30,6 @@ int main() {
     report(srt_timestamp(-1) == "00:00:00,000", "time: negative clamps to zero");
     report(srt_timestamp(100 * 3600'000) == "99:59:59,999", "time: >=100h clamps to max");
 
-    // --- text law ------------------------------------------------------------
     report(clean_segment_text("  Hello   world \t here  ") == "Hello world here",
            "text: interior whitespace collapses, edges trimmed");
     report(clean_segment_text("one\ntwo\r\nthree") == "one two three",
@@ -44,12 +38,11 @@ int main() {
     report(clean_segment_text("   \t\n ") == "", "text: whitespace-only -> empty");
     report(clean_segment_text("word") == "word", "text: bare word unchanged");
 
-    // --- assembly law --------------------------------------------------------
     {
         const std::vector<Segment> segs = {
             {2'000, 5'000, "  Hello   world"},
-            {5'500, 6'000, "   "},                         // silent -> skipped
-            {6'100, 6'250, "Done"},                        // zero-length-ish kept
+            {5'500, 6'000, "   "},
+            {6'100, 6'250, "Done"},
         };
         const std::string want = "1\r\n"
                                  "00:00:02,000 --> 00:00:05,000\r\n"
@@ -63,7 +56,6 @@ int main() {
     }
     report(srt_join({}) == "", "join: empty segment list -> empty SRT");
 
-    // --- writer ---------------------------------------------------------------
     const std::string path = "/tmp/opencode/media/transcript.srt";
     if (std::FILE* probe = std::fopen("/tmp/opencode/media/probe", "wb")) {
         std::fclose(probe);

@@ -1,5 +1,3 @@
-// Zero-copy VAAPI surface importer (see the header for the design contract).
-
 #include "Widgets/vaapi_viewer.hpp"
 
 #include "canvas/core/media/vaapi/driver.hpp"
@@ -22,16 +20,10 @@ namespace canvas::gui {
 VaapiViewerImporter::VaapiViewerImporter() = default;
 VaapiViewerImporter::~VaapiViewerImporter() = default;
 
-// ── Builds with both VAAPI and EGL: real EGLImage dmabuf import ────────────
 #if defined(CANVAS_HAVE_VAAPI) && defined(CANVAS_HAVE_EGL)
 
 namespace {
 
-// One plane imported as an EGLImage. The EGL spec does NOT take ownership of
-// the caller's fd — the caller keeps it open for the image's lifetime — so
-// every plane gets its own dup of the export fd. `*out_fd` is that owned dup,
-// closed on teardown (dma-buf import into two EGLImages sharing one fd is
-// undefined, so the dup per image is required, not defensive).
 bool make_plane_image(EGLDisplay dpy, int w, int h, std::uint32_t fourcc,
                       const canvas::core::vaapi::VaapiObject& obj,
                       const canvas::core::vaapi::VaapiPlane& pl, std::uint64_t mod,
@@ -80,9 +72,6 @@ bool make_plane_image(EGLDisplay dpy, int w, int h, std::uint32_t fourcc,
     return true;
 }
 
-// make_plane_image plus the vendor linear-fallback rule: a modifier-specified
-// import can fail where a LINEAR retry succeeds (iHD-era quirk). A LINEAR
-// request itself is never second-guessed.
 bool make_plane_image_retry(
     EGLDisplay dpy, int w, int h, std::uint32_t fourcc,
     const canvas::core::vaapi::VaapiObject& obj, const canvas::core::vaapi::VaapiPlane& pl,
@@ -100,9 +89,6 @@ bool make_plane_image_retry(
     return false;
 }
 
-// Binds one texture to an EGLImage with the NV12-path sampling state (linear
-// filter, clamp-to-edge), via glEGLImageTargetTexture2DOES. After this the
-// texture object resolves the image on every regular glBindTexture.
 void fn_bind_param(QOpenGLFunctions* f, GLuint tex, EGLImage img,
                    void (*image_target)(GLenum, GLeglImageOES)) {
     f->glBindTexture(GL_TEXTURE_2D, tex);
@@ -113,28 +99,23 @@ void fn_bind_param(QOpenGLFunctions* f, GLuint tex, EGLImage img,
     image_target(GL_TEXTURE_2D, img);
 }
 
-}  // namespace
+}
 
 struct VaapiViewerImporter::Impl {
     bool probed_ = false;
     bool available_ = false;
     QOpenGLFunctions* fn_ = nullptr;
-    // glEGLImageTargetTexture2DOES (fetched via getProcAddress; typed so a
-    // cast of the void-returning QFunctionPointer is unambiguous).
     void (*image_target_)(GLenum, GLeglImageOES) = nullptr;
     EGLDisplay dpy_ = EGL_NO_DISPLAY;
-    // Live EGL images + the owned dup fds they reference (closed on teardown).
     EGLImage y_img_ = EGL_NO_IMAGE;
     EGLImage uv_img_ = EGL_NO_IMAGE;
     int y_fd_ = -1;
     int uv_fd_ = -1;
-    // Raw texture ids targeted at the images (QOpenGLTexture cannot wrap them).
     GLuint y_tex_ = 0;
     GLuint uv_tex_ = 0;
-    // Layout key of the live import: recreate images when any of these change.
     int w_ = 0;
     int h_ = 0;
-    int src_fd_ = -1;  // the (non-dup) export fd the objects carried
+    int src_fd_ = -1;
     std::uint64_t mod_ = 0;
     std::uint32_t y_off_ = 0;
     std::uint32_t y_pitch_ = 0;
@@ -209,8 +190,6 @@ bool VaapiViewerImporter::import(const canvas::core::vaapi::VaapiSurface& surf, 
         canvas::core::vaapi::import_policy(surf.vendor);
     const bool pass_modifier = q->mods_ext_ && pol.modifiers_supported && !pol.force_linear;
 
-    // Unchanged DRM layout on a live import: the images are still bound, the
-    // textures still resolve them — return the same ids without re-importing.
     if (q->y_img_ != EGL_NO_IMAGE && q->uv_img_ != EGL_NO_IMAGE &&
         q->w_ == surf.width && q->h_ == surf.height && q->src_fd_ == y_obj.fd &&
         q->mod_ == y_obj.modifier && yp.offset == q->y_off_ &&
@@ -220,7 +199,6 @@ bool VaapiViewerImporter::import(const canvas::core::vaapi::VaapiSurface& surf, 
         return true;
     }
 
-    // Layout changed (or first import): rebuild the images from scratch.
     q->destroy_images();
     if (q->y_tex_ == 0) {
         q->fn_->glGenTextures(1, &q->y_tex_);
@@ -247,8 +225,6 @@ bool VaapiViewerImporter::import(const canvas::core::vaapi::VaapiSurface& surf, 
         return false;
     }
 
-    // Target both images at the raw textures (GL_EGL_image_target semantics:
-    // the texture object then resolves the image on every bind).
     const auto image_target = reinterpret_cast<void (*)(GLenum, GLeglImageOES)>(
         q->image_target_);
     fn_bind_param(q->fn_, q->y_tex_, y_img, image_target);
@@ -301,8 +277,6 @@ void VaapiViewerImporter::release() {
     q->available_ = false;
 }
 
-// ── Build without VAAPI or EGL: the importer is a stub that reports no ─────
-// ── capability, so the decode side gate falls back to CPU paths. ───────────
 #else
 
 struct VaapiViewerImporter::Impl {
@@ -320,6 +294,6 @@ bool VaapiViewerImporter::import(const canvas::core::vaapi::VaapiSurface&, GLuin
 
 void VaapiViewerImporter::release() {}
 
-#endif  // CANVAS_HAVE_VAAPI && CANVAS_HAVE_EGL
+#endif
 
-}  // namespace canvas::gui
+}

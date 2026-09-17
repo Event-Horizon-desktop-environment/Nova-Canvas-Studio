@@ -1,38 +1,5 @@
 #pragma once
 
-// Minimal debug logging for the standalone core library (no Qt dependency).
-//
-// All core logging is gated at runtime on the environment variable CANVAS_DEBUG
-// (any non-empty value other than "0" enables it). Messages are written to
-// stderr and appended to a file as well. This keeps default and headless-test
-// builds quiet while allowing a verbose debugging session via:
-//     CANVAS_DEBUG=1 CANVAS_LOG_FILE=/tmp/eh.log ./canvas
-//
-// Message routing: a line whose body starts with a bracketed tag (or a known
-// tag-less prefix) is routed to a per-category file in the same directory as the
-// default log. Audited 2026-09-11 call-site inventory -> destination:
-//     [dec]/[decode]/[media]/[hw]/[io]/[viewer]/[vaapi]                                 -> Canvas-Video.log
-//       + tag-less video_decoder:/decode:/decode open:/vdecode/video:/viewer:
-//     [trans-bake]/[transition] + tag-less transition: (set|playhead|preview|requested|resized...)
-//                                                                                    -> Canvas-Transition.log
-//     [render]/[render:q]/[export]/[gpu]/[wrh]/[TIMING]/[FRAME-DIAG]/[AUDIO-DIAG]/[dbg]
-//       + tag-less RenderSession::/render queue:/render_video_frame:/render_audio_chunk:/
-//         frame_gpu:/renderer:/render failure:/render:                               -> Canvas-render.log
-//     [edit]/[blade] + tag-less blade:/trim:/ripple:/lift:/delete_through_edit:/delete:/delete
-//         /timeline:                                                                -> Canvas-Timeline.log
-//     [play]/[playback]/[transport]/[loop]/[scrub]/[scrub:*]                         -> Canvas-Playback.log
-//     [grade]/[curve]/[wheels]/[knob]/[knobmaster]/[tone]/[target]/[preview]/[graph]/
-//         [page]/[ministrip]/[scope]/[hist]/[vectorscope]/[chromaticity]             -> Canvas-Color.log
-//     [thumb]/[wave] + tag-less thumb:                                               -> Canvas-Thumbs.log
-//     [srcprv]/[pool] + tag-less srcprv:/pool:                                       -> Canvas-Source.log
-//     [proj] + tag-less project:                                                     -> project.log
-//     [audio]/[audio:feed]/[avsync]/[eq]/[diag:cut] + tag-less audio:/audio_decoder:/
-//         audio decode:                                                              -> canvas-Audio.log
-//     [import]/[seq]/[env]/[build]/[font]/[eventloop]/[ui:*]
-//                                                                                    -> Canvas-UX.log
-// anything else stays in canvas_debug.log. stderr always sees every line regardless
-// of route, so a terminal session still shows the full interleaved picture.
-
 #include <chrono>
 #include <cstdarg>
 #include <cstdint>
@@ -50,9 +17,6 @@
 
 namespace canvas::core::log {
 
-// Monotonic milliseconds since first call — a stable "epoch" for correlating
-// the always-on [grade]/[viewer] chains (commit → bake → upload → draw) across
-// the GUI and core threads in one log. Process-local; NOT wall-clock.
 inline std::uint64_t epoch_ms() {
     static const auto t0 = std::chrono::steady_clock::now();
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -68,9 +32,6 @@ inline bool enabled() {
     return on;
 }
 
-// Default destination: <home>/studio/canvas_debug.log (creating the ~/studio dir if
-// needed), so the app log always lands in one fixed place regardless of the CWD.
-// Overridable with CANVAS_LOG_FILE.
 inline const char* default_log_path() {
     static const char* path = [] {
         static std::string p;
@@ -101,9 +62,6 @@ inline FILE*& file() {
     return f;
 }
 
-// Message category used to choose the destination log file. Lines routed to a
-// category are written ONLY to that category's file (and stderr); Default keeps
-// every line that doesn't match any category.
 enum class Route : unsigned char { Default, Video, Render, Ux, Playback, Timeline, Transition, Color, Thumbs, Audio, SourcePreview, Project };
 
 namespace tag_tables {
@@ -113,10 +71,6 @@ struct Entry {
     Route route;
 };
 
-// Bracketed `[tag]` -> route, prefix-matched (e.g. "render:q" hits "render",
-// "scrub:TRACE" hits "scrub", "ui:timeline" hits "ui"). Order matters: the first
-// entry whose token is a prefix wins, so long/specific tokens precede short ones
-// they'd collide with.
 constexpr Entry kTags[] = {
     {"trans-bake", Route::Transition},
     {"transition", Route::Transition},
@@ -150,9 +104,6 @@ constexpr Entry kTags[] = {
     {"ui", Route::Ux},
 };
 
-// Tag-less leading `prefix:` -> route. Same prefix-match rule; long/specific
-// first (e.g. "decode open:" is checked before "decode:", "render queue:" before
-// "render:").
 constexpr Entry kPrefixes[] = {
     {"video_decoder:", Route::Video},
     {"decode open:", Route::Video},
@@ -186,7 +137,7 @@ constexpr Entry kPrefixes[] = {
     {"pool:", Route::SourcePreview},
 };
 
-}  // namespace tag_tables
+}
 
 inline Route route_for_tokens(const std::string_view tok, const tag_tables::Entry* table,
                               std::size_t n) {
@@ -197,8 +148,6 @@ inline Route route_for_tokens(const std::string_view tok, const tag_tables::Entr
     return Route::Default;
 }
 
-// Extract the leading `[tag]` (or known tag-less `prefix:`) from a formatted log
-// body and return the category it maps to, or Route::Default.
 inline Route route_of(const char* body) {
     if (!body || !*body) return Route::Default;
     if (body[0] == '[') {
@@ -210,7 +159,6 @@ inline Route route_of(const char* body) {
     return route_for_tokens(body, tag_tables::kPrefixes, std::size(tag_tables::kPrefixes));
 }
 
-// Destination file path for a route, in the same directory as default_log_path().
 inline const char* route_log_path(Route r) {
     static const std::string dir = [] {
         std::string p(default_log_path());
@@ -245,9 +193,6 @@ inline const char* route_log_path(Route r) {
     return default_log_path();
 }
 
-// Lazy-opened handle for a specific route's file. Default routes to file(),
-// the shared all-lines log. (Forward-declared because Route::Audio routes to the
-// dedicated audio sink, whose definition appears later in this header.)
 inline FILE*& audio_file();
 inline FILE*& route_file_handle(Route r);
 
@@ -294,7 +239,6 @@ inline FILE*& route_file_handle(Route r) {
             return f;
         }
         case Route::Audio:
-            // Reuse the dedicated audio sink (honors CANVAS_AUDIO_LOG_FILE).
             return audio_file();
         case Route::SourcePreview: {
             static FILE* f = nullptr;
@@ -312,15 +256,8 @@ inline FILE*& route_file_handle(Route r) {
     }
 }
 
-// Destination handle for a formatted body: route it by leading tag.
 inline FILE* file_for(const char* body) { return route_file_handle(route_of(body)); }
 
-// Second, dedicated sink for the audio path: <home>/studio/canvas-Audio.log
-// (overridable with CANVAS_AUDIO_LOG_FILE). The playback/mix/EQ seams write
-// here so the audio trace is readable without the [dec] nv12 spam that drowns
-// canvas_debug.log — toggle a clip's EQ on/off and the ON/OFF transitions land
-// beside the [audio]/[avsync] telemetry and the mix-peak warnings, which is
-// what makes a pop/static reproducible from the log alone.
 inline FILE*& audio_file() {
     static FILE* f = nullptr;
     if (!f) {
@@ -346,9 +283,6 @@ inline FILE*& audio_file() {
     return f;
 }
 
-// Close the cached log handles so the next write re-opens the files fresh.
-// Called from the GUI's reset_log_file() so the core writer doesn't keep a
-// stale fd to an old inode after the file is removed and recreated.
 inline void reset_file() {
     if (FILE* old = file()) {
         std::fclose(old);
@@ -360,8 +294,6 @@ inline void reset_file() {
     }
 }
 
-// Close and forget the Route-tagged handles (so reset from a new launch makes
-// them lazily re-open the freshly-removed files).
 inline void reset_route_files() {
     for (Route r : {Route::Video, Route::Render, Route::Ux, Route::Playback,
                     Route::Timeline, Route::Transition, Route::Color, Route::Thumbs,
@@ -379,11 +311,8 @@ inline std::mutex& mutex() {
     return m;
 }
 
-}  // namespace canvas::core::log
+}
 
-// Formats and writes a core log line. Usage: CANVAS_LOG("delete id=%lld", id);
-// Expands to nothing when CANVAS_DEBUG is unset (the message itself is not
-// evaluated), so it is cheap to leave in production code.
 #define CANVAS_LOG(fmt, ...)                                                            \
     do {                                                                            \
         if (::canvas::core::log::enabled()) {                                           \
@@ -404,15 +333,8 @@ inline std::mutex& mutex() {
         }                                                                           \
     } while (0)
 
-// Unconditional error recording for the core engine. Unlike CANVAS_LOG (gated on
-// CANVAS_DEBUG), this always writes — render failures and the export lifecycle must
-// be captured even on default runs so a "Completed" with no file is debuggable.
 namespace canvas::core::log {
 
-// Unconditional (always-on) warning/status line, used by headless playback
-// modules for diagnostics that qWarning used to carry (e.g. [media] open,
-// [scrub] preview traces). Same sink as log_error but not an error: default
-// runs capture it without CANVAS_DEBUG, like qWarning did.
 inline void log_warning(const char* fmt, ...) {
     std::lock_guard<std::mutex> lk_(::canvas::core::log::mutex());
     const auto now_ = std::chrono::system_clock::now();
@@ -432,9 +354,6 @@ inline void log_warning(const char* fmt, ...) {
     std::vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     std::fprintf(stderr, "[eh-core WARN %s] %s\n", ts_, buf);
-    // Flush so core lines land immediately and interleave with the GUI handler's
-    // (it flushes per line); buffered stderr/file output would otherwise be lost
-    // on a hard kill and make these diagnostics invisible while debugging.
     std::fflush(stderr);
     if (FILE* f_ = ::canvas::core::log::file_for(buf); f_) {
         std::fprintf(f_, "[eh-core WARN %s] %s\n", ts_, buf);
@@ -468,12 +387,6 @@ inline void log_error(const char* fmt, ...) {
     }
 }
 
-// Unconditional (always-on) informational line. Same sink/flush discipline as
-// log_warning, but for periodic PERFORMANCE TELEMETRY and state transitions
-// rather than anomalies: e.g. the `[grade]` apply-time snapshots and `[dec]`
-// aggregates. Distinct level so a session log reads as INFO = measurements,
-// WARN = conditions to notice, ERROR = failures — and the whole thing stays
-// available in real time with no CANVAS_DEBUG/cmd.
 inline void log_info(const char* fmt, ...) {
     std::lock_guard<std::mutex> lk_(::canvas::core::log::mutex());
     const auto now_ = std::chrono::system_clock::now();
@@ -500,9 +413,6 @@ inline void log_info(const char* fmt, ...) {
     }
 }
 
-// The [audio]/[eq]/[avsync] path is routed here: the leading tag routes the line
-// to the dedicated canvas-Audio.log sink via the normal route table, so the mix
-// trace stays readable without the [dec] nv12 spam. stderr still sees every line.
 namespace detail {
 inline void write_audio(const char* level, const char* fmt, va_list* ap) {
     std::lock_guard<std::mutex> lk_(::canvas::core::log::mutex());
@@ -526,11 +436,8 @@ inline void write_audio(const char* level, const char* fmt, va_list* ap) {
         std::fflush(f_);
     }
 }
-}  // namespace detail
+}
 
-// Unconditional audio-path line. Use for EQ on/off transitions, mix-peak
-// warnings and the periodic mix telemetry — anything that must correlate with
-// an audible artifact from canvas-Audio.log alone.
 inline void log_audio_warning(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -545,4 +452,4 @@ inline void log_audio_info(const char* fmt, ...) {
     va_end(ap);
 }
 
-}  // namespace canvas::core::log
+}

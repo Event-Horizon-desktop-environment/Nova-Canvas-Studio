@@ -18,23 +18,16 @@
 
 namespace canvas::core::grade_graph {
 struct GradeLut3D;
-}  // namespace canvas::core::grade_graph
+}
 
 namespace canvas::gui {
 
-// Hardware-accelerated video viewer. Frames arrive as CPU-side RGBA buffers
-// (or NV12 planes) and are uploaded into reused OpenGL textures, then drawn
-// as a textured quad with GPU scaling (avoids per-frame CPU QImage copy +
-// software scaling).
 class ViewerGL final : public QOpenGLWidget, protected QOpenGLFunctions {
     Q_OBJECT
 
 public:
     enum class ViewerMode { Source, Program };
 
-    // How the frame is scaled into the media window: Fit shows the whole frame
-    // (letterbox bars on the odd axis), Fill covers the window edge-to-edge by
-    // cropping the overflow axis.
     enum class ScaleMode { Fit, Fill };
 
     explicit ViewerGL(QWidget* parent = nullptr);
@@ -44,25 +37,16 @@ public:
     void clear();
     void set_mode(ViewerMode mode);
     void set_scale_mode(ScaleMode mode);
-    // Canvas fill behind a letterboxed frame (Black / Checkerboard / White /
-    // Gray), driven by the timeline view-options dropdown's Viewer Background
-    // submenu. Called from apply_view_options(); the view repaints.
     void set_viewer_background(ViewerBackground background);
     [[nodiscard]] ViewerBackground viewer_background() const { return viewer_background_; }
 
-    // Optional editor overlays drawn over the presented frame: action/title
-    // safe areas, a rule-of-thirds grid, and a live playback indicator. They
-    // are toggled from the viewer's right-click menu and persisted in QSettings
-    // (see ShellCenter.cpp), and are purely cosmetic — never baked to export.
     enum class Overlay : unsigned {
-        SafeAreas = 1u << 0,   // 90% action-safe / 80% title-safe boxes
-        ThirdsGrid = 1u << 1,  // rule-of-thirds guides
+        SafeAreas = 1u << 0,
+        ThirdsGrid = 1u << 1,
         PlaybackBadge = 1u << 2,
     };
     void set_overlay(Overlay overlay, bool on);
     [[nodiscard]] bool overlay_enabled(Overlay overlay) const;
-    // Drives the playback indicator badge (MainWindow's on_playback_changed
-    // keeps it in lockstep with the SequenceController's real state).
     void set_playing(bool playing);
     [[nodiscard]] bool playing() const { return playing_; }
 
@@ -76,26 +60,11 @@ protected:
 
 private:
     void upload_frame();
-    // Binds the A-side Y/UV textures for the NV12 fragment shaders. The VAAPI
-    // zero-copy path targets EGL images at raw GL texture ids (Qt 6's
-    // QOpenGLTexture cannot wrap them); the CPU upload path uses the
-    // QOpenGLTexture wrappers. These helpers hide which one is live.
     void bind_nv12_a(int y_unit, int uv_unit);
     void bind_nv12_b(int y_unit, int uv_unit);
-    // Binds a clip's 3D grade LUT to `unit`, or the neutral 1x1x1 3D texture when
-    // no LUT is attached. The sampler3D uniforms must ALWAYS reference a 3D
-    // texture: left at their default value 0 they point at the unit holding the
-    // 2D video texture, and Mesa's draw-time validation then rejects the draw
-    // (GL_INVALID_OPERATION at glDrawArrays) even though the shader never samples
-    // the LUT — a silent black viewer. See bind_grade_lut.
     void bind_grade_lut(int unit, QOpenGLTexture* lut);
     void draw_blank();
-    // Paints the monitor overlays (safe areas / thirds grid / playback badge)
-    // after the frame quad, in widget coordinates and clipped to the widget.
     void draw_viewer_overlays();
-    // Paints the checkerboard canvas fill in the letterbox area (the exterior
-    // of the media rect). Solid Black/White/Gray backgrounds are handled by the
-    // paintGL clear color; only the checker needs a painter pass.
     void draw_viewer_background();
     [[nodiscard]] QColor viewer_background_color() const;
 
@@ -103,35 +72,20 @@ private:
     ViewerMode mode_ = ViewerMode::Program;
     ScaleMode scale_mode_ = ScaleMode::Fit;
     ViewerBackground viewer_background_ = ViewerBackground::Black;
-    // All overlays default OFF: the monitor stays a clean picture unless the
-    // operator opts in (Guides button in the top bar, or the viewer's
-    // right-click menu). ShellCenter reads QSettings and overrides before
-    // first paint.
     unsigned overlay_flags_ = 0;
     bool playing_ = false;
 
     std::unique_ptr<QOpenGLTexture> texture_;
     std::unique_ptr<QOpenGLTexture> texture_b_;
     std::unique_ptr<QOpenGLShaderProgram> program_;
-    // NV12 GPU fast path: Y uploaded as an R8 texture, interleaved CbCr as an
-    // RG8 texture, converted to RGB in kFragNv12Src (BT.601 limited). The
-    // second Y/UV pair backs the incoming (B) clip during an NV12 transition,
-    // blended by kFragNv12Trans.
     std::unique_ptr<QOpenGLTexture> texture_nv12_y_;
     std::unique_ptr<QOpenGLTexture> texture_nv12_uv_;
     std::unique_ptr<QOpenGLTexture> texture_nv12_b_y_;
     std::unique_ptr<QOpenGLTexture> texture_nv12_b_uv_;
     std::unique_ptr<QOpenGLShaderProgram> program_nv12_;
     std::unique_ptr<QOpenGLShaderProgram> program_nv12_trans_;
-    // Resolve-style 3D grade LUTs: RGB32F textures (N^3 cells) uploaded when a
-    // clip's baked LUT pointer changes (decode-side bake, cached). Unit 4/5
-    // hold A's and B's LUTs for the NV12 shaders; u_grade_*_size = 0 disables.
     std::unique_ptr<QOpenGLTexture> grade_tex_a_;
     std::unique_ptr<QOpenGLTexture> grade_tex_b_;
-    // Neutral 1x1x1 RGB 3D texture kept bound at the grade units when a side has
-    // no LUT, so the sampler3D uniforms always target a complete 3D texture (see
-    // bind_grade_lut). Raw GL id: QOpenGLTexture's allocation path is unusable
-    // on this driver (see the upload helpers in viewer_gl.cpp).
     GLuint grade_neutral_tex_ = 0;
     const canvas::core::grade_graph::GradeLut3D* grade_a_uploaded_ = nullptr;
     const canvas::core::grade_graph::GradeLut3D* grade_b_uploaded_ = nullptr;
@@ -146,19 +100,12 @@ private:
     int tex_h_ = 0;
     int tex_bw_ = 0;
     int tex_bh_ = 0;
-    // Per-instance id so always-on `[viewer]` telemetry can tell the main
-    // Program viewer apart from the Source-preview viewer in a shared log file.
     uint64_t viewer_uid_ = 0;
     bool texture_valid_ = false;
     bool texture_second_valid_ = false;
     bool texture_dirty_ = false;
     bool nv12_valid_ = false;
     bool nv12_b_valid_ = false;
-    // Zero-copy VAAPI path: when `vaapi_valid_`, the A-side luma/chroma
-    // textures live as raw GL texture ids (`vaapi_tex_y_/vaapi_tex_uv_`)
-    // targeted at EGLImage-imported dmabufs rather than the QOpenGLTexture
-    // wrappers; bind_nv12_a/b pick whichever is current. `vaapi_b_valid_` is
-    // the same for the incoming (B) clip during a GPU-composited transition.
     std::unique_ptr<VaapiViewerImporter> vaapi_importer_;
     std::unique_ptr<VaapiViewerImporter> vaapi_importer_b_;
     GLuint vaapi_tex_y_ = 0;
@@ -167,25 +114,10 @@ private:
     GLuint vaapi_tex_b_uv_ = 0;
     bool vaapi_valid_ = false;
     bool vaapi_b_valid_ = false;
-    // False when the RGBA viewer program (`program_`) failed to link — the
-    // driver-GLSL-rejection case that makes the quad path draw nothing (black
-    // viewer) while decode/audio run fine (seen on non-CUDA/AMD machines, which
-    // always render the RGBA path; NVIDIA/CUDA sessions use the NV12 programs
-    // instead). paintGL then blits RGBA frames via QPainter so a broken link
-    // degrades to a software picture rather than a silent black screen.
     bool rgba_gl_ok_ = true;
-    // GUI-thread delivery health (see set_frame): wall time of the previous
-    // set_frame, so the always-on `[viewer]` line can report the receive
-    // interval. A healthy worker→widget handoff tracks the controller cadence;
-    // a receive interval far above it means the GUI thread is busy between
-    // frames (paint/log/other) even though the decode worker kept up.
     std::chrono::steady_clock::time_point last_frame_arrival_{};
     bool have_last_arrival_ = false;
 
-    // Last NV12 spec + grade-attachment state drawn, so color.log records a
-    // [viewer] line exactly once per change (not per frame at playback rate).
-    // The grade toggle here is the correlation key for "touch a wheel -> the
-    // preview changes" (commit -> bake -> upload -> draw chain).
     canvas::core::gpu::ColorMatrix last_spec_matrix_ = canvas::core::gpu::ColorMatrix::BT709;
     canvas::core::gpu::ColorRange last_spec_range_ = canvas::core::gpu::ColorRange::Limited;
     int last_grade_attached_ = -1;

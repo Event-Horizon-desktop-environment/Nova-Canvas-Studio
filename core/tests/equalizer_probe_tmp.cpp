@@ -31,11 +31,10 @@ int main() {
     for (int i=seg/2-66;i<seg/2-61;++i) printf("%+.3f ", carried[i]);
     printf(" | ");
     for (int i=seg/2-64;i<seg/2-59;++i) printf("%+.3f ", carried[i]);
-    // cold-start reference
     EqualizerBank bank2;
     auto cold = carried;
     (void)bank2.tick(10, boost_12, true, kRate, 1, cold.data(), seg/2 - 64);
-    (void)bank2.tick(10, boost_12, true, kRate, 1, cold.data() + seg/2 - 64, 64); // keep same gains? no - want cold start of 14
+    (void)bank2.tick(10, boost_12, true, kRate, 1, cold.data() + seg/2 - 64, 64);
     (void)bank2.drop(10);
     (void)bank2.tick(10, boost_14, true, kRate, 1, carried.data() + seg/2 - 64, seg/2 + 64);
     printf("\n--- with explicit cold (drop) ---\n");

@@ -1,8 +1,3 @@
-// Headless GPU-discovery tests for canvas::core::gpu_select. The pure mapping
-// laws (vendor_name, backend_for_vendor, device_arg_for) are exercised
-// directly; detect_gpus is fed a synthetic sysfs/proc tree under a temp dir
-// so the tests neither need (nor accidentally touch) the real / proc.
-
 #include "canvas/core/media/gpu_select.hpp"
 
 #include <cstdio>
@@ -40,8 +35,6 @@ bool write_uevent(const std::string& root, const std::string& drm_node,
     return write_file(base + "/uevent", content);
 }
 
-// FATAL-guard: every test here is pure or self-contained, so a helper failure
-// is a bug in the harness — abort loudly rather than silently succeeding.
 bool ensure(bool ok, const char* what) {
     if (!ok) log::log_error("gpu_select_test harness failed: %s", what);
     return ok;
@@ -50,19 +43,16 @@ bool ensure(bool ok, const char* what) {
 bool test_mapping_laws() {
     bool ok = true;
 
-    // vendor_name
     ensure(vendor_name("1002") == "AMD", "vendor 1002 -> AMD");
     ensure(vendor_name("10de") == "NVIDIA", "vendor 10de -> NVIDIA");
     ensure(vendor_name("8086") == "Intel", "vendor 8086 -> Intel");
     ensure(vendor_name("1234") == "", "unknown vendor -> empty");
 
-    // backend_for_vendor
     ensure(backend_for_vendor("10de") == "cuda", "NVIDIA -> cuda");
     ensure(backend_for_vendor("1002") == "vaapi", "AMD -> vaapi");
     ensure(backend_for_vendor("8086") == "vaapi", "Intel -> vaapi");
     ensure(backend_for_vendor("1234") == "", "unknown vendor -> no backend");
 
-    // device_arg_for
     ensure(device_arg_for("vaapi", "renderD128", 0) == "/dev/dri/renderD128",
            "vaapi render-node arg");
     ensure(device_arg_for("vaapi", "renderD129", 0) == "/dev/dri/renderD129",
@@ -79,7 +69,6 @@ bool test_mapping_laws() {
 
 bool test_cpu_name() {
     bool ok = true;
-    // Synthetic cpuinfo tree: model name is parsed, missing file -> "".
     const std::string root = "/tmp/canvas_gpu_test_cpu";
     if (!ensure(mkdir(root.c_str(), 0755) == 0 || errno == EEXIST,
                 "mkdtemp root"))
@@ -129,14 +118,12 @@ bool test_detect_nvidia_amd_order() {
     const std::string root = "/tmp/canvas_gpu_test_mixed";
     const bool made = mkdir(root.c_str(), 0755) == 0 || errno == EEXIST;
     if (!ensure(made, "mkdtemp root")) return false;
-    // NOTE: inserted in reverse PCI order on purpose — the sort must fix it.
     const bool a = write_uevent(root, "renderD128", "amdgpu", "1002:13C0",
                                 "0000:7a:00.0");
     const bool n = write_uevent(root, "renderD129", "nvidia", "10DE:2C05",
                                 "0000:01:00.0");
     if (!ensure(a && n, "mixed uevents")) return false;
 
-    // Simulate the real /proc nvidia model file:
     const std::string info_dir = root + "/proc/driver/nvidia/gpus/0000:01:00.0";
     {
         const std::string parents[] = {root + "/proc",
@@ -155,7 +142,6 @@ bool test_detect_nvidia_amd_order() {
     const auto gpus = detect_gpus(root);
     bool ok = ensure(gpus.size() == 2, "two GPUs found");
     if (gpus.size() == 2) {
-        // PCI-slot order: nvidia (01) sorts before amd (7a).
         ok &= ensure(gpus[0].backend == "cuda" && gpus[1].backend == "vaapi",
                      "sorted by pci slot (cuda then vaapi)");
         ok &= ensure(gpus[0].vendor == "NVIDIA" && gpus[1].vendor == "AMD",
@@ -195,12 +181,10 @@ bool test_empty_sysfs() {
 bool test_gpu_name_for() {
     bool ok = true;
 
-    // Nonexistent sysfs -> no name.
     ensure(gpu_name_for("vaapi", "/dev/dri/renderD128",
                         "/tmp/canvas_gpu_test_does_not_exist") == "",
            "no sysfs -> no name");
 
-    // AMD-only: exact device_arg match, and the sole-GPU backend match.
     const std::string root_a = "/tmp/canvas_gpu_test_name_amd";
     if (!ensure(mkdir(root_a.c_str(), 0755) == 0 || errno == EEXIST,
                 "mkdtemp amd")) return false;
@@ -216,7 +200,6 @@ bool test_gpu_name_for() {
     ensure(gpu_name_for("vaapi", "", root_a).find("AMD") == 0,
            "sole AMD GPU matched without device arg");
 
-    // Mixed NVIDIA+AMD: sole-match per backend resolves each.
     const std::string root_m = "/tmp/canvas_gpu_test_name_mixed";
     if (!ensure(mkdir(root_m.c_str(), 0755) == 0 || errno == EEXIST,
                 "mkdtemp mixed")) return false;
@@ -247,7 +230,6 @@ bool test_gpu_name_for() {
     ensure(gpu_name_for("vaapi", "", root_m).find("AMD") == 0,
            "mixed: sole AMD resolved without device arg");
 
-    // Two AMD GPUs: no-device_arg must be ambiguous ("").
     const std::string root_2 = "/tmp/canvas_gpu_test_name_2amd";
     if (!ensure(mkdir(root_2.c_str(), 0755) == 0 || errno == EEXIST,
                 "mkdtemp 2amd")) return false;
@@ -264,9 +246,8 @@ bool test_gpu_name_for() {
     return ok;
 }
 
-}  // namespace
+}
 
-// Test driver: runs every check, exits 0 on all-clear and 1 on any failure.
 int run_gpu_select_tests() {
     bool all = true;
     all &= test_mapping_laws();
@@ -280,7 +261,7 @@ int run_gpu_select_tests() {
     return all ? 0 : 1;
 }
 
-}  // namespace canvas::core::gpu_select
+}
 
 int main() {
     return canvas::core::gpu_select::run_gpu_select_tests();

@@ -1,14 +1,3 @@
-// VAAPI driver-registry + surface-ownership tests
-// (canvas/core/media/vaapi/{driver,surface}.hpp).
-//
-// The zero-copy playback path maps a libva driver identity to an import policy
-// (identify_vendor / import_policy) and moves exported dmabuf surfaces across
-// threads via VaapiSurface. Both are pure data — no libva calls, no device
-// needed — so this runs anywhere canvas_core builds. It pins the real driver
-// vendor strings seen in the wild (including the two on a two-GPU dev box:
-// Mesa radeonsi alongside the NVIDIA VA-API NVDEC adapter) and the fd
-// ownership/close contract of the move-only surface.
-
 #include "canvas/core/media/vaapi/amd.hpp"
 #include "canvas/core/media/vaapi/driver.hpp"
 #include "canvas/core/media/vaapi/export.hpp"
@@ -44,19 +33,17 @@ int dup_end_of_pipe() {
     int p[2];
     if (::pipe(p) != 0) return -1;
     ::close(p[0]);
-    return p[1];  // caller owns this write end
+    return p[1];
 }
 
-}  // namespace
+}
 
 int main() {
     namespace v = canvas::core::vaapi;
 
     using v::Vendor;
 
-    // --- identify_vendor: real driver/vendor strings ---------------------
     {
-        // Mesa radeonsi, the full vaQueryVendorString on an actual AMD box:
         const char* kMesaVendor =
             "Mesa Gallium driver 26.2.2-arch1.1 for AMD Ryzen 9 9900X 12-Core "
             "Processor (radeonsi, raphael_mendocino, ACO, DRM 3.64, 7.2.4-arch1-2)";
@@ -69,8 +56,6 @@ int main() {
               "identify_vendor(full iHD vendor string) -> Intel");
         check(v::identify_vendor("i965") == Vendor::Intel, "identify_vendor(\"i965\") -> Intel");
 
-        // The NVIDIA VA-API adapter's actual libva vendor string (decode-only
-        // NVDEC adapter; a real second-GPU VAAPI box reports exactly this).
         check(v::identify_vendor("VA-API NVDEC driver [direct backend]") == Vendor::Nvidia,
               "identify_vendor(\"VA-API NVDEC driver\") -> Nvidia");
         check(v::identify_vendor("NVIDIA VA-API v0.3") == Vendor::Nvidia,
@@ -89,7 +74,6 @@ int main() {
         if (failures) goto failed;
     }
 
-    // --- vendor_name -----------------------------------------------------
     {
         check(std::strcmp(v::vendor_name(Vendor::Amd), "amd") == 0, "vendor_name(Amd) == \"amd\"");
         check(std::strcmp(v::vendor_name(Vendor::Intel), "intel") == 0, "vendor_name(Intel) == \"intel\"");
@@ -98,7 +82,6 @@ int main() {
         if (failures) goto failed;
     }
 
-    // --- import_policy assembly ------------------------------------------
     {
         const auto amd_p = v::import_policy(Vendor::Amd);
         check(amd_p.modifiers_supported, "amd policy keeps modifiers");
@@ -121,7 +104,6 @@ int main() {
         if (failures) goto failed;
     }
 
-    // --- VaapiSurface move ownership -------------------------------------
     {
         int fd = dup_end_of_pipe();
         v::VaapiSurface s;
@@ -133,27 +115,23 @@ int main() {
         s.planes = {{0, 0, 1920}, {0, 1920 * 1080, 1920}};
         check(s.valid(), "constructed surface is valid");
 
-        // Move transfers fd ownership; the source must drop it.
         v::VaapiSurface t = std::move(s);
         check(t.valid(), "moved-to surface valid");
         check(t.objects.size() == 1 && t.objects[0].fd == fd, "fd transferred to moved-to surface");
         check(!s.valid(), "moved-from surface invalid");
         check(s.objects.empty(), "moved-from surface owns no fds");
 
-        // The moved-from surface destructor must not close the transferred fd.
         {
             int probe = ::fcntl(fd, F_GETFD);
             check(probe >= 0, "fd still open after moved-from destruction");
         }
 
-        // Self-move-assign is a no-op (guard in operator=).
         v::VaapiSurface u;
-        u = std::move(u);
+        v::VaapiSurface& self = u;
+        u = std::move(self);
         check(!u.valid(), "self-move leaves empty surface valid=false");
     }
     {
-        // Destructor of an owning surface closes the fd it owns: open a fresh
-        // fd, hand it to a surface in an inner scope, and probe after it dies.
         int fd = dup_end_of_pipe();
         {
             v::VaapiSurface closing;
@@ -168,7 +146,6 @@ int main() {
         check(probe < 0 && errno == EBADF, "fd closed by destructor");
     }
     {
-        // valid() rejects degenerate surfaces.
         v::VaapiSurface empty;
         check(!empty.valid(), "default surface invalid");
         empty.fourcc = v::kDrmFourccNv12;
@@ -178,7 +155,6 @@ int main() {
     }
 
 #ifdef CANVAS_HAVE_VAAPI
-    // --- translate_descriptor (pure data mapping, fabricated descriptor) --
     {
         int fd = dup_end_of_pipe();
         VADRMPRIMESurfaceDescriptor desc{};
@@ -188,7 +164,7 @@ int main() {
         desc.num_objects = 1;
         desc.num_layers = 1;
         desc.objects[0].fd = fd;
-        desc.objects[0].drm_format_modifier = 0;  // LINEAR
+        desc.objects[0].drm_format_modifier = 0;
         desc.layers[0].drm_format = v::kDrmFourccNv12;
         desc.layers[0].num_planes = 2;
         desc.layers[0].object_index[0] = 0;
@@ -209,18 +185,15 @@ int main() {
               "color spec copied");
         check(sp && sp->planes.size() == 2 && sp->objects.size() == 1, "two planes / one object");
         check(sp && sp->planes[1].offset == 640 * 360, "chroma plane offset");
-        // The surface dup()s the descriptor's fd; original stays open to us.
         check(sp && sp->objects[0].fd >= 0 && sp->objects[0].fd != fd, "descriptor fd dup'd, not adopted");
-        // Original fd still ours; the dup'd copy is closed when sp drops.
         int probe = ::fcntl(fd, F_GETFD);
         check(probe >= 0, "original descriptor fd untouched by surface lifetime");
         ::close(fd);
     }
     {
-        // Degenerate / non-NV12 descriptors are rejected without touching fds.
         int fd = dup_end_of_pipe();
         VADRMPRIMESurfaceDescriptor bad{};
-        bad.fourcc = 0;  // not NV12
+        bad.fourcc = 0;
         bad.width = 640;
         bad.height = 360;
         bad.num_objects = 1;

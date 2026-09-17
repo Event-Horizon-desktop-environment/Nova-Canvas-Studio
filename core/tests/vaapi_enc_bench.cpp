@@ -1,24 +1,3 @@
-// vaapi_enc_bench — VAAPI encode speed sweep @ the deliver target.
-//
-// Measures export_project() wall-throughput at the user's real export intent —
-// H.265 VAAPI, 2560x1440, 60 fps, 80 Mbps — from the real 1440p AV1 source
-// clip, sweeping the knob space that the exporter actually exposes. Prints a
-// ranked leaderboard plus bytes/Mbps for each row.
-//
-// Informational by design: PASS when every measured row produced a decodable,
-// non-empty output file — it never asserts a speed (encode throughput is
-// machine/driver-dependent). The point is to (re)produce the "fastest safe
-// config" evidence (docs/vaapi.md §10) on THIS generation of hardware.
-//
-// Rows (hevc, the deliver codec):
-//   baseline        no extra knobs, rc = vbr_target @ 80 Mbps
-//   async_depth     {4, 8, 16, 32, 64} on top of baseline
-//   rc mode         CBR vs VBR at 80 Mbps
-//   preset names    ultrafast / faster / medium / slow / placebo
-//                   (exercises the exporter's vaapi_speed_for wiring)
-// h264 reference:   two rows at the same geometry so H.264 vs H.265 speed is
-//                   visible on the same run.
-
 #include "vaapi_test_common.hpp"
 
 #include "canvas/core/export/exporter.hpp"
@@ -39,16 +18,16 @@ void check(bool cond, const char* what) {
 }
 
 struct Row {
-    std::string tag;    // filename tag (out_<tag>.mp4)
-    std::string label;  // human-readable row label
+    std::string tag;
+    std::string label;
     double fps = 0.0;
     double mbps = 0.0;
     int64_t bytes = 0;
     bool ok = false;
-    std::string note;
+    std::string note{};
 };
 
-}  // namespace
+}
 
 int main() {
     using namespace vaapi_test;
@@ -71,14 +50,10 @@ int main() {
     std::printf("encode node: %s\n", node.c_str());
     canvas::core::HwDeviceManager::set_preferred_gpu("vaapi", device_arg_for(node));
 
-    constexpr int64_t kFrames = 90;  // 1.5 s @ 60 fps per row
+    constexpr int64_t kFrames = 90;
     const auto proj = make_single_clip_project(clip, kFrames);
-    // Editorial-content variant: same clip but with a burned-in subtitle +
-    // edge fades. Exports of it take the CPU-compositor path (frame_gpu bails
-    // on titles) inside the encode, so its rows measure the full deliver path
-    // for a title-bearing timeline, not a bare video blit.
     const auto feat_proj = make_feature_project(clip, kFrames);
-    constexpr double kSubtitleBandH = 0.18;  // bottom 18% = the subtitle band
+    constexpr double kSubtitleBandH = 0.18;
 
     const auto hevc_row = [&](const std::string& rc_mode, const std::string& preset,
                               const std::string& extra, const std::string& tag,
@@ -105,7 +80,6 @@ int main() {
 
     std::vector<Row> rows;
 
-    // --- hevc: baseline + knob sweep -----------------------------------------
     rows.push_back(hevc_row("vbr_target", "medium", "", "hevc_base", "hevc VBR@80M baseline"));
     for (const char* depth : {"4", "8", "16", "32", "64"}) {
         const std::string tag = std::string("hevc_ad") + depth;
@@ -120,7 +94,6 @@ int main() {
         rows.push_back(hevc_row("vbr_target", pres, "", tag, label));
     }
 
-    // --- h264 reference (same geometry/bitrate) ------------------------------
     if (h264_ok) {
         {
             Row r{"h264_base", "h264 VBR@80M baseline"};
@@ -148,16 +121,11 @@ int main() {
         }
     }
 
-    // --- feature-content rows: subtitle + fades through the deliver path -----
-    // Slower than the bare-clip rows by design (title rasterise + software
-    // compositor per frame), but these are the numbers a real subtitle-bearing
-    // timeline gets.
     rows.push_back(hevc_row("vbr_target", "medium", "", "hevc_feat",
                             "hevc VBR@80M baseline + subtitle/fades", true));
     rows.push_back(hevc_row("vbr_target", "ultrafast", "", "hevc_feat_fast",
                             "hevc VBR@80M ultrafast + subtitle/fades", true));
 
-    // --- validate + rank -----------------------------------------------------
     std::printf("%-42s | %6s | %6s | %10s | %s\n", "row", "fps", "Mbps", "bytes", "status");
     for (auto& row : rows) {
         if (row.ok) {

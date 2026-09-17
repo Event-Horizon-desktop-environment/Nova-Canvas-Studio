@@ -14,11 +14,6 @@
 
 #include <sys/stat.h>
 
-// Vendored public-domain TrueType rasteriser (keeping stb_truetype itself out
-// of the public include surface is a compile-time guard: its own license header
-// lives at the top of the vendored file, which one dirt-cheap copy keeps us on
-// the no-security-guarantee contract). title.cpp is the only TU that includes
-// it; the STB_TRUETYPE_IMPLEMENTATION macro compiles the implementation here.
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
@@ -35,10 +30,6 @@ bool file_exists(const std::string& path) {
     return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
-// UTF-8 -> codepoint run. Invalid sequences emit U+FFFD; control characters
-// (tabs, carriage returns, ...) collapse to a space. Newlines never reach here
-// — split_lines() breaks the text into lines first, so one codepoint run is
-// always one centred line. Stops at a NUL.
 std::vector<uint32_t> codepoints(const std::string& text) {
     std::vector<uint32_t> out;
     out.reserve(text.size());
@@ -114,9 +105,6 @@ std::shared_ptr<const LoadedFont> load_font(const std::string& path) {
     return font;
 }
 
-// Tight pixel box of the whole line: width/height plus the origin of the first
-// bitmap pixel relative to the pen start (origin_x) and the boxes' top
-// (origin_y). pen tracks cumulative advance + kerning in pixels.
 struct GlyphLayout {
     int width = 0;
     int height = 0;
@@ -165,12 +153,6 @@ GlyphLayout layout_line(const LoadedFont& font, const std::vector<uint32_t>& cps
     return out;
 }
 
-// --- installed-font enumeration ----------------------------------------------
-// Qt-free system font discovery for the Inspector's font dropdown: scan the
-// font roots for .ttf/.otf files and read each file's name table with
-// stb_truetype. Files are read standalone (never through the render cache) so
-// enumeration doesn't pin every system font in memory.
-
 std::string ascii_lower(std::string s) {
     for (char& ch : s)
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
@@ -185,7 +167,6 @@ std::string trim_ws(const std::string& s) {
     return s.substr(b, e - b);
 }
 
-// UTF-16BE (BMP) -> UTF-8; lone surrogates become U+FFFD.
 std::string utf16be_to_utf8(const char* data, const int len) {
     std::string out;
     out.reserve(static_cast<std::size_t>(len));
@@ -207,8 +188,6 @@ std::string utf16be_to_utf8(const char* data, const int len) {
     return out;
 }
 
-// Best-effort name-table read: MS Unicode BMP English first, then the Unicode
-// platform BMP entry, then Mac Roman (ASCII-subset decode).
 std::string font_name_string(const stbtt_fontinfo& info, const int name_id) {
     int len = 0;
     const char* s = stbtt_GetFontNameString(&info, &len, STBTT_PLATFORM_ID_MICROSOFT,
@@ -258,8 +237,6 @@ FaceNames read_face_names(const std::string& path) {
     if (!read_file_bytes(path, data, 64u * 1024u * 1024u)) return out;
     stbtt_fontinfo info;
     if (stbtt_InitFont(&info, data.data(), 0) == 0) return out;
-    // Typographic names (16/17) first — they carry the real family for faces
-    // whose legacy family field is overloaded (e.g. "... Semibold").
     out.family = font_name_string(info, 16);
     if (out.family.empty()) out.family = font_name_string(info, 1);
     out.style = font_name_string(info, 17);
@@ -298,11 +275,11 @@ bool has_font_suffix(const std::string& name) {
 }
 
 void scan_fonts_dir(const std::string& dir, std::vector<std::string>& out, const int depth) {
-    if (depth > 8) return;  // symlink-loop guard; real font trees are shallow
+    if (depth > 8) return;
     DIR* dp = ::opendir(dir.c_str());
     if (!dp) return;
     while (dirent* ent = ::readdir(dp)) {
-        const std::string name = ent->d_name ? ent->d_name : "";
+        const std::string name = ent->d_name;
         if (name.empty() || name[0] == '.') continue;
         const std::string full = dir + "/" + name;
         bool is_dir = ent->d_type == DT_DIR;
@@ -323,15 +300,11 @@ std::vector<FontFace> scan_font_faces() {
     std::vector<std::string> files;
     for (const std::string& root : font_scan_roots()) scan_fonts_dir(root, files, 0);
     std::sort(files.begin(), files.end());
-    // One face per family (keyed case-insensitively): the Regular style wins,
-    // then the lexicographically smallest path — deterministic for a set.
     std::map<std::string, FontFace> best;
     std::map<std::string, std::string> best_style;
     for (const std::string& path : files) {
         FaceNames names = read_face_names(path);
         if (names.family.empty()) {
-            // No parsable name table: fall back to the stem so the file is
-            // still selectable rather than silently dropped.
             const std::size_t slash = path.rfind('/');
             std::string stem = slash == std::string::npos ? path : path.substr(slash + 1);
             const std::size_t dot = stem.rfind('.');
@@ -364,8 +337,6 @@ std::vector<FontFace> scan_font_faces() {
     return out;
 }
 
-// --- multi-line raster pieces ------------------------------------------------
-
 std::vector<std::string> split_lines(const std::string& text) {
     std::vector<std::string> lines;
     std::string cur;
@@ -385,11 +356,9 @@ struct LineBitmap {
     std::vector<uint8_t> alpha;
     int w = 0;
     int h = 0;
-    int bottom = 0;  // lowest glyph-bottom row in box coords (underline anchor)
+    int bottom = 0;
 };
 
-// One rasterised line at its canvas origin (box + shadow + box extents all
-// derive from this, so single- and multi-line share one blit tail).
 struct Placed {
     int x = 0;
     int y = 0;
@@ -398,17 +367,12 @@ struct Placed {
     const LineBitmap* bmp = nullptr;
 };
 
-// Faux styles synthesised from the one installed face: embolden overdraw,
-// whole-box slant with a pinned baseline, underline bar below the descenders.
 struct TextStyle {
     bool bold = false;
     bool italic = false;
     bool underline = false;
 };
 
-// Rasterises one codepoint run into a tight alpha box (same advance/kerning/
-// box math the single-line renderer always used — pixel-identical output when
-// the style is plain).
 LineBitmap rasterize_line(const LoadedFont& font, const std::vector<uint32_t>& cps,
                           const float scale, const TextStyle& style, const float em_px) {
     LineBitmap out;
@@ -447,7 +411,6 @@ LineBitmap rasterize_line(const LoadedFont& font, const std::vector<uint32_t>& c
         prev_glyph = glyph;
     }
 
-    // Faux bold: OR a right-shifted copy (embolden ~4% of em, min 1 px).
     if (style.bold) {
         const int dx = std::max(1, static_cast<int>(std::lround(em_px * 0.04f)));
         const int nw = out.w + dx;
@@ -467,12 +430,8 @@ LineBitmap rasterize_line(const LoadedFont& font, const std::vector<uint32_t>& c
         out.w = nw;
     }
 
-    // Faux italic: whole-box shear (~0.2, about 11 degrees) with the baseline
-    // pinned, padded both sides so slanted rows never clip.
     if (style.italic) {
         constexpr float kSlant = 0.2f;
-        // Clamped: an all-descender line would otherwise pin the baseline
-        // outside the box and shrink the padding negative.
         const int baseline = std::clamp(-lay.origin_y, 0, out.h);
         const int left_pad =
             static_cast<int>(std::ceil(kSlant * static_cast<float>(out.h - baseline)));
@@ -498,7 +457,6 @@ LineBitmap rasterize_line(const LoadedFont& font, const std::vector<uint32_t>& c
     }
     out.bottom = bottom;
 
-    // Underline: solid bar across the full line width below the descenders.
     if (style.underline) {
         const int thick = std::max(1, static_cast<int>(std::lround(em_px / 14.0f)));
         const int gap = std::max(1, static_cast<int>(std::lround(em_px * 0.08f)));
@@ -515,7 +473,6 @@ LineBitmap rasterize_line(const LoadedFont& font, const std::vector<uint32_t>& c
     return out;
 }
 
-// Alpha-over dissolve of one box onto the canvas (the shared composite tail).
 void blit_alpha(const uint8_t* alpha, const int bw, const int bh, const int ox, const int oy,
                 std::vector<uint8_t>& rgba, const int width, const int height,
                 const std::size_t stride, const int cr, const int cg, const int cb,
@@ -549,10 +506,6 @@ void blit_alpha(const uint8_t* alpha, const int bw, const int bh, const int ox, 
     }
 }
 
-// Shared placement law for a block of rasterised lines (single-line centred
-// box, or stacked centred lines with a 0.25 em gap), shifted by the clip's
-// visual offset. Both the canvas renderer and the tight-sprite rasteriser use
-// this one copy so their origins can never drift apart.
 std::vector<Placed> place_block(const std::vector<LineBitmap>& bits, const int width,
                                 const int height, const int off_x, const int off_y,
                                 const float em_px) {
@@ -560,14 +513,11 @@ std::vector<Placed> place_block(const std::vector<LineBitmap>& bits, const int w
     std::vector<Placed> placed;
     placed.reserve(bits.size());
     if (bits.size() <= 1) {
-        // Single line: the historical centred-box path, unchanged.
         const LineBitmap& b = bits.front();
         if (b.w > 0 && b.h > 0)
             placed.push_back(
                 Placed{(width - b.w) / 2 + off_x, (height - b.h) / 2 + off_y, b.w, b.h, &b});
     } else {
-        // Multi-line: stack the centred lines with a 0.25 em gap, the whole
-        // block centred vertically. Empty lines keep their slot (blank band).
         const int gap = std::max(0, static_cast<int>(std::lround(em_px * 0.25f)));
         int total = 0;
         for (const LineBitmap& b : bits) total += b.h;
@@ -582,12 +532,6 @@ std::vector<Placed> place_block(const std::vector<LineBitmap>& bits, const int w
     return placed;
 }
 
-// Alpha-over of one component into a full-canvas premultiplied-RGBA8
-// accumulator (byte 3 = coverage), the sprite analogue of blit_alpha /
-// fill_rounded_rect: premultiplied add `c*a` and coverage add `a*(1-A)`. The
-// per-step rounding mirrors the CPU blob-per-component rounding, so the
-// sprite's accumulated premultiplied colour matches the canvas composite's
-// per-component law over an opaque background (up to one final blend pass).
 void sprite_blend(uint8_t* rgba, const std::size_t stride, const int width, const int height,
                   const int x, const int y, const float r, const float g, const float b,
                   const float a) {
@@ -604,9 +548,6 @@ void sprite_blend(uint8_t* rgba, const std::size_t stride, const int width, cons
         static_cast<int>(std::lround(a * 255.0f + static_cast<float>(dst[3]) * inv)), 0, 255));
 }
 
-// Solid alpha-over fill for the background box into the sprite accumulator,
-// replicating fill_rounded_rect's geometry and corner-coverage law exactly
-// (1 px anti-aliased edges from the corner circles, square when radius == 0).
 void sprite_fill_rounded(uint8_t* rgba, const std::size_t stride, const int width,
                          const int height, int x0, int y0, int x1, int y1, const int radius,
                          const float r, const float g, const float b, const float a) {
@@ -622,11 +563,9 @@ void sprite_fill_rounded(uint8_t* rgba, const std::size_t stride, const int widt
     const float loop_r = static_cast<float>(rad) - 0.5f;
     const float hit_r = static_cast<float>(rad) + 0.5f;
     for (int y = y0; y < y1; ++y) {
-        uint8_t* row = rgba + static_cast<std::size_t>(y) * stride;
         for (int x = x0; x < x1; ++x) {
             float cov = 1.0f;
             if (rad > 0) {
-                // Corner centres sit on the inner radius corners.
                 const int cx = x < x0 + rad ? x0 + rad : (x > right - rad ? right - rad : -1);
                 const int cy = y < y0 + rad ? y0 + rad : (y > bottom - rad ? bottom - rad : -1);
                 if (cx >= 0 && cy >= 0) {
@@ -648,10 +587,8 @@ void sprite_fill_rounded(uint8_t* rgba, const std::size_t stride, const int widt
     }
 }
 
-}  // namespace
+}
 
-// Separable box blur over an alpha plane (sliding window, clamped edges).
-// radius <= 0 returns a copy.
 std::vector<uint8_t> box_blur(const uint8_t* src, const int w, const int h,
                               const int radius) {
     if (w <= 0 || h <= 0) return {};
@@ -685,9 +622,6 @@ std::vector<uint8_t> box_blur(const uint8_t* src, const int w, const int h,
     return dst;
 }
 
-// Solid alpha-over fill for the background box, clipped to the canvas. A
-// non-zero radius rounds the corners (0 = the plain square rect). Per-pixel
-// coverage from the corner circles gives a 1 px anti-aliased edge.
 void fill_rounded_rect(std::vector<uint8_t>& rgba, const int width, const int height,
                        const std::size_t stride, int x0, int y0, int x1, int y1,
                        const int radius, const int cr, const int cg, const int cb,
@@ -703,13 +637,11 @@ void fill_rounded_rect(std::vector<uint8_t>& rgba, const int width, const int he
     const int bottom = y1 - 1;
     const float loop_r = static_cast<float>(rad) - 0.5f;
     const float hit_r = static_cast<float>(rad) + 0.5f;
-    const float inv = 1.0f - a;
     for (int y = y0; y < y1; ++y) {
         uint8_t* row = rgba.data() + static_cast<std::size_t>(y) * stride;
         for (int x = x0; x < x1; ++x) {
             float cov = 1.0f;
             if (rad > 0) {
-                // Corner centres sit on the inner radius corners.
                 const int cx = x < x0 + rad ? x0 + rad : (x > right - rad ? right - rad : -1);
                 const int cy = y < y0 + rad ? y0 + rad : (y > bottom - rad ? bottom - rad : -1);
                 if (cx >= 0 && cy >= 0) {
@@ -777,8 +709,6 @@ std::string find_font_path_for(const std::string& family) {
     for (const FontFace& f : installed_font_faces()) {
         if (ascii_lower(f.family) == want) return f.path;
     }
-    // Unknown family degrades to the default face: a stale project still
-    // renders instead of drawing nothing.
     return find_font_path();
 }
 
@@ -805,9 +735,6 @@ Layout measure(const std::string& text, const int glyph_height_px,
 
 namespace {
 
-// Multi-line tight box, mirroring render_clip_title_with_font's stacking law
-// (widest line = block width; 0.25 em gap between lines — so the fit law and
-// the rasteriser agree pixel-for-pixel on what "the block" is).
 Layout measure_block(const std::string& text, const int glyph_height_px,
                      const std::string& font_path) {
     Layout out;
@@ -830,7 +757,7 @@ Layout measure_block(const std::string& text, const int glyph_height_px,
     return out;
 }
 
-}  // namespace
+}
 
 SubtitleFit fit_caption(const std::string& text, const int frame_width, const int frame_height,
                         const std::string& font_path, const float size_hint) {
@@ -844,9 +771,6 @@ SubtitleFit fit_caption(const std::string& text, const int frame_width, const in
         out.pos_y = static_cast<double>(margin);
         return out;
     }
-    // Nominal fallback block for the bottom anchor when measurement fails
-    // (empty text / missing font): a single line one em tall reads as the
-    // subtitle safe-zone target.
     auto nominal_height = [&]() {
         return std::max(1, static_cast<int>(std::lround(static_cast<double>(out.size) *
                                                         frame_height * 1.25)));
@@ -859,9 +783,6 @@ SubtitleFit fit_caption(const std::string& text, const int frame_width, const in
         return measure_block(text, g, font_path);
     };
 
-    // Shrink (binary search over the size fraction) until the block fits both
-    // safe areas. Monotone: smaller size ⇒ narrower and shorter. Clamped to
-    // kSizeMin — an unbreakably long token accepts its overflow.
     if (!(block_at(out.size).width <= max_w && block_at(out.size).height <= max_h)) {
         float lo = kSizeMin;
         float hi = out.size;
@@ -880,10 +801,6 @@ SubtitleFit fit_caption(const std::string& text, const int frame_width, const in
     const int block_h = final.height;
     out.block_width = final.width;
     out.block_height = block_h;
-    // Centre the block, then shift it down so its bottom sits `margin` px above
-    // the frame bottom (the classic subtitle anchor). When the block is
-    // unmeasurable (missing font / empty text, block_height == 0) anchor a
-    // nominal single-line height instead so pos_y still reads as a sane offset.
     const int anchor_h = block_h > 0 ? block_h : nominal_height();
     out.pos_y = (frame_height - anchor_h) / 2.0 - static_cast<double>(margin);
     if (out.pos_y < 0) out.pos_y = 0.0;
@@ -915,17 +832,12 @@ void render_clip_title_with_font(const Clip& clip, const std::string& font_path,
     const int cg = static_cast<int>(std::lround(std::clamp(clip.title.g, 0.0f, 1.0f) * 255.0f));
     const int cb = static_cast<int>(std::lround(std::clamp(clip.title.b, 0.0f, 1.0f) * 255.0f));
 
-    // The clip's visual position nudges the whole title block (px). Zero by
-    // default, so untouched titles render exactly centred as before; the
-    // Subtitles tab's position sliders and the Video tab's Position row edit
-    // these same fields.
     const int off_x = static_cast<int>(std::lround(clip.pos_x));
     const int off_y = static_cast<int>(std::lround(clip.pos_y));
 
     std::vector<Placed> placed = place_block(bits, width, height, off_x, off_y, em_px);
     if (placed.empty()) return;
 
-    // Background box behind the whole block (behind glyphs and shadows).
     if (clip.title.box) {
         int x0 = width, y0 = height, x1 = 0, y1 = 0;
         for (const Placed& pl : placed) {
@@ -947,9 +859,6 @@ void render_clip_title_with_font(const Clip& clip, const std::string& font_path,
                           brad, bcr, bcg, bcb, clip.title.box_opacity * opacity);
     }
 
-    // Drop shadow (blurred, tinted, offset copy of each line) first, then the
-    // glyphs over it. The shadow inherits the text alpha so faded text casts
-    // a faded shadow.
     const int scr = static_cast<int>(
         std::lround(std::clamp(clip.title.shadow_r, 0.0f, 1.0f) * 255.0f));
     const int scg = static_cast<int>(
@@ -980,12 +889,6 @@ void render_clip_title(const Clip& clip, std::vector<uint8_t>& rgba, const int w
     render_clip_title_with_font(clip, path, rgba, width, height, stride);
 }
 
-// Premultiplied-RGBA8 tight sprite of clip.title for the GPU fast path (see
-// title.hpp). Rasterises into a full-canvas accumulator with the same
-// layering/ordering law as render_clip_title_with_font (box -> shadow ->
-// glyphs, no offsets drop out of the canvas box), tracks the coverage
-// footprint, then crops to the tight box. Blending the sprite over an opaque
-// canvas reproduces the CPU compose save for the final rounding pass.
 TitleSprite raster_title_sprite(const Clip& clip, const int canvas_w, const int canvas_h,
                                 const std::string& font_path) {
     TitleSprite out;
@@ -1012,19 +915,12 @@ TitleSprite raster_title_sprite(const Clip& clip, const int canvas_w, const int 
     const int off_x = static_cast<int>(std::lround(clip.pos_x));
     const int off_y = static_cast<int>(std::lround(clip.pos_y));
 
-    // Same placement law as the canvas renderer, so a sprite and a CPU render
-    // put the block at the same pixels no matter which path exports.
     const std::vector<Placed> placed = place_block(bits, canvas_w, canvas_h, off_x, off_y, em_px);
     if (placed.empty()) return out;
 
-    // Full-canvas accumulator: premultiplied colour in RGB, coverage in A —
-    // prepared exactly like a CPU alpha-over, so compositing the packed sprite
-    // over an opaque background reproduces render_clip_title_with_font's output
-    // (up to the single final blend rounding).
     std::vector<uint8_t> acc(static_cast<std::size_t>(canvas_w) * canvas_h * 4u, 0);
     const std::size_t stride = static_cast<std::size_t>(canvas_w) * 4u;
 
-    // Background box behind the whole block (behind glyphs and shadows).
     if (clip.title.box) {
         int x0 = canvas_w, y0 = canvas_h, x1 = 0, y1 = 0;
         for (const Placed& pl : placed) {
@@ -1046,9 +942,6 @@ TitleSprite raster_title_sprite(const Clip& clip, const int canvas_w, const int 
                             y1 + py, brad, bcr, bcg, bcb, clip.title.box_opacity * opacity);
     }
 
-    // Drop shadow (blurred, tinted, offset copy of each line) first, then the
-    // glyphs over it. The shadow inherits the text alpha so faded text casts a
-    // faded shadow.
     const float scr = static_cast<float>(
         std::lround(std::clamp(clip.title.shadow_r, 0.0f, 1.0f) * 255.0f));
     const float scg = static_cast<float>(
@@ -1085,7 +978,6 @@ TitleSprite raster_title_sprite(const Clip& clip, const int canvas_w, const int 
         }
     }
 
-    // Tight crop of the coverage footprint.
     int min_x = canvas_w, min_y = canvas_h, max_x = -1, max_y = -1;
     for (int y = 0; y < canvas_h; ++y) {
         const uint8_t* row = acc.data() + static_cast<std::size_t>(y) * stride;
@@ -1114,4 +1006,4 @@ TitleSprite raster_title_sprite(const Clip& clip, const int canvas_w, const int 
     return out;
 }
 
-}  // namespace canvas::core::title
+}

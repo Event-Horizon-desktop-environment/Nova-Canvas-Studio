@@ -97,10 +97,10 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
         place_selected_media(canvas::core::Placement::PlaceOnTop);
         return;
     case Qt::Key_Delete:
-        delete_selected_clip(/*ripple=*/true);
+        delete_selected_clip(true);
         return;
     case Qt::Key_Backspace:
-        delete_selected_clip(/*ripple=*/false);
+        delete_selected_clip(false);
         return;
     default:
         QMainWindow::keyPressEvent(event);
@@ -110,8 +110,6 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
 void MainWindow::delete_selected_clip(const bool ripple) {
     if (!project_) return;
 
-    // Clicking a transition bubble selects it; Delete/Backspace (or the Delete
-    // menu) then clears that transition instead of deleting a clip.
     if (timeline_ && timeline_->delete_selected_transition()) return;
 
     std::vector<canvas::core::ClipId> ids;
@@ -126,15 +124,7 @@ void MainWindow::delete_selected_clip(const bool ripple) {
         for (const auto id : ids)
             s += QString::number(static_cast<quint64>(id)) + QLatin1Char(' ');
         qDebug() << "delete: selected ids ->" << s << "ripple=" << ripple;
-    }    // The selected ids may already contain both halves of a linked pair
-    // (set_selection expands a selection to include each clip's linked mate).
-    // The core delete ops (lift_clip / ripple_delete_clip) remove a clip
-    // together with its linked mate on the partner track, so a single op per
-    // pair is sufficient. Scheduling both halves would run the delete twice:
-    // for Lift the second op travels through the linked-mate machinery and can
-    // remove an adjacent clip the user did not intend (e.g. the audio clip to
-    // the right of a split pair). For each linked pair we keep one
-    // representative so the loop below issues exactly one command per pair.
+    }
     const auto find = [&](canvas::core::ClipId id) -> const canvas::core::Clip* {
         for (auto& t : project_->sequence.video_tracks)
             if (const canvas::core::Clip* c = t.clip_with_id(id)) return c;
@@ -150,8 +140,6 @@ void MainWindow::delete_selected_clip(const bool ripple) {
         if (!c) continue;
         if (c->is_linked() &&
             std::find(ids.begin(), ids.end(), c->linked_id) != ids.end()) {
-            // Both halves of a linked pair are selected: only the
-            // numerically-lower id is kept as the pair's representative.
             const canvas::core::ClipId rep = std::min(id, c->linked_id);
             if (std::find(to_delete.begin(), to_delete.end(), rep) == to_delete.end())
                 to_delete.push_back(rep);
@@ -210,9 +198,6 @@ void MainWindow::toggle_disable_selected_clip() {
         ids.push_back(selected_clip_);
     if (ids.empty()) return;
 
-    // The selected ids may include both halves of a linked pair (selection
-    // auto-expands to linked mates). set_clip_enabled toggles the mate itself,
-    // so keep one representative per pair to apply exactly one command.
     const auto find = [&](canvas::core::ClipId id) -> const canvas::core::Clip* {
         for (auto& t : project_->sequence.video_tracks)
             if (const canvas::core::Clip* c = t.clip_with_id(id)) return c;
@@ -235,7 +220,6 @@ void MainWindow::toggle_disable_selected_clip() {
         reps.push_back(id);
     }
 
-    // Determine the resulting enabled state from the first representative.
     const canvas::core::Clip* first = find(reps.front());
     if (!first) return;
     const bool enabling = !first->enabled;
@@ -286,9 +270,6 @@ void MainWindow::toggle_transition_on_selected() {
     const canvas::core::Clip* c = find(id);
     if (!c) return;
 
-    // Toggle a default Cross Dissolve: if the clip already carries one, clear it;
-    // otherwise set it (6 frames). Delegates to the same edit commands used by
-    // the context menu.
     const bool clearing =
         c->transition_out == canvas::core::TransitionType::CrossDissolve && c->has_transition();
     std::unique_ptr<canvas::core::ICommand> cmd;
@@ -341,10 +322,6 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 void MainWindow::resizeEvent(QResizeEvent* event) {
     const auto rz_t0 = std::chrono::steady_clock::now();
     QMainWindow::resizeEvent(event);
-    // Whole-window resize cost, UI thread. The timeline's own relayout is a
-    // TL relayout log; this band catches everything ELSE each resize cycle
-    // (dock/QSplitter layout, sibling widget resizes, style polish) — the part
-    // the eventloop lag probe attributes back to a ~60ms block.
     const double rz_ms = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - rz_t0).count();
     static auto s_at = std::chrono::steady_clock::now();
@@ -367,4 +344,4 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
     }
 }
 
-}  // namespace canvas::gui
+}

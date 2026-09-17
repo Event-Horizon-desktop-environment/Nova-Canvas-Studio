@@ -1,10 +1,5 @@
 #pragma once
 
-// Branded empty-state widget used by every placeholder surface (left-dock
-// placeholder tabs, inspector placeholder pages). A quiet Nova-gold hero icon,
-// a title at body/title scale, and an optional muted subtitle — re-tinted on
-// theme switches so it can never drift from the active token set.
-
 #include <QLabel>
 #include <QPixmap>
 #include <QPointer>
@@ -15,11 +10,6 @@
 
 namespace canvas::gui {
 
-// Builds a vertically-centered empty state (icon, title, optional subtitle)
-// inside `parent`. Returns the container widget; callers may add extra widgets
-// to the returned layout handle is NOT exposed — use the page's own layout and
-// embed the returned widget, or append actions via `layout()->addWidget`.
-// `stretch_after` adds a trailing stretch below the copy (centered when set).
 inline QWidget* build_empty_state(QWidget* parent, const char* icon_name,
                                   const QString& title, const QString& subtitle = QString(),
                                   bool stretch_after = true) {
@@ -30,8 +20,6 @@ inline QWidget* build_empty_state(QWidget* parent, const char* icon_name,
 
     auto* brand_icon = new QLabel(host);
     brand_icon->setAlignment(Qt::AlignCenter);
-    // QPointer-guarded so a destroyed empty state (transient placeholder pages)
-    // auto-nulls out of the re-apply walk instead of being retinted.
     const auto retint = [wp = QPointer<QLabel>(brand_icon), icon_name] {
         if (!wp)
             return;
@@ -74,4 +62,4 @@ inline QWidget* build_empty_state(QWidget* parent, const char* icon_name,
     return host;
 }
 
-}  // namespace canvas::gui
+}

@@ -1,12 +1,3 @@
-// Phase 1 (A5) loudness-normalization LAW tests. Pins:
-//  - normalization_gain_db: target - measured, clamped to the shared audio_mix
-//    volume bounds, with silence (-inf) mapping to the maximum boost;
-//  - integrated_loudness_lufs: a full-scale sine reads ~ -3.01 (the block-RMS
-//    level), amplitude 0.1 reads ~ -23.01, digital silence reads the -70 floor,
-//    and the -10 LU relative gate discards quiet content when loud content
-//    dominates the programme.
-// Headless — links only canvas_core.
-
 #include "canvas/core/export/loudness.hpp"
 
 #include <cmath>
@@ -87,10 +78,6 @@ void test_integrated() {
     check(loudness::integrated_loudness_lufs(silence, kSr) == loudness::kSilenceLufs,
           "digital silence -> -70 floor");
 
-    // Relative gating: 1 s of very quiet content (-63 LUFS, above the -70
-    // absolute gate) followed by 3 s of full-scale sine. The quiet content is
-    // >10 LU below the programme mean, so it is discarded and the result tracks
-    // the loud content (~-3.01, allowing a small straddle-block pull-down).
     std::vector<float> mixed = sine(0.001, 1.0, kSr);
     const auto loud = sine(1.0, 3.0, kSr);
     mixed.insert(mixed.end(), loud.begin(), loud.end());
@@ -100,7 +87,7 @@ void test_integrated() {
     check(mixed_lu > -10.0f, "mixed loudness is not dragged toward the quiet level");
 }
 
-}  // namespace
+}
 
 int main() {
     test_gain_law();

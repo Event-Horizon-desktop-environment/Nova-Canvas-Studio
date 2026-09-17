@@ -1,10 +1,3 @@
-// CUDA-accelerated RGBA -> NV12 conversion + resize.
-//
-// Compiled with nvcc (CUDA 12 & 13). The kernel is intentionally a single
-// __global__ that does bilinear resize + BT.709 limited-range RGB->YUV in one
-// launch and writes straight into the planes of an FFmpeg AV_PIX_FMT_CUDA hw
-// frame, so the normal encode loop never touches CPU for the color conversion.
-
 #include "canvas/core/gpu/cuda_convert.hpp"
 #include "canvas/core/util/log.hpp"
 
@@ -19,11 +12,6 @@ using cuda_event_t = cudaEvent_t;
 
 namespace {
 
-// Bilinear-resize + RGBA -> NV12. yPlane holds Y (dst_h * dst_w), uvPlane holds
-// interleaved CbCr at (dst_h/2) * dst_w. BT.709 limited range (matches the
-// source's actual tagged color space — see exporter.cpp's BT.709 stream tags;
-// this was previously BT.601, which mismatched the output and produced the
-// same magenta/purple skin-tone shift on playback of exported files).
 __global__ void rgbaToNV12(const uint8_t* __restrict__ src, int sw, int sh,
                            uint8_t* __restrict__ yPlane, size_t yPitch,
                            uint8_t* __restrict__ uvPlane, size_t uvPitch,
@@ -54,7 +42,6 @@ __global__ void rgbaToNV12(const uint8_t* __restrict__ src, int sw, int sh,
     if (Y < 16.f) Y = 16.f; else if (Y > 235.f) Y = 235.f;
     yPlane[(size_t)y * yPitch + x] = (uint8_t)(Y + 0.5f);
 
-    // CbCr at 2x2 subsampling (x,y both even). Interleaved: Cb, Cr.
     if ((x & 1) == 0 && (y & 1) == 0) {
         const int cx = x >> 1, cy = y >> 1;
         float Cb = 128.f + (-0.101f * r - 0.339f * g + 0.439f * b);
@@ -67,22 +54,12 @@ __global__ void rgbaToNV12(const uint8_t* __restrict__ src, int sw, int sh,
     }
 }
 
-// Normalize a fractional coordinate to a valid clamp index [0, n-2] and a
-// fraction in [0,1], matching the RGBA kernel's edge handling above.
 __device__ inline int clamp_index(float v, int n) {
     if (v < 0.f) return 0;
     if (v >= n - 1.f) return n - 2;
     return (int)v;
 }
 
-// Bilinear-resize a GPU NV12 source into a letterboxed rectangle on a GPU NV12
-// target, writing the whole target plane (content + bars). The bars are black
-// (Y=16, Cb=Cr=128) so every pixel of the output hw frame stays defined.
-// Output is `ow x oh`; the scaled content occupies (dx,dy)..(dx+dstW,dy+dstH).
-// The output is normally the full encoder hw frame (letterbox already applied).
-// `fade` in (0,1] dips the CONTENT toward black in-place (16 + (Y-16)*fade,
-// 128 + (C-128)*fade) — the whole-canvas edge-fade blend the CPU compositor
-// applies for a single clip's transition; 1.0 leaves pixels untouched.
 __global__ void nv12Resize(const uint8_t* __restrict__ srcY,
                            const uint8_t* __restrict__ srcUV,
                            int sw, int sh, size_t sYPitch, size_t sUVPitch,
@@ -114,7 +91,6 @@ __global__ void nv12Resize(const uint8_t* __restrict__ srcY,
         outY[(size_t)y * oYPitch + x] = 16;
     }
 
-    // Chroma plane is subsampled by 2 in each axis; interleaved Cb,Cr.
     if ((x & 1) == 0 && (y & 1) == 0) {
         const int cx = x >> 1, cy = y >> 1;
         const int srccw = sw >> 1, srcch = sh >> 1;
@@ -146,27 +122,6 @@ __global__ void nv12Resize(const uint8_t* __restrict__ srcY,
     }
 }
 
-// Fused NV12 -> RGB -> 3D grade LUT (trilinear) -> RGB*fade -> NV12 for graded
-// clips on the export fast path. One launch replaces nv12Resize when a clip is
-// graded, so graded clips stay on the NVENC path (900+ fps) instead of dropping
-// to the CPU RGBA blit. The envelope mirrors the CPU compositor, in order:
-//
-//   1. resize sampling: byte-identical to nv12Resize (bilinear Y + 4-tap block
-//      chroma, letterbox bars Y=16/C=128).
-//   2. YUV->RGB: colorspace.hpp full-swing chroma gains (g.r_* are the caller's
-//      matrix_coeffs(matrix, range) values) + 1.164 limited-luma unwinding when
-//      g.range != full; RGB clamped to [0,255]. Same constants the viewer
-//      shaders use — never re-derived here.
-//   3. grade: bit-for-bit apply_grade_lut/sample_lut_pixel (r-major layout
-//      data[((r*N)+g)*N + b]; grid units = clamp(input)* (N-1); high neighbors
-//      clamped to the floor index on the top edge so every read is in-bounds).
-//      The index is EXPLICIT, so unlike the viewer's GL 3D-texture upload there
-//      is NO R/B axis swap here.
-//   4. fade: RGB output *= fade, the CPU compositor's whole-canvas transverse
-//      dip applied AFTER grade.
-//   5. RGB->YUV: EXACTLY rgbaToNV12's BT.709-limited law (coefficients, clamps
-//      Y[16,235]/C[16,240], +0.5 rounding) so a graded GPU export matches the
-//      CPU-composited convert_rgba_to_nv12 path to the byte.
 __global__ void nv12GradeResize(const uint8_t* __restrict__ srcY,
                                 const uint8_t* __restrict__ srcUV,
                                 int sw, int sh, size_t sYPitch, size_t sUVPitch,
@@ -182,8 +137,6 @@ __global__ void nv12GradeResize(const uint8_t* __restrict__ srcY,
     const int rdx = x - dx, rdy = y - dy;
     const bool in_rect = rdx >= 0 && rdx < dstW && rdy >= 0 && rdy < dstH;
 
-    // 4:2:0 chroma is uniform per 2x2 output block (same block addressing as
-    // nv12Resize); bars keep neutral chroma / video black.
     const int bx = x >> 1, by = y >> 1;
     float Y = 16.f, Cb = 128.f, Cr = 128.f;
     if (in_rect) {
@@ -221,8 +174,6 @@ __global__ void nv12GradeResize(const uint8_t* __restrict__ srcY,
         }
     }
 
-    // YUV -> full-range RGB (colorspace.hpp law; g.r_* are the (matrix, range)
-    // chroma gains, g.range picks the 1.164 limited-luma unwinding).
     const float yr = (g.range == 1) ? Y : 1.164f * (Y - 16.f);
     const float Cbq = Cb - 128.f, Crq = Cr - 128.f;
     float r = yr + g.r_cr * Crq;
@@ -233,8 +184,6 @@ __global__ void nv12GradeResize(const uint8_t* __restrict__ srcY,
     if (b < 0.f) b = 0.f; else if (b > 255.f) b = 255.f;
     float rn = r * (1.f / 255.f), gn = g_ * (1.f / 255.f), bn = b * (1.f / 255.f);
 
-    // Trilinear grade over the r-major grid — apply_grade_lut/sample_lut_pixel
-    // law, index explicit (no GL-style R/B axis swap needed here).
     if (g.lut && g.lut_size >= 2) {
         const int last = g.lut_size - 1;
         if (rn < 0.f) rn = 0.f; else if (rn > 1.f) rn = 1.f;
@@ -279,17 +228,12 @@ __global__ void nv12GradeResize(const uint8_t* __restrict__ srcY,
         }
     }
 
-    // Whole-canvas edge fade toward black, applied AFTER grade as the CPU
-    // compositor does (canvas->rgba *= fade).
     if (fade < 1.f) {
         r *= fade;
         g_ *= fade;
         b *= fade;
     }
 
-    // BT.709-limited encode: EXACTLY the rgbaToNV12 law (coefficients, clamps,
-    // +0.5 rounding). A bar pixel decodes to (0,0,0) so it re-encodes to
-    // 16/128/128 regardless of fade — defined output for the whole plane.
     float Yo = 16.f + (0.183f * r + 0.614f * g_ + 0.062f * b);
     if (Yo < 16.f) Yo = 16.f; else if (Yo > 235.f) Yo = 235.f;
     outY[(size_t)y * oYPitch + x] = (uint8_t)(Yo + 0.5f);
@@ -305,13 +249,6 @@ __global__ void nv12GradeResize(const uint8_t* __restrict__ srcY,
     }
 }
 
-// Title-overlay fuse for the export fast path: blends one premultiplied-RGBA8
-// sprite (title::raster_title_sprite uploaded once per clip) over the canvas
-// AFTER the resize/grade+fade kernels, matching the CPU compositor's
-// title-over-faded-video order. Luma gets the exact per-pixel alpha-over law;
-// chroma reuses the block-origin sprite pixel like rgbaToNV12's top-left-of-
-// block sampling (averaging the 2x2 on-sprite samples for edge blocks that the
-// +1px launch expansion can straddle, so a sprite edge mid-block still tints).
 __global__ void nv12TitleBlend(const uint8_t* __restrict__ sp, int spw, int sph,
                                int sox, int soy,
                                uint8_t* __restrict__ outY, size_t oYPitch,
@@ -332,8 +269,6 @@ __global__ void nv12TitleBlend(const uint8_t* __restrict__ sp, int spw, int sph,
         A = pp[3] * (1.f / 255.f);
     }
     if (A > 0.f) {
-        // Sprite luma (premultiplied 0..255 scale, same law as rgbaToNV12)
-        // dipped by `fade`, alpha-over the already-faded video luma.
         const float Yv = outY[(size_t)y * oYPitch + x];
         const float Ys = 16.f + (0.183f * pR + 0.614f * pG + 0.062f * pB);
         float Yo = 16.f + fade * (Ys - 16.f) + (1.f - A) * (Yv - 16.f);
@@ -380,7 +315,7 @@ __global__ void nv12TitleBlend(const uint8_t* __restrict__ sp, int spw, int sph,
     }
 }
 
-}  // namespace
+}
 
 bool cuda_available() {
     static const bool ok = [] {
@@ -391,9 +326,6 @@ bool cuda_available() {
 }
 
 namespace {
-// Persistent non-blocking stream for the GPU composite path. Kernels launch
-// here asynchronously so the CPU never stalls on a full device sync, letting
-// NVDEC (decode) and NVENC (encode) run concurrently with the composite.
 cudaStream_t& convert_stream() {
     static cudaStream_t s = [] {
         cudaStream_t st = nullptr;
@@ -404,12 +336,6 @@ cudaStream_t& convert_stream() {
     return s;
 }
 
-// CUDA error-transition logger: prints exactly one "[gpu] cuda error" line at
-// the FIRST failure of a site after a run of successes, then stays quiet while
-// it keeps failing, and prints one "[gpu] cuda recovered" line when the site
-// returns to success. A driver reset / context loss reads as a single one-shot
-// transition instead of a per-frame spam, and the recovery line marks the end
-// of the outage for log-timestamp alignment with the FFmpeg switches above.
 bool gpu_cuda_check(const char* name, const cudaError_t e) {
     static thread_local const char* s_bad = nullptr;
     if (e == cudaSuccess) {
@@ -426,10 +352,6 @@ bool gpu_cuda_check(const char* name, const cudaError_t e) {
     return false;
 }
 
-// Fuses an optional title overlay into the just-written NV12 output by
-// launching nv12TitleBlend over the sprite's canvas footprint (+1px, so chroma
-// blocks that straddle the sprite edge still tint) on the same stream, right
-// after the resize/grade kernel. No-op without a valid sprite.
 void launch_title_blend(const TitleSpriteGpu* title, uint8_t* dY, std::size_t yPitch,
                         uint8_t* dUV, std::size_t uvPitch, int ow, int oh, float fade,
                         cudaStream_t s) {
@@ -448,7 +370,7 @@ void launch_title_blend(const TitleSpriteGpu* title, uint8_t* dY, std::size_t yP
     nv12TitleBlend<<<grp, blk, 0, s>>>(title->rgba, title->w, title->h, title->ox, title->oy,
                                        dY, yPitch, dUV, uvPitch, ow, oh, fade);
 }
-}  // namespace
+}
 
 bool convert_nv12_resize_async(const uint8_t* srcY, const uint8_t* srcUV, int src_w, int src_h,
                                std::size_t src_y_pitch, std::size_t src_uv_pitch,
@@ -479,29 +401,18 @@ bool convert_nv12_sync() {
     return cudaGetLastError() == cudaSuccess;
 }
 
-// Full-device barrier.  Unlike convert_nv12_sync (which only waits on our own
-// resize stream), this waits for every kernel launched on the CUDA context —
-// including the asynchronous NVENC encode that is reading the encoder input
-// surface.  Call it BEFORE returning an encoder hw-frame to the surface pool
-// (av_frame_free) so the producer can never recycle a surface NVENC is still
-// reading (which produced duplicate/repeating frames).
 bool convert_nv12_device_sync() {
     const cudaError_t e = cudaDeviceSynchronize();
     cudaGetLastError();
     return gpu_cuda_check("nv12_device_sync", e);
 }
 
-// How many times the resize-event ring found a full slot (consumer a full ring
-// behind). File-scope so convert_nv12_record_event can bump it and
-// nv12_pool_stalls() can consume-on-read it across calls; TU-local by design.
 static uint64_t s_stalls = 0;
 
 bool convert_nv12_record_event(void** out) {
     if (!out) return false;
     cudaStream_t s = convert_stream();
     if (!s) return false;
-    // Recycle pre-created events: cudaEventCreate per call costs ~tens of
-    // microseconds and would dominate the composite launch at high throughput.
     static constexpr int kPoolSize = 64;
     static cuda_event_t s_events[kPoolSize];
     static bool s_created[kPoolSize] = {false};
@@ -514,8 +425,6 @@ bool convert_nv12_record_event(void** out) {
             return false;
         s_created[slot] = true;
     } else if (cudaEventQuery(ev) != cudaSuccess) {
-        // Still busy: the consumer is behind by a full ring — encode is the
-        // slower side. Fall back to a blocking record so ordering is preserved.
         ++s_stalls;
         cudaEventSynchronize(ev);
     }
@@ -529,24 +438,16 @@ bool convert_nv12_record_event(void** out) {
 bool convert_nv12_wait_event(void* ev) {
     if (!ev) return false;
     cudaStream_t s = convert_stream();
-    // Check the event regardless of whether the stream is still valid; if the
-    // stream is gone the event may still exist (created elsewhere).
     const cudaError_t e = cudaEventSynchronize(reinterpret_cast<cuda_event_t>(ev));
     (void)s;
     return e == cudaSuccess;
 }
 
 void convert_nv12_destroy_event(void* ev) {
-    // Events come from the internal ring pool; recycling is handled by
-    // convert_nv12_record_event. Nothing to free.
     (void)ev;
 }
 
 uint64_t nv12_pool_stalls() {
-    // Consume-on-read counter: how many times convert_nv12_record_event found
-    // the 64-slot event ring fully busy (the resize consumer is a full ring
-    // behind). A nonzero delta on the `[render]` line is the signature of an
-    // encode-bound export.
     static uint64_t s_stalls_seen = 0;
     const uint64_t now = s_stalls;
     const uint64_t delta = now - s_stalls_seen;
@@ -561,11 +462,6 @@ bool convert_rgba_to_nv12(const uint8_t* rgba, int src_w, int src_h,
     if (!rgba || !dY || !dUV || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0)
         return false;
 
-    // Always-on (once): the CUDA RGBA->NV12 kernel hardcodes BT.709 limited
-    // RGB->YUV coefficients + clamps (Y[16,235]/C[16,240]) — see rgbaToNV12.
-    // The export/hw path CONVERTS with BT.709 here, while the CPU swscale path
-    // converts with its BT.601 default: two different matrices for the same
-    // export depending on hw vs cpu. Traced against the [export] color audit.
     static bool rgba_nv12_logged_ = false;
     if (!rgba_nv12_logged_) {
         rgba_nv12_logged_ = true;
@@ -574,8 +470,6 @@ bool convert_rgba_to_nv12(const uint8_t* rgba, int src_w, int src_h,
             "coeffs, clamps Y[16,235] C[16,240]) — hw/export path only");
     }
 
-    // Persistent buffer avoids per-frame cudaMalloc/cudaFree (~14.7MB at 1440p).
-    // The buffer is lazily allocated and only reallocated if the source grows.
     thread_local uint8_t* dRgba = nullptr;
     thread_local size_t dRgbaSize = 0;
     const size_t needed = (size_t)src_w * src_h * 4;
@@ -626,18 +520,12 @@ bool convert_nv12_resize(const uint8_t* srcY, const uint8_t* srcUV, int src_w, i
 
 namespace {
 
-// Persistent host-staging buffers for convert_nv12_resize_to_host. The
-// playback path calls this ~30x/sec; a per-frame cudaMalloc pair churned the
-// device heap and, once fragmented, failed with "out of memory" on ~1 alloc/sec
-// — dropping the playhead to the multi-hundred-ms CPU GOP re-walk. Cache two
-// device buffers (grow-only) and fence them with a mutex so the playback thread
-// and the transition-bake thread share them safely.
 std::mutex g_staging_mtx;
 uint8_t* g_staging_y = nullptr;
 uint8_t* g_staging_uv = nullptr;
 std::size_t g_staging_y_size = 0;
 std::size_t g_staging_uv_size = 0;
-}  // namespace
+}
 
 bool convert_nv12_resize_to_host(const uint8_t* srcY, const uint8_t* srcUV,
                                  int src_w, int src_h,
@@ -649,10 +537,6 @@ bool convert_nv12_resize_to_host(const uint8_t* srcY, const uint8_t* srcUV,
         out_h <= 0 || dst_w <= 0 || dst_h <= 0)
         return false;
 
-    // Persistent grow-only host-staging pool (see g_staging_y/uv): the
-    // playback path calls this ~30x/sec, and a per-frame cudaMalloc pair
-    // churned the device heap until ~1 alloc/sec failed "out of memory",
-    // dropping the playhead to the multi-hundred-ms CPU GOP re-walk.
     const std::size_t y_sz = static_cast<std::size_t>(out_w) * out_h;
     const std::size_t uv_sz = static_cast<std::size_t>(out_w) * (out_h / 2);
     std::lock_guard<std::mutex> lk(g_staging_mtx);
@@ -740,9 +624,6 @@ bool convert_nv12_grade_resize_async(const uint8_t* srcY, const uint8_t* srcUV,
     if (!srcY || !srcUV || !dY || !dUV || src_w <= 0 || src_h <= 0 || out_w <= 0 ||
         out_h <= 0 || dst_w <= 0 || dst_h <= 0)
         return false;
-    // A graded call needs a valid device LUT. With g.lut_size < 2 the kernel
-    // skips the grade (passthrough decode->encode), but callers should never
-    // send that here — the exporter chooses this kernel only when a bake exists.
     if (!g.lut || g.lut_size < 2) return false;
     cudaStream_t s = convert_stream();
     if (!s) return false;
@@ -758,4 +639,4 @@ bool convert_nv12_grade_resize_async(const uint8_t* srcY, const uint8_t* srcUV,
     return gpu_cuda_check("nv12_grade_resize_async", cudaGetLastError());
 }
 
-}  // namespace canvas::core::gpu
+}

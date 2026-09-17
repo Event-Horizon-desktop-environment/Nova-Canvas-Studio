@@ -13,7 +13,7 @@ compiles from your system packages.
 ## Status
 
 Alpha, very much in motion. As of 2026-09-16 the app builds warning-free
-(Debug + Release), the 70-test suite passes except for two Vulkan
+(Debug + Release), the 77-test suite passes except for two Vulkan
 render-kernel SKIP stubs, and the current feature surface is catalogued in
 [docs/FEATURES.md](docs/FEATURES.md). The project was renamed (from Event
 Horizon Studio) to **Nova Canvas Studio** — binary `canvas`, project files

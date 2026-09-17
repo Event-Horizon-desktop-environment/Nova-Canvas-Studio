@@ -44,8 +44,8 @@ struct VisualControls {
     QLineEdit* title_text = nullptr;
     QDoubleSpinBox* title_size = nullptr;
     QToolButton* title_color = nullptr;
-    bool updating = false;   // guards against commit/re-sync during refresh
-    bool attached = false;   // selection signals already connected
+    bool updating = false;
+    bool attached = false;
 };
 
 std::map<MainWindow*, VisualControls>& visual_registry() {
@@ -58,9 +58,6 @@ VisualControls* lookup(MainWindow& mw) {
     return it == visual_registry().end() ? nullptr : &it->second;
 }
 
-// Paints the title-colour button from a QColor and stashes the colour as a
-// dynamic property so apply_inspector_visual can read it back without a global
-// colour state.
 void set_title_color_button(QToolButton* btn, const QColor& c) {
     btn->setProperty("titleColor", c);
     const bool light =
@@ -73,14 +70,13 @@ void set_title_color_button(QToolButton* btn, const QColor& c) {
     btn->setText(c.name());
 }
 
-}  // namespace
+}
 
 void build_inspector_visual(MainWindow& mw, QVBoxLayout* video_layout) {
     VisualControls& vc = visual_registry()[&mw];
     auto* host = video_layout->parentWidget();
     const auto tr = [&](const char* s) { return MainWindow::tr(s); };
 
-    // --- Transform ----------------------------------------------------------
     auto* transform = new InspectorCategory(tr("Transform"), true, host);
     auto* zoom_row = new QWidget(host);
     auto* zoom_layout = new QHBoxLayout(zoom_row);
@@ -130,8 +126,6 @@ void build_inspector_visual(MainWindow& mw, QVBoxLayout* video_layout) {
     anchor_layout->addWidget(vc.anchor_y);
     add_property_row(transform->body_layout(), tr("Anchor Point"), anchor_row);
 
-    // Pitch/Yaw are reference rows with no backing model fields yet — kept but
-    // intentionally unwired (a 3D rotate is out of the 2D transform scope).
     add_property_row(transform->body_layout(), tr("Pitch"),
                      make_numeric(-180.0, 180.0, 0.0, host));
     add_property_row(transform->body_layout(), tr("Yaw"),
@@ -154,14 +148,13 @@ void build_inspector_visual(MainWindow& mw, QVBoxLayout* video_layout) {
     flip_layout->addWidget(vc.flip_h);
     flip_layout->addWidget(vc.flip_v);
     flip_layout->addStretch(1);
-    add_property_row(transform->body_layout(), tr("Flip"), flip_row, /*with_reset=*/false);
+    add_property_row(transform->body_layout(), tr("Flip"), flip_row, false);
     video_layout->addWidget(transform);
 
-    // --- Title --------------------------------------------------------------
     auto* title_cat = new InspectorCategory(tr("Title"), true, host);
     vc.title_text = new QLineEdit(host);
     vc.title_text->setPlaceholderText(tr("Title text (centre-aligned)"));
-    add_property_row(title_cat->body_layout(), tr("Text"), vc.title_text, /*with_reset=*/false);
+    add_property_row(title_cat->body_layout(), tr("Text"), vc.title_text, false);
     vc.title_size = make_numeric(canvas::core::title::kSizeMin, canvas::core::title::kSizeMax,
                                  canvas::core::title::kSizeDefault, host);
     vc.title_size->setSuffix(QStringLiteral("  h"));
@@ -172,14 +165,13 @@ void build_inspector_visual(MainWindow& mw, QVBoxLayout* video_layout) {
     add_property_row(title_cat->body_layout(), tr("Colour"), vc.title_color);
     video_layout->addWidget(title_cat);
 
-    // --- Cropping / Dynamic Zoom (reference placeholders, unwired) ------------
     video_layout->addWidget(new InspectorCategory(tr("Cropping"), false, host));
     video_layout->addWidget(new InspectorCategory(tr("Dynamic Zoom"), false, host));
 
-    // --- Composite -----------------------------------------------------------
     auto* composite = new InspectorCategory(tr("Composite"), false, host);
     vc.blend = new QComboBox(host);
-    vc.blend->addItems({tr("Normal"), tr("Add"), tr("Multiply"), tr("Screen"), tr("Overlay")});
+    vc.blend->addItems({tr("Normal"), tr("Add"), tr("Multiply"), tr("Screen"), tr("Overlay"),
+                        tr("Soft Light"), tr("Subtract"), tr("Difference")});
     add_property_row(composite->body_layout(), tr("Composite Mode"), vc.blend);
     auto* opacity_row = new QWidget(host);
     auto* opacity_layout = new QHBoxLayout(opacity_row);
@@ -188,7 +180,6 @@ void build_inspector_visual(MainWindow& mw, QVBoxLayout* video_layout) {
     vc.opacity_slider = new QSlider(Qt::Horizontal, opacity_row);
     vc.opacity_slider->setRange(0, 100);
     vc.opacity_slider->setValue(100);
-    // Compressible so the row fits narrow inspector widths / high DPI.
     vc.opacity_slider->setMinimumWidth(0);
     vc.opacity_value = new QLabel(QStringLiteral("1.00"), opacity_row);
     apply_theme_style(vc.opacity_value, [] {
@@ -204,8 +195,6 @@ void build_inspector_visual(MainWindow& mw, QVBoxLayout* video_layout) {
         video_layout->addWidget(new InspectorCategory(tr(name), false, host));
     }
 
-    // ---- Wiring --------------------------------------------------------------
-    // Editing the X or Y zoom spin mirrors the linked twin when the chain is on.
     QObject::connect(vc.zoom_x, &QDoubleSpinBox::valueChanged, &mw, [&mw, &vc](double v) {
         if (vc.updating || !vc.chain) return;
         if (vc.chain->isChecked()) {
@@ -332,7 +321,7 @@ void apply_inspector_visual(MainWindow& mw, unsigned parts) {
                 mw.has_unsaved_changes_ = true;
                 mw.refresh_timeline();
                 mw.push_snapshot();
-                update_inspector_subtitles(mw);  // Subtitles position sliders follow
+                update_inspector_subtitles(mw);
                 qWarning() << "[edit] CLIP-TRANSFORM kind="
                            << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                            << "track=" << index << "clip=" << clip.id
@@ -376,9 +365,6 @@ void apply_inspector_visual(MainWindow& mw, unsigned parts) {
         if (!mw.find_selected_clip(kind, index, clip)) return;
 
         canvas::core::Clip::Title t = clip.title;
-        // Only the fields the Video tab actually edits change; everything set
-        // on the Subtitles tab (typeface, faux styles, shadow, background box)
-        // rides through untouched.
         t.text = vc->title_text->text().trimmed().toStdString();
         t.size = static_cast<float>(vc->title_size->value());
         const QColor c = vc->title_color->property("titleColor").value<QColor>();
@@ -388,7 +374,6 @@ void apply_inspector_visual(MainWindow& mw, unsigned parts) {
             t.b = static_cast<float>(c.blueF());
             t.a = static_cast<float>(c.alphaF());
         }
-        // Field-wise (snapshot-exact) comparison decides whether to commit.
         const bool same = clip.title == t;
         if (!same) {
             auto cmd = canvas::core::set_clip_title(mw.project_->sequence, kind, index, clip.id, t);
@@ -397,7 +382,7 @@ void apply_inspector_visual(MainWindow& mw, unsigned parts) {
                 mw.has_unsaved_changes_ = true;
                 mw.refresh_timeline();
                 mw.push_snapshot();
-                update_inspector_subtitles(mw);  // Subtitles tab slider follows
+                update_inspector_subtitles(mw);
                 qWarning() << "[edit] CLIP-TITLE kind="
                            << (kind == canvas::core::Track::Kind::Video ? "V" : "A")
                            << "track=" << index << "clip=" << clip.id << "text='"
@@ -411,4 +396,4 @@ void apply_inspector_visual(MainWindow& mw) {
     apply_inspector_visual(mw, VisualPartAll);
 }
 
-}  // namespace canvas::gui
+}

@@ -1,15 +1,11 @@
-# Build
 build*/
 cmake-build-*/
 build-debug-*/
 
-# Python cache
 __pycache__
 
-# Compiled binary (local meson build dir)
 EventHorizon
 
-# Editor / IDE
 .vscode/
 .idea/
 .cache/
@@ -17,7 +13,6 @@ EventHorizon
 *.swo
 *~
 
-# OS
 .DS_Store
 Thumbs.db
 

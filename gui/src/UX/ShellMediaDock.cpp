@@ -40,31 +40,17 @@ namespace canvas::gui {
 
 namespace {
 
-// Height of the media pool card's top blend ramp, in device pixels. Kept to
-// roughly the tab strip's own height (~36-40px of chrome above the content):
-// the blend finishes before the search row, so the gradient never spills a
-// half-done band between the strip and the content it anchors.
 constexpr int kMediaPoolBlendPx = 44;
 
-// 4x4 Bayer ordered-dither matrix. Tiles across the card so an 8-bit backing
-// store reads the float-computed blend as a smooth >8-bit ramp instead of
-// horizontal 8-bit bands.
 constexpr int kBayer4[4][4] = {
     {0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
 
-// Smoothstep easing so the ramp starts gently, accelerates through the
-// transition, and settles slowly into the panel tone below the blend height.
 double smoothstep(double u) {
     return u <= 0.0 ? 0.0 : u >= 1.0 ? 1.0 : u * u * (3.0 - 2.0 * u);
 }
 
-}  // namespace
+}
 
-// The media pool's raised card. Fully paint-coded so the top blends from the
-// surrounding workspace surface into the panel tone over a short ramp; QSS
-// qlineargradient interpolates in 8-bit per channel and bands visibly at
-// these spans, so the ramp is computed at float precision and dithered with a
-// 4x4 Bayer matrix. Repaints on theme switches via register_theme_reapply.
 class MediaPoolGlass final : public QFrame {
 public:
     explicit MediaPoolGlass(QWidget* parent) : QFrame(parent) {
@@ -81,17 +67,12 @@ protected:
         const int h = height();
         if (w <= 0 || h <= 0) return;
 
-        // The blend is purely vertical: one 4-px-wide Bayer column, stretched
-        // across the card at nearest scale (the pattern only repeats in x, so a
-        // 4xH tile tiles exactly and the dither stays crisp under the stretch).
         QImage tile(4, h, QImage::Format_RGB32);
         for (int y = 0; y < h; ++y) {
             const double eased =
                 smoothstep(static_cast<double>(y) / static_cast<double>(kMediaPoolBlendPx));
             QRgb* line = reinterpret_cast<QRgb*>(tile.scanLine(y));
             for (int x = 0; x < 4; ++x) {
-                // Dither amplitude ~1.0 LSB in 8-bit, centered so the pattern
-                // adds no overall brightness bias.
                 const double dith =
                     (static_cast<double>(kBayer4[x][y & 3]) - 7.5) / 16.0;
                 auto ch = [&](int a, int b) -> int {
@@ -108,8 +89,6 @@ protected:
         p.setRenderHint(QPainter::Antialiasing, false);
         p.drawImage(QRect(0, 0, w, h), tile);
 
-        // Hairline rim on both sides and the bottom (the top stays borderless
-        // so the blend has nothing to abut — see dock_panel_style's note).
         p.setPen(QPen(t.border, 1));
         p.drawLine(0, 0, 0, h - 1);
         p.drawLine(w - 1, 0, w - 1, h - 1);
@@ -117,10 +96,6 @@ protected:
     }
 };
 
-// The left dock: Bins column + Media Pool grid, in a Resolve-style tab strip
-// with a floating glass card and a collapse sliver at the dock's outer edge.
-// Split out of the old ShellDocks.cpp so the media-pool chrome can move
-// independently of the Inspector (ShellInspectorDock.cpp).
 void build_left_dock(MainWindow& mw) {
     auto* left_tabs = new QTabWidget(&mw);
     left_tabs->setObjectName(QStringLiteral("leftTabStrip"));
@@ -134,7 +109,6 @@ void build_left_dock(MainWindow& mw) {
     pool_root_layout->setContentsMargins(8, 8, 8, 8);
     pool_root_layout->setSpacing(8);
 
-    // Search row: filter field + Import, matching the reference panel top.
     auto* search_row = new QWidget(pool_tab);
     auto* search_layout = new QHBoxLayout(search_row);
     search_layout->setContentsMargins(0, 0, 0, 0);
@@ -173,13 +147,11 @@ void build_left_dock(MainWindow& mw) {
     search_layout->addWidget(import_btn);
     pool_root_layout->addWidget(search_row);
 
-    // Two-column body: bins | pool.
     auto* pool_body = new QWidget(pool_tab);
     auto* pool_body_layout = new QHBoxLayout(pool_body);
     pool_body_layout->setContentsMargins(0, 0, 0, 0);
     pool_body_layout->setSpacing(8);
 
-    // Bins column.
     auto* bins_column = new QWidget(pool_body);
     bins_column->setFixedWidth(88);
     auto* bins_layout = new QVBoxLayout(bins_column);
@@ -204,10 +176,6 @@ void build_left_dock(MainWindow& mw) {
     bin_tree->setIconSize(QSize(16, 16));
     apply_theme_style(bin_tree, &bin_tree_style);
     {
-        // Palette-driven surfaces so viewport/text/selection follow tokens
-        // (kept alive across appearance switches via the re-apply hook).
-        // QPointer-guarded: the callback outlives the tree if the dock contents
-        // are ever rebuilt, and would otherwise dereference freed memory.
         const auto retint_bins = [wp = QPointer<QTreeWidget>(bin_tree)] {
             if (!wp)
                 return;
@@ -299,7 +267,6 @@ void build_left_dock(MainWindow& mw) {
     bins_layout->addWidget(bins_label);
     bins_layout->addWidget(bin_tree, 1);
 
-    // Grid column.
     auto* grid_column = new QWidget(pool_body);
     grid_column->setMinimumWidth(220);
     auto* grid_layout = new QVBoxLayout(grid_column);
@@ -367,10 +334,6 @@ void build_left_dock(MainWindow& mw) {
     pool_body_layout->addWidget(bins_column);
     pool_body_layout->addWidget(grid_column, 1);
 
-    // The pool column above, the Resolve-style Toolbox below (effects /
-    // titles / transitions catalogue, drag sources into the timeline). The
-    // splitter splits the dock so the toolbox hugs the source-preview's
-    // bottom edge the way the reference edit page lays out.
     auto* pool_content = new QWidget(pool_tab);
     auto* pool_content_layout = new QVBoxLayout(pool_content);
     pool_content_layout->setContentsMargins(0, 0, 0, 0);
@@ -389,7 +352,6 @@ void build_left_dock(MainWindow& mw) {
 
     pool_root_layout->addWidget(pool_split, 1);
 
-    // Search filters the current bin's pool by clip name.
     QObject::connect(search, &QLineEdit::textChanged, &mw, [&mw](const QString& needle) {
         if (!mw.media_pool_) return;
         for (int i = 0; i < mw.media_pool_->count(); ++i) {
@@ -404,12 +366,6 @@ void build_left_dock(MainWindow& mw) {
 
     mw.media_dock_ = mw.ui->mediaDock;
     mw.media_dock_->setObjectName(QStringLiteral("mediaDock"));
-    // The dock backdrop paints the flat workspace surface; the glass card below
-    // floats on it (mirror of the viewer column's viewerFrame). The dock's own
-    // title sub-control would otherwise paint the App-level QDockWidget::title
-    // background (surface_raised + 4/8px padding) as a light strip above the
-    // card's top blend — the collapse toggle now lives on the top status bar,
-    // so kill the title bar here: transparent paint AND a zero-height widget.
     apply_theme_style(mw.media_dock_, [] {
         const ThemeTokens& t = tokens();
         return QStringLiteral(
@@ -427,22 +383,14 @@ void build_left_dock(MainWindow& mw) {
     media_title->setFixedHeight(0);
     mw.media_dock_->setTitleBarWidget(media_title);
 
-    // Edge-to-edge panel wrapping the tab strip: the dock content is a flat
-    // square well flush against the workspace surface — no float, no shadow.
-    // Paint-coded (MediaPoolGlass) so the card's top blends from the workspace
-    // surface down into the panel tone with a dithered >8-bit ramp.
     auto* media_glass = new MediaPoolGlass(&mw);
     auto* media_glass_layout = new QVBoxLayout(media_glass);
     media_glass_layout->setContentsMargins(0, 0, 0, 0);
     media_glass_layout->setSpacing(0);
     media_glass_layout->addWidget(left_tabs);
 
-    // The collapse/expand toggle now lives on the top status bar (ShellCenter,
-    // just left of the Dual-Viewer button) so the dock edge stays clean. The
-    // pool panel keeps its flat full-width glass below the tab strip; the
-    // same QAbstractButton-style roundtrips mw.media_dock_ corner flips.
     mw.media_dock_->setWidget(media_glass);
     mw.media_dock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
 }
 
-}  // namespace canvas::gui
+}

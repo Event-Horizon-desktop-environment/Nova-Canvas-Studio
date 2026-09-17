@@ -1,24 +1,3 @@
-// cuda_enc_bench — NVIDIA/CUDA (NVENC) encode speed sweep @ the deliver target.
-//
-// Measures export_project() wall-throughput at the user's real export intent —
-// H.265 NVENC, 2560x1440, 60 fps, 80 Mbps — from the real 1440p AV1 source,
-// sweeping the knob space that the exporter actually exposes. Prints a ranked
-// leaderboard plus bytes/Mbps for each row. The sibling of vaapi_enc_bench for
-// the CUDA backend.
-//
-// Informational by design: PASS when every measured row produced a decodable,
-// non-empty output file — it never asserts a speed. Rows:
-//   hevc async_depth    {4, 8, 16, 32, 64} on top of baseline (VBR@80 Mbps)
-//   rc mode             CBR vs VBR at 80 Mbps
-//   preset names        ultrafast / faster / medium / slow / placebo
-//                       (exercises the exporter's nv_preset_for p1..p7 wiring)
-//   feature rows        baseline + burned-in subtitle/fades. For NVENC the title
-//                       stays on the GPU and is fused by the nv12TitleBlend
-//                       kernel launch that already does resize+grade, so these
-//                       rows are the deliver numbers a subtitle-bearing timeline
-//                       gets on the fast path, not a CPU-compositor baseline.
-//   h264 reference      same geometry so H.264 vs H.265 speed is visible.
-
 #include "cuda_test_common.hpp"
 
 #include "canvas/core/export/exporter.hpp"
@@ -39,16 +18,16 @@ void check(bool cond, const char* what) {
 }
 
 struct Row {
-    std::string tag;    // filename tag (out_<tag>.mp4)
-    std::string label;  // human-readable row label
+    std::string tag;
+    std::string label;
     double fps = 0.0;
     double mbps = 0.0;
     int64_t bytes = 0;
     bool ok = false;
-    std::string note;
+    std::string note{};
 };
 
-}  // namespace
+}
 
 int main() {
     using namespace cuda_test;
@@ -75,14 +54,10 @@ int main() {
     std::printf("source: %s %dx%d %.0ffps\n", clip.path.c_str(), clip.width,
                 clip.height, clip.fps);
 
-    constexpr int64_t kFrames = 90;  // 1.5 s @ 60 fps per row
+    constexpr int64_t kFrames = 90;
     const auto proj = make_single_clip_project(clip, kFrames);
-    // Editorial-content variant: burn-in subtitle + edge fades. On the CUDA path
-    // the per-frame title sprite is uploaded once and woven into the fused
-    // resize+grade kernel launch (nv12TitleBlend), so these rows measure the full
-    // title raster->blend->encode deliver path at GPU cost, not a bare blit.
     const auto feat_proj = make_feature_project(clip, kFrames);
-    constexpr double kSubtitleBandH = 0.18;  // bottom 18% = the subtitle band
+    constexpr double kSubtitleBandH = 0.18;
 
     const auto hevc_row = [&](const std::string& rc_mode, const std::string& preset,
                               const std::string& extra, const std::string& tag,
@@ -109,7 +84,6 @@ int main() {
 
     std::vector<Row> rows;
 
-    // --- hevc: baseline + knob sweep -----------------------------------------
     rows.push_back(hevc_row("vbr_target", "medium", "", "hevc_base", "hevc VBR@80M baseline"));
     for (const char* depth : {"4", "8", "16", "32", "64"}) {
         const std::string tag = std::string("hevc_ad") + depth;
@@ -124,15 +98,11 @@ int main() {
         rows.push_back(hevc_row("vbr_target", pres, "", tag, label));
     }
 
-    // --- feature-content rows: subtitle + fades through the deliver path -----
-    // Exercising the same fused GPU title->encode chain the app runs (the
-    // sprite upload + nv12TitleBlend fusion happen inside the export session).
     rows.push_back(hevc_row("vbr_target", "medium", "", "hevc_feat",
                             "hevc VBR@80M baseline + subtitle/fades", true));
     rows.push_back(hevc_row("vbr_target", "ultrafast", "", "hevc_feat_fast",
                             "hevc VBR@80M ultrafast + subtitle/fades", true));
 
-    // --- h264 reference (same geometry/bitrate) ------------------------------
     if (h264_ok) {
         {
             Row r{"h264_base", "h264 VBR@80M baseline"};
@@ -160,7 +130,6 @@ int main() {
         }
     }
 
-    // --- validate + rank -----------------------------------------------------
     std::printf("%-42s | %6s | %6s | %10s | %s\n", "row", "fps", "Mbps", "bytes", "status");
     for (auto& row : rows) {
         if (row.ok) {

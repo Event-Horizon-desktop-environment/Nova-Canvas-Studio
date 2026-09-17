@@ -15,33 +15,17 @@
 
 namespace canvas::gui {
 
-// Forward declarations: the seq→media mappers are defined with the other
-// file-local helpers below but used from the decode entry points earlier.
 namespace {
 double media_fps_of(const canvas::core::Project& project, const canvas::core::Clip& clip);
 int64_t seq_to_src_frame(const canvas::core::Project& project, const canvas::core::Clip& clip,
                          int64_t seq_frame);
-// Shared NV12 staging for the slot decode path and the off-thread transition
-// bake (defined below with the other helpers).
 canvas::core::Nv12FramePtr host_nv12_from_hw(const AVFrame* hw, std::int64_t src_frame,
                                              const canvas::core::gpu::ColorSpec& spec,
                                              int max_dim);
 
-// The most recent decode_nv12()/decode_nv12_slot() null reason, published at
-// each early return and consumed by frame()/preview() right after an NV12
-// attempt fails, so the CPU-RGBA fallback line says WHY it ran. The ~1Hz
-// full-res decode() with 195ms-5.4s stalls in the logs is this fallback, and
-// without the reason it looks like a random re-decode. thread_local: the
-// playback worker, transition-bake thread and tests interleave, but the reason
-// is always consumed on the same thread that set it.
 thread_local const char* g_last_nv12_null_reason = "never-tried";
 thread_local std::int64_t g_last_nv12_null_ms = 0;
 
-// Every-fallback trace: each occurrence is a full-res CPU decode on the
-// playback/scrub path (0.4-6s stalls), so throttling would lose the very frames
-// being chased. `why`/`nv12_ms` are captured BEFORE the CPU decode runs (from
-// the thread-local reason the NV12 attempt published), `decode_ms` after — the
-// pair shows whether the stall is the NV12 miss itself or the CPU GOP re-walk.
 void trace_rgba_fallback(const char* side, int media, std::int64_t seq_frame,
                          std::int64_t tl_in, const char* why,
                          std::int64_t nv12_ms, double decode_ms) {
@@ -53,13 +37,6 @@ void trace_rgba_fallback(const char* side, int media, std::int64_t seq_frame,
         decode_ms);
 }
 
-// Full-res decode() attribution. A full-res CPU decode on the playback path is
-// almost always frame()'s NV12-fallback (RGBA-FALLBACK) — but the 02:50 log had
-// 13 fullres decodes (0.07-1.3s each) with NO RGBA-FALLBACK, implying decode()
-// is reached from a context that never attempted the NV12 fast path. Every
-// decode() call then logs an ungated FULLRES-CALLED line carrying the origin
-// (0=none, 1=frame(), 2=preview()) plus whatever reason the last NV12 attempt
-// published, so the next stall run names its caller even without CANVAS_DEBUG.
 thread_local int t_decode_origin = 0;
 class DecodeOriginGuard {
 public:
@@ -71,16 +48,13 @@ public:
 private:
     int saved_;
 };
-}  // namespace
+}
 
 void TimelineDecoder::add_media(const canvas::core::MediaEntry& entry) {
     auto slot = std::make_unique<DecoderSlot>();
     std::string error;
     if (slot->decoder.open(entry.path, &error, hw_.device_ctx(),
                            hw_.device_label().c_str())) slot->loaded = true;
-    // Always-on stream census: how many streams the container holds, which one
-    // the decoder picked, and every video stream present (so two video streams
-    // show up instead of silently being ignored).
     if (slot->loaded) {
         const bool gpu_tag = slot->decoder.is_hardware() &&
                              slot->decoder.gpu_label()[0];
@@ -103,12 +77,6 @@ void TimelineDecoder::add_media(const canvas::core::MediaEntry& entry) {
 
 void TimelineDecoder::open_b_slot(const canvas::core::Project& project,
                                   const canvas::core::Clip& clip) {
-    // A true two-clip cross-dissolve on the SAME media needs a second decode
-    // position from the same file. The main slot walks A's tail; the B slot
-    // walks B's pre-roll independently, so neither side has to seek back on
-    // the shared session (which re-walks a whole GOP per frame — the ~10fps
-    // stall + 4.4s A/V drift seen in the first pass at this fix). The two
-    // slots share the CUDA device but own separate decode sessions.
     if (b_slots_.count(clip.media) > 0) return;
     const auto it = std::find_if(project.media.begin(), project.media.end(),
                                  [&](const canvas::core::MediaEntry& m) { return m.id == clip.media; });
@@ -135,13 +103,6 @@ void TimelineDecoder::open_b_slot(const canvas::core::Project& project,
 }
 
 void TimelineDecoder::close() {
-    // Stop the transition-bake thread FIRST: it holds its own decoder sessions
-    // and reads hardware-frames from the shared device, so it must be joined
-    // before the slots (and the device) are torn down. bake_stop_ aborts an
-    // in-flight bake at the next frame boundary; the worker picks up the result
-    // — if any — like any other frame, but close also drops it so nothing stale
-    // survives the teardown. bake_thread_ is left non-joinable and the object
-    // reusable (tests call add_media after close).
     {
         std::lock_guard<std::mutex> lk(bake_mutex_);
         bake_stop_ = true;
@@ -150,15 +111,12 @@ void TimelineDecoder::close() {
     if (bake_thread_.joinable()) bake_thread_.join();
     {
         std::lock_guard<std::mutex> lk(bake_mutex_);
-        bake_stop_ = false;  // tests reuse the object after close()
+        bake_stop_ = false;
         bake_job_.reset();
         bake_inflight_ = false;
         bake_result_.reset();
     }
 
-    // Project-switch census: how many decoder slots were torn down and how many
-    // had gone hardware, so add_media storms (one decode init per media) are
-    // attributable to the switch rather than to a fill_lookahead loop.
     size_t hw_slots = 0;
     for (const auto& [id, slot] : slots_)
         if (slot->loaded && slot->decoder.is_hardware()) ++hw_slots;
@@ -218,7 +176,7 @@ canvas::core::grade_graph::GradeLutPtr TimelineDecoder::grade_lut_for(
         engaged_clip_ = clip.id;
         int lgg = 0, curves = 0, other = 0;
         const auto& g = clip.grade;
-        for (int i = 0; i < g.num_nodes(); ++i) {
+        for (std::size_t i = 0; i < g.num_nodes(); ++i) {
             switch (g.node(i).correct_mode) {
                 case canvas::core::grade_graph::CorrectMode::kLgg:
                     ++lgg;
@@ -227,25 +185,23 @@ canvas::core::grade_graph::GradeLutPtr TimelineDecoder::grade_lut_for(
                     ++curves;
                     break;
                 default:
-                    ++other;  // identity/cdl correctors + the output node
+                    ++other;
                     break;
             }
         }
         ::canvas::core::log::log_info(
             "[grade] engaged clip=%llu nodes=%d lgg=%d curves=%d other=%d (3D LUT path)",
-            static_cast<unsigned long long>(clip.id), g.num_nodes(), lgg, curves, other);
+            static_cast<unsigned long long>(clip.id), static_cast<int>(g.num_nodes()), lgg, curves,
+            other);
     }
 
     const auto t0 = std::chrono::steady_clock::now();
-    // Log the LGG/Offset structs the graph actually feeds the baker — a second
-    // source of truth vs. the wheel widget's own commit trace. If these two
-    // ever disagree, the scale law or the graph build dropped/reordered a term.
     {
         using namespace canvas::core::grade_graph;
         using namespace canvas::core::colorsci;
         const auto& g = clip.grade;
         bool any = false;
-        for (int i = 0; i < g.num_nodes(); ++i) {
+        for (std::size_t i = 0; i < g.num_nodes(); ++i) {
             const Node& n = g.node(i);
             if (n.lgg) {
                 const LGG& p = *n.lgg;
@@ -271,7 +227,7 @@ canvas::core::grade_graph::GradeLutPtr TimelineDecoder::grade_lut_for(
         if (!any)
             ::canvas::core::log::log_info(
                 "[grade] graph-lgg clip=%llu nodes=%d (no LGG/offset node)",
-                static_cast<unsigned long long>(clip.id), g.num_nodes());
+                static_cast<unsigned long long>(clip.id), static_cast<int>(g.num_nodes()));
     }
     canvas::core::grade_graph::GradeLutPtr lut =
         canvas::core::grade_graph::bake_grade_lut(clip.grade);
@@ -294,8 +250,6 @@ canvas::core::grade_graph::GradeLutPtr TimelineDecoder::grade_lut_for(
             digest.mid[2], digest.black[0], digest.black[1], digest.black[2],
             digest.white[0], digest.white[1], digest.white[2], digest.skin[0], digest.skin[1],
             digest.skin[2], digest.max_dev, changed ? 1 : 0);
-        // Color archive: same bake, correlated with the GUI [grade] commit by
-        // seq and the viewer upload by seq — the always-on page log.
         CANVAS_COLOR_LOG(
             "[grade] bake clip=%llu seq=%llu size=%d hash=%016llx "
             "black=(%.3f,%.3f,%.3f) white=(%.3f,%.3f,%.3f) "
@@ -345,11 +299,7 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
     auto* slot = it->second.get();
     const int64_t src_frame = seq_to_src_frame(project, clip, seq_frame);
 
-    // Fast low-res preview path with its own LRU so a reduced frame never
-    // displaces (or is returned as) a full-res playback frame.
     if (max_dim > 0) {
-        // Build the I-frame index lazily so random scrub seeks jump straight to
-        // the owning keyframe instead of searching the container per seek.
         if (!slot->decoder.has_iframe_index()) slot->decoder.build_iframe_index();
         const PreviewKey key{clip.media, src_frame};
         auto cit = preview_cache_.find(key);
@@ -390,11 +340,6 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
     }
 
     auto frame = slot->cache.get(src_frame);
-    // Full-res decode telemetry: measure the decode cost so playback stalls are
-    // attributable (a GOP-backwards hardware indexed-seek vs a forward sequential
-    // walk feel very different). The ~1s `[dec]` aggregate reports cache-hit rate
-    // and avg/peak decode_ms so a throughput cliff shows up as hit% falling and
-    // avg_ms climbing together, not as a mysterious dropped-frame cadence.
     static auto dec_log_at = std::chrono::steady_clock::now();
     static uint64_t fullres_req_ = 0, fullres_hits_ = 0;
     static canvas::core::FrameCache::Stats last_cache_stats_{};
@@ -408,12 +353,6 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
         dec_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - dec_t0).count();
         fullres_ms_sum_ += dec_ms;
         if (dec_ms > fullres_ms_max_) fullres_ms_max_ = dec_ms;
-        // The decoder labels a frame with its *decoded* PTS-derived number, which can
-        // differ from the requested target (a forward-walk holding the first frame
-        // at/after the target, or PTS/rate skew). Cache only when the numbers
-        // agree: keying the LRU by a wrong number aliases the frame (the playhead
-        // would later get frame N when src_frame M was asked for). A miss just
-        // re-decodes.
         if (frame && frame->frame_number == src_frame) slot->cache.put(frame);
         ::canvas::core::log::log_warning(
             "[dec] FULLRES-CALLED media=%d seq=%lld src=%lld ms=%.1f hw=%d dims=%dx%d "
@@ -432,17 +371,11 @@ canvas::core::VideoFramePtr TimelineDecoder::decode(const canvas::core::Project&
         const double avg_ms =
             fullres_req_ > 0 ? fullres_ms_sum_ / static_cast<double>(fullres_req_) : 0.0;
         const auto cs = slot->cache.stats();
-        // Per-window cache deltas: evict_delta/miss_delta are how many entries
-        // were dropped/decoded afresh THIS second. Sustained evict storms with a
-        // high budget% mean the frame budget is too small for the timeline
-        // (decode-thrash) — the same shape as the older scrub-cache bug.
         const auto evict_delta = cs.evictions < last_cache_stats_.evictions
             ? 0 : cs.evictions - last_cache_stats_.evictions;
         const auto miss_delta = cs.misses < last_cache_stats_.misses
             ? 0 : cs.misses - last_cache_stats_.misses;
         last_cache_stats_ = cs;
-        // Seek-vs-sequential path deltas for this window (steady playback must be
-        // ~100% sequential): seq_avg/seek_avg are the per-window mean decode cost.
         const auto ps = slot->decoder.path_stats();
         const auto seq_delta = ps.sequential < last_path_stats_.sequential
             ? 0 : ps.sequential - last_path_stats_.sequential;
@@ -524,8 +457,6 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12(const canvas::core::Proj
         g_last_nv12_null_reason = "clip-disabled";
         return nullptr;
     }
-    // GPU NV12 fast path requires a device that can hand a texture to GL:
-    // CUDA (host_nv12_from_hw) or the zero-copy VAAPI backend (vaapi_export_surface).
     const std::string& dev = hw_.device_name();
     if (!canvas::core::gpu::cuda_available() && dev != "vaapi") {
         g_last_nv12_null_reason = "no-cuda-no-vaapi";
@@ -545,15 +476,7 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
                                                          const canvas::core::Clip& clip,
                                                          const std::int64_t seq_frame,
                                                          const int max_dim) {
-    // Build the I-frame index lazily on the GPU path too: decode_to_hw_indexed
-    // needs it to anchor a scrub/commit on the owning keyframe. Without it the
-    // fallback is a plain container seek + forward decode on every position
-    // change (~520ms/scrub observed vs a tens-of-ms one-GOP walk indexed).
     if (!slot->decoder.has_iframe_index()) slot->decoder.build_iframe_index();
-    // Hardware fast path dispatch: decode_to_hw serves either the CUDA device
-    // (host_nv12_from_hw consumes CUDA device pointers) or, when the zero-copy
-    // VAAPI backend is live, VAAPI surface frames (vaapi_export_surface exports
-    // the dmabufs the GL viewer imports).
     const std::string& dev = hw_.device_name();
     const bool is_cuda = dev == "cuda";
     const bool is_vaapi = dev == "vaapi";
@@ -562,30 +485,12 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
         return nullptr;
     }
 
-    // A VAAPI surface frame is GPU-only (dmabufs, zero CPU planes), so it can
-    // only be produced when the viewer can actually import it — EGLImage dmabuf
-    // import is not guaranteed (GLX-only session, no dma_buf extension, missing
-    // glEGLImageTargetTexture2DOES). ViewerGL publishes the one-time probe
-    // result; until then and when it fails, fall back to the CPU RGBA path
-    // instead of handing the viewer a frame it cannot display.
     if (is_vaapi && !canvas::gui::vaapi_viewer_import_available()) {
         g_last_nv12_null_reason = "vaapi-viewer-import-unavailable";
         return nullptr;
     }
 
     const int64_t src_frame = seq_to_src_frame(project, clip, seq_frame);
-    // Two GPU decode strategies, chosen by path:
-    //
-    //  Prepared playback (max_dim == 0): sequential-forward when the target is
-    //  at-or-ahead of the decoder, so steady frames decode cheaply with no
-    //  per-frame container seek + codec flush. Random/backward access falls back
-    //  to the keyframe-anchored indexed seek (one GOP).
-    //
-    //  Scrub preview (max_dim > 0): always keyframe-anchored. The caps keep the
-    //  sparse-GOP walk cheap (~17ms measured) and every move — forward or
-    //  backward — lands near the target. Never blend sequential mode into a
-    //  preview drag: a capped sequential walk parks the decoder behind the
-    //  playhead and leaves the preview on the wrong (stale) picture.
     const AVFrame* hw;
     double hw_ms = 0.0;
     const auto hw_t0 = std::chrono::steady_clock::now();
@@ -593,12 +498,6 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
         hw = slot->decoder.decode_to_hw_indexed(
             src_frame, ::canvas::core::VideoDecoder::kPreviewMaxOver);
     } else {
-        // Prepared playback: keep the cheap sequential HW walk for small forward
-        // deltas (steady-state warming advances frame-by-frame). A large forward
-        // jump must NOT walk sequentially from wherever the decoder sits — a far
-        // release-commit would decode every frame between, stalling the worker
-        // for seconds and freezing every drag preview queued behind it. Anchor
-        // those on the owning I-frame so the walk is bounded by one GOP.
         const int64_t dec_pos = slot->decoder.current_frame();
         if (src_frame >= dec_pos && src_frame - dec_pos <= kCommitSeqMaxDelta) {
             hw = slot->decoder.decode_to_hw(src_frame);
@@ -621,15 +520,6 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
         return nullptr;
     }
 
-    // Shared NV12 staging with the off-thread transition bake
-    // (host_nv12_from_hw), so both paths are pixel-identical: same reduce rule
-    // (longest edge capped at max_dim, 0 = native, even dims), same on-GPU
-    // resize/download, same resolved color spec. The viewer letterboxes the
-    // quad, so the composite needs no bars (dst == full canvas).
-    //
-    // VAAPI zero-copy: instead of resize+download, export the surface's dmabufs
-    // and let the GL viewer import them directly (no CPU copy at all, native
-    // resolution — `max_dim` only bounds CPU traffic, which there is none of).
     const canvas::core::gpu::ColorSpec spec = slot->decoder.color_spec();
     const auto gpu_t0 = std::chrono::steady_clock::now();
     canvas::core::Nv12FramePtr frame;
@@ -660,9 +550,6 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gpu_t0).count();
     const int out_w = frame->width;
     const int out_h = frame->height;
-    // NV12 GPU fast-path timing: decode_to_hw (NVDEC) vs the on-GPU resize/composite
-    // download, so a GPU-path regression (driver, memory pressure, slice layout)
-    // shows up as hw_ms/gpu_ms climbing in the ~1s aggregate.
     static auto nv12_log_at = std::chrono::steady_clock::now();
     static uint64_t nv12_req_ = 0;
     static double nv12_hw_ms_ = 0.0, nv12_gpu_ms_ = 0.0;
@@ -672,10 +559,6 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
     nv12_gpu_ms_ += gpu_ms;
     nv12_hw_max_ = std::max(nv12_hw_max_, hw_ms);
     nv12_gpu_max_ = std::max(nv12_gpu_max_, gpu_ms);
-    // Per-frame tracing, throttled to every 8th request: the ~1s aggregate line
-    // below carries the trend (req/fps_hw/hw_avg/gpu_avg), so this one only
-    // needs to sample stray spikes — at 30fps a per-frame line is ~30 lines/s
-    // of log that drowns the ~1s [play]/[viewer] health lines.
     if (::canvas::core::log::enabled() && (nv12_req_ & 7u) == 0)
         ::canvas::core::log::log_warning(
             "[dec] nv12 media=%d seq=%lld src=%lld max_dim=%d dec_hw_ms=%.2f gpu_ms=%.2f",
@@ -687,10 +570,6 @@ canvas::core::Nv12FramePtr TimelineDecoder::decode_nv12_slot(DecoderSlot* slot,
         nv12_log_at = nv12_now;
         const double avg_hw = nv12_hw_ms_ / static_cast<double>(nv12_req_);
         const double avg_gpu = nv12_gpu_ms_ / static_cast<double>(nv12_req_);
-        // fps_hw is the hw-decode+resize cadence (timeline frames/s). It never
-        // beating the timeline fps while [play] cadence looks normal means the
-        // GPU compositor is the cap; beating it comfortably means the presenter
-        // (or decode granularity) is.
         ::canvas::core::log::log_warning(
             "[dec] nv12 req=%llu fps_hw=%.1f hw_avg_ms=%.2f hw_max_ms=%.2f gpu_avg_ms=%.2f gpu_max_ms=%.2f "
             "dims=%dx%d",
@@ -711,13 +590,6 @@ double media_fps_of(const canvas::core::Project& project, const canvas::core::Cl
     return (it != project.media.end() && it->fps > 0.0) ? it->fps : 0.0;
 }
 
-// Time-based clip mapping: a seq-frame offset advances the source by the
-// media/sequence fps ratio, so 60fps footage on a 30fps timeline strides two
-// source frames per timeline frame (the clip plays at its intended speed)
-// instead of halving the content. 1:1 whenever the rates match. Speed Change
-// (clip_rate) multiplies the offset for a whole-clip retime, keeping playback
-// and export on the same law. A clip's src_in/src_out are indices into the
-// SOURCE's own frame rate.
 int64_t seq_to_src_frame(const canvas::core::Project& project, const canvas::core::Clip& clip,
                          int64_t seq_frame) {
     const double mf = media_fps_of(project, clip);
@@ -733,9 +605,6 @@ int64_t seq_to_src_frame(const canvas::core::Project& project, const canvas::cor
                              mf / sf));
 }
 
-// Maps a core transition kind to the renderable viewer mode. Audio-only
-// transitions (constant gain/power/exponential) carry no image and map to None
-// here — they only drive audio mixing.
 canvas::core::TransitionRenderMode to_render_mode(const canvas::core::TransitionType t) {
     using TT = canvas::core::TransitionType;
     using RM = canvas::core::TransitionRenderMode;
@@ -752,7 +621,6 @@ canvas::core::TransitionRenderMode to_render_mode(const canvas::core::Transition
     }
 }
 
-// Copies A's visual transform onto a RenderFrame so the viewport applies it.
 void apply_clip_visual(canvas::core::RenderFrame& out,
                        const canvas::core::Clip& a) {
     out.scale_x = a.scale_x;
@@ -766,14 +634,6 @@ void apply_clip_visual(canvas::core::RenderFrame& out,
     out.flip_v = a.flip_v;
 }
 
-// Shared NV12 staging: resize the borrowed hardware frame on the GPU and
-// download the Y/UV planes the viewer's NV12 shader uploads. Same reduce rule
-// as the RGBA path (longest edge capped at max_dim, 0 = native, even dims) —
-// the viewer letterboxes the quad, so the composite needs no bars (dst == full
-// canvas). Called by the slot decode path (decode_nv12_slot) AND the off-thread
-// transition bake (run_transition_bake), so the two paths are pixel-identical.
-// The returned frame carries the source file's resolved color spec (matrix +
-// probe-reconciled range) so the shaders decode the raw planes correctly.
 canvas::core::Nv12FramePtr host_nv12_from_hw(const AVFrame* hw, std::int64_t src_frame,
                                              const canvas::core::gpu::ColorSpec& spec,
                                              int max_dim) {
@@ -798,11 +658,6 @@ canvas::core::Nv12FramePtr host_nv12_from_hw(const AVFrame* hw, std::int64_t src
     frame->uv_pitch = static_cast<std::size_t>(out_w);
     frame->matrix = spec.matrix;
     frame->range = spec.range;
-    // Staging is a plain per-frame cudaMalloc + resize + memcpy. Transient
-    // cudaMalloc flakiness at ~30 allocs/sec surfaced as 1/sec host-nv12-staging
-    // nulls that dropped the playhead to the multi-hundred-ms CPU GOP re-walk;
-    // retry once, and log attempt-1 with the captured CUDA error + frame layout
-    // so the failure is attributable (and known recoverable) by the next run.
     for (int attempt = 0; attempt < 2; ++attempt) {
         if (canvas::core::gpu::convert_nv12_resize_to_host(
                 reinterpret_cast<const uint8_t*>(hw->data[0]),
@@ -822,7 +677,7 @@ canvas::core::Nv12FramePtr host_nv12_from_hw(const AVFrame* hw, std::int64_t src
     }
     return nullptr;
 }
-}  // namespace
+}
 
 const canvas::core::Clip* TimelineDecoder::top_video_clip_at(const canvas::core::Project& project,
                                                          std::int64_t seq_frame) const {
@@ -857,13 +712,6 @@ TimelineDecoder::next_transition_bake_candidate(const canvas::core::Project& pro
     return TransitionBakeCandidate{job.win_start, job.win_end};
 }
 
-// Nearest qualifying same-media OUT-transition window at-or-ahead of `seq_frame`
-// that the off-thread pre-render would cover. Mirrors the live path's B search
-// (incoming clip exactly at A's cut on any unlocked video track) and requires
-// the two media ids to match — the far-GOP double-walk only exists for a SAME
-// file — and A to still be the topmost picture at the window head (a higher
-// track covering the head would take precedence at present time and waste the
-// bake). Pure timeline scan: no I/O, no thread.
 bool TimelineDecoder::transition_bake_candidate(const canvas::core::Project& project,
                                                 std::int64_t seq_frame,
                                                 TransitionBakeJob* out) const {
@@ -880,7 +728,7 @@ bool TimelineDecoder::transition_bake_candidate(const canvas::core::Project& pro
             const std::int64_t dur_out = a.transition_out_duration;
             if (dur_out <= 0 || dur_out > kTransitionBakeMaxFrames) continue;
             const std::int64_t win_start = a.tl_out - dur_out;
-            if (win_start < a.tl_in) continue;  // window must fit inside the clip
+            if (win_start < a.tl_in) continue;
             const std::int64_t lead = win_start - seq_frame;
             if (lead < 0 || lead > kTransitionBakeLead) continue;
             const canvas::core::Clip* b = nullptr;
@@ -931,7 +779,6 @@ void TimelineDecoder::maybe_start_transition_bake(const canvas::core::Project& p
     const canvas::core::MediaId media = job.a.media;
     std::lock_guard<std::mutex> lk(bake_mutex_);
     if (bake_stop_ || bake_inflight_) return;
-    // Already serving this window from a finished bake: don't re-kick.
     if (bake_result_ && seq_frame < bake_result_->win_end) return;
     bake_job_ = std::make_unique<TransitionBakeJob>(std::move(job));
     bake_inflight_ = true;
@@ -953,9 +800,6 @@ void TimelineDecoder::adopt_or_clear_transition_bake(std::int64_t seq_frame) {
         const auto it = slots_.find(b_media);
         if (it != slots_.end() && it->second->loaded) {
             it->second->decoder = std::move(*bake_result_->parked_b);
-            // The worker's B slot for this media is now redundant (the adopted
-            // main slot is already parked at B's head); drop it so a future cut
-            // on the same file reopens fresh instead of pinning two sessions.
             b_slots_.erase(b_media);
             ::canvas::core::log::log_warning(
                 "[trans-bake] adopt parked-B media=%d seq=%lld served=%lld",
@@ -987,13 +831,6 @@ void TimelineDecoder::transition_bake_thread() {
     }
 }
 
-// Walks the whole bake window with TWO dedicated decoder sessions (A's tail +
-// B's pre-roll), converting each frame to the in-memory NV12 planes the viewer
-// crossfades — the exact decode+composite work the playback thread would have
-// done live, minus the multi-second far keyframe walks (B's open + the main
-// slot's post-cut jump), done here AHEAD of the playhead. The B session, parked
-// at B's head when the walk ends, is handed to the worker as `parked_b`. Never
-// blocks playback: a completed result is simply matched by win bounds in frame().
 void TimelineDecoder::run_transition_bake(const TransitionBakeJob& job) {
     const auto t0 = std::chrono::steady_clock::now();
     std::string error;
@@ -1024,19 +861,12 @@ void TimelineDecoder::run_transition_bake(const TransitionBakeJob& job) {
     const std::int64_t dur_out = job.win_end - job.win_start;
     const std::int64_t n = job.win_end - job.win_start;
 
-    // Decode strategy mirrors the worker's prepared-playback branch
-    // (decode_nv12_slot): anchor each session ONCE on the owning keyframe, then
-    // ride decode_to_hw's cheap sequential walk for the rest of the window.
-    // Calling decode_to_hw_indexed for EVERY frame would container-seek +
-    // codec-flush per frame (the seek resets the walk position), re-climbing a
-    // whole GOP per frame on both sessions — measured: a 14-frame bake ~2.9s,
-    // which never beat the 0.47s window and so never engaged the serve path.
     std::vector<std::pair<canvas::core::Nv12FramePtr, canvas::core::Nv12FramePtr>> planes;
     planes.reserve(static_cast<std::size_t>(n));
     bool failed = false;
     bool a_indexed = true;
     bool b_indexed = true;
-    canvas::core::Nv12FramePtr prev_pb;  // reused for rate-rounded B repeats
+    canvas::core::Nv12FramePtr prev_pb;
     std::int64_t prev_b_src = -1;
     for (std::int64_t i = 0; i < n; ++i) {
         {
@@ -1065,11 +895,6 @@ void TimelineDecoder::run_transition_bake(const TransitionBakeJob& job) {
             failed = true;
             break;
         }
-        // B's pre-roll can land on the SAME source frame for consecutive window
-        // frames (the 2:1 rate rounds tl offsets onto one media frame). The live
-        // path serves that repeat from its retain-hit cache; here a sequential
-        // walk cannot step backward, so reuse the previously baked B plane —
-        // pixel-identical to what the live retain-hit would render.
         canvas::core::Nv12FramePtr pb;
         if (b_seq == prev_b_src && prev_pb) {
             pb = prev_pb;
@@ -1100,19 +925,8 @@ void TimelineDecoder::run_transition_bake(const TransitionBakeJob& job) {
         return;
     }
 
-    // Park the B session AT B's clip head (the source of the first post-window
-    // frame). On a distant-source same-media cut the window's last pre-roll frame
-    // sits FAR before src_in (this project: 1678 vs 3448); a parked decoder left
-    // there forces the worker's very next frame to re-walk the whole GOP
-    // (~200ms) — the visible 1-frame stutter at the cut. Positioning on src_in
-    // now, off-thread and absorbed by the bake's lead, makes that first post-cut
-    // frame a decode_to_hw_indexed retain-hit, so the boundary is a free
-    // sequential continue. The indexed entry preserves an incumbent retain when
-    // src_in was already the last walked source (no over-walk to src_in+1).
     if (!bake_stop_) decB.decode_to_hw_indexed(job.b.src_in);
 
-    // Captured under no lock (this thread alone touches the B session now) so the
-    // completion log below is safe after the result is published.
     const std::int64_t parked_at = decB.current_frame();
     {
         std::lock_guard<std::mutex> lk(bake_mutex_);
@@ -1138,9 +952,6 @@ void TimelineDecoder::attach_title_transition(canvas::core::RenderFrame& out,
                                               const canvas::core::Project& project,
                                               const canvas::core::Clip& a,
                                               std::int64_t seq_frame) {
-    // Same window predicates the media paths use; the title composite in out.a
-    // then carries the identical decode metadata so the viewer renders the
-    // transition on the titled frame instead of dropping it at the early return.
     const int64_t dur_out = a.transition_out_duration;
     const int64_t tr_out_start = a.tl_out - dur_out;
     const bool in_out_trans = a.has_transition_out() &&
@@ -1170,9 +981,6 @@ void TimelineDecoder::attach_title_transition(canvas::core::RenderFrame& out,
     }
     if (!in_out_trans) return;
 
-    // OUT dissolve: the incoming clip B sits exactly at the cut (A's tl_out) on
-    // the same track and plays BEHIND the titled A. Advance B through its
-    // pre-roll handle; clamp to source 0 when trimmed tight at the media head.
     static int title_out_log_ = 0;
     if ((title_out_log_++ % 30) == 0)
         ::canvas::core::log::log_warning(
@@ -1214,8 +1022,6 @@ void TimelineDecoder::attach_title_transition(canvas::core::RenderFrame& out,
                            static_cast<float>(dur_out);
         out.mode = to_render_mode(a.transition_out);
     } else {
-        // No incoming clip at the cut (e.g. the last clip on the track): fade the
-        // titled composite itself out to black over the transition window.
         if (dur_out > 0)
             out.progress = static_cast<float>(seq_frame - tr_out_start) /
                            static_cast<float>(dur_out);
@@ -1226,10 +1032,6 @@ void TimelineDecoder::attach_title_transition(canvas::core::RenderFrame& out,
 canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project& project,
                                                 std::int64_t seq_frame) {
     DecodeOriginGuard origin_frame(1);
-    // Off-thread transition pre-render lifecycle (all no-ops outside a bake):
-    // past a baked window, adopt its parked-B decoder into the main slot so the
-    // post-cut boundary is a sequential continue; then look ahead and kick the
-    // next bake-eligible window before the playhead reaches it.
     adopt_or_clear_transition_bake(seq_frame);
     maybe_start_transition_bake(project, seq_frame);
 
@@ -1239,12 +1041,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
     if (a) apply_clip_visual(*out, *a);
     if (!a) return out;
 
-    // Title clips (media < 0) and media clips carrying a title overlay force
-    // the CPU RGBA path: the GPU/NV12 fast path only delivers decoded planes,
-    // which would silently drop the rasterised text. A media-less title
-    // composites over the top media clip beneath it (black when the sequence
-    // has nothing media-backed below). The title draw is a fully owned copy so
-    // the LRU-backed const decode frames are never mutated.
     if (a->has_title()) {
         canvas::core::VideoFramePtr source;
         if (a->media >= 0) {
@@ -1269,37 +1065,20 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
         return out;
     }
 
-    // Graded clips ride the SAME GPU/NV12 fast path as grade-free ones: the
-    // grade is baked into a 3D LUT once per grade change and attached to the
-    // RenderFrame (out->grade), which the viewer samples in its NV12 shader —
-    // no full-res CPU grade eval on the playback path (Phase LUT live graded
-    // preview). The CPU RGBA path applies that same LUT, so preview == export
-    // by construction.
     const bool grade_a = a->has_grade();
 
-    // Is `seq_frame` inside the transition window owned by A's OUT boundary?
     const int64_t dur_out = a->transition_out_duration;
     const int64_t tr_out_start = a->tl_out - dur_out;
     const bool in_out_trans = a->has_transition_out() &&
                               !canvas::core::is_audio_transition(a->transition_out) &&
                               seq_frame >= tr_out_start && seq_frame < a->tl_out;
 
-    // Single-clip fade at A's IN (leading) boundary: over the first
-    // `transition_in_duration` frames the clip fades in from black; no
-    // preceding clip required. Independent of any OUT transition.
     const int64_t dur_in = a->transition_in_duration;
     const bool in_in_trans = a->has_transition_in() &&
                              !canvas::core::is_audio_transition(a->transition_in) &&
                              seq_frame >= a->tl_in && seq_frame < a->tl_in + dur_in;
 
     if (in_in_trans || in_out_trans) {
-        // [trans-bake] Serve-from-cache: a completed off-thread pre-render covers
-        // this OUT window — hand the baked A/B NV12 planes to the viewer's
-        // crossfade shader with the SAME mode/progress/grades the live path would
-        // attach, so the playback thread does ZERO decoding across the dissolve
-        // (the two far keyframe walks the bake absorbed are both gone). Re-attach
-        // grade LUTs from the CURRENT project at present-time — the bake only
-        // captures decode, so a grade change mid-window still displays correctly.
         {
             bool serve = false;
             bool first_serve = false;
@@ -1330,12 +1109,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                 out->grade = grade_a
                                  ? grade_lut_for(*a)
                                  : canvas::core::grade_graph::GradeLutPtr{};
-                // Re-resolve the incoming clip so grade_b keys on THIS project's
-                // Clip (grade_lut_cache_ is keyed by clip id + grade change_seq,
-                // so the id/seq pair is what must match the owner project) —
-                // never a bake copy. b_nv12 being null means the bake had no
-                // incoming clip (fade-to-black fallback), matching the live no-b
-                // branch.
                 if (out->b_nv12) {
                     const canvas::core::Sequence& seq = project.sequence;
                     const canvas::core::Clip* b = nullptr;
@@ -1357,15 +1130,8 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                 return out;
             }
         }
-        // GPU transition path: try to deliver A (and B, once visible mid-window)
-        // as hardware NV12 planes so a cut/cross-fade stays on the GPU fast path
-        // instead of the two full-res CPU RGBA decodes that collapsed the
-        // transition window to ~1.5 fps at 2K60. Falls through to the RGBA path
-        // below when a required plane can't be hardware-decoded.
         const auto nvA = decode_nv12(project, *a, seq_frame, 0);
         if (nvA) {
-            // Single-clip IN fade needs only A: the viewer ramps A itself against
-            // black in the shader.
             if (in_in_trans && !in_out_trans) {
                 out->nv12 = std::move(nvA);
                 out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
@@ -1377,11 +1143,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                 return out;
             }
 
-            // OUT transition: the incoming clip B (sitting exactly at the cut on
-            // the same track) plays BEHIND A. Advance B through its pre-roll
-            // handle (media frames before its timeline IN) so the dissolve
-            // reveals live footage instead of a frozen first frame; clamp to
-            // source 0 when the head was trimmed tight against the media start.
             const canvas::core::Sequence& seq = project.sequence;
             const canvas::core::Clip* b = nullptr;
             for (const auto& track : seq.video_tracks) {
@@ -1399,30 +1160,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                     (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
                 if (b_seq < 0) b_seq = 0;
                 auto nvB = [&]() -> canvas::core::Nv12FramePtr {
-                    // Same clip media => the adjacent clips share ONE hardware
-                    // decoder slot. Reuse A's planes ONLY when B's pre-roll
-                    // decodes to the exact media frame A already decoded — a true
-                    // 1:1 seamless blade (source ranges contiguous AND rates
-                    // matching, which is what maps b_seq back onto A's frame).
-                    // Crossfading identical frames is then the seamless-cut the
-                    // dissolve intends, and matches what the RGBA path rendered
-                    // without re-seeking the shared CUDA session (which would
-                    // re-walk up to a full keyframe GOP just to re-decode a
-                    // picture we already hold).
-                    //
-                    // When the pre-roll lands on DIFFERENT footage (trimmed or
-                    // retimed cut, gaps in the source, cross-rate project like
-                    // 60fps media on a 30fps timeline), aliasing A here would
-                    // freeze the dissolve on A for the whole window — mix(A, A,
-                    // t) is A for every t. Decode B real footage instead.
-                    //
-                    // SAME media: A and B share source file but need TWO decode
-                    // positions (A's tail + B's pre-roll). A dedicated B slot
-                    // walks the pre-roll forward independently of A's session;
-                    // decoding B on A's slot would re-walk a whole GOP each
-                    // frame (the ~10fps stall / 4.4s A/V drift seen in the
-                    // first pass). Distinct media needs no B slot — the two
-                    // media slots already decode independently.
                     if (b->media == a->media) {
                         if (seq_to_src_frame(project, *b, b_seq) ==
                             seq_to_src_frame(project, *a, seq_frame))
@@ -1452,11 +1189,7 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                                         static_cast<float>(dur_out);
                     return out;
                 }
-                // B couldn't be hardware-decoded: fall through and render the
-                // whole transition on the CPU RGBA path below.
             } else {
-                // No incoming clip at the cut (e.g. the last clip on the track):
-                // fade A itself out to black over the transition window.
                 out->nv12 = std::move(nvA);
                 out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
                 out->mode = to_render_mode(a->transition_out);
@@ -1468,14 +1201,7 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                 return out;
             }
         }
-        // A-side hardware decode unavailable at this position: RGBA path below.
     } else {
-        // GPU fast path: HW decode + CUDA composite straight into a small NV12
-        // the viewer uploads as Y/UV textures (no full-res CPU RGBA). Falls back
-        // to the RGBA path below when unavailable (software decode, non-CUDA
-        // device, backward scrub where decode_to_hw can't rewind). Graded clips
-        // ride this path too: the LUT rides on the RenderFrame and the viewer's
-        // NV12 shader applies it.
         const auto nv12 = decode_nv12(project, *a, seq_frame, 0);
         if (nv12) {
             out->nv12 = std::move(nv12);
@@ -1484,11 +1210,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
         }
     }
 
-    // CPU decode fallback (NV12 fast path unavailable at this position). The
-    // clip's grade is NEVER evaluated here on the CPU: the baked 3D LUT rides
-    // on the RenderFrame and the viewer's fragment shader applies it to the
-    // RGBA texture exactly like the NV12 shader does — zero CPU LUT work on
-    // the playback path.
     const auto fb_t0 = std::chrono::steady_clock::now();
     const char* const fb_why = g_last_nv12_null_reason;
     const auto fb_nv12_ms = g_last_nv12_null_ms;
@@ -1513,7 +1234,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                    static_cast<long long>(seq_frame), static_cast<unsigned long long>(a->id),
                    static_cast<int>(a->transition_out),
                    static_cast<long long>(tr_out_start), static_cast<long long>(a->tl_out));
-        // Incoming clip B sits exactly at the cut (A's tl_out) on the same track.
         const canvas::core::Sequence& seq = project.sequence;
         const canvas::core::Clip* b = nullptr;
         for (const auto& track : seq.video_tracks) {
@@ -1524,14 +1244,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
             if (b) break;
         }
         if (b && b != a) {
-            // The incoming clip plays BEHIND the transition: advance B through its
-            // pre-roll handle (media frames before its timeline IN) so the dissolve
-            // reveals live footage instead of a frozen first frame, and B keeps
-            // playing seamlessly once the cut lands. Clamp to source 0 when the
-            // head was trimmed tight against the media start (no handle to show).
-            // decode() maps seq->media by the media/sequence ratio, so feed it
-            // the inverse-scaled frame: B's seq offset (negative during the
-            // window, before its timeline IN) times seq/media.
             const double bsf2 = project.sequence.fps;
             const double bmf2 = media_fps_of(project, *b);
             const double bratio = (bmf2 > 0.0 && bsf2 > 0.0) ? bsf2 / bmf2 : 1.0;
@@ -1552,8 +1264,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
                                 static_cast<float>(dur_out);
             out->mode = to_render_mode(a->transition_out);
         } else {
-            // No incoming clip at the cut (e.g. the last clip on the track): fade A
-            // itself out to black over the transition window.
             if (dur_out > 0) {
                 out->progress = static_cast<float>(seq_frame - tr_out_start) /
                                 static_cast<float>(dur_out);
@@ -1565,9 +1275,6 @@ canvas::core::RenderFramePtr TimelineDecoder::frame(const canvas::core::Project&
     return out;
 }
 
-// Low-res variant used only for scrubbing. Bypasses the full-res cache on read
-// but does NOT put the reduced frame back into it, so a preview never displaces
-// (or gets returned as) a full-res playback frame.
 canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Project& project,
                                                   std::int64_t seq_frame,
                                                   int max_dim) {
@@ -1575,9 +1282,6 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
     auto out = std::make_shared<canvas::core::RenderFrame>();
     const canvas::core::Clip* a = top_video_clip_at(project, seq_frame);
 
-    // DECISIVE branch trace (always-on): report exactly which early return the
-    // scrub preview takes, so a decode that "runs but yields nothing" can't
-    // silently evade the [scrub:BAD] fallback path.
     static unsigned trace_ = 0;
     if ((++trace_ & 15u) == 0u)
         ::canvas::core::log::log_warning(
@@ -1589,10 +1293,6 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
     if (a) apply_clip_visual(*out, *a);
     if (!a) return out;
 
-    // Title clips take the same forced-CPU RGBA composite as frame(): raster the
-    // text over the top media clip beneath (or black) and stop. Scrub preview at
-    // full res for the ~short title windows is acceptable — the rare case, and
-    // correctness with the export path matters more than scrub latency here.
     if (a->has_title()) {
         canvas::core::VideoFramePtr source;
         if (a->media >= 0) {
@@ -1628,22 +1328,12 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                              !canvas::core::is_audio_transition(a->transition_in) &&
                              seq_frame >= a->tl_in && seq_frame < a->tl_in + dur_in;
 
-    // Graded clips ride the GPU NV12 fast path like every other clip: the LUT
-    // is attached to the RenderFrame and the viewer's NV12 shader applies it
-    // (Phase LUT live graded preview). Transition windows too: single-clip
-    // fades and cut-dissolves crossfade two hardware NV12 planes in the shader
-    // (b_nv12 + mode/progress), so a scrub across a transition stays GPU-speed
-    // instead of two full CPU RGBA decodes per frame. The CPU compositor below
-    // is the fallback when a required plane can't be hardware-decoded.
     const bool grade_a = a->has_grade();
     bool nv12_had = false, rgba_had = false;
     {
-        // GPU fast path with the reduced-cap composite (see frame).
         const auto nvA = decode_nv12(project, *a, seq_frame, max_dim);
         if (nvA) {
             nv12_had = true;
-            // Single-clip IN fade needs only A: the viewer ramps A itself against
-            // black in the shader.
             if (in_in_trans && !in_out_trans) {
                 out->nv12 = std::move(nvA);
                 out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
@@ -1655,10 +1345,6 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                 return out;
             }
             if (in_out_trans) {
-                // The incoming clip B (sitting exactly at the cut on the same
-                // track) plays BEHIND A. Advance B through its pre-roll handle so
-                // the dissolve reveals live footage instead of a frozen first
-                // frame; clamp to source 0 when the head was trimmed tight.
                 const canvas::core::Sequence& seq = project.sequence;
                 const canvas::core::Clip* b = nullptr;
                 for (const auto& track : seq.video_tracks) {
@@ -1676,13 +1362,6 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                         (static_cast<double>(seq_frame - tr_out_start) - dur_out) * bratio));
                     if (b_seq < 0) b_seq = 0;
                     auto nvB = [&]() -> canvas::core::Nv12FramePtr {
-                        // Same clip media => the adjacent clips share ONE media
-                        // file but the pre-roll may land on DIFFERENT footage
-                        // (trimmed/retimed cut, source gaps, cross-rate project
-                        // like 60fps media on a 30fps timeline). Reuse A's
-                        // planes ONLY on the true 1:1 seamless blade. Otherwise
-                        // decode B for real via its own B slot (a shared-slot
-                        // decode would re-walk a GOP every preview frame).
                         if (b->media == a->media) {
                             if (seq_to_src_frame(project, *b, b_seq) ==
                                 seq_to_src_frame(project, *a, seq_frame))
@@ -1712,11 +1391,7 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                                             static_cast<float>(dur_out);
                         return out;
                     }
-                    // B couldn't be hardware-decoded: fall through and render the
-                    // whole transition on the CPU RGBA path below.
                 } else {
-                    // No incoming clip at the cut (e.g. the last clip on the
-                    // track): fade A itself out to black over the window.
                     out->nv12 = std::move(nvA);
                     out->grade = grade_a ? grade_lut_for(*a) : canvas::core::grade_graph::GradeLutPtr{};
                     out->mode = to_render_mode(a->transition_out);
@@ -1727,7 +1402,6 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
                     return out;
                 }
             } else {
-                // Plain frame: NV12 plane + grade LUT.
                 out->nv12 = std::move(nvA);
                 if (a->has_grade()) {
                     out->grade = grade_lut_for(*a);
@@ -1798,12 +1472,6 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
         }
     }
 
-    // The viewer can only paint a frame that carries pixels. If neither the GPU
-    // NV12 plane nor the CPU RGBA came back with content (cold seek, not-yet-
-    // loaded slot, failed mid-scrub decode), fall back to a real black frame so
-    // the monitor shows black instead of holding a stale picture. The [scrub:BAD]
-    // log says exactly which decode path produced nothing, and whether it was a
-    // loaded-slot-but-slow decode vs a hard miss.
     if (!out->nv12 && !out->a) {
         ::canvas::core::log::log_warning(
             "[scrub:BAD] seq=%lld media=%d src=%lld gpu_path=%d nv12_ok=%d rgba_ok=%d "
@@ -1812,7 +1480,7 @@ canvas::core::RenderFramePtr TimelineDecoder::preview(const canvas::core::Projec
             static_cast<long long>(a->src_in + (seq_frame - a->tl_in)), nv12_had,
             nv12_had, rgba_had, is_loaded(a->media), is_hardware(a->media), max_dim);
         out->a = make_black_frame(*a, max_dim);
-        rgba_had = true;  // packed black pixels; count as paint-able
+        rgba_had = true;
     }
 
     return out;
@@ -1833,4 +1501,4 @@ double TimelineDecoder::media_rate_at(const canvas::core::Project& project, std:
     return fallback_fps;
 }
 
-}  // namespace canvas::gui
+}

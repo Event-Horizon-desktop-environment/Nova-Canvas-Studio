@@ -26,12 +26,6 @@ namespace canvas::gui {
 
 namespace {
 
-// GLSL dialect header: Qt6 under the Wayland QPA presents an OpenGL ES context
-// on many drivers (NVIDIA here hands out ES 3.2), whose shader translator
-// rejects desktop `#version 330 core` fragment shaders that declare sampler3D
-// ("global type sampler3D requires '#version 300' or later"). Emit ES-flavored
-// source (`#version 300 es` + precision statements) when the context is ES so
-// the NV12 LUT/transtion programs link there too; desktop GL keeps 330 core.
 QByteArray viewer_shader_header(bool gles, bool fragment) {
     if (gles) {
         if (fragment)
@@ -47,10 +41,6 @@ QByteArray viewer_shader_header(bool gles, bool fragment) {
     return QByteArray("#version 330 core\n");
 }
 
-// glTexImage3D lives beyond QOpenGLFunctions' 2.0 baseline; resolve it lazily
-// from the current context. Used to allocate the 3D grade LUT textures and the
-// neutral fallback through raw GL (Qt's QOpenGLTexture allocation path raises
-// GL_INVALID_OPERATION on Mesa 26 radeonsi and leaves the texture black).
 using TexImage3DProc = void (*)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei,
                                 GLint, GLenum, GLenum, const void*);
 TexImage3DProc tex_image_3d_proc() {
@@ -72,9 +62,6 @@ void main() {
 }
 )";
 
-// Canvas fill for the Viewer Background Checkerboard option: a classic
-// A-roll two-tone transparency tile at 14px cells, shared by the letterbox
-// exterior pass (draw_viewer_background) and the empty-view tile.
 void paint_checkerboard(QPainter& painter, const QRectF& area) {
     const QColor a(0x22, 0x22, 0x26);
     const QColor b(0x33, 0x33, 0x38);
@@ -91,33 +78,13 @@ void paint_checkerboard(QPainter& painter, const QRectF& area) {
     }
 }
 
-// NV12 -> RGB conversion driven by the frame's per-file color spec (u_matrix,
-// u_range), matching the CUDA composite kernel's frame-space convention
-// (R=Y+1.402Cr, G=Y-0.344U-0.714V, B=Y+1.772U with Y/U/V centered at 0). The
-// coefficient table below mirrors colorspace.hpp's MatrixCoeffs 1:1, so the GPU
-// path and the CPU fallback/scopes agree on every (matrix, range) pairing. For
-// BT.709 limited-range this is bit-identical to the historical hardcoded form
-// (1.164*(Y-16) + 1.793Cr etc.); for OBS-style files tagged `tv` but carrying
-// full-range data, u_range flips the decode to full-swing so highlights don't
-// clip and skin tones don't shift lavender.
-// u_tex_y samples the R8 luma plane, u_tex_uv the interleaved CbCr plane
-// (.r = Cb, .g = Cr).
-//
-// Grade LUT: on the NV12 fast path a graded clip's bake arrives as a 3D RGB->RGB
-// LUT texture (u_grade, RGB32F, trilinear). Resolve-style law: after the YUV->RGB
-// conversion, sample at the texel-center coordinate (see grade_graph/lut.hpp).
-// The bake's data is r-major (R slowest) but uploads to a GL 3D texture where x
-// is fastest, so texel (x,y,z) holds gridpoint (r=z,g=y,b=x); the shader swaps
-// R/B in the coordinate to evaluate gridpoint (r,g,b), matching the CPU
-// `apply_grade_lut` that the scrub/export paths use — preview == export here.
-// u_grade_size < 2 disables the pass (no grade attached).
 constexpr const char* kFragNv12Src = R"(
 uniform sampler2D u_tex_y;
 uniform sampler2D u_tex_uv;
-uniform sampler3D u_grade;        // baked 3D RGB->RGB grade LUT (RGB32F)
-uniform int       u_grade_size;   // N (grid cells per axis); <2 => no grade
-uniform int       u_matrix;       // 0=BT601 1=BT709 2=BT2020
-uniform int       u_range;        // 0=limited 1=full
+uniform sampler3D u_grade;
+uniform int       u_grade_size;
+uniform int       u_matrix;
+uniform int       u_range;
 in vec2 v_uv;
 out vec4 fragColor;
 
@@ -145,11 +112,6 @@ void main() {
     float Cr = texture(u_tex_uv, v_uv).g * 255.0 - 128.0;
     vec3 rgb = yuv_to_rgb(Y, Cb, Cr, u_matrix, u_range).rgb;
     if (u_grade_size > 1) {
-        // The bake is laid out r-major (R slowest index, B fastest) but the
-        // upload hands the array to a GL 3D texture verbatim, where x is the
-        // fastest axis: texel (x,y,z) holds gridpoint (r=z, g=y, b=x). Swap R/B
-        // in the sample coordinate so input (r,g,b) hits gridpoint (r,g,b) —
-        // exactly like the CPU apply_grade_lut the scrub/export paths use.
         vec3 coord = vec3(rgb.b, rgb.g, rgb.r) * float(u_grade_size - 1) / float(u_grade_size) + 0.5 / float(u_grade_size);
         rgb = texture(u_grade, coord).rgb;
     }
@@ -157,30 +119,20 @@ void main() {
 }
 )";
 
-// NV12 transition blend: converts BOTH Y/UV pairs (A and incoming B) to RGB and
-// applies the same TransitionRenderMode math as kFragSrc. Samplers 2/3 read the
-// B planes, which the CPU binds to A's planes when no B frame exists (single-
-// clip fades) so MODE_FADEIN_A/FADEOUT never sample an unallocated texture.
-//
-// Grade LUTs: u_grade_a / u_grade_b are the 3D RGB->RGB bakes for the A and B
-// clips (same Resolve-style texel-center convention as kFragNv12Src); each is
-// applied to its clip's RGB BEFORE the blend math so a two-input transition
-// grades both sides exactly like the exporter. Grade-b size < 2 disables a side
-// (single-clip fades bind A's planes to the B slots — grade B is then null).
 constexpr const char* kFragNv12Trans = R"(
 uniform sampler2D u_tex_y;
-uniform sampler2D u_tex_uv;      // A's interleaved CbCr
+uniform sampler2D u_tex_uv;
 uniform sampler2D u_tex_b_y;
-uniform sampler2D u_tex_b_uv;    // B's interleaved CbCr
-uniform sampler3D u_grade_a;     // A's baked grade LUT (RGB32F)
-uniform sampler3D u_grade_b;     // B's baked grade LUT (RGB32F)
-uniform int    u_grade_a_size;   // N for A; <2 => no grade on A
-uniform int    u_grade_b_size;   // N for B; <2 => no grade on B
-uniform int    u_matrix_a;       // A's YUV matrix: 0=BT601 1=BT709 2=BT2020
-uniform int    u_range_a;        // A's range: 0=limited 1=full
-uniform int    u_matrix_b;       // B's YUV matrix
-uniform int    u_range_b;        // B's range
-uniform int    u_mode;           // TransitionRenderMode
+uniform sampler2D u_tex_b_uv;
+uniform sampler3D u_grade_a;
+uniform sampler3D u_grade_b;
+uniform int    u_grade_a_size;
+uniform int    u_grade_b_size;
+uniform int    u_matrix_a;
+uniform int    u_range_a;
+uniform int    u_matrix_b;
+uniform int    u_range_b;
+uniform int    u_mode;
 uniform float  u_progress;
 uniform float  u_aspect;
 in vec2 v_uv;
@@ -225,9 +177,6 @@ vec4 sample_yuv(sampler2D ytex, sampler2D uvtex, vec2 p, int matrix, int range) 
 vec4 grade_rgb(vec4 p, sampler3D lut, int size) {
     if (size < 2) return p;
     vec3 rgb = clamp(p.rgb, 0.0, 1.0);
-    // Same r-major / x-fastest orientation as kFragNv12Src: the uploaded 3D
-    // texture stores gridpoint (r=z, g=y, b=x) at texel (x,y,z), so swap R/B in
-    // the coordinate to evaluate gridpoint (r,g,b) like the CPU path.
     vec3 coord = vec3(rgb.b, rgb.g, rgb.r) * float(size - 1) / float(size) + 0.5 / float(size);
     return vec4(texture(lut, coord).rgb, p.a);
 }
@@ -268,19 +217,18 @@ void main() {
 )";
 
 constexpr const char* kFragSrc = R"(
-uniform sampler2D u_tex;      // outgoing (A)
-uniform sampler2D u_tex_b;    // incoming (B), during a transition
-uniform sampler3D u_grade;    // A's baked 3D RGB->RGB grade LUT (RGB32F)
-uniform sampler3D u_grade_b;  // B's baked 3D RGB->RGB grade LUT (RGB32F)
-uniform int    u_grade_size;  // N for A; <2 => no grade on A
-uniform int    u_grade_b_size; // N for B; <2 => no grade on B
-uniform int    u_mode;        // TransitionRenderMode
-uniform float  u_progress;    // 0..1 transition progress
-uniform float  u_aspect;      // texture aspect (w/h) for circular/wipe shapes
+uniform sampler2D u_tex;
+uniform sampler2D u_tex_b;
+uniform sampler3D u_grade;
+uniform sampler3D u_grade_b;
+uniform int    u_grade_size;
+uniform int    u_grade_b_size;
+uniform int    u_mode;
+uniform float  u_progress;
+uniform float  u_aspect;
 in vec2 v_uv;
 out vec4 fragColor;
 
-// mode constants (must match TransitionRenderMode in frame.hpp)
 const int MODE_NONE         = 0;
 const int MODE_CROSSDISS    = 1;
 const int MODE_DIPBLACK     = 2;
@@ -290,14 +238,11 @@ const int MODE_WIPELEFT     = 5;
 const int MODE_WIPERIGHT    = 6;
 const int MODE_WIPEUP       = 7;
 const int MODE_WIPEDOWN     = 8;
-const int MODE_FADEIN_A     = 9;   // single-clip: fade the A texture itself in from black
+const int MODE_FADEIN_A     = 9;
 
 vec4 grade_rgb(vec4 p, sampler3D lut, int size) {
     if (size < 2) return p;
     vec3 rgb = clamp(p.rgb, 0.0, 1.0);
-    // Same r-major / x-fastest orientation as kFragNv12Src: the uploaded 3D
-    // texture stores gridpoint (r=z, g=y, b=x) at texel (x,y,z), so swap R/B in
-    // the coordinate to evaluate gridpoint (r,g,b) like the CPU path.
     vec3 coord = vec3(rgb.b, rgb.g, rgb.r) * float(size - 1) / float(size) + 0.5 / float(size);
     return vec4(texture(lut, coord).rgb, p.a);
 }
@@ -312,7 +257,6 @@ void main() {
     float t = clamp(u_progress, 0.0, 1.0);
 
     if (u_mode == MODE_FADEIN_A) {
-        // Single-clip IN fade: blend A in from black (no second texture).
         fragColor = a * t;
         return;
     }
@@ -322,7 +266,6 @@ void main() {
         return;
     }
     if (u_mode == MODE_DIPBLACK) {
-        // A fades out to black (first half), B fades in from black (second half).
         float phase = t < 0.5 ? (2.0 * t) : 1.0;
         vec4 black = vec4(0.0, 0.0, 0.0, 1.0);
         vec4 first = mix(a, black, phase);
@@ -340,20 +283,16 @@ void main() {
         return;
     }
 
-    // Wipes sweep B over A based on direction.
     vec2 uv = v_uv;
     float edge;
-    if (u_mode == MODE_WIPELEFT)  edge = 1.0 - t;              // reveal from right, moving left
-    else if (u_mode == MODE_WIPERIGHT) edge = t;               // reveal from left, moving right
-    else if (u_mode == MODE_WIPEUP)   edge = 1.0 - t;          // reveal from bottom, moving up
-    else edge = t;                                             // WIPE_DOWN: reveal from top, moving down
+    if (u_mode == MODE_WIPELEFT)  edge = 1.0 - t;
+    else if (u_mode == MODE_WIPERIGHT) edge = t;
+    else if (u_mode == MODE_WIPEUP)   edge = 1.0 - t;
+    else edge = t;
 
-    // Convert UV to an axis where 0 = shown A fully, 1 = shown B fully. The
-    // diagonal (for left/right) gives a soft-edged wipe; vertical likewise.
     float c;
     if (u_mode == MODE_WIPELEFT || u_mode == MODE_WIPERIGHT) c = uv.x;
     else c = uv.y;
-    // Soft edge feather (2% of dimension) to hide hard aliasing seams.
     float feather = 0.02;
     float blend = smoothstep(edge - feather, edge + feather, c);
     fragColor = mix(a, b, blend);
@@ -361,7 +300,7 @@ void main() {
 }
 )";
 
-}  // namespace
+}
 
 ViewerGL::ViewerGL(QWidget* parent) : QOpenGLWidget(parent) {
     static uint64_t next_uid = 1;
@@ -371,10 +310,6 @@ ViewerGL::ViewerGL(QWidget* parent) : QOpenGLWidget(parent) {
 }
 
 ViewerGL::~ViewerGL() {
-    // QOpenGLTexture / QOpenGLShaderProgram members must be released while a GL
-    // context is current; at app teardown none is, so Qt leaked each texture
-    // handle and warned "destroy() called without a current context" per
-    // resource. Make the widget's own context current for the cleanup.
     if (context()) {
         makeCurrent();
         texture_.reset();
@@ -398,10 +333,6 @@ ViewerGL::~ViewerGL() {
     }
 }
 
-// NV12 texture binding hides the VAAPI zero-copy vs CPU-upload split: raw GL
-// texture ids (EGLImage-targeted — Qt's QOpenGLTexture cannot wrap them) when
-// the frame's planes are imported VAAPI dmabufs, else the QOpenGLTexture
-// wrappers the CPU upload path fills.
 void ViewerGL::bind_nv12_a(const int y_unit, const int uv_unit) {
     if (vaapi_valid_) {
         glActiveTexture(static_cast<GLenum>(GL_TEXTURE0 + y_unit));
@@ -427,14 +358,6 @@ void ViewerGL::bind_nv12_b(const int y_unit, const int uv_unit) {
 }
 
 void ViewerGL::bind_grade_lut(const int unit, QOpenGLTexture* lut) {
-    // The sampler3D uniforms must reference a COMPLETE 3D texture on every draw.
-    // Mesa's draw-time validation (GL core) rejects glDrawArrays with
-    // GL_INVALID_OPERATION when a 3D sampler's unit holds a 2D texture — which
-    // is what happens when u_grade/u_grade_b are left at their default value 0
-    // and unit 0 carries the RGBA video texture. The shader never samples the
-    // LUT while u_grade_*_size < 2, but the driver still validates the binding,
-    // so bind the clip's real LUT when attached and the neutral 1x1x1 3D texture
-    // otherwise.
     glActiveTexture(static_cast<GLenum>(GL_TEXTURE0 + unit));
     glBindTexture(GL_TEXTURE_3D, lut ? lut->textureId() : grade_neutral_tex_);
     glActiveTexture(GL_TEXTURE0);
@@ -456,14 +379,6 @@ void ViewerGL::set_frame(canvas::core::RenderFramePtr frame) {
                  << "progress=" << frame->progress
                  << "ctx_valid=" << (QOpenGLContext::currentContext() != nullptr);
 
-    // Always-on viewer diagnostic (qWarning so the default handler keeps it):
-    // frame pixel size vs widget size, which display path (RGBA vs GPU NV12),
-    // whether a small preview frame needs the software upscale, and the
-    // GUI-thread receive interval (`recv_ms`): the gap between successive
-    // worker->widget frame handoffs. recv_ms near the [play] cadence = healthy
-    // delivery; recv_ms far above it while cadence is fine = the GUI thread is
-    // blocking between paints (busy signal handler, modal, slow repaint), a
-    // stall class the worker-side cadence line cannot see.
     const double recv_ms = have_last_arrival_
         ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                     last_frame_arrival_)
@@ -479,10 +394,6 @@ void ViewerGL::set_frame(canvas::core::RenderFramePtr frame) {
                                  : (frame->nv12 ? frame->nv12->height : 0));
         const int nw = (frame->nv12 ? frame->nv12->width : 0);
         const int nh = (frame->nv12 ? frame->nv12->height : 0);
-        // Always-on (log_warning, not the CANVAS_DEBUG-gated qDebug): arrival
-        // cadence and frame size are the first split between "frames never
-        // delivered to the viewer" and "delivered but the draw fails" — the
-        // two classes the black-viewer reports have been conflating.
         ::canvas::core::log::log_warning(
             "[viewer] set_frame uid=%llu frame=%dx%d nv12=%dx%d widget=%dx%d "
             "path=%s small=%s last_tex=%dx%d recv_ms=%.1f",
@@ -507,9 +418,6 @@ void ViewerGL::set_frame(canvas::core::RenderFramePtr frame) {
                        << "recv_ms=" << QString::number(recv_ms, 'f', 1);
     }
     frame_ = std::move(frame);
-    // Do NOT touch GL here: this is called from the GUI thread outside a
-    // current QOpenGLWidget context. Defer the upload to paintGL, which runs
-    // with the context current.
     texture_dirty_ = true;
     update();
 }
@@ -574,36 +482,20 @@ void ViewerGL::initializeGL() {
     uni_progress_ = program_->uniformLocation("u_progress");
     uni_aspect_ = program_->uniformLocation("u_aspect");
 
-    // NV12 (GPU composite fast path) needs its own program: two samplers (Y +
-    // interleaved CbCr) instead of one RGBA texture.
     program_nv12_ = std::make_unique<QOpenGLShaderProgram>();
     program_nv12_->addShaderFromSourceCode(QOpenGLShader::Vertex, vertHdr + kVertexSrc);
     program_nv12_->addShaderFromSourceCode(QOpenGLShader::Fragment, fragHdr + kFragNv12Src);
     program_nv12_->link();
 
-    // Always-on: the NV12 fast path now decodes YUV->RGB with per-frame
-    // u_matrix/u_range uniforms fed from each frame's RESOLVED spec (codecpar
-    // tags reconciled with the full-range probe), so the GPU path and the CPU
-    // swscale/scopes agree on every (matrix, range) — including OBS-style files
-    // stamped `tv` that carry full-range data. The histogram of tags actually
-    // seen per session is left to the frames' own [dec] open traces.
     ::canvas::core::log::log_warning(
         "[viewer] nv12 programs: per-frame u_matrix/u_range from Nv12Frame spec "
         "(tags+probe), not hardcoded 709-limited");
 
-    // Four-sampler variant for transitions drawn from hardware planes (A + B).
     program_nv12_trans_ = std::make_unique<QOpenGLShaderProgram>();
     program_nv12_trans_->addShaderFromSourceCode(QOpenGLShader::Vertex, vertHdr + kVertexSrc);
     program_nv12_trans_->addShaderFromSourceCode(QOpenGLShader::Fragment, fragHdr + kFragNv12Trans);
     program_nv12_trans_->link();
 
-    // Always-on GL health report: pin context flavor + driver + program link
-    // state. A black viewer with healthy decode is usually a GL program that
-    // failed to link (driver GLSL translator rejects the shader); that turns
-    // attr_pos_/attr_uv_ into -1 and the quad draws NOTHING — silent in logs
-    // until the link status itself is recorded. Non-CUDA/AMD sessions always
-    // render through the RGBA path, so `rgba=0` here is exactly the AMD black
-    // viewer. paintGL recovers from it with a QPainter blit.
     rgba_gl_ok_ = program_->isLinked();
     const bool nv12_ok = program_nv12_->isLinked();
     const bool trans_ok = program_nv12_trans_->isLinked();
@@ -629,10 +521,7 @@ void ViewerGL::initializeGL() {
         ::canvas::core::log::log_warning("[viewer] nv12-trans program link: %s", l.c_str());
     }
 
-    // Unit quad covering NDC in [-1,1]; aspect/letterboxing is handled by
-    // adjusting the quad positions each frame from the texture aspect.
     static const float kQuad[] = {
-        // x     y     u     v
         -1.f, -1.f, 0.f, 1.f,
          1.f, -1.f, 1.f, 1.f,
         -1.f,  1.f, 0.f, 0.f,
@@ -642,8 +531,6 @@ void ViewerGL::initializeGL() {
     vbo_.bind();
     vbo_.allocate(kQuad, sizeof(kQuad));
 
-    // Attribute layout is identical for both programs (same vertex layout and
-    // shared VAO); we just bind the appropriate program on draw.
     vao_.create();
     vao_.bind();
     program_->enableAttributeArray(attr_pos_);
@@ -683,11 +570,6 @@ void ViewerGL::initializeGL() {
     texture_nv12_b_uv_->setMagnificationFilter(QOpenGLTexture::Linear);
     texture_nv12_b_uv_->setWrapMode(QOpenGLTexture::ClampToEdge);
 
-    // Zero-copy VAAPI capability probe: can THIS session import exported
-    // dmabufs as EGL images (EGL display current + EGL_EXT_image_dma_buf_import
-    // + glEGLImageTargetTexture2DOES)? The result gates the decode side (see
-    // vaapi_import_state) so GPU-only VAAPI frames are only produced when the
-    // viewer can display them. Runs once with the context current.
     vaapi_importer_ = std::make_unique<VaapiViewerImporter>();
     const bool vaapi_ok = vaapi_importer_->available();
     canvas::gui::set_vaapi_viewer_import_available(vaapi_ok);
@@ -696,10 +578,6 @@ void ViewerGL::initializeGL() {
         "kept when unavailable)",
         vaapi_ok ? "available" : "unavailable");
 
-    // Neutral 1x1x1 3D texture for the grade sampler units. The sampler3D
-    // uniforms must always reference a complete 3D texture or Mesa rejects the
-    // draw (see bind_grade_lut); QOpenGLTexture's allocation path is broken on
-    // this driver, so allocate raw GL.
     glGenTextures(1, &grade_neutral_tex_);
     glBindTexture(GL_TEXTURE_3D, grade_neutral_tex_);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -721,10 +599,6 @@ void ViewerGL::resizeGL(int w, int h) {
 
 void ViewerGL::upload_frame() {
     if (!frame_ || !texture_) return;
-    // Always-on ~1s upload telemetry: NV12 fast-path upload vs the RGBA (CPU
-    // texture) fallback, with their average costs. A scrub that rides NV12 and
-    // suddenly drops to rgba_upload means the fast path was lost — and nv12cvt
-    // tallies the per-pixel YUV->RGB software conversions that re-appear then.
     static auto up_agg_at = std::chrono::steady_clock::now();
     static int up_n = 0;
     static double up_nv12_ms = 0.0, up_rgba_ms = 0.0;
@@ -757,10 +631,6 @@ void ViewerGL::upload_frame() {
         }
     };
 
-    // RGBA upload helper (owned-copy upscale + (re)allocate + setData). Defined
-    // before the NV12 block so the small-frame CPU-conversion path below can
-    // upload its result IN THE SAME PASS instead of deferring to a follow-up
-    // paint (which continuous playback starves, leaving the viewer black).
     auto upload = [this](std::unique_ptr<QOpenGLTexture>& tex, const canvas::core::VideoFramePtr& f,
                      int& tw, int& th, bool& valid) {
         if (!f || f->rgba.empty()) return;
@@ -768,14 +638,8 @@ void ViewerGL::upload_frame() {
         int h = f->height;
         const uint8_t* data = f->rgba.data();
         std::size_t stride = f->stride;
-        // Owned copy kept alive through setData() below whenever we upscale.
         QImage upscaled;
 
-        // The scrub-preview texture is decoded small (640px) for speed; if the
-        // player widget is larger, upscale in software so the frame fills the
-        // media window even on drivers whose GL magnification misbehaves.
-        // Aspect is preserved; the letterbox quad in paintGL then leaves at
-        // most thin symmetrical black bars.
         const int vw = std::max(1, width());
         const int vh = std::max(1, height());
         if (w > 0 && h > 0 && (vw > w || vh > h) &&
@@ -785,7 +649,6 @@ void ViewerGL::upload_frame() {
             int dw = std::max(1, static_cast<int>(std::llround(w * scale)));
             int dh = std::max(1, static_cast<int>(std::llround(h * scale)));
             if (dw != w || dh != h) {
-                // Copy into an owned QImage (RGBA8888) and smooth-scale to fill.
                 static int upscale_log_ = 0;
                 if ((upscale_log_++ % 12) == 0)
 qDebug() << "[viewer] UPSCALE"
@@ -802,7 +665,7 @@ qDebug() << "[viewer] UPSCALE"
                 QImage dst = src.scaled(QSize(dw, dh), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
                 if (dst.width() == dw && dst.height() == dh &&
                     dst.format() == QImage::Format_RGBA8888) {
-                    upscaled = std::move(dst);   // keep pixels alive for setData
+                    upscaled = std::move(dst);
                     w = dw;
                     h = dh;
                     data = upscaled.constBits();
@@ -821,17 +684,11 @@ qDebug() << "[viewer] UPSCALE"
                        << "upscaled=" << (w != f->width || h != f->height ? "yes" : "no")
                        << "widget=" << std::max(1, width()) << "x" << std::max(1, height());
         if (realloc) {
-            // Qt forbids setSize/setFormat once storage is allocated; a size
-            // change needs a fresh texture object instead.
             tex = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
             tex->create();
             tex->setMinificationFilter(QOpenGLTexture::Linear);
             tex->setMagnificationFilter(QOpenGLTexture::Linear);
             tex->setWrapMode(QOpenGLTexture::ClampToEdge);
-            // Allocate through raw GL: QOpenGLTexture::allocateStorage() raises
-            // GL_INVALID_OPERATION on Mesa 26 radeonsi and leaves the texture
-            // black (the `[viewer] pixels` probe then reports a black frame with
-            // healthy src pixels). glTexImage2D on the same texture id works.
             glBindTexture(GL_TEXTURE_2D, tex->textureId());
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -846,26 +703,8 @@ qDebug() << "[viewer] UPSCALE"
         valid = true;
     };
 
-    // Grade-LUT upload: the clip's baked 3D RGB->RGB LUT rides on the
-    // RenderFrame (u_grade/u_grade_b, RGB32F, trilinear, GL texture units 4/5).
-    // Uploaded as 3D textures only when the LUT pointer changed — rebaking is
-    // decode-side and cached, so identical lookups across successive frames skip
-    // the upload.
-    //
-    // QOpenGLTexture forbids setSize/setFormat/allocateStorage once storage is
-    // allocated, and re-allocating anyway is driver-dependent garbage (can
-    // visibly corrupt the sampled LUT). So the immutable parts run only on a
-    // fresh texture; later re-uploads are setData-only overwrites. The grid is
-    // size-33 by default and cached decode-side, so grids rarely change; a
-    // different size still rebuilds the texture object.
-    //
-    // Runs on every upload path that carries grades (NV12 fast path, the
-    // small-preview NV12->RGBA conversion, and the CPU-RGBA fallback), so the
-    // shader grades A and B wherever either is drawn — the CPU never applies a
-    // grade on the viewer path.
     auto upload_grades = [this](const canvas::core::RenderFrame* rf) {
-        {   // A-side LUT → grade_tex_a_
-            const canvas::core::grade_graph::GradeLut3D* lut = rf->grade.get();
+        {   const canvas::core::grade_graph::GradeLut3D* lut = rf->grade.get();
             if (lut && lut->valid() && lut != grade_a_uploaded_) {
                 const int n = lut->size;
                 if (grade_tex_a_ &&
@@ -923,8 +762,7 @@ qDebug() << "[viewer] UPSCALE"
                 grade_a_uploaded_ = nullptr;
             }
         }
-        {   // B-side LUT → grade_tex_b_
-            const canvas::core::grade_graph::GradeLut3D* lut = rf->grade_b.get();
+        {   const canvas::core::grade_graph::GradeLut3D* lut = rf->grade_b.get();
             if (lut && lut->valid() && lut != grade_b_uploaded_) {
                 const int n = lut->size;
                 if (grade_tex_b_ &&
@@ -974,13 +812,6 @@ qDebug() << "[viewer] UPSCALE"
         }
     };
 
-    // Zero-copy VAAPI fast path: the frame carries exported dmabufs and no CPU
-    // planes (gpu payload). Import them as EGL images into raw GL textures and
-    // draw exactly like the CPU NV12 path (same two-sampler shaders). The
-    // surface carries the resolved color spec, so u_matrix/u_range stay
-    // per-frame correct. On import failure (odd driver export) log and fall
-    // through to whichever CPU representation exists — none for a GPU-only
-    // frame, whose producer is gated on this import being available.
     if (frame_->nv12 && frame_->nv12->has_gpu()) {
         vaapi_valid_ = false;
         vaapi_b_valid_ = false;
@@ -1002,8 +833,6 @@ qDebug() << "[viewer] UPSCALE"
                     static_cast<long long>(nv->frame_number));
             }
         }
-        // Incoming (B) clip during a GPU-composited transition: import it on its
-        // own importer (a shared pool would thrash A's live images every frame).
         if (frame_->b_nv12 && frame_->b_nv12->gpu && frame_->b_nv12->gpu->valid()) {
             if (!vaapi_importer_b_) vaapi_importer_b_ = std::make_unique<VaapiViewerImporter>();
             GLuint by = 0, buv = 0;
@@ -1019,7 +848,6 @@ qDebug() << "[viewer] UPSCALE"
         }
         nv12_b_valid_ = vaapi_b_valid_;
         if (vaapi_valid_) {
-            // Clip's grade rides the same per-side 3D LUTs as the CPU paths.
             upload_grades(frame_.get());
             texture_valid_ = false;
             texture_second_valid_ = false;
@@ -1028,33 +856,16 @@ qDebug() << "[viewer] UPSCALE"
             up_mark("n");
             return;
         }
-        // Import failed: fall through. A CPU-plane frame re-uploads below; a
-        // GPU-only frame draws blank for this frame (logged above). Clear the
-        // stale draw state so a previous frame's textures can't leak through.
         nv12_valid_ = false;
         texture_valid_ = false;
     }
 
-    // NV12 GPU fast path: upload the two planes as R8 (luma) + RG8 (CbCr)
-    // textures; the per-frame-spec YUV->RGB conversion (u_matrix/u_range) is
-    // applied in the fragment shader.
     if (frame_->nv12 && !frame_->nv12->y.empty()) {
         const canvas::core::Nv12Frame* n = frame_->nv12.get();
         const int w = n->width;
         const int h = n->height;
 
-        // Small previews (scrub) don't magnify reliably in GL on some drivers, so
-        // when the NV12 plane is smaller than the player, convert to CPU RGBA
-        // and upload THAT now (same pass). Full-res playback keeps the fast NV12
-        // texture path. Deferring the upload to a follow-up paint pass is a
-        // black-frame under playback: a fresh NV12 frame re-arms the cvt before
-        // the follow-up runs, so the viewer never draws anything but blank.
         if (w > 0 && h > 0 && (w < width() || h < height())) {
-            // Always-on (once): this scrub/small-preview fallback converts NV12
-            // via colorspace.hpp's yuv_to_rgb with the frame's RESOLVED per-file
-            // spec (matrix + probe-reconciled range), so this CPU path and the
-            // GPU shader AGREE on every (matrix, range) pair — including the
-            // OBS-style full-range files whose `tv` tag lies.
             static bool yuv2rgb_logged_ = false;
             if (!yuv2rgb_logged_) {
                 yuv2rgb_logged_ = true;
@@ -1075,10 +886,6 @@ qDebug() << "[viewer] UPSCALE"
             rgba->height = h;
             rgba->stride = static_cast<std::size_t>(w) * 4;
 
-            // Convert to RGBA; the clip's grade is NOT applied here. The baked 3D
-            // LUT is carried on the RenderFrame and applied by the fragment
-            // shader below (upload_grades + kFragSrc's u_grade), exactly like
-            // the NV12 fast path — the CPU never grades pixels on the viewer.
             rgba->rgba.assign(rgba->stride * static_cast<std::size_t>(h), 0);
             const int y_p = static_cast<int>(n->y_pitch);
             const int uv_p = static_cast<int>(n->uv_pitch);
@@ -1112,7 +919,6 @@ qDebug() << "[viewer] UPSCALE"
             rf->fade_to_black = frame_->fade_to_black;
             frame_ = std::move(rf);
             nv12_valid_ = false;
-            // Upload in this same pass so playback never draws a blank frame.
             upload(texture_, frame_->a, tex_w_, tex_h_, texture_valid_);
             texture_second_valid_ = false;
             if (frame_->b && frame_->b->rgba.size() >= frame_->b->stride * frame_->b->height) {
@@ -1130,19 +936,6 @@ qDebug() << "[viewer] UPSCALE"
         const bool y_realloc = tex_w_ != w || tex_h_ != h;
         if (y_realloc) {
             ++up_realloc_cnt;
-            // Qt forbids setSize/setFormat once storage is allocated (logs
-            // "Cannot change format once storage has been allocated" and keeps
-            // the stale buffer). Size changes therefore need a fresh texture
-            // object; re-create the pair here (still on the context thread via
-            // upload_frame's callers).
-            //
-            // Allocate through raw GL, same as the RGBA path in upload() above:
-            // QOpenGLTexture::allocateStorage() raises GL_INVALID_OPERATION on
-            // Mesa 26 radeonsi and leaves the texture black even though setData()
-            // below uploads real pixels — this is the NV12/hardware-decode fast
-            // path (the one real playback actually takes), so this was the
-            // black-screen-on-play bug: the RGBA fallback path got the raw-GL
-            // fix, this GPU path never did.
             texture_nv12_y_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
             texture_nv12_y_->create();
             texture_nv12_y_->setMinificationFilter(QOpenGLTexture::Linear);
@@ -1169,8 +962,6 @@ qDebug() << "[viewer] UPSCALE"
             tex_w_ = w;
             tex_h_ = h;
         }
-        // y_pitch is the tightly-packed stride; GL texture rows are also tightly
-        // packed, so upload row by row only if the pitch differs.
         const int y_pitch = static_cast<int>(n->y_pitch);
         const int uv_pitch = static_cast<int>(n->uv_pitch);
         if (y_pitch == w && uv_pitch == w) {
@@ -1186,8 +977,6 @@ qDebug() << "[viewer] UPSCALE"
                 texture_nv12_uv_->setData(0, 0, row, w / 2, 1, 1, QOpenGLTexture::RG,
                                           QOpenGLTexture::UInt8, n->uv.data() + row * uv_pitch);
         }
-        // Incoming (B) clip during an NV12 transition: upload its Y/UV pair too
-        // so paintGL can blend both clips in kFragNv12Trans.
         nv12_b_valid_ = false;
         if (frame_->b_nv12 && !frame_->b_nv12->y.empty()) {
             const canvas::core::Nv12Frame* bn = frame_->b_nv12.get();
@@ -1196,9 +985,6 @@ qDebug() << "[viewer] UPSCALE"
             const bool b_realloc = tex_bw_ != bw || tex_bh_ != bh;
             if (b_realloc) {
                 ++up_realloc_cnt;
-                // Same raw-GL allocation as the A-side pair above (see the
-                // comment there) — this driver rejects QOpenGLTexture's
-                // allocateStorage() path.
                 texture_nv12_b_y_ = std::make_unique<QOpenGLTexture>(QOpenGLTexture::Target2D);
                 texture_nv12_b_y_->create();
                 texture_nv12_b_y_->setMinificationFilter(QOpenGLTexture::Linear);
@@ -1245,8 +1031,6 @@ qDebug() << "[viewer] UPSCALE"
             }
             nv12_b_valid_ = true;
         }
-        // Upload the clip's grade LUT(s) (shared with the RGBA/small-preview
-        // paths via upload_grades) so the NV12 shader grades A and B.
         upload_grades(frame_.get());
         texture_valid_ = false;
         texture_second_valid_ = false;
@@ -1275,11 +1059,8 @@ qDebug() << "[viewer] UPSCALE"
         int bw = 0;
         int bh = 0;
         upload(texture_b_, frame_->b, bw, bh, texture_second_valid_);
-        // Keep second texture size so letterboxing matches texture A's aspect.
     }
 
-    // The clip's grade rides the RGBA textures as a sampled 3D LUT (same as the
-    // NV12 path), so a CPU-RGBA decode still renders fully graded display.
     upload_grades(frame_.get());
 
     texture_dirty_ = false;
@@ -1287,18 +1068,10 @@ qDebug() << "[viewer] UPSCALE"
 }
 
 void ViewerGL::paintGL() {
-    // Ensure the GL viewport tracks the widget's physical size. Qt normally
-    // calls resizeGL() on widget resize, but on some platforms the buffer can
-    // lag behind (especially with rapid scrub updates) and content would render
-    // into a small top-left box. Re-asserting here is idempotent. On HiDPI the
-    // framebuffer is sized in *device* pixels, so `width()` isn't enough —
-    // multiply by the pixel ratio or content renders at a quarter resolution.
     const qreal dpr = devicePixelRatioF();
     glViewport(0, 0, std::max(1, static_cast<int>(std::lround(width() * dpr))),
                std::max(1, static_cast<int>(std::lround(height() * dpr))));
 
-    // Drain any GL errors left over from earlier frames so the per-stage probe
-    // below attributes errors to THIS frame's draw calls only.
     while (glGetError() != GL_NO_ERROR) {}
     GLenum first_err = GL_NO_ERROR;
     int err_stage = -1;
@@ -1315,13 +1088,6 @@ void ViewerGL::paintGL() {
     glClearColor(bg.redF(), bg.greenF(), bg.blueF(), 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    // Software fallback for a broken RGBA program. If program_ failed to link
-    // (driver GLSL rejection — the AMD black-viewer case, where decode and
-    // audio both run), the textured-quad path draws nothing silently, so blit
-    // the latest RGBA frame through QPainter instead. NV12 sessions (CUDA
-    // machines, hardware composite path) keep the GL path: their programs are
-    // independent and never black in practice. See the `[viewer] gl` health
-    // line in initializeGL for the link state that routes here.
     if (!rgba_gl_ok_) {
         const canvas::core::VideoFrame* a = frame_ ? frame_->a.get() : nullptr;
         if (a && !a->rgba.empty() && a->width > 0 && a->height > 0 &&
@@ -1346,9 +1112,6 @@ void ViewerGL::paintGL() {
                 if (viewer_background_ == ViewerBackground::Checkerboard)
                     paint_checkerboard(p, rect());
                 p.setRenderHint(QPainter::SmoothPixmapTransform);
-                // VIEW the decode buffer directly (no copy) — RGBA8888 is the
-                // same layout the GL quad uploads; the frame outlives this
-                // paint, so the borrowed data stays valid.
                 const QImage img(a->rgba.data(), a->width, a->height, a->stride,
                                  QImage::Format_RGBA8888);
                 p.drawImage(target, img);
@@ -1357,8 +1120,6 @@ void ViewerGL::paintGL() {
                 return;
             }
         }
-        // No RGBA frame available (yet): fall through so the normal path keeps
-        // painting the letterbox background / blank instead of a stale clear.
     }
 
     if (debug_enabled() && texture_dirty_)
@@ -1378,8 +1139,6 @@ void ViewerGL::paintGL() {
                 static_cast<int>(texture_dirty_),
                 frame_ && frame_->a && !frame_->a->rgba.empty() ? 1 : 0,
                 frame_ && frame_->nv12 ? 1 : 0, static_cast<int>(rgba_gl_ok_));
-        // Upload a pending frame here, on the context thread, so the very first
-        // frame also shows without prior GL calls from outside paintGL.
         if (texture_dirty_) upload_frame();
         if (!(texture_valid_ || nv12_valid_)) {
             draw_blank();
@@ -1389,19 +1148,11 @@ void ViewerGL::paintGL() {
         upload_frame();
     }
 
-    // Letterbox into the viewport keeping the aspect ratio. Log the exact
-    // projected draw-size (1.0 = full media window) so a default session
-    // captures the real fill; always-on (qWarning), throttled to ~1 line/sec.
     const float vw = static_cast<float>(width());
     const float vh = static_cast<float>(height());
     const float aspect = tex_h_ > 0 ? static_cast<float>(tex_w_) / tex_h_ : 1.0f;
     const float va = vw / vh;
 
-    // Letterbox: Fit (default) shows the whole frame with bars on the odd axis;
-    // Fill covers the window edge-to-edge by cropping the overflow axis. Both
-    // preserve pixel aspect (qw/qh scale the quad as a whole):
-    //   Fit : qw,qh <= 1  (quad inside screen)
-    //   Fill: qw,qh >= 1  (quad covers screen, texture cropped at the edge)
     const float qw = (scale_mode_ == ScaleMode::Fill)
                          ? std::max(aspect / va, 1.0f)
                          : std::min(aspect / va, 1.0f);
@@ -1413,15 +1164,8 @@ void ViewerGL::paintGL() {
         static auto log_t0 = std::chrono::steady_clock::now();
         static double sum_ms = 0.0;
         static int64_t sum_n = 0;
-        // Measure this paint's wall time (upload + draw) so presentation cost is
-        // attributable to the GL path, not just the decode that fed it.
         const auto p0 = std::chrono::steady_clock::now();
         if ((paint_log_++ % 30) == 0)
-            // Always-on (log_warning): which draw branch a paint actually took
-            // and what the texture state was, so a black viewer resolves to
-            // "blank path painted" vs "textured draw failed" without
-            // CANVAS_DEBUG. organic of the pixel probe's ~1/s throttle, this
-            // is the per-instance cadence.
             ::canvas::core::log::log_warning(
                 "[viewer] paint uid=%llu tex=%dx%d widget=%dx%d tex_valid=%d "
                 "nv12_valid=%d vaapi_valid=%d dirty=%d rgba_ok=%d",
@@ -1434,8 +1178,6 @@ void ViewerGL::paintGL() {
             std::chrono::duration<double, std::milli>(p1 - p0).count();
         sum_ms += paint_ms;
         ++sum_n;
-        // ~1/s aggregate paint cost: sustained ms here (well above ~8.3ms@60Hz)
-        // means the viewer itself is the bottleneck once decode is healthy.
         const double since_s = std::chrono::duration<double>(p1 - log_t0).count();
         if (since_s >= 1.0) {
             qDebug().nospace()
@@ -1450,33 +1192,17 @@ void ViewerGL::paintGL() {
         }
     }
 
-    // Single-clip edge fade (fade-in-from-black at the clip's head, or fade-out-
-    // to-black at its tail) blends the A texture against black via u_mode/
-    // u_progress. Rendering it needs no B texture.
     const bool single_fade = frame_ && (frame_->fade_from_black || frame_->fade_to_black);
 
     const bool nv12_cur = nv12_valid_ && frame_ && frame_->nv12;
-    // NV12 BLEND: hardware planes also carry transitions and edge fades when
-    // the timeline delivers them GPU-first (b_nv12 + mode/progress for
-    // two-input transitions, or a single clip for fades). Preferred over both
-    // the plain NV12 path and the RGBA path.
     const bool nv12_blend =
         nv12_cur &&
         (single_fade || frame_->mode != canvas::core::TransitionRenderMode::None);
 
-    // Grade bind-state summary, logged only on CHANGE: proves a freshly baked
-    // LUT actually reaches a texture AND is the texture currently sampled at
-    // draw time. `drop` (grade present but not bound) is the state that would
-    // draw an ungraded or stale-sampled frame; bake-hash vs upload-hash (above)
-    // plus tex address here pin corruption to bake, upload, or bind.
     {
         const bool grade_present = frame_ && frame_->grade && frame_->grade->valid();
         const bool grade_bound = grade_present && grade_tex_a_ &&
                                  grade_a_uploaded_ == frame_->grade.get();
-        // Re-log whenever a new LUT object goes live (pointer identity chases
-        // every re-bake), not just on the present/bound/tex flags — those are
-        // stable once the first grade binds, so a state-only gate would log
-        // exactly once per session.
         static const void* last_lut = nullptr;
         if (grade_present) {
             const void* cur = frame_->grade.get();
@@ -1522,16 +1248,10 @@ void ViewerGL::paintGL() {
         if (have_b) {
             bind_nv12_b(2, 3);
         } else {
-            // Single-clip fade (no B frame): bind A's planes to the B slots so
-            // MODE_FADEIN_A/FADEOUT never sample an unallocated texture.
             bind_nv12_a(2, 3);
         }
         program_nv12_trans_->setUniformValue("u_tex_b_y", 2);
         program_nv12_trans_->setUniformValue("u_tex_b_uv", 3);
-        // Per-side YUV color spec: each clip decodes with its own matrix/range
-        // (probe-reconciled), and a single-clip fade's B slots alias A's planes
-        // so B inherits A's spec there. Defaults live in the shader's runtime
-        // branches — never rely on the GL default (0 = BT601 limited).
         const auto spec_int2 = [](const canvas::core::Nv12Frame* n) {
             return std::pair<int, int>{static_cast<int>(n->matrix),
                                        static_cast<int>(n->range)};
@@ -1542,8 +1262,6 @@ void ViewerGL::paintGL() {
         const auto spec_b = spec_int2(have_b ? frame_->b_nv12.get() : frame_->nv12.get());
         program_nv12_trans_->setUniformValue("u_matrix_b", spec_b.first);
         program_nv12_trans_->setUniformValue("u_range_b", spec_b.second);
-        // Grade LUTs: A lives on unit 4, B on unit 5. A single-clip fade has no
-        // B grade (B slots alias A's planes), so grade_b stays disabled there.
         const bool grade_a_attached = frame_->grade && frame_->grade->valid() &&
                                       grade_tex_a_ && grade_a_uploaded_ == frame_->grade.get();
         const bool grade_b_attached = have_b && frame_->grade_b &&
@@ -1558,8 +1276,7 @@ void ViewerGL::paintGL() {
         program_nv12_trans_->setUniformValue("u_grade_b_size",
                                              grade_b_attached ? frame_->grade_b->size : 0);
         if (single_fade) {
-            const int fade_mode = frame_->fade_from_black ? 9 /*MODE_FADEIN_A*/
-                                                          : 3 /*MODE_FADEOUT*/;
+            const int fade_mode = frame_->fade_from_black ? 9 : 3;
             program_nv12_trans_->setUniformValue("u_mode", fade_mode);
             program_nv12_trans_->setUniformValue("u_progress", frame_->progress);
         } else {
@@ -1574,16 +1291,10 @@ void ViewerGL::paintGL() {
         bind_nv12_a(0, 1);
         program_nv12_->setUniformValue("u_tex_y", 0);
         program_nv12_->setUniformValue("u_tex_uv", 1);
-        // This clip decodes with its own resolved matrix/range (see the trans
-        // path for the same pair); GL's default uniform is 0 = BT601 limited,
-        // so set it every frame.
         program_nv12_->setUniformValue("u_matrix", static_cast<int>(frame_->nv12->matrix));
         program_nv12_->setUniformValue("u_range", static_cast<int>(frame_->nv12->range));
-        // A-side grade LUT (unit 4); the plain NV12 shader has no B side.
         const bool grade_a_attached = frame_->grade && frame_->grade->valid() &&
                                       grade_tex_a_ && grade_a_uploaded_ == frame_->grade.get();
-        // Color archive: [viewer] line on spec/grade changes only, so wheel/curve
-        // interactions show when a grade actually attached to the preview draw.
         const int grade_state = grade_a_attached ? 1 : 0;
         if (!last_spec_set_ || frame_->nv12->matrix != last_spec_matrix_ ||
             frame_->nv12->range != last_spec_range_ || grade_state != last_grade_attached_) {
@@ -1610,12 +1321,9 @@ void ViewerGL::paintGL() {
         program_->setUniformValue("u_tex", 0);
 
         if (single_fade) {
-            // Fade the A texture against black. Bind A to both slots so the shader's B
-            // texture() is valid even though the fade modes don't use it.
             texture_->bind(1);
             program_->setUniformValue("u_tex_b", 1);
-            const int fade_mode = frame_->fade_from_black ? 9 /*MODE_FADEIN_A*/
-                                                          : 3 /*MODE_FADEOUT*/;
+            const int fade_mode = frame_->fade_from_black ? 9 : 3;
             program_->setUniformValue("u_mode", fade_mode);
             program_->setUniformValue("u_progress", frame_->progress);
         } else {
@@ -1627,11 +1335,6 @@ void ViewerGL::paintGL() {
             program_->setUniformValue("u_mode", trans ? static_cast<int>(frame_->mode) : 0);
             program_->setUniformValue("u_progress", trans ? frame_->progress : 0.0f);
         }
-        // A/B grade LUTs (units 4/5): the same sample-graded 3D-LUT path as the
-        // NV12 shaders, so a CPU-RGBA decode still renders fully graded display.
-        // Units are bound unconditionally (real LUT or the neutral 3D texture) so
-        // the sampler3D uniforms never target the 2D video unit (Mesa rejects the
-        // draw otherwise); u_grade_*_size disables the grade when none is set.
         const bool grade_a_attached = frame_ && frame_->grade && frame_->grade->valid() &&
                                       grade_tex_a_ && grade_a_uploaded_ == frame_->grade.get();
         const bool grade_b_attached = frame_ && frame_->grade_b && frame_->grade_b->valid() &&
@@ -1648,8 +1351,6 @@ void ViewerGL::paintGL() {
         note_err(3);
     }
 
-    // Scale the unit quad's X/Y by the letterbox factor by re-buffering the
-    // quad positions (UVs unchanged); the GPU scales during raster.
     static const std::array<float, 16> s_src = {
         -1.f, -1.f, 0.f, 1.f,
          1.f, -1.f, 1.f, 1.f,
@@ -1663,10 +1364,6 @@ void ViewerGL::paintGL() {
                                frame_->anchor_dx != 0.0 || frame_->anchor_dy != 0.0 ||
                                frame_->flip_h || frame_->flip_v);
     if (tf) {
-        // Math in output-pixel space, mirroring the exporter's mapping so the
-        // viewport and an export agree: pivot P = fitted-rect center + anchor;
-        // scale about P, mirror (flips), rotate about P, then translate by the
-        // pixel position. Corners are the fitted letterbox rect in screen px.
         const double hw = qw * vw * 0.5;
         const double hh = qh * vh * 0.5;
         const double cx = vw * 0.5;
@@ -1684,7 +1381,7 @@ void ViewerGL::paintGL() {
             {-hw, -hh}, {hw, -hh}, {-hw, hh}, {hw, hh}};
         for (int i = 0; i < 16; i += 4) {
             const int k = i / 4;
-            const double bx = corners[k][0] + cx - px;  // v - P
+            const double bx = corners[k][0] + cx - px;
             const double by = corners[k][1] + cy - py;
             const double ax = bx * sx * fxx;
             const double ay = by * sy * fyy;
@@ -1699,8 +1396,8 @@ void ViewerGL::paintGL() {
         }
     } else {
         for (int i = 0; i < 16; i += 4) {
-            s[i] *= qw;       // x
-            s[i + 1] *= qh;   // y
+            s[i] *= qw;
+            s[i + 1] *= qh;
         }
     }
     vbo_.bind();
@@ -1710,13 +1407,6 @@ void ViewerGL::paintGL() {
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     note_err(5);
 
-    // Always-on pixel probe (throttled ~1/s): samples the CPU RGBA source and
-    // the composited framebuffer center, plus any GL error from the draw. The
-    // line decides WHERE a persistent black viewer originates without needing
-    // CANVAS_DEBUG (all `[viewer] set_frame/upload/paint` lines are gated):
-    //   src avg/max > 0 but fb == 0    -> upload/shaders/draw broken (driver)
-    //   src avg/max == 0               -> decode/swscale produced black pixels
-    //   fb mirrors src brightness      -> the GL viewer path painted fine
     static int64_t px_probe_ = 0;
     const bool px_on_err = first_err != GL_NO_ERROR;
     if (px_on_err || (px_probe_++ % 60) == 0) {
@@ -1731,9 +1421,6 @@ void ViewerGL::paintGL() {
                 default: return "other";
             }
         };
-        // Per-stage attribution from THIS frame's draw (see note_err markers):
-        // 0=rgba program bind, 1=vao, 2=texture bind, 3=rgba uniforms,
-        // 4=vbo write, 5=glDrawArrays.
         uint8_t fbpx[4] = {0, 0, 0, 0};
         int fb_nz = 0;
         int fb_n = 0;
@@ -1787,7 +1474,6 @@ void ViewerGL::paintGL() {
             }
             src_avg = n ? static_cast<int>(sum / (3LL * n)) : 0;
         }
-        // src_avg == -1 => no CPU slice this probe tick (NV12-only or blank).
         ::canvas::core::log::log_warning(
             "[viewer] pixels uid=%llu errstage=%d err=%s tex=%dx%d win=%dx%d fb_avg=%d "
             "fb_nz=%d/%d fb=(%d,%d,%d,%d) src00=(%d,%d,%d,%d) "
@@ -1797,13 +1483,6 @@ void ViewerGL::paintGL() {
             fbpx[2], fbpx[3], s00[0], s00[1], s00[2], s00[3], scc[0], scc[1], scc[2],
             scc[3], src_avg);
         if (px_on_err) {
-            // One-shot drill-down on the failing draw: which program/VAO/VBO are
-            // current, what is bound to every unit the shaders touch (units
-            // 0,1 = A/B RGBA, 4,5 = grade 3D), whether the neutral 3D sampler
-            // object is actually complete, and GL_ACTIVE_TEXTURE. The first
-            // black-viewer draw rejected by Mesa (`GL_INVALID_OPERATION` at
-            // glDrawArrays) was traced to a sampler3D unit holding a 2D texture;
-            // this dump pins the exact unit/binding responsible.
             GLint prog = 0, vao = 0, arb = 0, eab = 0, active_tex = 0;
             glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
             glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
@@ -1878,8 +1557,8 @@ void ViewerGL::paintGL() {
             texture_nv12_b_uv_->release();
             texture_nv12_b_y_->release();
         } else {
-            texture_nv12_uv_->release();  // bound to both slots 1 and 3 (B fallback)
-            texture_nv12_y_->release();   // bound to both slots 0 and 2 (B fallback)
+            texture_nv12_uv_->release();
+            texture_nv12_y_->release();
         }
         texture_nv12_uv_->release();
         texture_nv12_y_->release();
@@ -1891,7 +1570,7 @@ void ViewerGL::paintGL() {
         program_nv12_->release();
     } else {
         if (single_fade) {
-            texture_->release();  // bound to both slots 0/1
+            texture_->release();
         } else if (texture_second_valid_ && frame_ && frame_->has_transition()) {
             texture_b_->release();
         }
@@ -1910,10 +1589,6 @@ void ViewerGL::paintGL() {
 void ViewerGL::draw_viewer_overlays() {
     if (overlay_flags_ == 0) return;
 
-    // Guides are drawn against the media rect the frame actually occupies on
-    // screen (the letterboxed quad), in widget coordinates — the same qw/qh
-    // math paintGL used to scale the quad, so the guides follow the picture in
-    // Fit mode and crop with it in Fill mode. Overlays are never exported.
     const float vw = static_cast<float>(width());
     const float vh = static_cast<float>(height());
     if (vw < 8.0f || vh < 8.0f) return;
@@ -1947,7 +1622,6 @@ void ViewerGL::draw_viewer_overlays() {
         sa.setAlpha(150);
         painter.setPen(QPen(sa, 1.0));
         painter.setBrush(Qt::NoBrush);
-        // Title safe: 80% box; action safe: 90% box (standard video safety).
         const QRectF title(media.left() + media.width() * 0.10, media.top() + media.height() * 0.10,
                            media.width() * 0.80, media.height() * 0.80);
         const QRectF action(media.left() + media.width() * 0.05, media.top() + media.height() * 0.05,
@@ -1968,7 +1642,6 @@ void ViewerGL::draw_viewer_overlays() {
         painter.setPen(Qt::NoPen);
         painter.setBrush(t.surface_low);
         painter.drawRoundedRect(pill, 10.0, 10.0);
-        // Status dot: amber while live, muted while paused.
         const QColor dot = playing_ ? t.accent : t.ink_faint;
         painter.setBrush(dot);
         painter.drawEllipse(QPointF(pill.left() + 11.0, pill.center().y()), 3.5, 3.5);
@@ -1982,8 +1655,6 @@ void ViewerGL::draw_viewer_overlays() {
 void ViewerGL::draw_blank() {
     const ThemeTokens& t = tokens();
     QPainter painter(this);
-    // The canvas fill honours the view-options Viewer Background: solid colors
-    // matched the glClear already, the checkerboard tiles the whole empty view.
     painter.fillRect(rect(), viewer_background_color());
     if (viewer_background_ == ViewerBackground::Checkerboard)
         paint_checkerboard(painter, rect());
@@ -1998,9 +1669,6 @@ void ViewerGL::draw_blank() {
     painter.drawText(badge, Qt::AlignCenter, mode_ == ViewerMode::Source ? QStringLiteral("SOURCE")
                                                                           : QStringLiteral("PROGRAM"));
 
-    // Branded empty state: the film-strip mark over the monitor's center, a
-    // bold mode-aware title, and a faint one-line hint — the same voice as
-    // the timeline's empty-state panel.
     const QPointF c = rect().center();
     const QPixmap mark_pm = raw_icon("film-strip").pixmap(24, 24);
     painter.drawPixmap(QPointF(c.x() - 12.0, c.y() - 52.0), mark_pm);
@@ -2039,7 +1707,6 @@ QColor ViewerGL::viewer_background_color() const {
         case ViewerBackground::White:      return QColor(0xE8, 0xE8, 0xE8);
         case ViewerBackground::Gray:       return QColor(0x5A, 0x5A, 0x5A);
         case ViewerBackground::Checkerboard:
-            // Same near-black base as Black; the checker tiles sit on top.
             return QColor(0x0A, 0x0A, 0x0C);
         case ViewerBackground::Black:
         default:                           return QColor(0x0A, 0x0A, 0x0C);
@@ -2047,13 +1714,11 @@ QColor ViewerGL::viewer_background_color() const {
 }
 
 void ViewerGL::draw_viewer_background() {
-    // Solid backgrounds are the glClear color in paintGL — no painter pass.
-    // Checkerboard needs the letterbox GL quad punched out of the tiled fill.
     if (viewer_background_ != ViewerBackground::Checkerboard) return;
     const float vw = static_cast<float>(width());
     const float vh = static_cast<float>(height());
     if (vw < 8.0f || vh < 8.0f) return;
-    if (!(texture_valid_ || nv12_valid_)) return;  // blank already tiled everything
+    if (!(texture_valid_ || nv12_valid_)) return;
     const float aspect = tex_h_ > 0 ? static_cast<float>(tex_w_) / tex_h_ : 1.0f;
     const float va = vw / vh;
     const float qw = (scale_mode_ == ScaleMode::Fill) ? std::max(aspect / va, 1.0f)
@@ -2061,8 +1726,6 @@ void ViewerGL::draw_viewer_background() {
     const float qh = (scale_mode_ == ScaleMode::Fill) ? std::max(va / aspect, 1.0f)
                                                       : std::min(va / aspect, 1.0f);
     const QRectF media((vw - qw * vw) / 2.0, (vh - qh * vh) / 2.0, qw * vw, qh * vh);
-    // Punch the media rect out of the fill with an even-odd path so the checker
-    // only shows in the letterbox bars / crop overflow.
     QPainterPath exterior;
     exterior.setFillRule(Qt::OddEvenFill);
     exterior.addRect(rect());
@@ -2072,4 +1735,4 @@ void ViewerGL::draw_viewer_background() {
     paint_checkerboard(painter, rect());
 }
 
-}  // namespace canvas::gui
+}

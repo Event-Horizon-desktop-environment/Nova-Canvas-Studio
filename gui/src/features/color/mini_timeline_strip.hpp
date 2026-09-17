@@ -1,11 +1,5 @@
 #pragma once
 
-// Mini-timeline strip (design spec §Layout-5): a compact cosmetic overview of
-// the sequence shown above the Color workspace. Reads the project's sequence
-// and paints each clip on the topmost video track as a 16:9 thumbnail box
-// (requested via ThumbnailService) plus a live playhead. Clicking a box seeks
-// the playhead to that clip (Milestone 0 UX scaffold — no grade data).
-
 #include <QWidget>
 
 #include <chrono>
@@ -23,22 +17,11 @@ namespace canvas::gui {
 
 class ThumbnailService;
 
-// Thumbnail request-id namespace for the color-page mini strip. Shares the one
-// app-wide ThumbnailService with the timeline filmstrip, media pool, project
-// manager and source preview; each consumer owns a disjoint high bit so
-// completion handlers can never match another consumer's decode. The strip and
-// the timeline used to both count from ~0/1, guaranteeing a collision over time
-// ("filmstrip never fully populated" / wrong frames). Bit 59 is below every
-// existing namespace region (pool = bit63, project = bits61-63,
-// source-preview = bits60-63 + bit0, timeline = bit60).
 inline constexpr std::uint64_t kMiniStripThumbNs = 0x0800000000000000ULL;
-// O(1) gate on_thumbnail_ready uses to reject ids posted by other consumers.
 inline bool is_mini_strip_thumb_id(std::uint64_t id) noexcept {
     return (id & kMiniStripThumbNs) != 0;
 }
 
-// Lightweight media metadata for looking up the source path behind a clip's
-// media id so the strip can request a thumbnail frame.
 struct MiniMediaMeta {
     std::string path;
     int64_t total_frames = 0;
@@ -59,9 +42,6 @@ public:
 
 signals:
     void clip_activated(canvas::core::ClipId id, int64_t timeline_frame);
-    // Drag-to-scrub lifecycle: scrub_begin fires when a drag grab starts,
-    // scrubbed on every pointer move (live preview), scrub_committed once on
-    // release.
     void scrub_begin();
     void scrubbed(int64_t timeline_frame);
     void scrub_committed(int64_t timeline_frame);
@@ -87,8 +67,6 @@ private:
     QSize previous_size_;
     bool scrubbing_ = false;
     int64_t scrub_owner_clip_ = -1;
-    // Drag-to-scrub move taps fire at pointer-move rate; peers (sequence seek
-    // previews) already throttle, so gate the per-move trace line here too.
     std::chrono::steady_clock::time_point last_scrub_log_{};
     std::unordered_map<canvas::core::MediaId, MiniMediaMeta> media_paths_;
     ThumbnailService* thumbnail_service_ = nullptr;
@@ -97,4 +75,4 @@ private:
     std::unordered_map<canvas::core::ClipId, QImage> thumbs_;
 };
 
-}  // namespace canvas::gui
+}

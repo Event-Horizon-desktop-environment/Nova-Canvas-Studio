@@ -16,23 +16,17 @@ struct MediaEntry {
     int width = 0;
     int height = 0;
     int64_t total_frames = -1;
-    std::string bin;  // name of the owning bin; empty = Master bin
-    bool has_audio = false;  // media carries an audio stream (waveform preview)
+    std::string bin;
+    bool has_audio = false;
 };
 
 struct Project {
     std::string name = "Untitled Project";
-    // Default directory this project's footage lives in (set from the New
-    // Project dialog; seeds the Media import browser). Empty for projects
-    // created before this field existed.
     std::string media_root;
     Sequence sequence;
     std::vector<MediaEntry> media;
-    std::vector<std::string> bins;  // user-created bin names (Master is implicit, not stored)
+    std::vector<std::string> bins;
 
-    // Deliver state persisted with the project so reopening jumps straight back
-    // into the export setup: the panel-level settings plus a snapshot of the
-    // render queue (staged jobs, finished cards, failures all survive).
     DeliverSettings deliver_settings;
     std::vector<RenderJobSnapshot> render_jobs;
 

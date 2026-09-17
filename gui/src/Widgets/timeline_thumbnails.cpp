@@ -21,9 +21,6 @@ namespace canvas::gui {
 
 QPixmap scaled_fit(const QImage& img, int w, int h) {
     if (w <= 0 || h <= 0 || img.isNull()) return QPixmap();
-    // Show the whole frame: scale to fit inside the cell (KeepAspectRatio) and
-    // center it on a transparent canvas so the letterbox bars reveal the clip
-    // shell behind. No cropping — nothing of the picture is cut off.
     const QImage scaled =
         img.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     QPixmap canvas(w, h);
@@ -37,12 +34,6 @@ QPixmap scaled_fit(const QImage& img, int w, int h) {
 void TimelineWidget::set_thumbnail_service(ThumbnailService* service) {
     thumbnail_service_ = service;
     if (service) {
-        // Queued always: the service emits from WORKER threads AND reentrantly
-        // from submit() (memory-cache hits on the caller's thread). A direct
-        // delivery back into request_clip_thumbnails()' loop re-entered the
-        // handler mid-scan with the strip's geometry/items mid-flight; queuing
-        // routes every delivery through the event loop so placement always runs
-        // with the request loop fully unwound.
         connect(service, &ThumbnailService::thumbnail_ready, this,
                 &TimelineWidget::on_thumbnail_ready, Qt::QueuedConnection);
         connect(service, &ThumbnailService::waveform_ready, this,
@@ -68,9 +59,6 @@ void TimelineWidget::request_clip_thumbnails() {
             const int clip_h = std::max(1, static_cast<int>(item.rect->rect().height() - kClipLabelHeight - 4));
             const uint64_t id = next_thumb_id_++;
             item.cells[0].request_id = id;
-            // The clip's src_in..src_out window as a fraction of the media, so
-            // the waveform shows exactly this clip's audio. Two clips produced
-            // by a blade render the same spectrum they showed before the cut.
             float lo = 0.0f, hi = 1.0f;
             const int64_t total = it->second.total_frames;
             if (total > 0) {
@@ -78,11 +66,6 @@ void TimelineWidget::request_clip_thumbnails() {
                 lo = static_cast<float>(std::clamp(static_cast<double>(item.clip->src_in) * inv, 0.0, 1.0));
                 hi = static_cast<float>(std::clamp(static_cast<double>(item.clip->src_out) * inv, 0.0, 1.0));
             }
-            // Always-on diagnostic coupling this request's window-law (video-frame
-            // grid: src / total_frames) with the geometry the user aims the razor
-            // at, so a "wrong cut" can be reconciled against the [wave] AUDIT line
-            // in the generator (audio-time grid). This is the exact pair of inputs
-            // the grid cross-check needs.
             const double fpp = frames_per_pixel();
             qDebug().nospace()
                 << "[wave] REQ id=" << id
@@ -112,10 +95,6 @@ void TimelineWidget::request_clip_thumbnails() {
 
         const double cw = item.rect->rect().width();
         const double cell_w = cw / num_cells;
-        // Always-on filmstrip audit: how the strip was created this rebuild.
-        // cells/cw/cell_w must match draw_tracks() exactly (cells are what the
-        // request loop fans out below); a mismatch here means the draw side
-        // created a different count and the served pixmaps cannot tile the clip.
         const int64_t last_frame =
             src_in + static_cast<int64_t>((num_cells - 0.5) * dur / num_cells);
         if (debug_enabled())
@@ -128,18 +107,11 @@ void TimelineWidget::request_clip_thumbnails() {
                 << " dur=" << dur << " src_in=" << src_in
                 << " frames=[" << src_in << "," << last_frame << "]"
                 << " track=" << item.track_index;
-        // Decode at ~2-3x the on-screen cell width so deep-zoom cells stay sharp;
-        // the min keeps narrow cells from falling below a useful decode size.
         const int target_w = std::max(24, std::min(192, static_cast<int>(cell_w * 2.5)));
         for (int c = 0; c < num_cells; ++c) {
             const int64_t src_frame = src_in + static_cast<int64_t>((c + 0.5) * dur / num_cells);
             const uint64_t id = next_thumb_id_++;
             item.cells[c].request_id = id;
-            // Always-on per-cell audit: every cell the draw pass created must
-            // receive a request here. The scene_x that the request PASS writes is
-            // compared against on_thumbnail_ready's actual placement, so a
-            // draw/request/place divergence (strip ending short of the clip end,
-            // overlapping cells, cells skipped) is visible in the log directly.
             const double cell_x = item.rect->pos().x() + c * cell_w;
             if (debug_enabled())
                 qWarning().nospace()
@@ -167,30 +139,16 @@ void TimelineWidget::request_clip_thumbnails() {
 
 void TimelineWidget::on_thumbnail_ready(uint64_t id, const QImage& image) {
     if (image.isNull()) return;
-    // O(1) namespace gate: only ids this widget assigned may place cells. Without
-    // it, pool/ministrip/project ids with a numerically-equal id landed in (or
-    // forced a fruitless scan over) these cells — the wrong-frame filmstrip bug.
     if (!is_timeline_thumb_id(id)) return;
     for (auto& item : clip_items_) {
         if (item.track_kind != canvas::core::Track::Kind::Video) continue;
         if (item.cells.empty()) continue;
         for (auto& cell : item.cells) {
             if (cell.request_id != id || !cell.item) continue;
-            // Whole-frame cells: the full picture is scaled to fit inside the
-            // cell and centered, so nothing is cropped. Where the source aspect
-            // doesn't match the cell, the letterbox bars reveal the clip shell
-            // behind instead of cutting off the top/bottom or sides.
             const double cell_w = item.rect->rect().width() / item.cells.size();
             const int cell_h = std::max(1, static_cast<int>(item.rect->rect().height() - kClipLabelHeight - 4.0));
             const int pw = std::max(1, static_cast<int>(std::ceil(cell_w)));
-            // Always-on placement audit: the pixmap's actual size vs the cell box
-            // it was scaled to, plus where it landed. If pw < cell_w the pixmaps
-            // would leave gaps between cells (not edge-to-edge); if the drawn
-            // image inside scaled_fit's canvas is much smaller than the box, the
-            // visible frame reads as a floating thumbnail instead of a strip.
             const QPixmap placed = scaled_fit(image, pw, cell_h);
-            // Cells are children of the clip's ClipClipGroup (scene origin), so
-            // item pos == scene pos.
             if (debug_enabled())
                 qWarning().nospace()
                     << "[filmstrip] PLACE id=" << id
@@ -201,11 +159,6 @@ void TimelineWidget::on_thumbnail_ready(uint64_t id, const QImage& image) {
                     << " cell_scene_x=" << QString::number(cell.item->pos().x(), 'f', 2)
                     << " clip_w=" << QString::number(item.rect->rect().width(), 'f', 1);
             cell.item->setPixmap(placed);
-            // Completeness audit: how many of this clip's cells now hold a
-            // pixmap. A clip whose PLACE lines never reach filled=totals has
-            // holes — decode failures punched through to the shell and the strip
-            // reads as not-edge-to-edge (REQ/CELL enumerate the cells the draw
-            // pass created, so a missing PLACE line names the exact blank cell).
             int filled = 0;
             for (const auto& other : item.cells)
                 if (other.request_id != 0 && other.item && !other.item->pixmap().isNull()) filled++;
@@ -222,26 +175,13 @@ void TimelineWidget::on_thumbnail_ready(uint64_t id, const QImage& image) {
 
 void TimelineWidget::on_waveform_ready(uint64_t id, const QImage& image) {
     if (image.isNull()) return;
-    // Namespace gate (mirrors on_thumbnail_ready): only this widget's waveform
-    // ids may place a spectrum.
     if (!is_timeline_thumb_id(id)) return;
     for (auto& item : clip_items_) {
         if (item.track_kind != canvas::core::Track::Kind::Audio) continue;
         if (item.cells.empty() || item.cells[0].request_id != id || !item.cells[0].item) continue;
         const QRectF r = item.rect->rect();
-        // Fill the body EXACTLY: the pixmap is generated at r.width() (request
-        // width) and must be drawn at that same width so each column maps 1:1 to
-        // a timeline frame column. Rescaling to width-4 (old code) compressed the
-        // spectrum ~4px inward and, with the old cx+2 inset, shifted it off the
-        // frame grid — the blade wrong-cut bug. Height keeps its existing inset.
         const int cw = std::max(1, static_cast<int>(r.width()));
         const int ch = std::max(1, static_cast<int>(r.height() - kClipLabelHeight - 4.0));
-        // Waveform view flags applied at serve time (before the volume scale) so
-        // the spectrum lands pre-shaped: rectification keeps one side, Full/Scaled
-        // height laws shrink the body, and the border is a hairline box. The
-        // generator's images are bipolar (peaks mirrored about the vertical
-        // center), so "Non-Rectified" (the default) passes them through whole;
-        // "Rectified" crops the upper half and stretches it to the full box.
         const TimelineViewOptions& vopts = eff_view_options();
         QImage shaped = image;
         if (!vopts.non_rectified_waveforms && shaped.height() > 2) {
@@ -265,18 +205,10 @@ void TimelineWidget::on_waveform_ready(uint64_t id, const QImage& image) {
             pm = framed;
         }
         item.cells[0].item->setPixmap(pm);
-        // A Short/Unscaled body centers itself in the clip's waveform box (the
-        // pixmap top stays at volume_y0, matching the volume-line's own box).
         if (th < ch) {
             const double yoff = item.volume_y0 + static_cast<double>(ch - th) * 0.5;
             item.cells[0].item->setPos(item.cells[0].item->pos().x(), yoff);
         }
-        // Always-on placement audit: the wave pixmap must fill the clip body EXACTLY
-        // (no horizontal inset, no width-4 shrink — see timeline_view for the
-        // frame_at_x law). Log the cell scene position + fpp so the drawn
-        // spectrum's left/right scene-x maps back to timeline frames for
-        // comparison against the clip's tl window — any mismatch here is a
-        // drawn-vs-audible offset the blade would inherit.
         const double cell_x = item.cells[0].item->scenePos().x();
         const double fpp = frames_per_pixel();
         const double dxl = kSceneMargin + kTrackHeaderWidth;
@@ -291,13 +223,9 @@ void TimelineWidget::on_waveform_ready(uint64_t id, const QImage& image) {
             << " tl=[" << item.clip->tl_in << "," << item.clip->tl_out << ")"
             << " drawn_frames=[" << QString::number(drawn_left_frame, 'f', 2) << ","
             << QString::number(drawn_right_frame, 'f', 2) << "]";
-        // Render the freshly-set waveform at the clip's COMMITTED volume (a
-        // rebuild re-rendered the pixmap, so this is the point where the
-        // spectrum re-syncs with the gain; live drag updates come from
-        // set_live_clip_gain's apply_waveform_volume_scale instead).
         apply_waveform_volume_scale(item, static_cast<float>(item.clip->volume_db));
         return;
     }
 }
 
-}  // namespace canvas::gui
+}

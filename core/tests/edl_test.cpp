@@ -1,12 +1,3 @@
-// Phase 1 (D1) EDL (CMX3600) export tests. Pins:
-//  - edl::timecode HH:MM:SS:FF math (incl. boundaries + fps fallback);
-//  - the CMX3600 header (TITLE / FCM: NON-DROP FRAME);
-//  - one event per clip, sorted by timeline in-point across tracks (stable for
-//    same-frame events), each with the src + rec timecode quartet;
-//  - reel derivation from the media basename (uppercased, extension stripped)
-//    and the AX fallback for title clips / unknown media.
-// Headless — links only canvas_core.
-
 #include "canvas/core/export/edl.hpp"
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/model.hpp"
@@ -64,11 +55,11 @@ void test_write() {
     Track v1;
     v1.kind = Track::Kind::Video;
     v1.name = "V1";
-    v1.clips.push_back(make_clip(1, 0, 150, 0, 150, 1));  // 5s
+    v1.clips.push_back(make_clip(1, 0, 150, 0, 150, 1));
     Track v2;
     v2.kind = Track::Kind::Video;
     v2.name = "V2";
-    v2.clips.push_back(make_clip(2, 30, 90, 0, 60, 2));  // 2s at 1s
+    v2.clips.push_back(make_clip(2, 30, 90, 0, 60, 2));
     Track a1;
     a1.kind = Track::Kind::Audio;
     a1.name = "A1";
@@ -92,25 +83,20 @@ void test_write() {
     check(has(edl, "TITLE: Demo\n"), "TITLE line");
     check(has(edl, "FCM: NON-DROP FRAME\n\n"), "FCM line");
 
-    // Event 001 = video V1 clip (tl 0), reel FOO.
     check(has(edl, "001"), "event 001 present");
     check(has(edl, "FOO"), "reel from foo.mov");
     check(has(edl, "00:00:00:00 00:00:05:00 00:00:00:00 00:00:05:00"),
           "event 001 src + rec timecodes");
     check(has(edl, "* FROM CLIP NAME: foo.mov\n"), "clip-name note");
 
-    // Same tl_in (0) as event 001, but on the audio track: stable sort keeps
-    // track order, so the audio event is 002.
     const std::size_t pos_bar = edl.find("BAR");
     const std::size_t pos_baz = edl.find("BAZ");
     check(pos_bar != std::string::npos && pos_baz != std::string::npos, "BAR + BAZ reels");
     check(pos_bar < pos_baz, "audio event (BAR) before later video event (BAZ)");
 
-    // Event 003 = video V2 clip at tl 1s, 2s long, src 0..2s.
     check(has(edl, "00:00:00:00 00:00:02:00 00:00:01:00 00:00:03:00"),
           "event 003 src + rec timecodes");
 
-    // Title clip (media < 0) uses the AX auxiliary reel.
     Sequence t;
     t.fps = 30.0;
     Track tv;
@@ -122,7 +108,7 @@ void test_write() {
     check(!has(tedl, "FROM CLIP NAME"), "title clip has no media note");
 }
 
-}  // namespace
+}
 
 int main() {
     test_timecode();

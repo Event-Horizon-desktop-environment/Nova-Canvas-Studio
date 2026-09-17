@@ -13,8 +13,6 @@ int64_t Editor::max_duration(const CutTarget& t) {
 }
 
 bool Editor::open(const CutTarget& target, int64_t seeded) {
-    // A move over the already-open identical target is a no-op, so the widget
-    // skips tearing down and rebuilding its painted handle every pointer move.
     const bool unchanged =
         visible_ && t_.cut_frame == target.cut_frame &&
         t_.track_index == target.track_index && t_.a == target.a &&
@@ -25,9 +23,6 @@ bool Editor::open(const CutTarget& target, int64_t seeded) {
     int64_t init = seeded < kMinTransitionFrames ? 6 : seeded;
     init = std::clamp(init, kMinTransitionFrames, max_duration(t_));
     dur_ = init;
-    // For a single-clip Start (IN) edge the overlay extends rightward from the
-    // boundary; an End (OUT) edge extends leftward; a cut centres it across the
-    // two clips with the same one-frame-off symmetry as before.
     if (t_.edge == Edge::Start) {
         left_ = t_.cut_frame;
         right_ = t_.cut_frame + init;
@@ -61,7 +56,6 @@ void Editor::close() {
 void Editor::begin_drag(int edge, bool snap) {
     dragging_ = true;
     drag_edge_ = edge;
-    // The opposite edge stays fixed while the grabbed edge moves.
     anchor_ = edge == kDragEdgeLeft ? right_ : left_;
     snap_ = snap;
 }
@@ -72,8 +66,6 @@ void Editor::move_to(int64_t pointer_frame) {
                                                     : anchor_ - pointer_frame;
     int64_t dur = std::clamp(rawsize, kMinTransitionFrames, maxd);
     if (snap_) {
-        // Bubble drags snap to the favourite presets so the live label settles
-        // on a clean duration instead of a free-form frame count.
         int64_t best = dur;
         for (const int64_t preset : kFavoritePresets) {
             if (preset < kMinTransitionFrames || preset > maxd) continue;
@@ -114,5 +106,5 @@ int64_t Editor::stored_duration() const {
                                          : t_.a->transition_out_duration);
 }
 
-}  // namespace transition_editor
-}  // namespace canvas::gui
+}
+}

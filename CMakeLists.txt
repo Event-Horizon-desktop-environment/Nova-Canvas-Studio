@@ -11,9 +11,6 @@ enable_testing()
 add_subdirectory(core)
 add_subdirectory(gui)
 
-# Phase 0 (Vulkan-tests): the Vulkan backend is proven test-first. Headless —
-# links only canvas_core + Vulkan, never Qt. Disabled when no Vulkan SDK is
-# present so ordinary builds (and CI without the headers) stay unaffected.
 find_package(Vulkan QUIET)
 if(Vulkan_FOUND)
     add_subdirectory(Vulkan-tests)
@@ -22,18 +19,6 @@ else()
     message(STATUS "Vulkan headers not found — Vulkan-tests disabled")
 endif()
 
-# ── Formatting ──────────────────────────────────────────────────────────────
-# Opt-in clang-format enforcement, mirroring MLT's clang-format-check
-# discipline. Off by default so ordinary `./build.sh` builds are untouched; the
-# agent "before you hand back" loop (and CI, when one exists) configures with
-# -DCANVAS_CLANG_FORMAT=ON.
-#
-#   cmake -DCANVAS_CLANG_FORMAT=ON -B build
-#   cmake --build build --target clang-format        # reformat in place
-#   cmake --build build --target clang-format-check  # dry-run; fails on drift
-#
-# The style lives in the repo's .clang-format (Qt-derived: 4-space indent,
-# bound-left pointers, 100-column cap).
 option(CANVAS_CLANG_FORMAT "Expose clang-format / clang-format-check targets" OFF)
 if(CANVAS_CLANG_FORMAT)
     find_program(CLANG_FORMAT clang-format)
@@ -49,8 +34,6 @@ if(CANVAS_CLANG_FORMAT)
             gui/tests/*.cpp gui/tests/*.hpp gui/tests/*.h
             gui/tests/qt/*.cpp gui/tests/qt/*.hpp gui/tests/qt/*.h
         )
-        # clang-format finds the repo .clang-format by walking up from each
-        # file, so a relative path list + WORKING_DIRECTORY is all that's needed.
         add_custom_target(clang-format
             COMMAND ${CLANG_FORMAT} -i ${CANVAS_FORMAT_SOURCES}
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

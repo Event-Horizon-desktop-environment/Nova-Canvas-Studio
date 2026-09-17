@@ -1,12 +1,3 @@
-// Qt test for the Theme-tab foundation: the generalized token-override API and
-// the shareable theme file (Save/Import). Pins the enumeration <-> name <-> key
-// law, override-clear semantics, the derived-family recoloring (accent/playhead
-// recolor their hover/soft/state members while preserving designed alpha), the
-// JSON theme export/import round-trip, and format rejection.
-//
-// Qt-linked on purpose (theme_tokens.cpp touches QColor/QJson/QFile); the headless
-// invariant doesn't apply. Mirrors the other qt/* tests' bespoke main() runner.
-
 #include "UX/theme_state.hpp"
 #include "UX/theme_tokens.hpp"
 
@@ -35,13 +26,12 @@ bool expect(bool cond, const char* label, bool& ok) {
     return true;
 }
 
-}  // namespace
+}
 
 static int run_checks() {
     bool ok = true;
     unsigned failures = 0;
 
-    // --- Enumeration <-> name <-> QSettings key law -------------------------
     {
         QSet<QString> seen;
         for (int i = 0; i < kThemeTokenFieldCount; ++i) {
@@ -64,7 +54,6 @@ static int run_checks() {
                "COUNT_ has no name", ok);
     }
 
-    // --- Color string law ---------------------------------------------------
     {
         expect(theme_color_string(QColor(0xEA, 0xA3, 0x40))
                    == QStringLiteral("#eaa340"),
@@ -73,11 +62,9 @@ static int run_checks() {
         const QString s = theme_color_string(alpha_col);
         expect(s == alpha_col.name(QColor::HexArgb), "translucent keeps HexArgb", ok);
         expect(theme_color_string(QColor()).isEmpty(), "invalid serializes empty", ok);
-        // Parsing round-trips the serialized string back to the same color.
         expect(QColor(s) == alpha_col, "HexArgb string parses back", ok);
     }
 
-    // --- Set -> live token; clear -> designed ------------------------------
     {
         const QColor designed = designed_token_value(ThemeTokenField::Surface);
         const QColor over(0x10, 0x20, 0x30);
@@ -91,9 +78,8 @@ static int run_checks() {
         expect(tokens().surface == designed, "tokens() returns designed after clear", ok);
     }
 
-    // --- Derived family: accent recolors its BUTTON states only -------------
     {
-        const ThemeTokens base = tokens();  // no accent override active
+        const ThemeTokens base = tokens();
         const QColor purple(0x55, 0x00, 0x7F);
         set_token_override(ThemeTokenField::Accent, purple);
         expect(tokens().accent == purple, "accent override lands", ok);
@@ -103,8 +89,6 @@ static int run_checks() {
                "accent_press recolored", ok);
         expect(tokens().on_accent != base.on_accent,
                "on_accent recolored", ok);
-        // The wider chrome must stay on its designed colors — changing the
-        // accent alone must never flush the whole UI into one tint.
         expect(tokens().accent_text == base.accent_text,
                "accent_text keeps designed color", ok);
         expect(tokens().accent_soft == base.accent_soft,
@@ -115,7 +99,6 @@ static int run_checks() {
                "state_selected keeps designed color", ok);
         expect(tokens().focus_ring == base.focus_ring,
                "focus_ring keeps designed color", ok);
-        // A translucent-accent file (import) must land verbatim too.
         set_token_override(ThemeTokenField::Accent, QColor(0x55, 0x00, 0x7F, 0x99));
         expect(tokens().accent == QColor(0x55, 0x00, 0x7F, 0x99),
                "translucent accent override lands verbatim", ok);
@@ -124,7 +107,6 @@ static int run_checks() {
                "accent family returns to designed on clear", ok);
     }
 
-    // --- Derived family: playhead -> playhead_soft; ink -> state layers -----
     {
         const ThemeTokens base = tokens();
         set_token_override(ThemeTokenField::Playhead, QColor(0x4F, 0xB8, 0xD6));
@@ -140,7 +122,6 @@ static int run_checks() {
         set_token_override(ThemeTokenField::Ink, QColor());
     }
 
-    // --- Border override flips border_hi -----------------------------------
     {
         const ThemeTokens base = tokens();
         const QColor b(0x30, 0x30, 0x35);
@@ -150,9 +131,8 @@ static int run_checks() {
         set_token_override(ThemeTokenField::Border, QColor());
     }
 
-    // --- Export / import round-trip ----------------------------------------
     {
-        const QColor designed_accent_soft = tokens().accent_soft;  // no override yet
+        const QColor designed_accent_soft = tokens().accent_soft;
         const QColor accent(0x22, 0x88, 0x44);
         const QColor playhead(0x4F, 0xB8, 0xD6, 0xCC);
         const QColor border(0x99, 0x88, 0x77, 0x33);
@@ -187,7 +167,6 @@ static int run_checks() {
         expect(QColor(overrides.value(QStringLiteral("playhead")).toString()) == playhead,
                "translucent playhead hex round-trips", ok);
 
-        // Wipe everything, then import the file back.
         for (int i = 0; i < kThemeTokenFieldCount; ++i)
             set_token_override(static_cast<ThemeTokenField>(i), QColor());
         expect(!token_override(ThemeTokenField::Accent).isValid(), "overrides wiped", ok);
@@ -211,7 +190,6 @@ static int run_checks() {
             set_token_override(static_cast<ThemeTokenField>(i), QColor());
     }
 
-    // --- Import rejects foreign files --------------------------------------
     {
         const QColor before = token_override(ThemeTokenField::Accent);
         QTemporaryDir dir;
@@ -229,8 +207,6 @@ static int run_checks() {
         x.close();
         expect(!import_theme_file(foreign, nullptr), "foreign format rejected", ok);
 
-        // Unknown keys (derived members are not importable) must be skipped, not
-        // crash or blow away existing overrides.
         const QString derived = dir.filePath(QStringLiteral("derived.json"));
         QFile d(derived);
         expect(d.open(QIODevice::WriteOnly), "derived file writable", ok);

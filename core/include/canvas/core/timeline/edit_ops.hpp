@@ -44,9 +44,6 @@ private:
     std::vector<TrackSnapshot> after_;
 };
 
-// Batches several commands into ONE undoable step: redo()/undo() run the
-// children in order (undo reverses), so a multi-clip bulk edit — e.g. styling
-// every selected caption at once — stays a single UndoStack entry instead of N.
 class GroupCommand final : public ICommand {
 public:
     GroupCommand(std::string name, std::vector<std::unique_ptr<ICommand>> children);
@@ -60,11 +57,6 @@ private:
     std::vector<std::unique_ptr<ICommand>> children_;
 };
 
-// Whole-kind track-LIST edit: snapshots the entire `video_tracks` or
-// `audio_tracks` vector before/after and swaps it back. Needed because
-// EditCommand::apply() addresses tracks by index and asserts they exist, which
-// cannot express a track being inserted/removed/reordered (every later index
-// shifts). Used by insert_track/remove_track/move_track.
 class TrackListCommand final : public ICommand {
 public:
     TrackListCommand(std::string name, Track::Kind kind, std::vector<Track> before,
@@ -83,12 +75,6 @@ private:
 
 enum class Placement { Overwrite, Insert, AppendAtEnd, PlaceOnTop };
 
-// `media_fps` is the source media's own frame rate. Placement derives the clip's
-// timeline duration from the source window *time-based* (`tl = src * seq.fps /
-// media.fps`), matching the renderer/playback source stride — so 60fps footage on
-// a 30fps timeline spans its real duration, not twice it. Defaults to seq.fps
-// (the historical frame-for-frame law) for callers without media context; fps==seq
-// placements are identical either way.
 std::unique_ptr<ICommand> place_clip(Sequence& seq, Track::Kind kind, std::size_t track_index,
                                      Clip clip, Placement mode, double media_fps = 0.0);
 std::unique_ptr<ICommand> place_linked_clip(Sequence& seq, std::size_t video_track,
@@ -96,9 +82,6 @@ std::unique_ptr<ICommand> place_linked_clip(Sequence& seq, std::size_t video_tra
                                             Placement mode, double media_fps = 0.0);
 std::unique_ptr<ICommand> unlink_clip(Sequence& seq, Track::Kind kind, std::size_t track_index,
                                       ClipId id);
-// Links an unlinked clip to an unlinked clip of the opposite kind whose time
-// range overlaps the source clip (preferring the best overlap). Returns nullptr
-// if no compatible mate exists or the clip is already linked.
 std::unique_ptr<ICommand> link_clip(Sequence& seq, Track::Kind kind, std::size_t track_index,
                                     ClipId id);
 std::unique_ptr<ICommand> lift_range(Sequence& seq, Track::Kind kind, std::size_t track_index,
@@ -107,127 +90,53 @@ std::unique_ptr<ICommand> ripple_delete_range(Sequence& seq, Track::Kind kind,
                                               std::size_t track_index, int64_t in, int64_t out);
 std::unique_ptr<ICommand> blade_at(Sequence& seq, Track::Kind kind, std::size_t track_index,
                                    int64_t pos);
-// Cuts the clip under `pos` AND its linked mate (if any) at the same position.
 std::unique_ptr<ICommand> blade_linked_at(Sequence& seq, Track::Kind kind, std::size_t track_index,
                                           int64_t pos);
-// Deletes a single clip (removing it), *without* closing the gap. If the clip
-// is linked, its linked mate is also removed. Returns the command or nullptr.
 std::unique_ptr<ICommand> lift_clip(Sequence& seq, Track::Kind kind, std::size_t track_index,
                                     ClipId id);
-// Ripple-deletes a single clip, closing the gap by shifting later clips left.
-// If the clip is linked, its linked mate is also removed (without rippling the
-// mate's track unless the mate is on a different kind of track).
 std::unique_ptr<ICommand> ripple_delete_clip(Sequence& seq, Track::Kind kind,
                                              std::size_t track_index, ClipId id);
 std::unique_ptr<ICommand> move_clip(Sequence& seq, Track::Kind src_kind, std::size_t src_track,
                                     ClipId id, Track::Kind dst_kind, std::size_t dst_track,
                                     int64_t new_tl_in);
-// A single clip destination for a batch move: the clip `id` ends on the track
-// `kind`/`track_index` at `new_tl_in`. Track indices are PER-KIND (audio entries
-// index into audio_tracks).
 struct BatchMove {
     ClipId id = 0;
     Track::Kind kind = Track::Kind::Video;
     std::size_t track_index = 0;
     int64_t new_tl_in = 0;
 };
-// Atomically moves several clips at once (one undo command). All moved clips are
-// extracted from their source tracks FIRST, then each is placed at its target, so
-// the group never clips or consumes its own members the way sequential move_clip
-// calls would; only stationary (non-dragged) clips get trimmed by a final
-// overlap. Linked clips missing from `moves` follow their rep by the same tl_in
-// delta, matching move_clip's mate semantics. Returns nullptr if `moves` is
-// empty; entries whose source/destination track is locked or whose clip cannot
-// be found are skipped.
 std::unique_ptr<ICommand> move_clips_batch(Sequence& seq, const std::vector<BatchMove>& moves);
-// Trims a clip's HEAD (left edge) to `new_tl_in`. `src_in` follows in lockstep
-// so the pictured content moves with the edge; the edge can be dragged back to
-// extend the clip but is clamped so it never goes below 0 or overlaps the track's
-// left neighbor, and never pushes src_in below the source start. If the clip is
-// linked, the mate's head trims by the same frame delta (clamped to its own
-// limits so the pair stays mated). `media_frames` is the clip's media duration
-// (total_frames) used to bound source-based clamps; pass 0 to allow no source
-// extension. Returns nullptr if the clip is not found, the track is locked, or
-// the requested position is already at the current edge.
 std::unique_ptr<ICommand> trim_clip_head(Sequence& seq, Track::Kind kind, std::size_t track_index,
                                          ClipId id, int64_t new_tl_in, int64_t media_frames);
-// Same as trim_clip_head but for the clip's TAIL (right edge) at `new_tl_out`;
-// `src_out` follows in lockstep and can never exceed `media_frames` or overlap
-// the track's right neighbor. This enables "regrow" after a blade+delete: the
-// source window extends back into the deleted region.
 std::unique_ptr<ICommand> trim_clip_tail(Sequence& seq, Track::Kind kind, std::size_t track_index,
                                          ClipId id, int64_t new_tl_out, int64_t media_frames);
-// Auto-creates a new topmost video track (index 0) and a new topmost audio track
-// (index 0), then moves the clip `id` onto the new video track at `new_tl_in`.
-// If the clip is linked, its linked mate moves to the new audio track, keeping
-// A/V sync (the mate's time offset relative to the primary is preserved). All of
-// this happens in a *single* undoable command; undoing restores the clips to
-// their original tracks (the new tracks themselves are left in place, matching
-// the non-undoable add/remove-track behavior). Returns nullptr if the clip is
-// not found.
 std::unique_ptr<ICommand> create_top_track_move(Sequence& seq, ClipId id, int64_t new_tl_in);
-// Sets the enabled/mute flag on a clip (and its linked mate, if any) so both
-// halves toggle together in a single undoable step. Returns nullptr if the clip
-// is not found.
 std::unique_ptr<ICommand> set_clip_enabled(Sequence& seq, Track::Kind kind, std::size_t track_index,
                                            ClipId id, bool enabled);
-// Sets the transition applied at a clip's OUT boundary (type + duration in
-// frames). If the clip is linked, the mate's transition is set to match, so a
-// video dissolve also crossfades its linked audio. Returns nullptr if the clip
-// is not found.
 std::unique_ptr<ICommand> set_clip_transition(Sequence& seq, Track::Kind kind,
                                               std::size_t track_index, ClipId id,
                                               TransitionType type, int64_t duration);
-// Clears the transition on a clip (and its linked mate). Returns nullptr if the
-// clip is not found.
 std::unique_ptr<ICommand> clear_clip_transition(Sequence& seq, Track::Kind kind,
                                                 std::size_t track_index, ClipId id);
-// Sets the transition applied at a clip's IN (leading) boundary (type + duration
-// in frames), fading the clip in over its first frames. Independent of the OUT
-// transition. If the clip is linked, the mate's IN transition is set to match.
-// Returns nullptr if the clip is not found.
 std::unique_ptr<ICommand> set_clip_transition_in(Sequence& seq, Track::Kind kind,
                                                  std::size_t track_index, ClipId id,
                                                  TransitionType type, int64_t duration);
-// Clears the IN transition on a clip (and its linked mate). Returns nullptr if
-// the clip is not found.
 std::unique_ptr<ICommand> clear_clip_transition_in(Sequence& seq, Track::Kind kind,
                                                    std::size_t track_index, ClipId id);
-// Removes the edit point (cut) where the incoming clip `B` (with B.tl_in ==
-// A.tl_out) joins the outgoing clip `A` (identified by `out_id`), merging the
-// two adjacent same-media clips into a single continuous clip spanning
-// [A.tl_in, B.tl_out). Returns nullptr if the clips are not adjacent on the same
-// track or do not share the same media (i.e. the edit is not a genuine "through"
-// edit that can be joined).
 std::unique_ptr<ICommand> delete_through_edit(Sequence& seq, Track::Kind kind,
                                               std::size_t track_index, ClipId out_id);
-// Sets the audio mix parameters (Volume in dB, Pan in [-1,1]) on a clip. If the
-// clip is linked, the mate inherits the same values (both halves of an A/V pair
-// share one loudness/position). Returns nullptr if the clip is not found.
 std::unique_ptr<ICommand> set_clip_audio(Sequence& seq, Track::Kind kind,
                                          std::size_t track_index, ClipId id,
                                          float volume_db, float pan);
-// Sets audio processing parameters (pitch, speed, EQ) on a clip. If the clip is
-// linked, the mate inherits the same values. Returns nullptr if the clip is not
-// found.
 std::unique_ptr<ICommand> set_clip_audio_processing(Sequence& seq, Track::Kind kind,
                                                     std::size_t track_index, ClipId id,
                                                     float pitch_semitones, float pitch_cents,
                                                     float speed_factor, bool speed_enabled,
                                                     bool eq_enabled,
                                                     const std::array<Clip::EqBand, 6>& eq_bands);
-// Sets the AI voice-isolation engine on a clip's audio. If the clip is linked,
-// the mate inherits the same mode (both halves of an A/V pair share one audio
-// treatment). Returns nullptr if the clip is not found.
 std::unique_ptr<ICommand> set_clip_voice_isolation(Sequence& seq, Track::Kind kind,
                                                    std::size_t track_index, ClipId id,
                                                    VoiceIsolationMode mode);
-// Sets a video clip's visual transform (Zoom scale_x/scale_y, pixel Position
-// pos_x/pos_y, Rotation in degrees, Anchor offsets in pixels, and the flips).
-// If the clip is linked, its mate inherits the same values (an A/V pair shares
-// one transform; the audio half is a no-op visually). Values are clamped to the
-// visual limits. Returns nullptr if the clip is not found. Does nothing audible
-// regardless of the track kind (the fields are shared, not audio).
 std::unique_ptr<ICommand> set_clip_transform(Sequence& seq, Track::Kind kind,
                                              std::size_t track_index, ClipId id,
                                              float scale_x, float scale_y,
@@ -235,90 +144,47 @@ std::unique_ptr<ICommand> set_clip_transform(Sequence& seq, Track::Kind kind,
                                              float rotation_deg,
                                              double anchor_dx, double anchor_dy,
                                              bool flip_h, bool flip_v);
-// Sets a video clip's composite (opacity in [0,1] and the blend mode) with the
-// same linked-mate propagation and clamping as set_clip_transform.
 std::unique_ptr<ICommand> set_clip_composite(Sequence& seq, Track::Kind kind,
                                              std::size_t track_index, ClipId id,
                                              float opacity, BlendMode blend_mode);
-// Sets a clip's title overlay (text, size, colour) with the title-law clamps
-// applied. Per-clip only: unlike transform/grade, an A/V pair's audio mate
-// carries no text, so the value does NOT propagate to a linked mate. Passing
-// an empty title clears the overlay. Returns nullptr if the clip is not found.
 std::unique_ptr<ICommand> set_clip_title(Sequence& seq, Track::Kind kind,
                                          std::size_t track_index, ClipId id,
                                          const Clip::Title& title);
-// Replaces a clip's color grade (the node tree applied before the composite
-// blit). If the clip is linked, the mate inherits the same graph (an A/V pair
-// shares one grade; the audio half is a visual no-op). Passing an empty graph
-// clears the grade. Returns nullptr if the clip is not found.
 std::unique_ptr<ICommand> set_clip_grade(Sequence& seq, Track::Kind kind,
                                          std::size_t track_index, ClipId id,
                                          const grade_graph::GradeGraph& grade);
-// Sets transition shaping on a clip's IN or OUT edge: ease amount, curve value,
-// and the start/end ratio profile (all per-edge). If the clip is linked, the
-// mate's corresponding edge inherits the values. Returns nullptr if the clip is
-// not found.
 std::unique_ptr<ICommand> set_clip_transition_curve(Sequence& seq, Track::Kind kind,
                                                     std::size_t track_index, ClipId id,
                                                     bool in_edge, float ease_amount,
                                                     float curve_value, int start_ratio,
                                                     int end_ratio);
-// Sets clip metadata (tag, colour, comments, name). If the clip is linked, the
-// mate inherits tag/colour/comments (name is per-clip). Returns nullptr if the
-// clip is not found.
 std::unique_ptr<ICommand> set_clip_metadata(Sequence& seq, Track::Kind kind,
                                             std::size_t track_index, ClipId id,
                                             Clip::ClipTag tag, uint8_t color,
                                             const std::string& comments,
                                             const std::string& name);
-// Toggles a track's audio mixing flags. Each returns nullptr if the track
-// index is out of range. These are discrete per-track settings; the model's
-// `locked` flag (also toggled here) makes the track read-only in the timeline.
 std::unique_ptr<ICommand> set_track_muted(Sequence& seq, Track::Kind kind,
                                           std::size_t track_index, bool muted);
 std::unique_ptr<ICommand> set_track_solo(Sequence& seq, Track::Kind kind,
                                          std::size_t track_index, bool solo);
 std::unique_ptr<ICommand> set_track_locked(Sequence& seq, Track::Kind kind,
                                            std::size_t track_index, bool locked);
-// Sets an audio track's gain in dB (shared audio_mix law). Returns nullptr if
-// the track index is out of range.
 std::unique_ptr<ICommand> set_track_gain(Sequence& seq, Track::Kind kind,
                                          std::size_t track_index, float gain_db);
 
-// Collapse/expand a track in the timeline UI (a display-only flag on the model
-// so undo + project round-trip are free). Returns nullptr if the track is out
-// of range; a null-op command if the flag already has the requested value.
 std::unique_ptr<ICommand> set_track_collapsed(Sequence& seq, Track::Kind kind,
                                               std::size_t track_index, bool collapsed);
 
-// Collapse/expand EVERY video and audio track in one undoable command (the
-// one-click "turn the timeline into strips" action). Returns a single command
-// covering all tracks, so one Undo restores the per-track states.
 std::unique_ptr<ICommand> set_all_tracks_collapsed(Sequence& seq, bool collapsed);
 
-// ---------------------------------------------------------------------------
-// Track-shape edits (insert/remove/rename/reorder). Each is one undoable step
-// backed by TrackListCommand (whole-kind snapshots), since indices shift.
-// ---------------------------------------------------------------------------
-
-// Insert an empty track at `index` (valid range 0..track_count inclusive).
-// `name` empty derives "V{n}"/"A{n}" from the insertion position. Returns
-// nullptr for an invalid index.
 std::unique_ptr<ICommand> insert_track(Sequence& seq, Track::Kind kind, std::size_t index,
                                        const std::string& name = "");
 
-// Remove the track at `index`. Guards: invalid index, or removing the LAST
-// track of its kind (the timeline always keeps at least one of each) → nullptr.
-// Clips on the removed track are removed with it (undo restores them).
 std::unique_ptr<ICommand> remove_track(Sequence& seq, Track::Kind kind, std::size_t index);
 
-// Rename the track at `index`. Returns nullptr for an invalid index; a null-op
-// command if the name is already that value.
 std::unique_ptr<ICommand> rename_track(Sequence& seq, Track::Kind kind, std::size_t index,
                                        const std::string& name);
 
-// Move the track at `from` so it ends up at `to` (both in 0..track_count-1;
-// clip contents move with the track). Returns nullptr for an invalid index.
 std::unique_ptr<ICommand> move_track(Sequence& seq, Track::Kind kind, std::size_t from,
                                      std::size_t to);
 

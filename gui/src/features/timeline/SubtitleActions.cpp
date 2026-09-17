@@ -44,7 +44,6 @@ QString stage_text(const Progress::Stage stage) {
     return {};
 }
 
-// Word count over the cue texts for the performance summary.
 std::size_t cue_words(const std::vector<canvas::core::transcript::Segment>& cues) {
     std::size_t words = 0;
     for (const auto& cue : cues) {
@@ -61,15 +60,8 @@ std::size_t cue_words(const std::vector<canvas::core::transcript::Segment>& cues
     }
     return words;
 }
-}  // namespace
+}
 
-// "Generate Subtitles From Audio" UI entry (Timeline > AI Tools). The dialog
-// is modal; while the whisper worker runs it is locked into a busy state with a
-// progress line (the modal exec() continues to spin the event loop, so the
-// queued finish callback can still drive it). The worker is joined once the
-// dialog closes, which bounds the window-destruction race: join happens before
-// open_subtitle_dialog returns, and the queued finish carries no dialog
-// references of its own.
 void MainWindow::open_subtitle_dialog() {
     if (!project_) return;
     if (subtitle_busy_.load()) {
@@ -95,7 +87,6 @@ void MainWindow::open_subtitle_dialog() {
     }
     const canvas::core::MediaEntry& entry = media[static_cast<std::size_t>(audio_clip.media)];
 
-    // Fail fast with install instructions when the whisper model is missing.
     if (canvas::core::transcribe::resolve_model_path().empty()) {
         QMessageBox::warning(
             this, tr("Whisper Model Not Found"),
@@ -118,9 +109,6 @@ void MainWindow::open_subtitle_dialog() {
 
     auto* dlg = new SubtitleDialog(this);
     subtitle_dialog_ = dlg;
-    // Poll loop (GUI thread): mirrors the engine's atomic progress channel
-    // into the dialog's bar + stage + live performance line ~8x per second.
-    // Parented to the dialog so it dies with it; every tick is guard-checked.
     auto* poll = new QTimer(dlg);
     QObject::connect(poll, &QTimer::timeout, this, [this] {
         if (!subtitle_dialog_ || !subtitle_progress_) return;
@@ -182,15 +170,8 @@ void MainWindow::open_subtitle_dialog() {
     subtitle_progress_.reset();
 }
 
-// Queued back onto the main thread when the worker finishes. Lands the shaped
-// caption stream on a fresh top video track (reusing an empty existing top
-// track), writes an SRT sidecar beside the source media, then dismisses or
-// re-edits the dialog based on the outcome.
 void MainWindow::finish_subtitle_transcription(Report report) {
     subtitle_busy_.store(false);
-    // The poll timer is guard-checked on the channel pointer, so dropping it
-    // here (GUI thread, serialized with the timer) is race-free; the worker's
-    // own shared_ptr copy already went out of scope with the thread.
     subtitle_progress_.reset();
     const bool dialog_alive = (subtitle_dialog_ != nullptr);
     if (dialog_alive) subtitle_dialog_->set_running(false);
@@ -249,15 +230,11 @@ void MainWindow::finish_subtitle_transcription(Report report) {
         return;
     }
 
-    // SRT sidecar beside the source media (raw whisper cues, unshaped — the
-    // subtitle file mirrors the engine output, the timeline bars the shaped one).
     const QFileInfo finfo(subtitle_media_path_);
     const QString srt_path = finfo.dir().filePath(finfo.completeBaseName() + QStringLiteral(".srt"));
     const bool wrote_srt =
         canvas::core::transcript::write_srt(srt_path.toStdString(), report.cues);
 
-    // Target track: reuse an empty top video track, else grow a new one so the
-    // caption bars never sit on top of existing footage.
     std::size_t top = seq.video_tracks.size();
     if (top > 0) {
         --top;
@@ -265,10 +242,6 @@ void MainWindow::finish_subtitle_transcription(Report report) {
     }
     ensure_tracks_at(canvas::core::Track::Kind::Video, top);
 
-    // World-frame law: the clip's media frame zero lands at tl_in, so an
-    // utterance that starts at `start_ms` into the source maps to
-    //   tl_in + (start_ms/1000 - src_in/media_fps) * seq_fps
-    // clamped into the clip body, with the span clipped to the clip tail.
     const double seq_fps = subtitle_seq_fps_;
     const double media_fps = subtitle_media_fps_;
     const int64_t body_first = subtitle_tl_in_;
@@ -288,17 +261,12 @@ void MainWindow::finish_subtitle_transcription(Report report) {
         const int64_t dur = std::max<int64_t>(1, w_e - w_s + 1);
 
         canvas::core::Clip clip;
-        clip.media = -1;  // media-less generator: the rasterised caption is the picture
+        clip.media = -1;
         clip.tl_in = w_s;
         clip.src_in = 0;
         clip.src_out = dur;
         clip.name = "Caption";
         clip.title.text = cap.text;
-        // Fit + bottom-anchor law: generated captions must always land INSIDE
-        // the frame like real subtitles. fit_caption measures the shaped text
-        // against the frame's safe areas, picks the largest glyph size that
-        // fits, and returns the pos_y pinning the block above the bottom
-        // margin. Dimensions default to 1080p when the media can't tell us.
         int frame_w = 1920;
         int frame_h = 1080;
         if (const auto* me = project_->media_by_id(subtitle_media_id_);
@@ -326,8 +294,6 @@ void MainWindow::finish_subtitle_transcription(Report report) {
         refresh_timeline();
     }
 
-    // Performance summary: cues/words shaped, audio seconds processed, engine
-    // wall time, and the realtime factor (audio ÷ wall).
     const std::size_t words = cue_words(report.cues);
     const double audio_s = report.audio_seconds;
     const double wall_s = report.wall_seconds;
@@ -359,4 +325,4 @@ void MainWindow::finish_subtitle_transcription(Report report) {
     }
 }
 
-}  // namespace canvas::gui
+}

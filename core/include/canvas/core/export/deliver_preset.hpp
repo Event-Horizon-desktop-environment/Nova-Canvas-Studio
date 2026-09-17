@@ -8,30 +8,21 @@
 
 namespace canvas::core {
 
-// ---------------------------------------------------------------------------
-// Deliver page settings — a high-level model that maps onto the
-// lower-level FFmpeg ExportSettings used by export_project(). It captures every
-// option shown in the Deliver settings panel (Video/Audio/File tabs, plus the
-// advanced render options) so the GUI can build controls over it and translate
-// it deterministically into ExportSettings.
-// ---------------------------------------------------------------------------
-
-// Render scope for a job.
 enum class RenderScope {
-    SingleClip,      // render the whole timeline as one clip
-    IndividualClips, // one output per clip (queue fills with one job per clip)
+    SingleClip,
+    IndividualClips,
+    Still,
+    FrameSequence,
 };
 
-// Encoder backend selection.
 enum class EncoderBackend {
-    Auto,    // pick GPU if available for the codec, else CPU
-    CPU,     // force software encoder (libx264/libx265/libsvtav1/...)
-    NVIDIA,  // NVENC
-    AMD,     // VAAPI
-    Intel,   // QSV
+    Auto,
+    CPU,
+    NVIDIA,
+    AMD,
+    Intel,
 };
 
-// Video codec family (FFmpeg encoder is derived from codec + backend + format).
 enum class VideoCodec {
     H264,
     H265,
@@ -42,7 +33,6 @@ enum class VideoCodec {
     Uncompressed,
 };
 
-// Video encoding profile (H.26x / ProRes flavor).
 enum class EncodingProfile {
     Main,
     Main10,
@@ -52,22 +42,19 @@ enum class EncodingProfile {
     Main44410,
 };
 
-// Rate-control mode.
 enum class RateControl {
     ConstantQP,
-    VBRQuality,      // Variable Bitrate (Quality)
-    VBRTargetKbps,   // Variable Bitrate (Target Kbps)
+    VBRQuality,
+    VBRTargetKbps,
     ConstantBitrate,
 };
 
-// Multi-encode (parallel chunked encode).
 enum class MultiEncode {
     Auto,
     Enabled,
     Disabled,
 };
 
-// Encoder tuning.
 enum class EncoderTuning {
     HighQuality,
     LowLatency,
@@ -75,49 +62,44 @@ enum class EncoderTuning {
     Lossless,
 };
 
-// Pixel aspect ratio.
 enum class PixelAspect {
     Square,
     Cinemascope,
 };
 
-// Data levels.
 enum class DataLevels {
     Auto,
     Video,
     Full,
 };
 
-// Frame key-frame placement.
 enum class KeyFrameMode {
     Automatic,
     EveryNFrames,
 };
 
-// Converts a VideoCodec + EncoderBackend (+ requested container) into a concrete
-// FFmpeg encoder name. Falls back to a software encoder when hardware isn't
-// supported ("sw_fallback" set) or when backend == CPU.
 std::string video_encoder_name(VideoCodec codec, EncoderBackend backend,
                                const std::string& container_format, bool* sw_fallback);
 
-// Maps a friendly container/format name (MKV, MP4, QuickTime, ...) to the FFmpeg
-// muxer name. Empty string when unknown.
 std::string container_format_name(const std::string& format);
 
-// Maps a friendly codec display name to VideoCodec.
+[[nodiscard]] bool scope_is_still(RenderScope scope) noexcept;
+[[nodiscard]] bool scope_is_sequence(RenderScope scope) noexcept;
+[[nodiscard]] bool scope_is_image(RenderScope scope) noexcept;
+
+[[nodiscard]] std::string still_output_path(const std::string& base);
+[[nodiscard]] std::string sequence_output_path(const std::string& base, int64_t frame_index);
+
 VideoCodec video_codec_from_string(const std::string& codec);
 
-// Translates a fully-specified DeliverSettings into the low-level ExportSettings
-// consumed by export_project().
 ExportSettings to_export_settings(const struct DeliverSettings& ds);
 
-// All video render options for one export job (the Deliver left panel).
 struct DeliverVideoSettings {
     bool export_video = true;
-    std::string format = "MKV";                 // container display name
-    std::string codec = "H.265";                // display name
+    std::string format = "MKV";
+    std::string codec = "H.265";
     EncoderBackend encoder = EncoderBackend::Auto;
-    bool network_optimization = false;          // frag -> mp4/mov
+    bool network_optimization = false;
     std::string resolution = "Timeline Resolution";
     int custom_width = 1920;
     int custom_height = 1080;
@@ -131,7 +113,7 @@ struct DeliverVideoSettings {
     int key_frame_interval = 30;
     bool frame_reordering = true;
     RateControl rate_control = RateControl::ConstantBitrate;
-    int quality = 0;                           // CRF / quality value (lower = better, 0 = best)
+    int quality = 0;
     int target_bitrate_kbps = 80000;
     int max_bitrate_kbps = 80000;
     MultiEncode multi_encode = MultiEncode::Enabled;
@@ -148,10 +130,8 @@ struct DeliverVideoSettings {
     bool temporal_filtering = false;
     bool unidirectional_b_frames = false;
 
-    // True when adaptive B-frames are enabled (used to emit bf=).
     [[nodiscard]] bool enable_b_frames() const noexcept { return adaptive_b_frame; }
 
-    // Advanced
     PixelAspect pixel_aspect = PixelAspect::Square;
     DataLevels data_levels = DataLevels::Auto;
     bool retain_sub_black_super_white = false;
@@ -168,8 +148,8 @@ struct DeliverVideoSettings {
 };
 
 struct DeliverAudioSettings {
-    bool export_audio = true;                  // audio exported by default (matches "remove_audio")
-    std::string codec = "AAC";                 // display name ("" = no audio)
+    bool export_audio = true;
+    std::string codec = "AAC";
     int bitrate_kbps = 192;
     int sample_rate = 48000;
     int channels = 2;
@@ -180,19 +160,17 @@ struct DeliverAudioSettings {
 
 struct DeliverFileSettings {
     std::string file_name = "Untitled";
-    std::string location;                      // empty = ask at render time
+    std::string location;
     bool embed_media = false;
 };
 
-// Advanced/other (kept for completeness; maps to extra libavcodec opts).
 struct DeliverAdvancedSettings {
     int threads = 0;
     bool enable_pipewire = false;
     bool disallow_masking_metadata = false;
-    std::string extra_options;                 // raw "k=v\nk=v" passthrough
+    std::string extra_options;
 };
 
-// One complete set of deliver settings (what the left panel edits).
 struct DeliverSettings {
     std::string preset_name = "Custom Export";
     RenderScope render_scope = RenderScope::SingleClip;
@@ -202,33 +180,25 @@ struct DeliverSettings {
     DeliverAdvancedSettings advanced;
 };
 
-// Plain-data mirror of a RenderJob, embedded in the Project so a saved project
-// carries its render queue (staged jobs, finished cards, failures) with it —
-// the Deliver settings power the left panel and each snapshot rebuilds a job
-// on open. Decoupled from the thread-owning RenderQueue by design.
 struct RenderJobSnapshot {
     uint64_t id = 0;
     std::string name;
     std::string output_path;
     DeliverSettings settings;
     int64_t total_frames = 0;
-    // Mirrors canvas::core::RenderJob::Status as an int so this header needs no
-    // dependency on the thread class (0=Queued,1=Rendering,2=Completed,3=Failed,4=Cancelled).
+    int priority = 0;
     int status = 0;
     double progress = 0.0;
     double render_fps = 0.0;
     std::string error;
     double elapsed_seconds = 0.0;
     int64_t frames_rendered = 0;
-    // Wall-clock completion time ("HH:MM:SS"); empty when not finished. Renders
-    // as the card label on finished jobs ("Finished 14:22:03"), like Resolve.
     std::string finished_at;
 };
 
-// Nice human labels for enumerations (used by the GUI to populate combo boxes).
-std::vector<std::string> deliver_formats();     // MKV, MP4, QuickTime, ...
-std::vector<std::string> deliver_video_codecs(); // H.264, H.265, AV1, ProRes, ...
-std::vector<std::string> deliver_audio_codecs(); // AAC, MP3, PCM, ...
-std::vector<std::string> deliver_encoders();     // Auto, CPU, NVIDIA, AMD, Intel
+std::vector<std::string> deliver_formats();
+std::vector<std::string> deliver_video_codecs();
+std::vector<std::string> deliver_audio_codecs();
+std::vector<std::string> deliver_encoders();
 
-}  // namespace canvas::core
+}

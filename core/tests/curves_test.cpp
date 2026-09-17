@@ -1,10 +1,3 @@
-// Phase 5 tests for the custom-curve grade law (colorsci/curves). Verifies
-// spline identity/passthrough, exact knot interpolation, regularization of
-// duplicate-x points, the folded soft-clip toe/shoulder rails (monotonicity,
-// C1 at the rail, 1.0 folding below 1.0), hue-preserving luma curves, and the
-// graph-node integration (evaluate + JSON round-trip) for CorrectMode::kCurves.
-// Links only canvas_core.
-
 #include "canvas/core/colorsci/curves.hpp"
 #include "canvas/core/grade_graph/eval.hpp"
 #include "canvas/core/grade_graph/graph.hpp"
@@ -65,36 +58,29 @@ void test_identity() {
 }
 
 void test_spline_knots() {
-    // A single interior point off the diagonal: the spline must hit it exactly.
     const std::vector<cs::CurvePoint> pts{{0.5f, 0.8f}};
     check(near(cs::eval_curve(pts, 0.5f), 0.8f), "single point interpolated exactly");
     check(near(cs::eval_curve(pts, 0.0f), 0.0f), "implicit (0,0) endpoint holds");
     check(near(cs::eval_curve(pts, 1.0f), 1.0f), "implicit (1,1) endpoint holds");
 
-    // Two interior points on an S-curve.
     const std::vector<cs::CurvePoint> sc{{0.3f, 0.1f}, {0.7f, 0.9f}};
     check(near(cs::eval_curve(sc, 0.3f), 0.1f), "first S-knot interpolated");
     check(near(cs::eval_curve(sc, 0.7f), 0.9f), "second S-knot interpolated");
 
-    // Out-of-domain x clamps (does not extrapolate past the implicit endpoints).
     check(near(cs::eval_curve(sc, -0.5f), 0.0f), "x < 0 clamps to the start");
     check(near(cs::eval_curve(sc, 1.5f), 1.0f), "x > 1 clamps to the end");
 }
 
 void test_sort_and_duplicates() {
-    // Points out of x order are sorted.
     const std::vector<cs::CurvePoint> unsorted{{0.8f, 0.2f}, {0.2f, 0.6f}};
     check(near(cs::eval_curve(unsorted, 0.2f), 0.6f), "knots evaluated after x-sort");
 
-    // Duplicate x collapses to the LAST point (drag-on-top wins) and evaluates
-    // to a finite value (no zero-length segment NaN).
     const std::vector<cs::CurvePoint> dup{{0.5f, 0.2f}, {0.5f, 0.9f}};
     check(std::isfinite(cs::eval_curve(dup, 0.5f)), "duplicate-x knot stays finite");
     check(near(cs::eval_curve(dup, 0.5f), 0.9f), "duplicate-x keeps the last point");
 }
 
 void test_monotone_range() {
-    // Monotone control points must yield a monotone, in-range curve.
     const std::vector<cs::CurvePoint> pts{{0.2f, 0.1f}, {0.5f, 0.7f}, {0.8f, 0.9f}};
     float prev = -1.0f;
     bool monotone = true;
@@ -110,9 +96,6 @@ void test_monotone_range() {
 }
 
 void test_no_overshoot_stiff() {
-    // A near-vertical monotone ladder is exactly where plain Catmull-Rom
-    // overshoots out of the box (tangents blow up) and the final clamp then
-    // clips. The Fritsch-Carlson law must stay monotone and in [0,1] here.
     const std::vector<cs::CurvePoint> stiff{{0.45f, 0.2f}, {0.5f, 0.85f}, {0.55f, 0.88f}};
     float prev = -1.0f;
     bool monotone = true;
@@ -126,7 +109,6 @@ void test_no_overshoot_stiff() {
     check(monotone, "stiff ladder stays monotone (no Catmull-Rom overshoot)");
     check(in_range, "stiff ladder stays inside [0,1]");
 
-    // Non-monotone (dip) data must still stay inside the box everywhere.
     bool dip_in_range = true;
     for (float x = 0.0f; x <= 1.00001f; x += 0.002f) {
         const float y = cs::eval_curve({{0.3f, 0.7f}, {0.5f, 0.2f}, {0.7f, 0.55f}}, x);
@@ -136,13 +118,11 @@ void test_no_overshoot_stiff() {
 }
 
 void test_soft_clip_high() {
-    // Passthrough when there's nothing to fold.
     check(near(cs::eval_soft_clip_high(0.9f, 1.0f, 1.0f), 0.9f), "high==1 is passthrough");
     check(near(cs::eval_soft_clip_high(0.9f, 0.8f, 0.0f), 0.9f), "soft==0 is passthrough");
     check(near(cs::eval_soft_clip_high(0.75f, 0.8f, 1.0f), 0.75f), "below the rail is passthrough");
     check(near(cs::eval_soft_clip_high(0.8f, 0.8f, 1.0f), 0.8f), "on the rail is unchanged");
 
-    // Monotone, and 1.0 folds strictly below 1.0 for any soft > 0.
     float prev = -1.0f;
     bool monotone = true;
     float top = -1.0f;
@@ -155,7 +135,6 @@ void test_soft_clip_high() {
     check(monotone, "shoulder is monotone");
     check(top < 1.0f - 1e-3f && top > 0.8f, "shoulder folds 1.0 below 1.0");
 
-    // soft == 1 crushes 1.0 onto the rail; C1 continuity at the rail.
     check(near(cs::eval_soft_clip_high(1.0f, 0.8f, 1.0f), 0.8f), "soft==1 crushes the top to the rail");
     const float h = 0.8f;
     const float delta = 1e-3f;
@@ -185,8 +164,6 @@ void test_soft_clip_low() {
 }
 
 void test_luma_curve_gray() {
-    // On gray, the luma curve is applied uniformly (ratio scale == identity on
-    // equal channels), so the output is exactly the curve value at that luma.
     const std::vector<cs::CurvePoint> pts{{0.5f, 0.75f}};
     const cs::RGBF out = apply_curves_channel_luma(cs::RGBF{0.4f, 0.4f, 0.4f}, pts);
     const float expected = cs::eval_curve(pts, 0.4f);
@@ -195,8 +172,6 @@ void test_luma_curve_gray() {
 }
 
 void test_luma_curve_hue_preserving() {
-    // On a chromatic pixel the luma curve scales all channels by Lc/L, keeping
-    // the RGB ratios (hue) intact: out == in * (Lc / L).
     const std::vector<cs::CurvePoint> pts{{0.5f, 0.6f}};
     const cs::RGBF in{0.5f, 0.25f, 0.125f};
     const float L = cs::kLuma601R * in.r + cs::kLuma601G * in.g + cs::kLuma601B * in.b;
@@ -207,9 +182,6 @@ void test_luma_curve_hue_preserving() {
 }
 
 void test_single_channel_luma_hold() {
-    // Editing exactly one RGB channel holds the pre-curve luma by counter-
-    // scaling the two untouched channels (Resolve-style unganged curve), so a
-    // color edit does not change exposure.
     {
         cs::CurveParams c;
         c.channels[static_cast<std::size_t>(cs::CurveChannel::kRed)] = {{0.5f, 0.9f}};
@@ -225,7 +197,7 @@ void test_single_channel_luma_hold() {
     {
         cs::CurveParams c;
         c.channels[static_cast<std::size_t>(cs::CurveChannel::kBlue)] = {{0.5f, 0.2f}};
-        const cs::RGBF in{0.5f, 0.4f, 0.5f};  // blue input hits the knot x == 0.5
+        const cs::RGBF in{0.5f, 0.4f, 0.5f};
         const float L_in = cs::kLuma601R * in.r + cs::kLuma601G * in.g + cs::kLuma601B * in.b;
         const cs::RGBF out = cs::apply_curves(in, c);
         check(near(out.b, 0.2f), "edited blue channel reaches its curve value");
@@ -235,7 +207,6 @@ void test_single_channel_luma_hold() {
               "untouched channels counter-scale up for a blue cut");
     }
     {
-        // Two channels edited at once is an independent RGB reshape (no hold).
         cs::CurveParams c;
         c.channels[static_cast<std::size_t>(cs::CurveChannel::kRed)] = {{0.5f, 0.2f}};
         c.channels[static_cast<std::size_t>(cs::CurveChannel::kGreen)] = {{0.5f, 0.9f}};
@@ -247,8 +218,6 @@ void test_single_channel_luma_hold() {
 }
 
 void test_soft_clip_through_apply() {
-    // Strong highlight fold via the panel params: a bright pixel drops below a
-    // mid pixel's headroom, monotone on a gray ramp, top < input.
     cs::CurveParams c;
     c.soft_clip.high = 0.8f;
     c.soft_clip.high_soft = 0.7f;
@@ -268,7 +237,6 @@ void test_soft_clip_through_apply() {
 }
 
 void test_graph_evaluation_and_roundtrip() {
-    // A corrector node carrying a curve for every channel.
     gg::GradeGraph g;
     const int in = g.add_node(gg::NodeKind::kCorrector);
     {
@@ -282,7 +250,7 @@ void test_graph_evaluation_and_roundtrip() {
     }
     const int out = g.add_node(gg::NodeKind::kOutput);
     static_cast<void>(g.add_rgb_edge(in, out));
-    const gg::Node& n = g.node(in);  // re-fetch: add_node invalidates held Node&
+    const gg::Node& n = g.node(in);
 
     gg::FrameF src = gg::FrameF::filled(2, 1, 0.5f, 0.4f, 0.3f, 1.0f);
     const gg::EvalResult res = gg::evaluate_graph(g, src);
@@ -291,7 +259,6 @@ void test_graph_evaluation_and_roundtrip() {
     check(near(res.frame->rgba[0], expected.r) && near(res.frame->rgba[4], expected.r),
           "evaluated curves node matches apply_curves");
 
-    // Serialization round-trip.
     const nlohmann::json j = gg::grade_graph_to_json(g);
     const gg::GradeGraph g2 = gg::grade_graph_from_json(j);
     check(g2.num_nodes() == 2, "round-trip keeps the nodes");
@@ -307,7 +274,7 @@ void test_graph_evaluation_and_roundtrip() {
     }
 }
 
-}  // namespace
+}
 
 int main() {
     test_identity();

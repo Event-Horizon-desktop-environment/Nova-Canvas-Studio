@@ -1,27 +1,3 @@
-// interop_contract_test — the extension floor the backend's interop design sits on.
-//
-// Phase 0 gate for the architecture chosen in docs/vulkan.md: a SHARED device
-// (one VkInstance/device, all queues from it) whose image/semaphore/memory
-// handles move between queues and into FFmpeg via the Vulkan hwdevice context.
-// That design hard-depends on a specific extension set being present. This test
-// pins THAT contract on the machine: if any member is missing, the design as
-// documented cannot be built here and the owning phase must be re-planned —
-// failing here at Phase 0 is far cheaper than failing mid-P-C/P-D.
-//
-// Extensions asserted:
-//   VK_KHR_timeline_semaphore      — cross-queue A/V/composite ordering
-//   VK_KHR_synchronization2        — modern transition/signal barriers
-//   VK_KHR_external_memory_fd      — export memory to FFmpeg's vulkan ctx
-//   VK_KHR_external_semaphore_fd   — export semaphores to FFmpeg's vulkan ctx
-//   VK_EXT_host_query_reset        — low-latency host->device query resets
-//   VK_KHR_push_descriptor         — cheap descriptor updates per composite
-//   VK_EXT_image_drm_format_modifier — NV12/dmabuf tiling paths (if DRM target)
-//   VK_EXT_memory_budget           — the vram_leak_vulkan sampling seam
-//
-// PASS (0)  — primaries have the full floor (core-promoted or named).
-// FAIL (1)  — a required named extension is missing from the device.
-// SKIP (2)  — no Vulkan implementation at all.
-
 #include "vk_probe.hpp"
 
 using namespace canvas::vktest;
@@ -40,7 +16,7 @@ void check(bool ok, const char* what) {
     if (!ok) ++g_failures;
 }
 
-}  // namespace
+}
 
 int main() {
     const ProbeResult r = run_probe();
@@ -66,9 +42,9 @@ int main() {
         {"host_query_reset", d.host_query_reset, true},
         {"push_descriptor", d.push_descriptor, true},
         {"memory_budget", d.memory_budget, true},
-        {"drm_modifiers", d.drm_modifiers, false},   // DRM-target only
-        {"dma_buf_fd", d.dma_buf_fd, false},         // Linux-target only
-        {"maintenance4", d.maintenance4, false},     // nice-to-have (soft)
+        {"drm_modifiers", d.drm_modifiers, false},
+        {"dma_buf_fd", d.dma_buf_fd, false},
+        {"maintenance4", d.maintenance4, false},
     };
 
     for (const Floor& f : floor) {

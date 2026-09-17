@@ -1,15 +1,3 @@
-// Qt-free unit test for TimelineDecoder (the extracted decode/assemble front-end).
-//
-// Encodes a tiny h264 MP4 at runtime (no external fixtures or system ffmpeg),
-// builds a one-clip Project, and verifies the public surface:
-//   * decode(): full-res dims, repeat = cache hit (same frame), max_dim cap
-//   * frame()/preview(): RenderFrame assembly returns pixels
-//   * disabled clip -> all-zero black fallback frame
-//   * media_rate_at(): media fps vs fallback
-//   * invalidate()/close(): slot teardown
-// Links ONLY canvas_core + timeline_decoder.cpp (no Qt) — the "unbreakable seam" that
-// keeps the extracted headless module display-free.
-
 #include "features/playback/sync_constants.hpp"
 #include "features/playback/timeline_decoder.hpp"
 
@@ -40,8 +28,6 @@ static void report(bool ok, const char* what) {
     if (!ok) ++g_failures;
 }
 
-// Encodes `frames` of a moving gradient as h264 in an MP4 container at `path`
-// (same synthesis the export sweep uses). Returns false when libx264 is missing.
 static bool make_source(const std::string& path, int w, int h, int fps, int frames) {
     const AVCodec* codec = avcodec_find_encoder_by_name("libx264");
     if (!codec) return false;
@@ -122,7 +108,6 @@ int main() {
         return 0;
     }
 
-    // One video track, one clip covering the whole media, src window aligned.
     Project project;
     project.name = "decoder-test";
     project.sequence.fps = kFps;
@@ -153,7 +138,6 @@ int main() {
     canvas::gui::TimelineDecoder decoder;
     decoder.add_media(media);
 
-    // Full-res decode through the slot cache.
     auto f0 = decoder.decode(project, clip, 5);
     report(f0 && f0->width == kWidth && f0->height == kHeight,
            "decode(project, clip, frame) full-res dims");
@@ -162,20 +146,12 @@ int main() {
                      f0 ? f0->height : -1, path.c_str());
     }
 
-    // Repeating the same frame must be a cache hit that returns the SAME frame
-    // (FrameCache identity), not a fresh decode.
     auto f1 = decoder.decode(project, clip, 5);
     report(f0.get() == f1.get(), "decode repeat is a cache hit (same frame ptr)");
 
-    // Reduced decode caps the longest edge at max_dim.
     auto fp = decoder.decode(project, clip, 10, 40);
     report(fp && fp->width <= 40 && fp->height <= 40, "decode max_dim caps longest edge");
 
-    // Decode past the media's last frame must CLAMP to the last addressable
-    // source frame instead of walking the GOP chain to EOF (the 78s stall when a
-    // music region extended past a short clip; also a far-forward seek into an
-    // ultra-sparse GOP). Assert the returned frame number is within the source
-    // and the call actually returns a frame within the bounded walk.
     auto fEnd = decoder.decode(project, clip, 35000);
     report(fEnd != nullptr && fEnd->frame_number >= 0 && fEnd->frame_number < kFrames,
            "decode past media end clamps to last source frame (no infinite walk)");
@@ -183,18 +159,11 @@ int main() {
     report(fEnd2 != nullptr && fEnd2->frame_number >= 0 && fEnd2->frame_number < kFrames,
            "preview decode past media end clamps to last source frame");
 
-    // Full-res and preview timeline assembly return pixels (RGBA or GPU NV12).
     auto rf = decoder.frame(project, 5);
     report(rf && (rf->a || rf->nv12), "frame() assembles pixels at seq_frame");
     auto rp = decoder.preview(project, 5, 40);
     report(rp && (rp->a || rp->nv12), "preview() assembles pixels at seq_frame");
 
-    // Phase 6 live graded preview + Phase LUT: a clip owning a grade tree is
-    // baked to a 3D LUT attached to the RenderFrame (the viewer shaders sample
-    // it), so preview == export by construction. The CPU never grades pixels:
-    // on GPU machines the graded clip rides the NV12 fast path (NV12 plane +
-    // LUT, no CPU `a`); on software-only machines the CPU RGBA path delivers
-    // RAW decoded pixels with the LUT carried for the shader to apply.
     {
         Project pgraded = project;
         Clip graded = clip;
@@ -202,17 +171,13 @@ int main() {
         const int lgg = g.add_node(canvas::core::grade_graph::NodeKind::kCorrector);
         g.node(lgg).correct_mode = canvas::core::grade_graph::CorrectMode::kLgg;
         canvas::core::colorsci::LGG bright;
-        bright.lift_master = 0.4f;  // additive lift across all channels
+        bright.lift_master = 0.4f;
         g.node(lgg).lgg = bright;
         const int gout = g.add_node(canvas::core::grade_graph::NodeKind::kOutput);
         g.add_rgb_edge(lgg, gout);
         graded.grade = g;
         pgraded.sequence.video_tracks[0].clips[0] = graded;
 
-        // The CPU never grades pixels anymore (zero-CPU directive): the decoded
-        // planes are raw and the clip's baked 3D LUT rides on the RenderFrame
-        // for the viewer shader to sample. Assert the LUT rides along on both
-        // the NV12 fast path and the software RGBA fallback.
         auto gf = decoder.frame(pgraded, 5);
         report(gf && (gf->nv12 || (gf->a && gf->a->width == kWidth &&
                                    gf->a->height == kHeight)),
@@ -221,7 +186,7 @@ int main() {
                "graded clip frame() attaches a valid grade LUT");
 
         auto raw = decoder.decode(project, clip, 5);
-        bool raw_unchanged = true;  // vacuous on the NV12 path (no `a` to compare)
+        bool raw_unchanged = true;
         if (gf && gf->a && raw && gf->a->rgba.size() == raw->rgba.size()) {
             for (std::size_t i = 0; i < raw->rgba.size(); ++i) {
                 if (raw->rgba[i] != gf->a->rgba[i]) { raw_unchanged = false; break; }
@@ -237,7 +202,6 @@ int main() {
                "graded clip preview() carries pixels + valid grade LUT");
     }
 
-    // Disabled clip → black fallback frame of the media dims, all-zero pixels.
     Clip disabled = clip;
     disabled.enabled = false;
     auto fb = decoder.decode(project, disabled, 5);
@@ -249,16 +213,11 @@ int main() {
     }
     report(black, "disabled clip -> all-zero black fallback");
 
-    // Media pacing: covered frame returns media fps, uncovered falls back.
     const double rate = decoder.media_rate_at(project, 5, 25.0);
     report(rate > kFps - 0.5 && rate < kFps + 0.5, "media_rate_at returns media fps");
     const double fallback = decoder.media_rate_at(project, 500, 25.0);
     report(fallback == 25.0, "media_rate_at falls back outside sequence");
 
-    // Mixed frame-rate mapping: a 60fps source on a 30fps timeline strides TWO
-    // source frames per seq-frame (time-based), so the clip plays at its
-    // intended speed instead of half-speed slow motion. Media fps == seq fps
-    // keeps the old 1:1 mapping (covered above at 30/30).
     const std::string path60 = "/tmp/canvas_td_test_60.mp4";
     if (make_source(path60, kWidth, kHeight, 60, 48)) {
         Project p60;
@@ -296,10 +255,6 @@ int main() {
         decoder.invalidate(m60.id);
     }
 
-    // Title clips short-circuit the decode/assemble path: a media clip wearing
-    // a title overlay must force the CPU RGBA canvas (the NV12 fast path would
-    // silently drop the raster), and a bare media < 0 title clip draws its text
-    // over black. Both strings match what the export renderer does.
     {
         Project pt = project;
         pt.sequence.video_tracks[0].clips[0].title.text = "OVERLAY";
@@ -345,12 +300,10 @@ int main() {
         report(plit, "bare title clip preview() carries title pixels");
     }
 
-    // invalidation drops the slot + preview entries; decode then yields null.
     decoder.invalidate(media.id);
     report(!decoder.is_loaded(media.id), "invalidate -> is_loaded false");
     report(decoder.decode(project, clip, 5) == nullptr, "invalidate -> decode null");
 
-    // Re-arm and tear down.
     decoder.add_media(media);
     report(decoder.is_loaded(media.id), "add_media re-loads after invalidate");
     decoder.close();

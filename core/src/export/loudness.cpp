@@ -9,12 +9,12 @@
 namespace canvas::core::loudness {
 
 namespace {
-constexpr double kEnergyFloor = 1e-10;  // -100 dB, keeps log10 finite for silence
-}  // namespace
+constexpr double kEnergyFloor = 1e-10;
+}
 
 float normalization_gain_db(const float measured_lufs, const float target_lufs) noexcept {
     float gain = target_lufs - measured_lufs;
-    if (!std::isfinite(gain)) gain = audio_mix::kMaxVolumeDb;  // silence -> max boost
+    if (!std::isfinite(gain)) gain = audio_mix::kMaxVolumeDb;
     return audio_mix::normalize_volume_db(gain);
 }
 
@@ -28,7 +28,6 @@ float integrated_loudness_lufs(const std::span<const float> mono,
         std::max<int64_t>(1, static_cast<int64_t>(std::llround(0.1 * sample_rate)));
     if (static_cast<int64_t>(mono.size()) < block) return kSilenceLufs;
 
-    // Per-block mean square → dB. Floor keeps log10 finite for silence.
     const auto lu_of = [](const double mean_sq) {
         return 10.0 * std::log10(std::max(mean_sq, kEnergyFloor));
     };
@@ -45,13 +44,11 @@ float integrated_loudness_lufs(const std::span<const float> mono,
     }
     if (means.empty()) return kSilenceLufs;
 
-    // Absolute gate: discard blocks below -70 LUFS.
     std::vector<double> gated;
     for (const double m : means)
         if (lu_of(m) >= kSilenceLufs) gated.push_back(m);
     if (gated.empty()) return kSilenceLufs;
 
-    // Relative gate: -10 LU below the mean of the absolute-gated set.
     double sum = 0.0;
     for (const double m : gated) sum += m;
     const double abs_mean = sum / static_cast<double>(gated.size());
@@ -69,4 +66,4 @@ float integrated_loudness_lufs(const std::span<const float> mono,
     return static_cast<float>(lu_of(kept_sum / static_cast<double>(kept)));
 }
 
-}  // namespace canvas::core::loudness
+}

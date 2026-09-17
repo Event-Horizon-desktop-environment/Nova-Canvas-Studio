@@ -1,20 +1,3 @@
-// vk_probe_test — Phase 0 selftest of the Vulkan capability probe.
-//
-// Proves the probe itself is coherent before any backend code leans on it:
-//   1. a Vulkan implementation is reachable through the system loader/ICD
-//      (instance created, at least one device enumerated),
-//   2. the queue-family matrix is sane (at least one family per device,
-//      video-codec flags split decode vs encode correctly),
-//   3. the driver matrix is printable/reportable — conformance version and
-//      the extension subset the interop design gates on (memory budget,
-//      DRM modifiers + dma-buf, timeline semaphores) are reported per device.
-//
-// PASS (0)  — loader + device present and matrix sane; the report prints.
-// FAIL (1)  — the loader API misbehaved (instance creation failed despite an
-//             ICD, or the query chain returned garbage).
-// SKIP (2)  — NO Vulkan loader/ICD installed; nothing can run, and every
-//             downstream Vulkan test will SKIP for the same reason.
-
 #include "vk_probe.hpp"
 
 #include <vulkan/vulkan.h>
@@ -60,8 +43,6 @@ int main() {
     const ProbeResult r = run_probe();
 
     if (!r.ok) {
-        // No particle-of-Vulkan at all (no loader or no ICD): every Vulkan test
-        // in this tree is moot. Report and skip.
         std::printf("SKIP  Vulkan implementation unavailable: %s\n", r.error.c_str());
         return 2;
     }
@@ -81,23 +62,16 @@ int main() {
     for (std::size_t i = 0; i < r.devices.size(); ++i)
         print_device(r.devices[i], static_cast<int>(i));
 
-    // Queue matrix sanity: fill flags never lost, video flags never coexisted
-    // on a family that doesn't also carry the queue flag bits.
     bool qf_sane = true;
     for (const auto& d : r.devices) {
         for (const auto& q : d.queue_families) {
             const bool video_queue = (q.flags & (VK_QUEUE_VIDEO_DECODE_BIT_KHR |
                                                  VK_QUEUE_VIDEO_ENCODE_BIT_KHR)) != 0;
-            // Video ops must only be reported where the family actually says
-            // it does video queue work.
             if ((q.video_decode || q.video_encode) && !video_queue) qf_sane = false;
         }
     }
     check(qf_sane, "vk_probe: queue-family video bits coherent with queue flags");
 
-    // Extension-subset reporting: the interop-gating extensions must be
-    // individually gated, not lumped. A missing one is reported, not fatal —
-    // downstream tests SKIP on the ones they actually need.
     bool any_drm = false, any_budget = false, any_timeline = false;
     for (const auto& d : r.devices) {
         any_drm |= d.drm_modifiers && d.dma_buf_fd;

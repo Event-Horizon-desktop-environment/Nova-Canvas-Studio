@@ -8,11 +8,6 @@ class QPaintEvent;
 
 namespace canvas::gui {
 
-// Viewport/frame timebase selector for the transport bar. Hand-painted from
-// scratch (no QComboBox, no stylesheet subcontrols): a semi-rounded outlined
-// button holding the current mode label plus the bundled chevron icon, opening
-// a themed popup menu on press. Paints everything itself so no sibling can
-// draw over the label or the chevron.
 class ViewportSelector final : public QWidget {
     Q_OBJECT
 public:
@@ -36,4 +31,4 @@ private:
     bool hovered_{false};
 };
 
-}  // namespace canvas::gui
+}

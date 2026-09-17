@@ -1,15 +1,3 @@
-// Phase 1 (F6) blend-mode LAW tests. Pins the canonical timeline byte blend law
-// (timeline/blend.hpp) for all 8 modes:
-//  - the enum values / count and the display-name table;
-//  - exact known byte values for the simple modes (Normal, Add, Multiply,
-//    Screen, Overlay, Subtract, Difference and SoftLight's source==0.5 pivot);
-//  - byte parity vs the color-page float law (grade_graph::blend_channel)
-//    across a value grid, for every mode (the two renderers must not drift);
-//  - the opacity dissolve;
-//  - edit-op acceptance + project round-trip for the three newly-admitted modes
-//    (SoftLight/Subtract/Difference), which the old 5-mode clamp rejected.
-// Headless — links only canvas_core.
-
 #include "canvas/core/grade_graph/composite.hpp"
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/blend.hpp"
@@ -37,9 +25,6 @@ void check(const bool cond, const char* what) {
     }
 }
 
-// Independent oracle: map the timeline enum to the color-page enum by NAME and
-// apply the documented float law + dissolve. Deliberately a separate mapping so
-// a bug in blend.cpp's mapping cannot hide behind the same bug in the test.
 gg::BlendMode to_grade(const BlendMode m) {
     switch (m) {
         case BlendMode::Normal: return gg::BlendMode::kNormal;
@@ -107,12 +92,9 @@ void test_known_values() {
     check(blend::blend_channel(BlendMode::Subtract, kOp, 10, 200) == 0, "Subtract clamps at 0");
     check(blend::blend_channel(BlendMode::Difference, kOp, 255, 0) == 255, "Difference 255/0");
     check(blend::blend_channel(BlendMode::Difference, kOp, 128, 128) == 0, "Difference equal -> 0");
-    // SoftLight around the source == 0.5 pivot: the correction term vanishes, so
-    // the result is the backdrop (within a byte).
     const int sl = blend::blend_channel(BlendMode::SoftLight, kOp, 100, 127);
     check(std::abs(sl - 100) <= 1, "SoftLight source~0.5 preserves backdrop");
 
-    // Opacity dissolve: Normal at 50% over black is half the source.
     check(blend::blend_channel(BlendMode::Normal, 0.5f, 0, 100) == 50, "Normal @50% dissolve");
     check(blend::blend_channel(BlendMode::Add, 0.5f, 0, 100) == 50, "Add @50% dissolve");
     check(blend::blend_channel(BlendMode::Normal, 0.0f, 200, 0) == 200, "opacity 0 -> backdrop");
@@ -176,7 +158,6 @@ void test_edit_and_json_roundtrip() {
         check(cmd != nullptr, "set_clip_composite accepts appended mode");
         check(p.sequence.video_tracks[0].clips[0].blend_mode == mode,
               "clip carries appended blend mode");
-        // Undo/redo round-trip.
         cmd->undo(p.sequence);
         check(p.sequence.video_tracks[0].clips[0].blend_mode == prior,
               "undo restores the prior blend mode");
@@ -193,7 +174,6 @@ void test_edit_and_json_roundtrip() {
                   q.sequence.video_tracks[0].clips[0].blend_mode == mode,
               "appended blend mode survives JSON round-trip");
     }
-    // A full 8-mode sweep through the clamp: every mode is accepted.
     for (int i = 0; i < blend::kBlendModeCount; ++i) {
         auto cmd = set_clip_composite(p.sequence, Track::Kind::Video, 0, 1, 1.0f,
                                       static_cast<BlendMode>(i));
@@ -203,7 +183,7 @@ void test_edit_and_json_roundtrip() {
     }
 }
 
-}  // namespace
+}
 
 int main() {
     test_enum_and_count();

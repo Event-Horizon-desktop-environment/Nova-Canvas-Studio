@@ -33,7 +33,6 @@ namespace canvas::gui {
 
 namespace {
 
-// ── Slider + numeric spin composite row ───────────────────────────────────
 QWidget* make_slider_spin(double min, double max, int decimals, QWidget* parent,
                           QSlider** out_slider, QDoubleSpinBox** out_spin) {
     auto* host = new QWidget(parent);
@@ -42,9 +41,6 @@ QWidget* make_slider_spin(double min, double max, int decimals, QWidget* parent,
     lay->setSpacing(6);
     auto* slider = new QSlider(Qt::Horizontal, host);
     slider->setRange(0, 10000);
-    // Don't let the slider's default minimum width (≈84px) force the row wider
-    // than the inspector dock — the label/spin/reset on the right must stay
-    // visible at any dock width.
     slider->setMinimumWidth(0);
     auto* spin = new QDoubleSpinBox(host);
     spin->setRange(min, max);
@@ -67,11 +63,6 @@ QWidget* make_slider_spin(double min, double max, int decimals, QWidget* parent,
                                             static_cast<double>(slider->value()) / 10000.0);
                      });
 
-    // Seed the knob to match the spin's initial value. The spin starts at its
-    // built-in default (0.0) and the slider at its own default (0 = far-left on
-    // the 0..10000 range), so without this they disagree until the user touches
-    // the spin — e.g. a -100..+100 dB volume row would show 0.00 with the knob
-    // hard against the left end instead of centered.
     spin_to_slider(spin->value());
 
     lay->addWidget(slider, 1);
@@ -116,7 +107,6 @@ QDoubleSpinBox* make_band_spin(double lo, double hi, int decimals, double val, Q
     return s;
 }
 
-// ── Control registry ──────────────────────────────────────────────────────
 struct AudioControls {
     QDoubleSpinBox* volume = nullptr;
     QSlider* volume_slider = nullptr;
@@ -135,21 +125,16 @@ struct AudioControls {
 
     InspectorCategory* eq_cat = nullptr;
     EqGraphWidget* eq_graph = nullptr;
-    QButtonGroup* eq_view_group = nullptr;  // Curve / Faders view switch
+    QButtonGroup* eq_view_group = nullptr;
     QToolButton* eq_view_curve = nullptr;
     QToolButton* eq_view_bands = nullptr;
     std::vector<QDoubleSpinBox*> eq_freq;
     std::vector<QDoubleSpinBox*> eq_gain;
     std::vector<QDoubleSpinBox*> eq_q;
     std::vector<QComboBox*> eq_type;
-    std::vector<QToolButton*> eq_enable;  // per-band bypass dots (mirror EqBand.enabled)
-    std::vector<QLabel*> eq_labels;       // B1..B6 labels, recoloured on selection
+    std::vector<QToolButton*> eq_enable;
+    std::vector<QLabel*> eq_labels;
 
-    // AI Voice Isolation: per-clip engine picker. Backed by the real model
-    // field (None / RNNoise / DeepFilterNet) and applied before the clip's
-    // gains/mix in both playback and export. Engine entries whose backend is
-    // not compiled in (voice_isolation_supported()==false, i.e. DeepFilterNet)
-    // are listed but disabled.
     InspectorCategory* iso_cat = nullptr;
     QComboBox* iso_combo = nullptr;
 
@@ -158,8 +143,8 @@ struct AudioControls {
     QDoubleSpinBox* ai_amount = nullptr;
 
     QToolButton* mode_button = nullptr;
-    bool updating = false;   // guards against commit/re-sync during refresh
-    bool attached = false;   // selection signals already connected
+    bool updating = false;
+    bool attached = false;
 };
 
 std::map<MainWindow*, AudioControls>& audio_registry() {
@@ -187,7 +172,6 @@ void set_processing_enabled(AudioControls& ac, bool on) {
     }
     if (ac.eq_graph) {
         ac.eq_graph->setEnabled(on);
-        // LP/HP rows have no gain control — greyed even when the section is on.
         for (std::size_t i = 0; i < ac.eq_type.size() && i < ac.eq_gain.size(); ++i) {
             if (!ac.eq_type[i] || !ac.eq_gain[i]) continue;
             ac.eq_gain[i]->setEnabled(
@@ -205,7 +189,6 @@ void set_processing_enabled(AudioControls& ac, bool on) {
         }
 }
 
-// Reads a freshly-found selected audio clip into the widgets (no commit).
 void populate_from_clip(AudioControls& ac, const canvas::core::Clip& clip) {
     ac.updating = true;
     if (ac.volume) ac.volume->setValue(clip.volume_db);
@@ -227,7 +210,6 @@ void populate_from_clip(AudioControls& ac, const canvas::core::Clip& clip) {
     }
     if (ac.eq_graph) {
         ac.eq_graph->set_bands(clip.eq_bands);
-        // Entering a new clip clears the node/row selection.
         ac.eq_graph->set_selected(-1);
     }
     if (ac.iso_combo)
@@ -235,7 +217,7 @@ void populate_from_clip(AudioControls& ac, const canvas::core::Clip& clip) {
     ac.updating = false;
 }
 
-}  // namespace
+}
 
 void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
                            QToolButton* audio_mode_button) {
@@ -244,7 +226,6 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     auto* host = audio_layout->parentWidget();
     const auto tr = [&](const char* s) { return MainWindow::tr(s); };
 
-    // --- Audio (Volume / Pan) ------------------------------------------------
     auto* audio = new InspectorCategory(tr("Audio"), true, host);
     {
         QSlider* vol_slider = nullptr;
@@ -256,13 +237,8 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         ac.volume_slider = vol_slider;
         vol_spin->setSuffix(QStringLiteral(" dB"));
         vol_spin->setMaximumWidth(110);
-        // Drag the slider left to lower, right to raise; commit once the drag
-        // releases so playback keeps streaming between drag steps.
         QObject::connect(vol_slider, &QSlider::sliderReleased, &mw,
                          [&mw]() { mw.apply_inspector_audio(); });
-        // Live spectrum feedback: every drag/typing step re-renders the selected
-        // clip's waveform at the knob's gain (no undo/commit per step); the
-        // release handler above still records the one real volume edit.
         QObject::connect(vol_spin, &QDoubleSpinBox::valueChanged, &mw,
                          [&mw](double vol_db) { mw.preview_inspector_volume(static_cast<float>(vol_db)); });
         add_property_row(audio->body_layout(), tr("Volume (dB)"), vol_row);
@@ -276,14 +252,10 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     ac.pan_slider = pan_slider;
     pan_spin->setSuffix(QStringLiteral(" L/R"));
     pan_spin->setMaximumWidth(110);
-    // Drag right to pan right, left to pan left; commit once the drag releases
-    // so playback keeps streaming between drag steps.
     QObject::connect(pan_slider, &QSlider::sliderReleased, &mw,
                      [&mw]() { mw.apply_inspector_audio(); });
     add_property_row(audio->body_layout(), tr("Pan"), pan_row);
     {
-        // Multi-clip selection hint: Volume/Pan edits below apply to every
-        // selected audio clip (Phase 4). Hidden for single-clip selections.
         auto* hint = new QLabel(host);
         apply_theme_style(hint, [] {
             return QStringLiteral("color: %1; font-size: 10px; padding: 0 4px;")
@@ -296,12 +268,9 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     }
     audio_layout->addWidget(audio);
     audio_layout->addSpacing(2);
-    // Keep MainWindow's legacy mix spins pointing at these so the pre-split
-    // apply_inspector_audio() (volume/pan commit path) keeps working unchanged.
     mw.inspector_audio_volume_ = ac.volume;
     mw.inspector_audio_pan_ = ac.pan;
 
-    // --- Pitch ----------------------------------------------------------------
     auto* pitch = new InspectorCategory(tr("Pitch"), true, host);
     QSlider* s1 = nullptr;
     QDoubleSpinBox* sp1 = nullptr;
@@ -323,8 +292,7 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     add_property_row(pitch->body_layout(), tr("Cents"), cents_row);
     audio_layout->addWidget(pitch);
 
-    // --- Speed Change ---------------------------------------------------------
-    ac.speed_cat = new InspectorCategory(tr("Speed Change"), false, /*has_enable=*/true, host);
+    ac.speed_cat = new InspectorCategory(tr("Speed Change"), false, true, host);
     ac.speed_cat->set_feature_toggle_enabled(false);
     QSlider* s3 = nullptr;
     QDoubleSpinBox* sp3 = nullptr;
@@ -335,12 +303,9 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     ac.speed_factor = sp3;
     QToolButton* speed_row_reset = nullptr;
     add_property_row(ac.speed_cat->body_layout(), tr("Factor"), speed_row,
-                     /*with_reset=*/true, &speed_row_reset);
+                     true, &speed_row_reset);
     audio_layout->addWidget(ac.speed_cat);
 
-    // "Reset to default": the category-header reset AND the Factor-row reset
-    // both restore the speed to 1.00 (disabled tempo) and commit one undoable
-    // edit. spin->setValue() keeps the linked slider in sync.
     const auto reset_speed = [&mw]() {
         AudioControls* acc = audio_lookup(mw);
         if (!acc || !acc->speed_factor) return;
@@ -352,17 +317,10 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     if (speed_row_reset)
         QObject::connect(speed_row_reset, &QToolButton::clicked, &mw, reset_speed);
 
-    // --- Equalizer ------------------------------------------------------------
-    // Open by default so the bands are immediately editable — no collapsed/
-    // hidden-by-default state.
-    ac.eq_cat = new InspectorCategory(tr("Equalizer"), /*expanded=*/true, /*has_enable=*/true, host);
+    ac.eq_cat = new InspectorCategory(tr("Equalizer"), true, true, host);
     ac.eq_cat->set_feature_toggle_enabled(false);
-    // The EQ section sits at the bottom of the audio tab and gets generous
-    // spacing so every value/suffix stays fully visible at any dock width.
     ac.eq_cat->body_layout()->setSpacing(12);
 
-    // View toggle: Curve (node graph) vs Faders (band gain columns). A
-    // lightweight segmented pair, identical to the page-bar pills in style.
     {
         auto* view_row = new QWidget(host);
         auto* view_lay = new QHBoxLayout(view_row);
@@ -420,12 +378,6 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     ac.eq_graph = new EqGraphWidget(host);
     ac.eq_cat->body_layout()->addWidget(ac.eq_graph);
 
-    // Band rows: [dot] B1..B6 | type | freq | gain | Q. All six columns are
-    // always shown — never folded away per filter type — so the row layout is
-    // stable and no label/value is ever hidden. The leading dot is the per-band
-    // bypass toggle (EqBand.enabled): the same rule the graph's double-click
-    // uses. The band label picks up the band hue while its node is selected,
-    // mirroring the graph's selection ring.
     for (int i = 0; i < canvas::core::audio_processing::kEqBandCount; ++i) {
         auto* row = new QWidget(host);
         auto* lay = new QHBoxLayout(row);
@@ -477,20 +429,13 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         ac.eq_cat->body_layout()->addWidget(row);
     }
 
-    // --- AI Voice Isolation --------------------------------------------------
-    // Real per-clip engine picker (model-backed, applied before the gains/mix
-    // in playback AND export). A dropdown row = the engine list; "None" is the
-    // default/off state. Modes whose backend isn't compiled in this build stay
-    // listed but greyed (DeepFilterNet voice-from-music — seam reserved).
-    ac.iso_cat = new InspectorCategory(tr("AI Voice Isolation"), true, /*has_enable=*/false, host);
+    ac.iso_cat = new InspectorCategory(tr("AI Voice Isolation"), true, false, host);
     {
         auto* row = new QWidget(host);
         auto* lay = new QHBoxLayout(row);
         lay->setContentsMargins(0, 0, 0, 0);
         lay->setSpacing(6);
         auto* combo = make_dark_combo(row);
-        // Index i == VoiceIsolationMode i (None=0, RnNoise=1, DeepFilterNet=2);
-        // keep this aligned with the enum order.
         combo->addItem(tr("None"));
         combo->addItem(tr("RNNoise — Noise Suppression"));
         combo->addItem(tr("DeepFilterNet — Voice from Music"));
@@ -515,9 +460,8 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     }
     audio_layout->addWidget(ac.iso_cat);
 
-    // --- AI sections (UI placeholders, not wired to the model) ---------------
     const auto make_ai = [&](const QString& title, bool with_amount) -> InspectorCategory* {
-        auto* cat = new InspectorCategory(title, true, /*has_enable=*/true, host);
+        auto* cat = new InspectorCategory(title, true, true, host);
         cat->set_feature_toggle_enabled(false);
         cat->set_feature_enabled(false);
         if (with_amount) {
@@ -546,11 +490,9 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         audio_layout->addWidget(cat);
         return cat;
     };
-    ac.ai_leveler = make_ai(tr("AI Dialogue Leveler"), /*with_amount=*/false);
-    ac.ai_remix = make_ai(tr("AI Music Remixer"), /*with_amount=*/false);
+    ac.ai_leveler = make_ai(tr("AI Dialogue Leveler"), false);
+    ac.ai_remix = make_ai(tr("AI Music Remixer"), false);
 
-    // Equalizer sits at the bottom of the audio tab where it has room to
-    // breathe; its extra spacing keeps every band value fully visible.
     audio_layout->addSpacing(8);
     audio_layout->addWidget(ac.eq_cat);
 
@@ -560,7 +502,6 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
             "to edit volume, pitch, speed and EQ."));
     }
 
-    // ---- Wiring --------------------------------------------------------------
     QObject::connect(ac.volume, &QDoubleSpinBox::editingFinished, &mw, [&mw]() {
         mw.apply_inspector_audio();
     });
@@ -586,8 +527,6 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     QObject::connect(ac.speed_cat, &InspectorCategory::feature_toggled, &mw, commit_processing);
     QObject::connect(ac.eq_cat, &InspectorCategory::feature_toggled, &mw, commit_processing);
 
-    // Live graph <-> rows echo (no commit): any spin/type/dot edit repaints the
-    // curve from the widgets, preserving each band's enabled dot.
     const auto refresh_graph = [&ac]() {
         if (!ac.eq_graph) return;
         std::array<canvas::core::Clip::EqBand, 6> bands;
@@ -612,8 +551,6 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
         QObject::connect(spin, &QDoubleSpinBox::valueChanged, &mw, refresh_graph);
     for (QComboBox* combo : ac.eq_type)
         QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw, refresh_graph);
-    // View toggle: Curve ↔ Faders gain columns. The graph paints from
-    // whatever mode is selected; selection is shared across both views.
     if (ac.eq_view_group) {
         QObject::connect(
             ac.eq_view_group, qOverload<int>(&QButtonGroup::idClicked), &mw,
@@ -623,8 +560,6 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
                                               : EqGraphWidget::View::Curve);
             });
     }
-    // LP/HP bands carry no gain: grey the row spin as the graph disables its
-    // vertical drag, and keep it in lock-step with a type change.
     const auto refresh_band_gain_editable = [&ac]() {
         for (std::size_t i = 0; i < ac.eq_type.size() && i < ac.eq_gain.size(); ++i) {
             if (!ac.eq_type[i] || !ac.eq_gain[i]) continue;
@@ -637,7 +572,6 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     for (QComboBox* combo : ac.eq_type)
         QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), &mw, refresh_band_gain_editable);
 
-    // Graph gestures → live row echo + one settled commit.
     ac.eq_graph->on_edit = [&ac](int idx) {
         if (idx < 0 || idx >= static_cast<int>(ac.eq_freq.size())) return;
         const auto& b = ac.eq_graph->bands()[idx];
@@ -648,8 +582,6 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
     };
     ac.eq_graph->on_commit = [&mw]() { apply_inspector_audio_processing(mw); };
     ac.eq_graph->on_selection_changed = [&ac](int idx) {
-        // The numeric row echoes the selected node: the B-label takes the band's
-        // hue + weight, the others fall back to muted ink.
         for (std::size_t i = 0; i < ac.eq_labels.size(); ++i) {
             const bool sel = static_cast<int>(i) == idx;
             apply_theme_style(ac.eq_labels[i], [sel, i] {
@@ -662,9 +594,7 @@ void build_inspector_audio(MainWindow& mw, QVBoxLayout* audio_layout,
             });
         }
     };
-    // A cell click (or Escape) on the row widgets re-syncs the graph; the
-    // selection ring itself is drawn by the graph and echoed here above.
-    ac.eq_graph->set_selected(-1);  // harmless no-op initial state
+    ac.eq_graph->set_selected(-1);
 }
 
 void attach_inspector_audio(MainWindow& mw, TimelineWidget* timeline) {
@@ -686,15 +616,12 @@ void update_inspector_audio_full(MainWindow& mw) {
 
     if (has_audio) populate_from_clip(*ac, targets.front().clip);
 
-    // Enabled for audio clips and for video clips with a linked audio mate.
     if (ac->mode_button) ac->mode_button->setEnabled(has_audio);
     set_processing_enabled(*ac, has_audio);
     if (ac->volume) ac->volume->setEnabled(has_audio);
     if (ac->volume_slider) ac->volume_slider->setEnabled(has_audio);
     if (ac->pan) ac->pan->setEnabled(has_audio);
 
-    // Multi-selection hint: values shown are the FIRST target's, but Volume/Pan
-    // commits land on every resolved audio clip.
     if (ac->multi_hint) {
         const int n = static_cast<int>(targets.size());
         ac->multi_hint->setVisible(n > 1);
@@ -711,7 +638,6 @@ void apply_inspector_audio_processing(MainWindow& mw) {
     canvas::core::Track::Kind kind;
     std::size_t index;
     canvas::core::Clip clip;
-    // Target the selected audio clip, or the linked audio mate of a video clip.
     if (!mw.find_audio_target(kind, index, clip)) return;
 
     const float semi = static_cast<float>(ac->pitch_semi ? ac->pitch_semi->value() : 0.0);
@@ -761,13 +687,10 @@ void apply_inspector_voice_isolation(MainWindow& mw) {
     canvas::core::Track::Kind kind;
     std::size_t index;
     canvas::core::Clip clip;
-    // Target the selected audio clip, or the linked audio mate of a video clip.
     if (!mw.find_audio_target(kind, index, clip)) return;
 
     const auto mode = static_cast<canvas::core::VoiceIsolationMode>(
         ac->iso_combo->currentIndex());
-    // An unsupported engine (DeepFilterNet) must never be selectable at commit
-    // time even if the entry was force-enabled somehow.
     if (!canvas::core::voice_isolation_supported(mode)) return;
     if (clip.voice_isolation == mode) return;
 
@@ -784,4 +707,4 @@ void apply_inspector_voice_isolation(MainWindow& mw) {
                << "mode=" << canvas::core::voice_isolation_mode_name(mode);
 }
 
-}  // namespace canvas::gui
+}

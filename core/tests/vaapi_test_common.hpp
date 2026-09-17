@@ -1,19 +1,3 @@
-// Shared helpers for the device-bound VAAPI encode tests (vaapi_enc_test.cpp,
-// vaapi_enc_bench.cpp). Header-only so both tests compile the same source
-// generator / device-discovery / export-timing / decode-verify logic without a
-// shared .cpp.
-//
-// These tests are DEVICE-BOUND: they SKIP (exit 2) when the machine has no
-// working VAAPI *encode* node (e.g. CI without a GPU, or a box where the only
-// VAAPI display is a decode-only adapter like the NVIDIA NVDEC VAAPI shim —
-// naive `av_hwdevice_ctx_create` success is NOT the gate, a real encode is).
-//
-// The test SOURCE is a real 1440p60 clip (default the user's
-// ~/Videos/clips/2026-09-10 14-28-50.mkv, overridable via CANVAS_TEST_CLIP) so
-// the pipeline exercises decode of genuine high-rate footage, not a synthetic
-// postage stamp. Tests that need it SKIP when the clip is absent. Target render
-// is H.265 VAAPI 1440p @ 80 Mbps @ 60 fps.
-
 #pragma once
 
 #include "canvas/core/export/exporter.hpp"
@@ -44,26 +28,20 @@ extern "C" {
 
 namespace vaapi_test {
 
-// Output/artifact root shared by the two tests.
 inline std::string art_root() {
     return "/tmp/canvas_vaapi_enc";
 }
 
-// The fixed 1440p60 source clip photo-real footage is exported from. Honors
-// CANVAS_TEST_CLIP so a different box/clip can drive the same tests.
 inline std::string default_clip_path() {
     if (const char* p = std::getenv("CANVAS_TEST_CLIP")) return p;
     return "/home/matt/Videos/clips/2026-09-10 14-28-50.mkv";
 }
 
-// Render target shared by the tests: H.265 VAAPI, 2560x1440, 60 fps,
-// 80 Mbps bitrate-driven. Matches the deliver intent the bench is optimizing.
 inline constexpr int kTargetWidth = 2560;
 inline constexpr int kTargetHeight = 1440;
 inline constexpr double kTargetFps = 60.0;
 inline constexpr int kTargetBitrateKbps = 80000;
 
-// A probed source clip the export pipeline can be pointed at.
 struct TestClip {
     std::string path;
     int width = 0;
@@ -76,8 +54,6 @@ struct TestClip {
     }
 };
 
-// Probes `path`'s first video stream for dims / fps / frame count. Returns an
-// invalid TestClip when the file is missing or has no video stream.
 inline TestClip probe_clip(const std::string& path) {
     TestClip out;
     out.path = path;
@@ -105,11 +81,6 @@ inline TestClip probe_clip(const std::string& path) {
     return out;
 }
 
-// True when `enc_name` can actually encode on `node` ("" = FFmpeg-default
-// VAAPI display). The gate is a real 2-frame encode+flush producing packets —
-// device-init success alone is NOT enough: on some boxes the default VAAPI
-// display is a decode-only adapter (NVIDIA NVDEC VAAPI shim) and opens fine but
-// cannot encode.
 inline bool encode_probe(const std::string& node, const char* enc_name) {
     AVBufferRef* dev = nullptr;
     if (av_hwdevice_ctx_create(&dev, AV_HWDEVICE_TYPE_VAAPI,
@@ -131,8 +102,6 @@ inline bool encode_probe(const std::string& node, const char* enc_name) {
             if (codec) {
                 AVCodecContext* ctx = avcodec_alloc_context3(codec);
                 if (ctx) {
-                    // VCN (radeonsi gfx1037) refuses sub-128px encodes; 320x240
-                    // is comfortably inside the 128-4096 hardware window.
                     ctx->width = 320;
                     ctx->height = 240;
                     ctx->time_base = AVRational{1, 30};
@@ -182,12 +151,6 @@ inline bool encode_probe(const std::string& node, const char* enc_name) {
     return ok;
 }
 
-// Finds a working VAAPI *encode* node. Returns:
-//   "/dev/dri/renderD128"  — a render node that encodes h264_vaapi
-//   "<default>"            — the FFmpeg-default VAAPI display encodes
-//   ""                     — nothing encodes (SKIP condition)
-// Honors CANVAS_VAAPI_DEVICE to force a specific node (useful on multi-GPU
-// boxes where scan order picks the decode-only adapter).
 inline std::string pick_vaapi_encode_node() {
     const char* over = std::getenv("CANVAS_VAAPI_DEVICE");
     if (over && *over) {
@@ -202,28 +165,18 @@ inline std::string pick_vaapi_encode_node() {
     return encode_probe("", "h264_vaapi") ? "<default>" : "";
 }
 
-// Maps the sentinel returned by pick_vaapi_encode_node to the device argument
-// the exporter should receive ("<default>" -> "" -> null device).
 inline std::string device_arg_for(const std::string& node) {
     return node == "<default>" ? std::string{} : node;
 }
 
-// One-shot export timing through the real export_project() path.
 struct EncResult {
     bool ok = false;
     std::string err;
-    double fps = 0.0;  // steady-state frames/sec (see SteadyFps below)
-    double ms = 0.0;   // wall time across the whole export incl. session open
+    double fps = 0.0;
+    double ms = 0.0;
     int64_t bytes = 0;
 };
 
-// Steady-state fps from the exporter's per-frame progress samples. Short
-// head windows (e.g. 90 frames) are dominated by the fixed per-export session
-// cost — device/session open, NVENC/VAAPI context setup, mux init — so naive
-// frames/wall reads far under the sustained rate. Drop the trailing mux-flush
-// plateau (identical progress), then measure over the BACK HALF of the
-// remaining samples' wall span, which carries none of the session-open cost.
-// Mirrors the CUDA family's SteadyFps (cuda_test_common.hpp).
 struct SteadyFps {
     std::vector<std::pair<double, std::chrono::steady_clock::time_point>> s;
     std::int64_t total = 1;
@@ -234,7 +187,7 @@ struct SteadyFps {
     double fps() const {
         if (s.size() < 4) return 0.0;
         std::size_t hi = s.size();
-        while (hi >= 2 && s[hi - 1].first == s[hi - 2].first) --hi;  // flush plateau
+        while (hi >= 2 && s[hi - 1].first == s[hi - 2].first) --hi;
         if (hi < 2) hi = s.size();
         const std::size_t lo = hi / 2;
         const double dt = std::chrono::duration<double>(s[hi - 1].second - s[lo].second).count();
@@ -249,9 +202,6 @@ inline EncResult run_export(const canvas::core::Project& proj,
                             const std::string& vid_rc_mode, const std::string& preset,
                             int bitrate_kbps, const std::string& extra,
                             const std::string& tag) {
-    // /tmp is wiped across reboots; the artifact root must exist before the
-    // exporter opens a file under it, or every row fails with
-    // "Cannot open output file".
     if (::mkdir(art_root().c_str(), 0755) != 0 && errno != EEXIST) {
         EncResult r{};
         r.err = "cannot create artifact root " + art_root();
@@ -274,10 +224,6 @@ inline EncResult run_export(const canvas::core::Project& proj,
     if (bitrate_kbps > 0) es.video_max_bitrate_kbps = bitrate_kbps * 3 / 2;
     es.extra = extra;
 
-    // Watch the exporter's own progress ticks; one callback per encoded frame.
-    // The steady-state fps it derives excludes session open / mux flush, so a
-    // short bench window reports the sustained encode rate, not a startup-diluted
-    // wall-clock average (the app's long-export log reads the same way).
     SteadyFps watch;
     watch.total = frames;
     canvas::core::ExportControl ctl;
@@ -298,9 +244,6 @@ inline EncResult run_export(const canvas::core::Project& proj,
     return r;
 }
 
-// Minimal project carrying the source clip's first `frames` timeline frames.
-// The clip's own fps/dims come from the probe, so the timeline framerate
-// matches the media for a frame-accurate decode.
 inline canvas::core::Project make_single_clip_project(const TestClip& clip,
                                                       int64_t frames) {
     canvas::core::Project p;
@@ -329,14 +272,6 @@ inline canvas::core::Project make_single_clip_project(const TestClip& clip,
     return p;
 }
 
-// Same project but with editorial CONTENT layered on the single clip: a
-// burned-in subtitle (Clip::Title, pushed into the classic lower subtitle band
-// via pos_y) and edge fade transitions (FadeIn at the head, DipToBlack at the
-// tail). The title forces every frame through the CPU compositor — the frame_gpu
-// fast path bails on any enabled clip with a title — so an export of this
-// project exercises the full title-rasterise + fade-envelope + composite + HW
-// encode path on whichever backend runs it, which is exactly what a real
-// subtitle/title-bearing timeline does.
 inline canvas::core::Project make_feature_project(const TestClip& clip,
                                                   int64_t frames) {
     canvas::core::Project p = make_single_clip_project(clip, frames);
@@ -354,9 +289,6 @@ inline canvas::core::Project make_feature_project(const TestClip& clip,
     t.box_radius = 6.0f;
     c.title = std::move(t);
 
-    // pos_y nudges the title block toward the bottom of the frame so a decode
-    // can assert the subtitle really landed in the subtitle band (bright pixels
-    // in the bottom ~18% are the "did the title reach the encoder" gauge).
     c.pos_y = static_cast<double>(clip.height) * 0.32;
 
     c.transition_in = canvas::core::TransitionType::FadeIn;
@@ -366,19 +298,14 @@ inline canvas::core::Project make_feature_project(const TestClip& clip,
     return p;
 }
 
-// Decodes an encoded output back with the software decoder and reports the
-// decoded frame count + a luma-sample "does it carry content" gauge.
 struct DecodeResult {
     bool ok = false;
     int frames = 0;
-    int64_t lit_luma = 0;      // sampled luma pixels > 16 (not black), whole frame
-    int64_t lit_luma_band = 0; // same count, sampled only in the bottom band
-    int64_t band_samples = 0;  // pixels sampled inside the band (0 = band skipped)
+    int64_t lit_luma = 0;
+    int64_t lit_luma_band = 0;
+    int64_t band_samples = 0;
 };
 
-// band_frac_h: fraction of the frame height from the BOTTOM that counts as the
-// subtitle band (0 = whole frame only). Pass e.g. 0.18 to also gauge whether a
-// burned-in subtitle (make_feature_project) actually reached the encoder.
 inline DecodeResult verify_decode(const std::string& path, double band_frac_h = 0.0) {
     DecodeResult out;
     AVFormatContext* fmt = nullptr;
@@ -434,13 +361,10 @@ inline DecodeResult verify_decode(const std::string& path, double band_frac_h = 
     return out;
 }
 
-// Assesses whether a decoded output's bottom band contains subtitle-like
-// content (make_feature_project's title should light up the band well past the
-// bright-subtitle floor). Returns the fraction of band samples that are lit.
 inline double band_lit_fraction(const DecodeResult& d) {
     return d.band_samples > 0
                ? static_cast<double>(d.lit_luma_band) / static_cast<double>(d.band_samples)
                : 0.0;
 }
 
-}  // namespace vaapi_test
+}

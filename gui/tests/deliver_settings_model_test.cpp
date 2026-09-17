@@ -1,21 +1,3 @@
-// Headless DeliverSettingsModel tests (splitplan Phase 31). Compiles
-// deliver_settings_model.cpp directly into the binary so the module is verified
-// exactly as shipped; the Qt-free seam is enforced by the build (a stray <Q...>
-// include breaks this target on purpose).
-//
-// Covers the container<->codec restriction policy the Deliver settings panel
-// applies to its combo boxes, the encoder/preset lists, and the bitrate-field
-// visibility law:
-//   * every video codec the policy allows for a container is also a member of
-//     canvas::core::deliver_video_codecs() (display-name parity);
-//   * WebM exposes only AV1 video and Opus/Vorbis audio;
-//   * MXF/IMF are H.26x-only video and PCM-only audio;
-//   * image-sequence formats reduce video to Uncompressed;
-//   * matching is case-insensitive on the container name;
-//   * bitrate visibility: constant-QP / VBR-quality hide both fields,
-//     VBR-target shows both (relabelling the single field "Target (Kbps)"),
-//     constant-bitrate shows only the single "Bit Rate" field.
-
 #include "features/deliver/deliver_settings_model.hpp"
 
 #include "canvas/core/export/deliver_preset.hpp"
@@ -65,14 +47,12 @@ void test_encoder_backends_wrap_core() {
 }
 
 void test_available_encoder_backends() {
-    // Auto + CPU are never filtered out and keep their plain labels.
     const auto choices = deliver_model::available_encoder_backends();
     CHECK(choices.size() >= 2);
     if (choices.size() < 2) return;
     CHECK(choices.at(0).label == "Auto" && choices.at(0).key == "Auto");
     CHECK(choices.at(1).label == "CPU" && choices.at(1).key == "CPU");
 
-    // Every key is a canonical core name; labels carry the encoder family.
     const std::vector<std::string> core_names = canvas::core::deliver_encoders();
     size_t vendor_entries = 0;
     for (const auto& c : choices) {
@@ -84,9 +64,6 @@ void test_available_encoder_backends() {
         else if (c.key == "Intel") CHECK(c.label == "Intel QSV");
     }
 
-    // The vendor entries mirror the GPUs actually present on this machine
-    // (same detection the Settings dialog uses): each entry must correspond to
-    // a detected vendor GPU, and no missing vendor may be listed.
     const auto gpus = canvas::core::gpu_select::detect_gpus();
     std::vector<std::string> detected;
     for (const auto& g : gpus) detected.push_back(g.vendor);
@@ -95,7 +72,7 @@ void test_available_encoder_backends() {
         if (key == "Auto" || key == "CPU") continue;
         CHECK(std::find(detected.begin(), detected.end(), key) != detected.end());
     }
-    (void)vendor_entries;  // keep the counter meaningful if a compiler ever prunes it
+    (void)vendor_entries;
 }
 
 void test_video_codecs_are_display_names() {
@@ -125,7 +102,6 @@ void test_webm_policy() {
 }
 
 void test_mp4_policy() {
-    // MP4 exposes H.26x + AV1; ProRes/FFV1/etc. are rejected up front.
     const auto vcs = deliver_model::video_codecs_for_format("MP4");
     CHECK(vcs.size() == 3);
     if (vcs.size() == 3) {
@@ -150,7 +126,6 @@ void test_quicktime_policy() {
     const auto vcs = deliver_model::video_codecs_for_format("QuickTime");
     CHECK(contains(vcs, "Apple ProRes"));
     CHECK(!contains(vcs, "AV1"));
-    // Lower-case 'mov' form is accepted too.
     CHECK(vcs == deliver_model::video_codecs_for_format("mov"));
 }
 
@@ -164,7 +139,7 @@ void test_avi_policy() {
 }
 
 void test_mxf_policy() {
-    for (const std::string& fmt : {"MXF OP-Atom", "MXF OP1A"}) {
+    for (const char* fmt : {"MXF OP-Atom", "MXF OP1A"}) {
         const auto vcs = deliver_model::video_codecs_for_format(fmt);
         CHECK(vcs.size() == 2 && vcs.at(0) == "H.264" && vcs.at(1) == "H.265");
         const auto acs = deliver_model::audio_codecs_for_format(fmt);
@@ -173,11 +148,10 @@ void test_mxf_policy() {
 }
 
 void test_image_sequence_policy() {
-    for (const std::string& fmt : {"PNG", "DPX", "EXR", "TIFF", "WebP", "GIF"}) {
+    for (const char* fmt : {"PNG", "DPX", "EXR", "TIFF", "WebP", "GIF"}) {
         const auto vcs = deliver_model::video_codecs_for_format(fmt);
         CHECK(vcs.size() == 1 && vcs.at(0) == "Uncompressed");
     }
-    // "JPEG 2000" the container hits the image-sequence branch through "jpeg".
     CHECK(deliver_model::video_codecs_for_format("JPEG 2000") ==
           deliver_model::video_codecs_for_format("PNG"));
 }
@@ -190,7 +164,6 @@ void test_case_insensitive() {
 }
 
 void test_bitrate_visibility() {
-    // RateControl: 0=ConstantQP, 1=VBRQuality, 2=VBRTargetKbps, 3=ConstantBitrate.
     const auto qp = deliver_model::bitrate_visibility(0);
     CHECK(!qp.show_bitrate && !qp.show_max);
     CHECK(std::string(qp.bitrate_label) == "Bit Rate");
@@ -206,14 +179,10 @@ void test_bitrate_visibility() {
     CHECK(cbr.show_bitrate && !cbr.show_max);
     CHECK(std::string(cbr.bitrate_label) == "Bit Rate");
 
-    // Unknown index behaves like the quality modes (fields hidden).
     const auto bogus = deliver_model::bitrate_visibility(7);
     CHECK(!bogus.show_bitrate && !bogus.show_max);
 }
 
-// available_encoder_backends() with a Preferences GPU pin set: the list
-// collapses to that GPU's vendor only (an AMD-pinned user sees no NVIDIA
-// NVENC), and widens back to every detected vendor once the pin is cleared.
 void test_available_backends_respect_gpu_pin() {
     using canvas::core::HwDeviceManager;
 
@@ -224,28 +193,24 @@ void test_available_backends_respect_gpu_pin() {
         return keys;
     };
 
-    // Start unpinned so the unpinned baseline matches detect_gpus().
     HwDeviceManager::set_preferred_gpu("", "");
     const auto unpinned = vendor_keys();
     const bool have_amd = contains(unpinned, "AMD");
     const bool have_nvidia = contains(unpinned, "NVIDIA");
     const bool have_intel = contains(unpinned, "Intel");
 
-    // Amber: AMD VAAPI only -> AMD kept, NVIDIA dropped (when present).
     HwDeviceManager::set_preferred_gpu("vaapi", "/dev/dri/renderD128");
     auto keys = vendor_keys();
     if (have_amd) CHECK(contains(keys, "AMD"));
     if (have_nvidia) CHECK(!contains(keys, "NVIDIA"));
     if (have_intel) CHECK(!contains(keys, "Intel"));
 
-    // NVIDIA NVENC only -> NVIDIA kept, AMD dropped (when present).
     HwDeviceManager::set_preferred_gpu("cuda", "0");
     keys = vendor_keys();
     if (have_nvidia) CHECK(contains(keys, "NVIDIA"));
     if (have_amd) CHECK(!contains(keys, "AMD"));
     if (have_intel) CHECK(!contains(keys, "Intel"));
 
-    // Clearing the pin restores every detected vendor.
     HwDeviceManager::set_preferred_gpu("", "");
     keys = vendor_keys();
     if (have_amd) CHECK(contains(keys, "AMD"));
@@ -253,9 +218,6 @@ void test_available_backends_respect_gpu_pin() {
     if (have_intel) CHECK(contains(keys, "Intel"));
 }
 
-// Strict GPU pin law: video_encoder_name demotes any hardware backend naming a
-// GPU different from the pinned one to software (sw_fallback set), while the
-// matching backend is preserved. No pin -> all hardware backends honored.
 void test_gpu_pin_demotes_foreign_backends() {
     using canvas::core::EncoderBackend;
     using canvas::core::HwDeviceManager;
@@ -267,7 +229,6 @@ void test_gpu_pin_demotes_foreign_backends() {
         return std::make_pair(n, sw);
     };
 
-    // No pin: every hardware backend survives.
     HwDeviceManager::set_preferred_backend("");
     HwDeviceManager::set_preferred_gpu("", "");
     {
@@ -277,7 +238,6 @@ void test_gpu_pin_demotes_foreign_backends() {
         CHECK(amdx == "h264_vaapi" && !sw2);
     }
 
-    // AMD pinned: NVENC and QSV demote to software; VAAPI survives.
     HwDeviceManager::set_preferred_gpu("vaapi", "/dev/dri/renderD128");
     {
         auto [nvid, sw] = encode(VideoCodec::H264, EncoderBackend::NVIDIA);
@@ -290,7 +250,6 @@ void test_gpu_pin_demotes_foreign_backends() {
         CHECK(nvidh == "libx265" && sw4);
     }
 
-    // NVIDIA pinned: VAAPI and QSV demote; NVENC survives.
     HwDeviceManager::set_preferred_gpu("cuda", "0");
     {
         auto [amdx, sw] = encode(VideoCodec::H264, EncoderBackend::AMD);
@@ -301,11 +260,10 @@ void test_gpu_pin_demotes_foreign_backends() {
         CHECK(itl == "libsvtav1" && sw3);
     }
 
-    // Clear the pin so later tests in this process aren't affected.
     HwDeviceManager::set_preferred_gpu("", "");
 }
 
-}  // namespace
+}
 
 int main() {
     test_presets();

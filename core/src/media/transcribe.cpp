@@ -26,10 +26,7 @@ std::string cache_dir() {
     return "/tmp";
 }
 
-// whisper callback trampolines: plain function pointers (no captures) that
-// forward into the caller's Progress channel. Both run on the transcription
-// worker thread; they touch atomics only and return immediately.
-void progress_trampoline(struct whisper_context* /*ctx*/, struct whisper_state* /*state*/,
+void progress_trampoline(struct whisper_context*, struct whisper_state*,
                          int progress, void* user_data) {
     auto* p = static_cast<Progress*>(user_data);
     if (!p) return;
@@ -49,7 +46,7 @@ void finish_progress(Progress* p) {
     p->stage.store(Progress::Stage::kFinished, std::memory_order_relaxed);
 }
 
-}  // namespace
+}
 
 std::string resolve_model_path(const std::string& override) {
     if (!override.empty() && is_regular_file(override)) return override;
@@ -90,7 +87,7 @@ Report transcribe_pcm_16k(const float* pcm, std::size_t n_samples,
         opts.progress->stage.store(Progress::Stage::kLoadingModel,
                                    std::memory_order_relaxed);
     whisper_context_params cparams = whisper_context_default_params();
-    cparams.use_gpu = false;  // portable CPU transcription for background jobs
+    cparams.use_gpu = false;
     whisper_context* ctx = whisper_init_from_file_with_params(model_path.c_str(), cparams);
     if (!ctx) {
         out.result = Result::kCouldNotInit;
@@ -110,9 +107,6 @@ Report transcribe_pcm_16k(const float* pcm, std::size_t n_samples,
     params.max_len = opts.max_len;
     params.max_tokens = opts.max_tokens;
     if (opts.progress) {
-        // whisper_full (not _parallel): _parallel nulls the progress hook in
-        // each worker, and with a single processor both spell the same
-        // single-chunk run — so the plain call keeps the progress channel live.
         params.progress_callback = progress_trampoline;
         params.progress_callback_user_data = opts.progress;
         params.abort_callback = abort_trampoline;
@@ -141,8 +135,6 @@ Report transcribe_pcm_16k(const float* pcm, std::size_t n_samples,
     const int n_segments = whisper_full_n_segments(ctx);
     out.cues.reserve(static_cast<std::size_t>(n_segments));
     for (int i = 0; i < n_segments; ++i) {
-        // whisper segment times are 10 ms ticks; scale to the ms clock the
-        // transcript/srt laws and the timeline subtitle mapping speak in.
         transcript::Segment s;
         s.start_ms = whisper_full_get_segment_t0(ctx, i) * 10;
         s.end_ms = whisper_full_get_segment_t1(ctx, i) * 10;
@@ -156,12 +148,9 @@ Report transcribe_pcm_16k(const float* pcm, std::size_t n_samples,
 
 namespace {
 
-// Safety cap for a whole-file read: 4 hours at 16 kHz mono. Transcriptions are
-// background jobs on media of arbitrary length; this bounds the memory and
-// walls off a corrupt demuxer that reports an absurd total.
 constexpr std::size_t kMaxReadSamples = 16'000u * 60u * 60u * 4u;
 
-}  // namespace
+}
 
 Report transcribe_file(const std::string& path, const std::string& model_path,
                        const Options& opts) {
@@ -186,13 +175,8 @@ Report transcribe_file(const std::string& path, const std::string& model_path,
         return out;
     }
 
-    // Drain the whole stream at 16 kHz into a mono scratch buffer (down-mix by
-    // averaging channels — whisper's front end re-windows PCM anyway). The
-    // decoder serves synthetic silence once the stream physically ends, so on
-    // each chunk we stop the moment it flips at_stream_end() — otherwise a
-    // whole-file drain would keep consuming fabricated silence up to the cap.
     std::vector<float> mono;
-    mono.reserve(16'000u * 64u);  // 64 s of pending audio; grows on demand
+    mono.reserve(16'000u * 64u);
     constexpr int kChunkFrames = 16'384;
     for (;;) {
         canvas::core::AudioChunkPtr chunk = audio.decode(static_cast<int64_t>(mono.size()),
@@ -225,4 +209,4 @@ Report transcribe_file(const std::string& path, const std::string& model_path,
     return transcribe_pcm_16k(mono.data(), mono.size(), model_path, opts);
 }
 
-}  // namespace canvas::core::transcribe
+}

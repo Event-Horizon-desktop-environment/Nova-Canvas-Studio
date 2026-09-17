@@ -1,23 +1,3 @@
-// formats_test — image format support matrix for the composite path (P-D).
-//
-// Phase 0 reading that pins which VkFormat combos the machine supports for the
-// way the backend composites (docs/vulkan.md, Phase P-D): the decoder hands us
-// an NV12 image on a video-decode queue, the composite kernel samples it as a
-// texture on a graphics/compute queue and writes RGBA8/SRGB output images, and
-// the encode path reads those outputs. Every one of those is a VkFormat +
-// image-usage + tiling combination that a driver may or may not support — NV12
-// sampled on compute is driver-specific.
-//
-// This test enumerates the exact combos the plan assumes and reports PASS/FAIL
-// per combo. It does not require a VkDevice: format support is a physical-
-// device query. A machine that cannot sample NV12 with a STORAGE/SAMPLED image
-// (composite target) fails loudly NOW instead of in P-D's face at build time.
-//
-// PASS (0)  — every combo the plan's phase needs on this machine is supported.
-// FAIL (1)  — a REQUIRED combo is missing (the phase that needs it cannot ship
-//             on this machine).
-// SKIP (2)  — no Vulkan implementation at all.
-
 #include "vk_probe.hpp"
 #include "vk_session.hpp"
 
@@ -32,17 +12,12 @@ namespace {
 
 int g_failures = 0;
 
-void check(bool ok, const char* what) {
-    std::printf("%s  %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_failures;
-}
-
 struct Combo {
     const char* name;
     VkFormat format;
     VkImageTiling tiling;
     VkImageUsageFlags usage;
-    bool required;  // P-D cannot ship without it
+    bool required;
 };
 
 bool supports(VkPhysicalDevice phys, const Combo& c) {
@@ -60,7 +35,7 @@ bool supports(VkPhysicalDevice phys, const Combo& c) {
     return vkGetPhysicalDeviceImageFormatProperties2(phys, &fmt, &prop) == VK_SUCCESS;
 }
 
-}  // namespace
+}
 
 int main() {
     const ProbeResult r = run_probe();
@@ -77,31 +52,22 @@ int main() {
     }
     std::printf("formats: probing %s\n", s.device_name.c_str());
 
-    // The composite plan's format combos. `required` marks combos the plan
-    // depends on unconditionally for P-D to ship on this machine type.
     const Combo combos[] = {
-        // Decoder -> composite: sample NV12 (2-plane) as a texture.
         {"nv12-sample-optimal", VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
          VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
          true},
         {"nv12-sample-linear", VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
          VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
          false},
-        // Composite target: RGBA8 color attachment (sample + render).
         {"rgba8-color-optimal", VK_FORMAT_R8G8B8A8_UNORM,
          VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
          true},
-        // Composite target: SRGB (encoded output of a grade carries an sRGB
-        // transfer).
         {"rgba8s-sampled-optimal", VK_FORMAT_R8G8B8A8_SRGB,
          VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
          false},
-        // Compute direct-write target (if the composite routes through a
-        // compute pass instead of a render pass).
         {"nv12-storage-optimal", VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
          VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_STORAGE_BIT, false},
-        // CPU-export / parity-readback target.
         {"rgba8-linear-readback", VK_FORMAT_R8G8B8A8_UNORM,
          VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_DST_BIT, false},
     };

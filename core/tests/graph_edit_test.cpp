@@ -1,11 +1,3 @@
-// Phase 6 graph-EDIT law tests (core/grade_graph/edit.hpp). Exercises the
-// connection-validity law (type match, port existence, single-owner ports,
-// cycle rejection), port replace-wiring, Parallel/Layer branch insertion with
-// auto-created mixers (identity branch == evaluator no-op), layer-stack
-// append/reorder (links preserved by construction), and the raw add_edge /
-// remove_edge model additions the laws sit on. Headless — links only
-// canvas_core.
-
 #include "canvas/core/grade_graph/graph.hpp"
 #include "canvas/core/grade_graph/eval.hpp"
 #include "canvas/core/grade_graph/edit.hpp"
@@ -57,7 +49,6 @@ void expect_pix(const gg::EvalResult& r, float er, float eg, float eb, const cha
     check(ok, what);
 }
 
-// Adds an LGG corrector (gamma=1: out = gain * in).
 int add_gain(gg::GradeGraph& g, float gain, gg::NodeKind kind = gg::NodeKind::kCorrector) {
     const int id = g.add_node(kind);
     g.node(id).correct_mode = gg::CorrectMode::kLgg;
@@ -90,8 +81,6 @@ int find_kind(const gg::GradeGraph& g, gg::NodeKind kind) {
     return -1;
 }
 
-// ---- Port table -------------------------------------------------------------
-
 void test_node_ports() {
     const gg::NodePorts c = gg::node_ports(gg::NodeKind::kCorrector);
     check(c.rgb_in == 1 && c.rgb_out == 1 && c.key_in == 1 && c.key_out == 1 && !c.unbounded_rgb_in,
@@ -111,8 +100,6 @@ void test_node_ports() {
     const gg::NodePorts po = gg::node_ports(gg::NodeKind::kOutput);
     check(po.rgb_in == 1 && po.rgb_out == 0 && po.key_in == 0, "output: single rgb in");
 }
-
-// ---- Connection validity ----------------------------------------------------
 
 void test_can_wire() {
     gg::GradeGraph g;
@@ -154,15 +141,12 @@ void test_can_wire() {
     check(std::string(gg::can_wire(g, rgb(c0), rgb(c1)).reason) == "occupied",
           "second wire onto an occupied port refused");
 
-    // Layer Mixer: base slot + any layer slot beyond it.
     const int lm = g.add_node(gg::NodeKind::kLayerMixer);
     check(gg::can_wire(g, rgb(c0), {lm, gg::PipeType::kRgb, 7}).ok,
           "layer mixer accepts a far layer port (unbounded)");
     check(std::string(gg::can_wire(g, key(c0), {lm, gg::PipeType::kRgb, 0}).reason) == "type mismatch",
           "key into the layer base refused");
 }
-
-// ---- Replace wiring + raw edge model additions ------------------------------
 
 void test_connect_or_replace() {
     gg::GradeGraph g;
@@ -201,10 +185,7 @@ void test_edge_model_additions() {
           "remove_edge: second removal reports false");
 }
 
-// ---- Branch insertion (auto-created mixers) ---------------------------------
-
 void test_insert_parallel_branch() {
-    // Serial src(gain 1.2) -> sink(gain 0.5) -> out.
     gg::GradeGraph g;
     const int src = add_gain(g, 1.2f);
     const int sink = add_gain(g, 0.5f);
@@ -229,19 +210,15 @@ void test_insert_parallel_branch() {
     check(has_edge_toward(g, sink, gg::PipeType::kRgb, 0, mixer), "mixer output feeds the sink");
     check(g.node(mixer).shared_source == src, "parallel mixer shares the source base");
 
-    // Identity branch must reproduce the baseline exactly (A+B-base with A==B).
     const gg::EvalResult idle = gg::evaluate_graph(g, src2x2(0.3f, 0.4f, 0.5f));
     expect_pix(idle, 0.18f, 0.24f, 0.30f, "identity parallel branch is an evaluator no-op");
 
-    // Give the branch a real correction (gain 0.5): out = src*0.5*0.5*... see
-    // comment. branch = 0.5*srcOut; mixer = srcOut + branch - srcOut = branch;
     g.node(branch).correct_mode = gg::CorrectMode::kLgg;
     g.node(branch).lgg.emplace();
     g.node(branch).lgg->gain_master = 0.5f;
     const gg::EvalResult noted = gg::evaluate_graph(g, src2x2(0.3f, 0.4f, 0.5f));
     expect_pix(noted, 0.09f, 0.12f, 0.15f, "parallel branch exposes its delta over the base");
 
-    // Refused when the sink has no wired source (chain head).
     gg::GradeGraph h;
     const int head = add_gain(h, 1.0f);
     const int ho = h.add_node(gg::NodeKind::kOutput);
@@ -251,7 +228,6 @@ void test_insert_parallel_branch() {
 }
 
 void test_insert_layer_branch_and_stack() {
-    // Serial src(identity) -> sink(gain 1.5) -> out.
     gg::GradeGraph g;
     const int src = add_identity(g);
     const int sink = add_gain(g, 1.5f);
@@ -269,7 +245,6 @@ void test_insert_layer_branch_and_stack() {
     const gg::EvalResult parked = gg::evaluate_graph(g, src2x2(0.3f, 0.4f, 0.5f));
     expect_pix(parked, 0.45f, 0.6f, 0.75f, "identity layer branch preserves the serial result");
 
-    // A stacked layer over the same base, appended at the next free port.
     const int mul = add_gain(g, 0.5f, gg::NodeKind::kLayer);
     g.node(mul).blend = gg::BlendMode::kMultiply;
     const int port = gg::add_layer(g, mixer, mul);
@@ -277,14 +252,11 @@ void test_insert_layer_branch_and_stack() {
     check(gg::add_layer(g, mixer, mul) == -1, "add_layer refuses an already-stacked layer");
     check(gg::add_layer(g, mixer, src) == -1, "add_layer refuses the base as a layer");
 
-    // layer = 0.5*source over base(identity source 0.3): acc = 0.3 * 0.15 =
-    // 0.045 (multiply) -> sink gain 1.5 -> 0.0675.
     const gg::EvalResult stacked = gg::evaluate_graph(g, src2x2(0.3f, 0.4f, 0.5f));
     expect_pix(stacked, 0.0675f, 0.12f, 0.1875f, "stacked multiply layer blends over the base");
 
-    // Reorder: explicit base + two distinguishable layers on a uniform source.
     gg::GradeGraph r;
-    const int rb = add_gain(r, 1.0f);  // base = source (0.5)
+    const int rb = add_gain(r, 1.0f);
     const int norm = r.add_node(gg::NodeKind::kLayer);
     r.node(norm).correct_mode = gg::CorrectMode::kCdl;
     r.node(norm).cdl.emplace();
@@ -307,7 +279,6 @@ void test_insert_layer_branch_and_stack() {
     r.add_rgb_edge(mx, roof);
 
     const std::size_t edges_before = r.edges().size();
-    // base 0.5 -> norm 0.7 -> multiply 0.7*0.05 = 0.035.
     const gg::EvalResult a = gg::evaluate_graph(r, src2x2(0.5f, 0.5f, 0.5f));
     expect_pix(a, 0.035f, 0.035f, 0.035f, "stack (base + normal + multiply) top-to-bottom");
 
@@ -319,7 +290,6 @@ void test_insert_layer_branch_and_stack() {
           "reorder compacts ports (multiply -> 1, normal -> 2)");
     check(has_edge_toward(r, mx, gg::PipeType::kRgb, 0, rb), "reorder leaves the base link untouched");
 
-    // base 0.5 -> multiply 0.05 -> normal replaces -> 0.7.
     const gg::EvalResult b = gg::evaluate_graph(r, src2x2(0.5f, 0.5f, 0.5f));
     expect_pix(b, 0.7f, 0.7f, 0.7f, "stack after reorder (multiply then normal)");
 
@@ -331,7 +301,7 @@ void test_insert_layer_branch_and_stack() {
     check(r.edges().size() == edges_before2, "refused reorders leave the wiring intact");
 }
 
-}  // namespace
+}
 
 int main() {
     test_node_ports();

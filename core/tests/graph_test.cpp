@@ -1,11 +1,3 @@
-// Phase 2 tests for the node-graph model + CPU evaluator
-// (canvas/core/grade_graph). Exercises the dual-pipe signal model: serial
-// correctors, key gating + passthrough, bypass/opacity, parallel mixer
-// additivity, layer-mixer blend math + explicit stack order, outside
-// partitioning, key-mixer modes, splitter/combiner round-trip, cycle
-// rejection, and the exactly-one-output passthrough rule. Headless — links
-// only canvas_core.
-
 #include "canvas/core/grade_graph/graph.hpp"
 #include "canvas/core/grade_graph/eval.hpp"
 #include "canvas/core/grade_graph/serialize.hpp"
@@ -55,7 +47,6 @@ void expect_pix(const gg::EvalResult& r, float er, float eg, float eb, const cha
     check(ok, what);
 }
 
-// Adds an LGG corrector (gamma=1: out = gain * in).
 int add_gain(gg::GradeGraph& g, float gain, gg::NodeKind kind = gg::NodeKind::kCorrector) {
     const int id = g.add_node(kind);
     g.node(id).correct_mode = gg::CorrectMode::kLgg;
@@ -64,8 +55,6 @@ int add_gain(gg::GradeGraph& g, float gain, gg::NodeKind kind = gg::NodeKind::kC
     return id;
 }
 
-// Adds an identity corrector; its key_out is a uniform 1.0, handy as a source
-// for key-math tests.
 int add_identity(gg::GradeGraph& g, gg::NodeKind kind = gg::NodeKind::kCorrector) {
     const int id = g.add_node(kind);
     g.node(id).correct_mode = gg::CorrectMode::kIdentity;
@@ -87,8 +76,6 @@ void test_passthrough_and_terminal() {
 }
 
 void test_serial_chain() {
-    // node0 = lift 0.4 (gamma 1, gain 1): out = x + 0.4(1-x)
-    // node1 = cdl offset +0.2: out = x + 0.2
     gg::GradeGraph g;
     const int n0 = add_identity(g);
     g.node(n0).correct_mode = gg::CorrectMode::kLgg;
@@ -105,7 +92,6 @@ void test_serial_chain() {
     check(g.add_rgb_edge(n1, out) >= 0, "serial chain edge n1->out accepted");
 
     const gg::EvalResult r = gg::evaluate_graph(g, src2x2(0.3f, 0.4f, 0.5f));
-    // lift: 0.3 + 0.4*0.7 = 0.58 ; then offset: 0.78 / 0.84 / 0.90.
     expect_pix(r, 0.78f, 0.84f, 0.90f, "serial chain: lift then offset compose");
 }
 
@@ -143,7 +129,6 @@ gg::EvalResult keyed_run(gg::KeyMixMode mode, int feeders) {
 }
 
 void test_key_pipe() {
-    // Feeders have uniform key_out = 1.0.
     expect_pix(keyed_run(gg::KeyMixMode::kAdd, 2), 0.45f, 0.6f, 0.75f,
                "key Add(1,1) -> full correction");
     expect_pix(keyed_run(gg::KeyMixMode::kSubtract, 2), 0.3f, 0.4f, 0.5f,
@@ -153,11 +138,9 @@ void test_key_pipe() {
     expect_pix(keyed_run(gg::KeyMixMode::kInvert, 1), 0.3f, 0.4f, 0.5f,
                "key Invert(1) -> no correction");
 
-    // Key propagation through a serial corrector: the feeder's key reaches the
-    // mixer verbatim (key pipe is its own sub-graph).
     gg::GradeGraph g;
     const int feeder = add_identity(g);
-    const int relay = add_identity(g);  // serial, passes the key through
+    const int relay = add_identity(g);
     g.add_key_edge(feeder, relay);
     const int corr = add_gain(g, 1.5f);
     const int out = g.add_node(gg::NodeKind::kOutput);
@@ -168,7 +151,6 @@ void test_key_pipe() {
 }
 
 void test_parallel() {
-    // partner gain 1.2, branch gain 0.5, both read the source; mixer = A+B-base.
     gg::GradeGraph g;
     const int partner = add_gain(g, 1.2f);
     const int branch = add_gain(g, 0.5f, gg::NodeKind::kParallel);
@@ -178,10 +160,8 @@ void test_parallel() {
     g.add_rgb_edge(branch, mixer);
     g.add_rgb_edge(mixer, out);
     const gg::EvalResult r = gg::evaluate_graph(g, src2x2(0.3f, 0.4f, 0.5f));
-    // A=0.36,0.48,0.6 ; B=0.15,0.2,0.25 ; base=0.3,0.4,0.5 -> 0.21,0.28,0.35
     expect_pix(r, 0.21f, 0.28f, 0.35f, "parallel mixer adds branch contributions to the base");
 
-    // An identical branch contributes zero (no exposure doubling).
     gg::GradeGraph g2;
     const int p2 = add_gain(g2, 1.2f);
     const int idb = add_gain(g2, 1.0f, gg::NodeKind::kParallel);
@@ -193,7 +173,6 @@ void test_parallel() {
     const gg::EvalResult r2 = gg::evaluate_graph(g2, src2x2(0.3f, 0.4f, 0.5f));
     expect_pix(r2, 0.36f, 0.48f, 0.6f, "identical branch adds zero, mirrors the partner");
 
-    // Branches chained from a shared upstream: the base is subtracted once.
     gg::GradeGraph g3;
     const int src3 = add_gain(g3, 1.0f);
     const int pa3 = add_gain(g3, 1.2f);
@@ -233,20 +212,17 @@ int add_gain_layer(gg::GradeGraph& g, float slope, gg::BlendMode blend) {
 }
 
 void test_layer_mixer() {
-    // Base is explicit (gain-1.0 provider); single normal layer = base + 0.2.
-    // The layer's corrected output replaces the base via normal blend.
     gg::GradeGraph g2;
-    const int b2 = add_gain(g2, 1.0f);                       // explicit base = source
+    const int b2 = add_gain(g2, 1.0f);
     const int l2 = add_offset_layer(g2, 0.2f, gg::BlendMode::kNormal);
     const int m2 = g2.add_node(gg::NodeKind::kLayerMixer);
     const int o2 = g2.add_node(gg::NodeKind::kOutput);
-    g2.add_rgb_edge(b2, m2);   // port 0 = base
-    g2.add_rgb_edge(l2, m2);   // port 1 = layer
+    g2.add_rgb_edge(b2, m2);
+    g2.add_rgb_edge(l2, m2);
     g2.add_rgb_edge(m2, o2);
     const gg::EvalResult r2 = gg::evaluate_graph(g2, src2x2(0.3f, 0.4f, 0.5f));
     expect_pix(r2, 0.5f, 0.6f, 0.7f, "layer normal replaces the base with the layer");
 
-    // Multiply blend: out = base * layer.
     gg::GradeGraph g3;
     const int b3 = add_gain(g3, 1.0f);
     const int l3 = add_gain_layer(g3, 0.4f, gg::BlendMode::kMultiply);
@@ -256,10 +232,8 @@ void test_layer_mixer() {
     g3.add_rgb_edge(l3, m3);
     g3.add_rgb_edge(m3, o3);
     const gg::EvalResult r3 = gg::evaluate_graph(g3, src2x2(0.3f, 0.4f, 0.5f));
-    // layer = 0.12,0.16,0.20 ; out = base*layer = 0.036,0.064,0.1
     expect_pix(r3, 0.036f, 0.064f, 0.1f, "layer multiply computes base * layer");
 
-    // Layer opacity 0.5 blends half the delta.
     gg::GradeGraph g4;
     const int b4 = add_gain(g4, 1.0f);
     const int l4 = add_offset_layer(g4, 0.2f, gg::BlendMode::kNormal);
@@ -272,7 +246,6 @@ void test_layer_mixer() {
     const gg::EvalResult r4 = gg::evaluate_graph(g4, src2x2(0.3f, 0.4f, 0.5f));
     expect_pix(r4, 0.4f, 0.5f, 0.6f, "layer opacity 0.5 blends half the delta");
 
-    // Explicit stack order: {base 0.5} -> normal +0.2 -> multiply 0.1.
     const auto stacked = [](bool normal_first) {
         gg::GradeGraph g;
         const int base = add_gain(g, 1.0f);
@@ -291,15 +264,11 @@ void test_layer_mixer() {
         g.add_rgb_edge(mix, out);
         return gg::evaluate_graph(g, src2x2(0.5f, 0.5f, 0.5f));
     };
-    // normal-then-multiply: acc 0.5 -> 0.7 -> 0.7 * (0.1*0.5) = 0.035
     expect_pix(stacked(true), 0.035f, 0.035f, 0.035f, "stack: normal then multiply");
-    // multiply-then-normal: acc 0.5 -> 0.05 -> 0.7 (normal replaces)
     expect_pix(stacked(false), 0.7f, 0.7f, 0.7f, "stack: multiply then normal");
 }
 
 void test_outside() {
-    // partner gain 1.2 (no key -> uniform 1), outside gain 0.2 with
-    // partner set: outside key = 1 - 1 = 0 -> its contribution is zero.
     gg::GradeGraph g;
     const int partner = add_gain(g, 1.2f);
     const int outside = add_gain(g, 0.2f, gg::NodeKind::kOutside);
@@ -312,8 +281,6 @@ void test_outside() {
     const gg::EvalResult r = gg::evaluate_graph(g, src2x2(0.3f, 0.4f, 0.5f));
     expect_pix(r, 0.36f, 0.48f, 0.6f, "outside with empty partner key contributes nothing");
 
-    // Give the partner a real key via an inverted tracker: feeder key 1 ->
-    // invert -> 0 -> outside key = 1 - 0 = 1 -> outside applies in full.
     gg::GradeGraph g2;
     const int feeder = add_identity(g2);
     const int invert = g2.add_node(gg::NodeKind::kKeyMixer);
@@ -329,8 +296,6 @@ void test_outside() {
     g2.add_rgb_edge(outside2, mixer2);
     g2.add_rgb_edge(mixer2, o2);
     const gg::EvalResult r2 = gg::evaluate_graph(g2, src2x2(0.3f, 0.4f, 0.5f));
-    // partner is keyed 0 (no change), outside's partition (1-0)=1 applies in
-    // full via gain 1.5; A + B - base = 0.3 + 0.45 - 0.3 = 0.45 (r channel).
     expect_pix(r2, 0.45f, 0.6f, 0.75f, "inverted partner key flips the partition");
 }
 
@@ -346,7 +311,6 @@ void test_splitter_combiner() {
     const gg::EvalResult r = gg::evaluate_graph(g, src2x2(0.3f, 0.4f, 0.5f));
     expect_pix(r, 0.3f, 0.4f, 0.5f, "splitter/combiner round-trips all channels");
 
-    // Missing channel wires read as zero.
     gg::GradeGraph g2;
     const int split2 = g2.add_node(gg::NodeKind::kSplitter);
     const int comb2 = g2.add_node(gg::NodeKind::kCombiner);
@@ -370,23 +334,18 @@ void test_cycle_rejection() {
     check(g.add_rgb_edge(n2, n0) < 0, "n2->n0 rejected (cycle)");
     check(g.add_rgb_edge(n0, n0) < 0, "self edge rejected");
 
-    // The cycle guard spans pipes: a key edge back into an upstream node is
-    // also rejected.
     const int km = g.add_node(gg::NodeKind::kKeyMixer);
     const int odd = add_identity(g);
     g.add_key_edge(odd, km);
     check(g.add_key_edge(km, odd) < 0, "key edge closing a cycle is rejected");
 
-    // The graph is still valid without the rejected edges.
     const gg::EvalResult r = gg::evaluate_graph(g, src2x2(0.3f, 0.4f, 0.5f));
     expect_pix(r, 0.3f, 0.4f, 0.5f, "evaluation proceeds on the non-cyclic remainder");
 }
 
 void test_inactive_subgraph_ignored() {
-    // A corrector with nothing downstream of it must not fight the active
-    // path nor leave dangling state in the result.
     gg::GradeGraph g;
-    add_gain(g, -3.0f);  // inactive: no path to the terminal
+    add_gain(g, -3.0f);
     const int c = add_gain(g, 1.5f);
     const int out = g.add_node(gg::NodeKind::kOutput);
     g.add_rgb_edge(c, out);
@@ -395,7 +354,6 @@ void test_inactive_subgraph_ignored() {
 }
 
 void test_blend_into() {
-    // Unit-level blend checks on a 2-pixel buffer.
     std::vector<float> acc = {0.5f, 0.5f, 0.5f, 1.0f, 0.3f, 0.3f, 0.3f, 1.0f};
     std::vector<float> lay = {0.2f, 0.2f, 0.2f, 1.0f, 0.6f, 0.6f, 0.6f, 1.0f};
     std::vector<float> out(8, 0.0f);
@@ -410,11 +368,8 @@ void test_blend_into() {
     check(near(out[0], 0.2f), "blend normal keeps the layer");
 }
 
-// --- Phase 3: project-file JSON round-trip -----------------------------------
-
 void test_serialize_roundtrip() {
     gg::GradeGraph g;
-    // node0: layer branch, LGG gain 0.75 with label + non-1 opacity
     const int layer = g.add_node(gg::NodeKind::kLayer);
     g.node(layer).correct_mode = gg::CorrectMode::kLgg;
     g.node(layer).lgg.emplace();
@@ -422,17 +377,12 @@ void test_serialize_roundtrip() {
     g.node(layer).lgg->lift_r = 0.05f;
     g.node(layer).opacity = 0.9f;
     g.node(layer).label = "dim";
-    // node1: CDL corrector feeding the key domain is not possible; key source:
-    // node1 identity corrector (key_out = uniform 1).
     const int key_src = g.add_node(gg::NodeKind::kCorrector);
     g.node(key_src).correct_mode = gg::CorrectMode::kIdentity;
-    // node2: key mixer (subtract) takes the identity's key
     const int key = g.add_node(gg::NodeKind::kKeyMixer);
     g.node(key).key_mode = gg::KeyMixMode::kSubtract;
-    // node3: layer mixer stack (base + layer)
     const int mix = g.add_node(gg::NodeKind::kLayerMixer);
     g.node(mix).blend = gg::BlendMode::kScreen;
-    // node4: output terminal
     const int out_n = g.add_node(gg::NodeKind::kOutput);
 
     check(g.add_rgb_edge(layer, mix) >= 0, "serialize: layer rgb -> mixer");
@@ -461,12 +411,10 @@ void test_serialize_roundtrip() {
     check(g2.node(mix).blend == gg::BlendMode::kScreen, "serialize: layer blend survives");
     check(g2.terminal() == out_n, "serialize: output terminal survives");
 
-    // Empty graph round-trips as empty.
     const nlohmann::json je = gg::grade_graph_to_json(gg::GradeGraph{});
     const gg::GradeGraph ge = gg::grade_graph_from_json(je);
     check(ge.num_nodes() == 0 && ge.edges().empty(), "serialize: empty graph round-trip");
 
-    // Tolerant load: unknown node kind skipped, unknown enum strings default.
     nlohmann::json nodes = nlohmann::json::array();
     nodes.push_back({{"id", 0}, {"kind", "hologram"}});
     nlohmann::json n1;
@@ -493,10 +441,7 @@ void test_serialize_roundtrip() {
     check(gt.edges().empty(), "serialize: edge to skipped node dropped");
 }
 
-// --- Phase 3: renderer frame application (uint8 <-> FrameF glue) -------------
-
 void test_apply_grade_to_frame() {
-    // Source pixels (2x2 RGBA): aim for byte-exact half-gain round-trips.
     canvas::core::VideoFrame src;
     src.width = 2;
     src.height = 2;
@@ -518,25 +463,22 @@ void test_apply_grade_to_frame() {
                   near(graded->rgba[2], 80u),
               "grade-frame: gain 0.5 halves RGB bytes");
         check(graded->rgba[3] == 255u, "grade-frame: alpha rides along");
-        // Byte-exact values [0,255], [128,255] -> [0,128], [64,255] at 0.5 gain.
         check(graded->rgba[12] == 0u && graded->rgba[13] == 64u,
               "grade-frame: byte-exact 0/128 -> 0/64");
         check(graded->width == 2 && graded->height == 2 && graded->stride == 8,
               "grade-frame: geometry preserved");
     }
 
-    // No terminal => passthrough => nullptr, caller keeps the decoder frame.
     gg::GradeGraph bare;
     (void)bare.add_node(gg::NodeKind::kCorrector);
     canvas::core::VideoFramePtr untouched = canvas::core::apply_grade_to_frame(src, bare);
     check(untouched == nullptr, "grade-frame: unwired tree returns nullptr (passthrough)");
 
-    // An empty graph (the "no grade" reporter state) is also passthrough.
     canvas::core::VideoFramePtr none = canvas::core::apply_grade_to_frame(src, gg::GradeGraph{});
     check(none == nullptr, "grade-frame: empty graph is passthrough");
 }
 
-}  // namespace
+}
 
 int main() {
     test_passthrough_and_terminal();

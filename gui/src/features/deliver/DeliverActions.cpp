@@ -1,19 +1,17 @@
-// Deliver-page actions on MainWindow: page enter/exit (dock visibility), render
-// queue reflection, and the two user-facing render actions (add current to
-// queue, render all). Split out of MainWindow.cpp as part of the splitplan
-// refactor so the deliver feature lives under features/deliver/ next to its
-// model + panels.
-
 #include "UX/MainWindow.hpp"
 
 #include "features/deliver/deliver_settings_panel.hpp"
 #include "features/deliver/render_queue_panel.hpp"
 
 #include "canvas/core/export/deliver_preset.hpp"
+#include "canvas/core/export/edl.hpp"
 #include "canvas/core/export/render_queue.hpp"
 
 #include <QDir>
 #include <QDockWidget>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QStandardPaths>
 #include <QStatusBar>
 
@@ -26,7 +24,6 @@ namespace canvas::gui {
 
 namespace {
 
-// Best-effort file extension for a Deliver format display name.
 QString extension_for_format(const std::string& format) {
     const std::string f = format;
     const auto has = [&](const char* s) { return f.find(s) != std::string::npos; };
@@ -47,7 +44,7 @@ QString extension_for_format(const std::string& format) {
     return QStringLiteral("mkv");
 }
 
-}  // namespace
+}
 
 void MainWindow::enter_deliver_page() {
     leave_project_manager();
@@ -66,7 +63,7 @@ void MainWindow::enter_edit_page() {
     if (deliver_settings_dock_) deliver_settings_dock_->hide();
     if (deliver_queue_dock_) deliver_queue_dock_->hide();
     if (media_dock_) media_dock_->show();
-    if (inspector_dock_ && inspector_dock_->isVisible()) { /* keep user state */ }
+    if (inspector_dock_ && inspector_dock_->isVisible()) {}
     status_->showMessage(tr("Import media with File > Import Media (Ctrl+I)"));
 }
 
@@ -76,9 +73,6 @@ void MainWindow::reflect_render_queue() {
             project_ && project_->name != "Untitled Project"
                 ? QString::fromStdString(project_->name)
                 : QString());
-    // Flag the top-bar fps readout for render-speed mode while a job runs;
-    // on_fps_tick picks it up on its next pulse. The count comes straight from
-    // the queue — no duplicated label in the settings panel anymore.
     render_fps_ = 0.0;
     for (const auto& j : render_queue_.jobs()) {
         if (j.status == canvas::core::RenderJob::Status::Rendering) {
@@ -93,7 +87,6 @@ void MainWindow::add_current_to_render_queue() {
 
     canvas::core::DeliverSettings ds = deliver_settings_->settings();
 
-    // Resolve "Timeline Resolution" / "Timeline Frame Rate" to concrete values.
     if (ds.video.resolution == "Timeline Resolution") {
         int w = 0, h = 0;
         for (const auto& track : project_->sequence.video_tracks) {
@@ -106,16 +99,10 @@ void MainWindow::add_current_to_render_queue() {
         }
         ds.video.custom_width = w > 0 ? w : 1920;
         ds.video.custom_height = h > 0 ? h : 1080;
-        // Persist the concrete dimensions on the job so the render-queue panel
-        // can summarize the actual resolution instead of the "Timeline
-        // Resolution" placeholder (which is meaningless once enqueued).
         ds.video.resolution = std::to_string(ds.video.custom_width) + " x "
                             + std::to_string(ds.video.custom_height);
     }
     if (ds.video.frame_rate == "Auto") {
-        // Auto-detect the source media frame rate (the highest fps among the
-        // enabled clips on the timeline), so e.g. 60fps sources render at 60fps
-        // without the user having to set it manually.
         double f = 0.0;
         for (const auto& track : project_->sequence.video_tracks) {
             for (const auto& clip : track.clips) {
@@ -127,8 +114,6 @@ void MainWindow::add_current_to_render_queue() {
         if (f <= 0.0) f = project_->sequence.fps;
         if (f <= 0.0) f = 30.0;
         ds.video.custom_fps = f;
-        // Persist the concrete fps on the job too, so the render-queue panel can
-        // summarize "1440p · 60fps" instead of the "Auto" placeholder.
         {
             char buf[16];
             std::snprintf(buf, sizeof(buf), "%.4g", f);
@@ -148,7 +133,6 @@ void MainWindow::add_current_to_render_queue() {
     render_queue_.set_active_project(std::make_shared<const canvas::core::Project>(*project_), {});
 
     if (ds.render_scope == canvas::core::RenderScope::IndividualClips) {
-        // Enqueue one job per video clip on the timeline.
         int index = 0;
         for (const auto& track : project_->sequence.video_tracks) {
             for (const auto& clip : track.clips) {
@@ -181,8 +165,6 @@ void MainWindow::add_current_to_render_queue() {
 }
 
 void MainWindow::render_all_from_queue() {
-    // Explicit user action: start draining every queued job. Enqueueing alone
-    // only stages work; rendering begins here.
     int queued = 0;
     const auto jobs = render_queue_.jobs();
     for (const auto& j : jobs)
@@ -196,4 +178,33 @@ void MainWindow::render_all_from_queue() {
     reflect_render_queue();
 }
 
-}  // namespace canvas::gui
+void MainWindow::export_edl() {
+    if (!project_) return;
+
+    const QString base_dir =
+        project_path_.isEmpty()
+            ? QStandardPaths::writableLocation(QStandardPaths::MoviesLocation)
+            : QFileInfo(project_path_).absolutePath();
+    const QString stem = project_->name.empty() ? QStringLiteral("timeline")
+                                                : QString::fromStdString(project_->name);
+    const QString suggested = QDir(base_dir).filePath(stem + QStringLiteral(".edl"));
+
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export EDL"), suggested,
+        tr("Edit Decision List (*.edl);;All Files (*)"));
+    if (path.isEmpty()) return;
+
+    const std::string text =
+        canvas::core::edl::write_cmx3600(project_->sequence, project_->name, project_->media);
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        status_->showMessage(tr("Could not write EDL: %1").arg(path));
+        return;
+    }
+    file.write(text.data(), static_cast<qint64>(text.size()));
+    file.close();
+    status_->showMessage(tr("Exported EDL: %1").arg(path));
+}
+
+}

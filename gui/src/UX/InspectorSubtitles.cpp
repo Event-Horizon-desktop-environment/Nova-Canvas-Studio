@@ -1,11 +1,3 @@
-// Subtitles inspector page (see InspectorSubtitles.hpp). Built once per
-// MainWindow (registry keyed by window), refreshed from whichever clip is
-// selected, enabled only while the selection carries a title overlay.
-// Styling edits target EVERY selected caption at once ("Select All Subtitles"
-// gathers them into one selection) and every gesture/commit records exactly
-// one undo — a GroupCommand wrapping one set_clip_title/set_clip_transform per
-// caption — before re-syncing the Video tab's Title row.
-
 #include "UX/InspectorSubtitles.hpp"
 
 #include <QCheckBox>
@@ -78,23 +70,13 @@ QString zoom_button_style() {
              css(t.ink_faint), css(t.on_accent));
 }
 
-// Slider percent <-> size-fraction law (mirrors title::kSizeMin/kSizeMax).
 int size_to_percent(const float size) {
     return static_cast<int>(std::lround(
         std::clamp(size, canvas::core::title::kSizeMin, canvas::core::title::kSizeMax) * 100.0f));
 }
 
-// Position-slider half-range in output px for the horizontal / up directions.
-// The Video tab's Position spins span the full visual law (±4096); the subtitle
-// sliders cover the nudge band around centre where captions actually live.
-// The DOWN direction grows past this band to reach the frame's bottom edge
-// (see update_inspector_subtitles: the slider's lower bound widens to
-// half the picture height so any caption can hug the screen edge).
 constexpr int kPosRangePx = 550;
 
-// The picture this project draws captions over — the subtitle-positioning and
-// caption-fit reference frame. Mirrors timeline_decoder's convention (the first
-// real video clip's media wins) with a 1080p fallback.
 std::pair<int, int> project_frame_dims(const canvas::core::Project& project) {
     for (const auto& t : project.sequence.video_tracks) {
         for (const auto& c : t.clips) {
@@ -106,26 +88,19 @@ std::pair<int, int> project_frame_dims(const canvas::core::Project& project) {
     return {1920, 1080};
 }
 
-// Shadow effect ranges (px / percent). Offset is a nudge band around zero;
-// blur 0 = hard edge; opacity is a percent of the tint.
 constexpr int kOffsetRangePx = 160;
 constexpr int kBlurMaxPx = 32;
 constexpr int kOpacityMax = 100;
 
-// Background-box parameters in px: padding ("width"/"height" around the text
-// block, the box hugs the text so dimensions grow outward), corner radius.
 constexpr int kBoxPadMaxPx = 200;
 constexpr int kBoxRadiusMaxPx = 48;
 
-// Bipolar slider readout: "Right 120 px" / "Down 45 px" / "0 px".
 QString axis_label(int v, const char* neg, const char* pos) {
     if (v == 0) return QStringLiteral("0 px");
     return QString::fromLatin1(v > 0 ? pos : neg) + QStringLiteral(" ") +
            QString::number(std::abs(v)) + QStringLiteral(" px");
 }
 
-// One labelled slider row (offset/blur/opacity/padding): label, live-painted
-// slider (one commit per release), value readout.
 struct ScalarRow {
     QSlider* slider = nullptr;
     QLabel* value = nullptr;
@@ -141,7 +116,7 @@ ScalarRow add_scalar_row(QVBoxLayout* body, QWidget* host, const char* label, in
     apply_theme_style(lbl, &muted_label_style);
     out.slider = new QSlider(Qt::Horizontal, host);
     out.slider->setRange(min_v, max_v);
-    out.slider->setTracking(true);  // valueChanged streams during a drag → realtime preview
+    out.slider->setTracking(true);
     out.slider->setTickPosition(QSlider::TicksBelow);
     out.slider->setTickInterval(tick);
     out.slider->setToolTip(MainWindow::tr(tip));
@@ -155,9 +130,6 @@ ScalarRow add_scalar_row(QVBoxLayout* body, QWidget* host, const char* label, in
     return out;
 }
 
-// Colour picker row: a label plus a swatch button that opens QColorDialog
-// (click-to-pick beats three R/G/B sliders). The button's fill shows the
-// current colour; a click commits the new one as one undoable set_clip_title.
 QToolButton* add_color_button(QVBoxLayout* body, QWidget* host, const char* tip) {
     auto* lay = new QHBoxLayout;
     lay->setSpacing(8);
@@ -176,7 +148,6 @@ QToolButton* add_color_button(QVBoxLayout* body, QWidget* host, const char* tip)
     return btn;
 }
 
-// Paint a swatch button's fill for an RGB triple (theme-borderfaced).
 void paint_color_button(QToolButton* btn, const int r, const int g, const int b) {
     btn->setStyleSheet(QStringLiteral(
                 "QToolButton { background-color: rgb(%1, %2, %3); border: 1px solid %4;"
@@ -197,9 +168,9 @@ struct SubControls {
     QLabel* size_value = nullptr;
     QToolButton* zoom_out = nullptr;
     QToolButton* zoom_in = nullptr;
-    QSlider* pos_h = nullptr;  // bipolar px, 0 = centred (right positive)
+    QSlider* pos_h = nullptr;
     QLabel* pos_h_value = nullptr;
-    QSlider* pos_v = nullptr;  // bipolar px, 0 = centred (up positive)
+    QSlider* pos_v = nullptr;
     QLabel* pos_v_value = nullptr;
     QToolButton* pos_centre = nullptr;
     QToolButton* style_bold = nullptr;
@@ -226,22 +197,18 @@ struct SubControls {
     QSlider* box_alpha = nullptr;
     QLabel* box_alpha_value = nullptr;
     QToolButton* box_color = nullptr;
-    bool updating = false;  // guards against committing while populating
-    bool attached = false;  // selection signals already connected
-    // Realtime drag-gesture state: a slider drag previews every tick through a
-    // warm swap_project snapshot and records ONE undo entry on release, with the
-    // pre-drag clip as its "before". When several captions are selected the
-    // gesture spans them all and the recorded entry is a single GroupCommand.
+    bool updating = false;
+    bool attached = false;
     struct LiveStart {
         canvas::core::Track::Kind kind = canvas::core::Track::Kind::Video;
         std::size_t track = 0;
         canvas::core::ClipId id = 0;
-        Clip clip;  // full pre-drag snapshot of one selected caption
+        Clip clip;
     };
     struct LiveGesture {
         bool active = false;
-        bool transform = false;  // pos sliders ride set_clip_transform
-        std::vector<LiveStart> starts;  // one snapshot per selected caption
+        bool transform = false;
+        std::vector<LiveStart> starts;
     };
     LiveGesture live;
 };
@@ -256,15 +223,14 @@ SubControls* sub_lookup(MainWindow& mw) {
     return it == sub_registry().end() ? nullptr : &it->second;
 }
 
-}  // namespace
+}
 
 void build_inspector_subtitles(MainWindow& mw, QVBoxLayout* subtitles_layout) {
     SubControls& sc = sub_registry()[&mw];
     auto* host = subtitles_layout->parentWidget();
     const auto tr = [](const char* s) { return MainWindow::tr(s); };
 
-    // ---- Caption -----------------------------------------------------------
-    auto* caption = new InspectorCategory(tr("Caption"), /*expanded=*/true, host);
+    auto* caption = new InspectorCategory(tr("Caption"), true, host);
     auto* caption_body = caption->body_layout();
     sc.preview = new QLabel(tr("Select a caption or title clip…"), host);
     sc.preview->setWordWrap(true);
@@ -282,15 +248,14 @@ void build_inspector_subtitles(MainWindow& mw, QVBoxLayout* subtitles_layout) {
     caption_body->addWidget(sc.select_all);
     subtitles_layout->addWidget(caption);
 
-    // ---- Size ---------------------------------------------------------------
-    auto* size_cat = new InspectorCategory(tr("Size"), /*expanded=*/true, host);
+    auto* size_cat = new InspectorCategory(tr("Size"), true, host);
     auto* size_body = size_cat->body_layout();
     auto* slider_row = new QHBoxLayout;
     slider_row->setSpacing(8);
     sc.size_slider = new QSlider(Qt::Horizontal, host);
     sc.size_slider->setRange(static_cast<int>(canvas::core::title::kSizeMin * 100.0f),
                              static_cast<int>(canvas::core::title::kSizeMax * 100.0f));
-    sc.size_slider->setTracking(true);  // valueChanged streams during a drag → realtime preview
+    sc.size_slider->setTracking(true);
     sc.size_slider->setToolTip(tr("Text size as percent of frame height"));
     sc.size_value = new QLabel(QStringLiteral("—"), host);
     sc.size_value->setMinimumWidth(44);
@@ -302,7 +267,7 @@ void build_inspector_subtitles(MainWindow& mw, QVBoxLayout* subtitles_layout) {
     auto* zoom_row = new QHBoxLayout;
     zoom_row->setSpacing(8);
     sc.zoom_out = new QToolButton(host);
-    sc.zoom_out->setText(QStringLiteral("\u2212"));  // minus sign
+    sc.zoom_out->setText(QStringLiteral("\u2212"));
     sc.zoom_out->setToolTip(tr("Zoom text out (shrink 20%)"));
     sc.zoom_out->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     apply_theme_style(sc.zoom_out, &zoom_button_style);
@@ -316,11 +281,7 @@ void build_inspector_subtitles(MainWindow& mw, QVBoxLayout* subtitles_layout) {
     size_body->addLayout(zoom_row);
     subtitles_layout->addWidget(size_cat);
 
-    // ---- Position ------------------------------------------------------------
-    // Two bipolar sliders sharing the clip's visual position (pos_x/pos_y, px)
-    // with the Video tab: both rest at 0 = centred. The horizontal slider maps
-    // left-to-right; the vertical slider maps bottom(down)-to-top(up).
-    auto* pos_cat = new InspectorCategory(tr("Position"), /*expanded=*/true, host);
+    auto* pos_cat = new InspectorCategory(tr("Position"), true, host);
     auto* pos_body = pos_cat->body_layout();
     const auto pos_label = [&](const char* text) {
         auto* lbl = new QLabel(MainWindow::tr(text), host);
@@ -332,7 +293,7 @@ void build_inspector_subtitles(MainWindow& mw, QVBoxLayout* subtitles_layout) {
     h_row->setSpacing(8);
     sc.pos_h = new QSlider(Qt::Horizontal, host);
     sc.pos_h->setRange(-kPosRangePx, kPosRangePx);
-    sc.pos_h->setTracking(true);  // valueChanged streams during a drag → realtime preview
+    sc.pos_h->setTracking(true);
     sc.pos_h->setTickPosition(QSlider::TicksBelow);
     sc.pos_h->setTickInterval(120);
     sc.pos_h->setToolTip(tr("Drag right to move right, left to move left (px)"));
@@ -348,7 +309,7 @@ void build_inspector_subtitles(MainWindow& mw, QVBoxLayout* subtitles_layout) {
     v_row->setSpacing(8);
     sc.pos_v = new QSlider(Qt::Vertical, host);
     sc.pos_v->setRange(-kPosRangePx, kPosRangePx);
-    sc.pos_v->setTracking(true);  // valueChanged streams during a drag → realtime preview
+    sc.pos_v->setTracking(true);
     sc.pos_v->setTickPosition(QSlider::TicksLeft);
     sc.pos_v->setTickInterval(120);
     sc.pos_v->setFixedHeight(110);
@@ -369,8 +330,7 @@ void build_inspector_subtitles(MainWindow& mw, QVBoxLayout* subtitles_layout) {
     pos_body->addWidget(sc.pos_centre);
     subtitles_layout->addWidget(pos_cat);
 
-    // ---- Style -----------------------------------------------------------------
-    auto* style_cat = new InspectorCategory(tr("Style"), /*expanded=*/true, host);
+    auto* style_cat = new InspectorCategory(tr("Style"), true, host);
     auto* style_body = style_cat->body_layout();
     auto* style_row = new QHBoxLayout;
     style_row->setSpacing(8);
@@ -402,8 +362,7 @@ void build_inspector_subtitles(MainWindow& mw, QVBoxLayout* subtitles_layout) {
     style_body->addLayout(style_row);
     subtitles_layout->addWidget(style_cat);
 
-    // ---- Shadow ---------------------------------------------------------------
-    auto* shadow_cat = new InspectorCategory(tr("Shadow"), /*expanded=*/true, host);
+    auto* shadow_cat = new InspectorCategory(tr("Shadow"), true, host);
     auto* shadow_body = shadow_cat->body_layout();
     sc.shadow_on = new QCheckBox(tr("Cast Shadow"), host);
     sc.shadow_on->setToolTip(tr("Drop a blurred, tinted copy behind the glyphs"));
@@ -430,11 +389,7 @@ sc.shadow_alpha = sh_alpha.slider;
         add_color_button(shadow_body, host, "Click to pick the shadow colour");
     subtitles_layout->addWidget(shadow_cat);
 
-    // ---- Box ------------------------------------------------------------------
-    // A background box behind the whole text block. "Width"/"Height" add
-    // padding around the block (the box hugs the text, so dimensions grow
-    // outward); Radius rounds the corners; opacity and colour fill the field.
-    auto* box_cat = new InspectorCategory(tr("Box"), /*expanded=*/true, host);
+    auto* box_cat = new InspectorCategory(tr("Box"), true, host);
     auto* box_body = box_cat->body_layout();
     sc.box_on = new QCheckBox(tr("Background Box"), host);
     sc.box_on->setToolTip(tr("Fill a box behind the whole caption"));
@@ -461,8 +416,7 @@ sc.shadow_alpha = sh_alpha.slider;
     sc.box_color = add_color_button(box_body, host, "Click to pick the box colour");
     subtitles_layout->addWidget(box_cat);
 
-    // ---- Font ----------------------------------------------------------------
-    auto* font_cat = new InspectorCategory(tr("Font"), /*expanded=*/true, host);
+    auto* font_cat = new InspectorCategory(tr("Font"), true, host);
     auto* font_body = font_cat->body_layout();
     sc.font = new QComboBox(host);
     sc.font->addItem(tr("System Default"), QString());
@@ -478,14 +432,6 @@ sc.shadow_alpha = sh_alpha.slider;
     font_body->addWidget(font_hint);
     subtitles_layout->addWidget(font_cat);
 
-    // ---- Committing ------------------------------------------------------------
-    // Single commit funnel, defined inside the befriended build function (like
-    // the File page's commit_metadata) so it can reach the selection/project/
-    // undo state: each committed change lands on EVERY selected caption as ONE
-    // undoable GroupCommand, then both pages re-sync so the Video tab's Title
-    // row never disagrees with this one. "Selected captions" is the intersection
-    // of the current selection with the sequence's title clips — audio mates and
-    // non-title clips are never touched.
     struct CaptionTarget {
         canvas::core::Track::Kind kind = canvas::core::Track::Kind::Video;
         std::size_t track = 0;
@@ -510,8 +456,6 @@ sc.shadow_alpha = sh_alpha.slider;
         }
         return out;
     };
-    // Live lookup by id (titles live on video tracks only), for the gesture
-    // loops that re-fetch each target's live state during/after a drag.
     const auto resolve_caption = [&mw](const canvas::core::ClipId id) -> std::optional<Clip> {
         if (!mw.project_) return std::nullopt;
         for (const Track& t : mw.project_->sequence.video_tracks)
@@ -540,14 +484,6 @@ sc.shadow_alpha = sh_alpha.slider;
         update_inspector_subtitles(mw);
     };
 
-    // --- Realtime slider gestures --------------------------------------------
-    // The Size/Position/Shadow/Box sliders are realtime: sliderPressed stashes
-    // the pre-drag clip, valueChanged applies the live change and pushes a warm
-    // swap_project snapshot (the current frame re-presents through cached
-    // decoders at mouse-move cadence instead of set_project()'s ~217ms decode
-    // teardown), and sliderReleased records exactly ONE undo entry — reverting
-    // the model to the stashed start through the op, then re-applying the final
-    // value, so the recorded command's "before" brackets the whole gesture.
     const auto gesture_press = [&mw, &sc, caption_targets](const bool transform) {
         if (sc.updating) return;
         sc.live.active = false;
@@ -578,7 +514,7 @@ sc.shadow_alpha = sh_alpha.slider;
             }
         }
         mw.has_unsaved_changes_ = true;
-        mw.push_live_snapshot();  // re-present current frame, decoders stay warm
+        mw.push_live_snapshot();
         update_inspector_visual(mw);
         update_inspector_subtitles(mw);
     };
@@ -599,9 +535,7 @@ sc.shadow_alpha = sh_alpha.slider;
                                   start.clip.anchor_dy == cur->anchor_dy &&
                                   start.clip.flip_h == cur->flip_h &&
                                   start.clip.flip_v == cur->flip_v;
-                if (same) continue;  // dragged back to the start — nothing to record
-                // Revert then re-apply: each recorded command's "before" is that
-                // clip's pre-gesture state, so one undo reverts the whole gesture.
+                if (same) continue;
                 canvas::core::set_clip_transform(
                     mw.project_->sequence, start.kind, start.track, start.id, start.clip.scale_x,
                     start.clip.scale_y, start.clip.pos_x, start.clip.pos_y,
@@ -613,7 +547,7 @@ sc.shadow_alpha = sh_alpha.slider;
                     cur->anchor_dy, cur->flip_h, cur->flip_v);
                 if (cmd) cmds.push_back(std::move(cmd));
             } else {
-                if (start.clip.title == cur->title) continue;  // dragged back — no change
+                if (start.clip.title == cur->title) continue;
                 canvas::core::set_clip_title(mw.project_->sequence, start.kind, start.track,
                                              start.id, start.clip.title);
                 auto cmd = canvas::core::set_clip_title(mw.project_->sequence, start.kind,
@@ -621,7 +555,7 @@ sc.shadow_alpha = sh_alpha.slider;
                 if (cmd) cmds.push_back(std::move(cmd));
             }
         }
-        if (cmds.empty()) return;  // whole drag netted zero change
+        if (cmds.empty()) return;
         auto group = std::make_unique<canvas::core::GroupCommand>(
             MainWindow::tr("Edit Captions").toStdString(), std::move(cmds));
         mw.undo_.record(std::move(group));
@@ -659,8 +593,6 @@ sc.shadow_alpha = sh_alpha.slider;
                          });
                      });
 
-    // Position commits ride the transform op (pos lives on the Clip, not the
-    // Title), carrying each clip's other transform fields through untouched.
     const auto commit_pos = [&mw, &sc, caption_targets](const double px, const double py) {
         if (sc.updating) return;
         std::vector<std::unique_ptr<canvas::core::ICommand>> cmds;
@@ -678,8 +610,8 @@ sc.shadow_alpha = sh_alpha.slider;
         mw.has_unsaved_changes_ = true;
         mw.push_snapshot();
         mw.refresh_timeline();
-        update_inspector_visual(mw);     // Video tab Position spins follow
-        update_inspector_subtitles(mw);  // sliders follow the clamped result
+        update_inspector_visual(mw);
+        update_inspector_subtitles(mw);
     };
     QObject::connect(sc.pos_h, &QSlider::sliderPressed, &mw,
                      [gesture_press]() { gesture_press(true); });
@@ -697,7 +629,6 @@ sc.shadow_alpha = sh_alpha.slider;
                      [gesture_tweak, &sc](int v) {
                          sc.pos_v_value->setText(axis_label(v, "Down", "Up"));
                          if (sc.updating) return;
-                         // Slider up is positive; screen y grows downward.
                          gesture_tweak([v](Clip& c) { c.pos_y = -static_cast<double>(v); });
                      });
     QObject::connect(sc.pos_v, &QSlider::sliderReleased, &mw,
@@ -705,10 +636,6 @@ sc.shadow_alpha = sh_alpha.slider;
     QObject::connect(sc.pos_centre, &QToolButton::clicked, &mw,
                      [commit_pos]() { commit_pos(0.0, 0.0); });
 
-    // Select-all-captions: gathers every title clip on the video tracks into one
-    // selection so the styling controls above edit them all at once. Mirrors the
-    // widget's range-select plumbing (selection round-trips through the widget so
-    // linked audio mates ride along; caption_targets filters them out later).
     QObject::connect(sc.select_all, &QToolButton::clicked, &mw, [&mw, &sc]() {
         if (!mw.project_) return;
         std::vector<canvas::core::ClipId> ids;
@@ -736,7 +663,6 @@ sc.shadow_alpha = sh_alpha.slider;
                          commit_with([on](Clip::Title& t) { t.underline = on; });
                      });
 
-    // --- Shadow commits ------------------------------------------------------
     QObject::connect(sc.shadow_on, &QCheckBox::toggled, &mw,
                      [commit_with](bool on) { commit_with([on](Clip::Title& t) { t.shadow = on; }); });
     QObject::connect(sc.shadow_dx, &QSlider::sliderPressed, &mw,
@@ -782,7 +708,6 @@ sc.shadow_alpha = sh_alpha.slider;
     QObject::connect(sc.shadow_alpha, &QSlider::sliderReleased, &mw,
                      [gesture_end]() { gesture_end(); });
 
-    // --- Box commits ---------------------------------------------------------
     QObject::connect(sc.box_on, &QCheckBox::toggled, &mw,
                      [commit_with](bool on) { commit_with([on](Clip::Title& t) { t.box = on; }); });
     QObject::connect(sc.box_w, &QSlider::sliderPressed, &mw,
@@ -828,9 +753,6 @@ sc.shadow_alpha = sh_alpha.slider;
     QObject::connect(sc.box_alpha, &QSlider::sliderReleased, &mw,
                      [gesture_end]() { gesture_end(); });
 
-    // Colour pickers: one QColorDialog commit per click, seed = the current
-    // tint so reopening the dialog lands where the user last left it. The picked
-    // colour lands on every selected caption as one GroupCommand.
     const auto pick_color =
         [&mw, &sc, caption_targets](
             const std::function<void(Clip::Title&, const QColor&)>& apply,
@@ -911,10 +833,6 @@ void update_inspector_subtitles(MainWindow& mw) {
     Clip clip;
     const bool has = mw.find_selected_clip(kind, index, clip) && clip.has_title();
 
-    // The vertical travel must reach the bottom EDGE of the picture, so the
-    // slider's down bound (negative side: slider-down = screen-down) widens
-    // with the frame height — half the height puts even a tiny caption's top at
-    // the screen edge. Up stays within the 550px nudge band.
     const int frame_h = project_frame_dims(*mw.project_).second;
     const int down_max = std::max(kPosRangePx, frame_h / 2);
     sc->pos_v->setRange(-down_max, kPosRangePx);
@@ -980,7 +898,6 @@ void update_inspector_subtitles(MainWindow& mw) {
                               kPosRangePx);
     sc->pos_h->setValue(hv);
     sc->pos_h_value->setText(axis_label(hv, "Left", "Right"));
-    // Slider up is positive; screen y grows downward.
     const int vv = std::clamp(static_cast<int>(std::lround(-clip.pos_y)),
                               sc->pos_v->minimum(), sc->pos_v->maximum());
     sc->pos_v->setValue(vv);
@@ -992,7 +909,6 @@ void update_inspector_subtitles(MainWindow& mw) {
         sc->font->findData(QString::fromStdString(clip.title.font_family));
     sc->font->setCurrentIndex(font_idx >= 0 ? font_idx : 0);
 
-    // Shadow effect state.
     sc->shadow_on->setChecked(clip.title.shadow);
     const int sdx = std::clamp(static_cast<int>(std::lround(clip.title.shadow_dx)),
                                -kOffsetRangePx, kOffsetRangePx);
@@ -1018,7 +934,6 @@ void update_inspector_subtitles(MainWindow& mw) {
                                0, 255);
     paint_color_button(sc->shadow_color, shr, shg, shb);
 
-    // Background box state.
     sc->box_on->setChecked(clip.title.box);
     const int bw = std::clamp(static_cast<int>(std::lround(clip.title.box_pad_x)), 0,
                               kBoxPadMaxPx);
@@ -1047,7 +962,7 @@ void update_inspector_subtitles(MainWindow& mw) {
 }
 
 void apply_inspector_subtitles(MainWindow& mw) {
-    (void)mw;  // commits are event-driven from the control signals
+    (void)mw;
 }
 
-}  // namespace canvas::gui
+}

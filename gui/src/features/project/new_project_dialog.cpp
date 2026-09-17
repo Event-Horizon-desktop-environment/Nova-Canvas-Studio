@@ -159,4 +159,4 @@ QString NewProjectDialog::media_location() const {
     return loc.isEmpty() ? default_media_root() : loc;
 }
 
-}  // namespace canvas::gui
+}

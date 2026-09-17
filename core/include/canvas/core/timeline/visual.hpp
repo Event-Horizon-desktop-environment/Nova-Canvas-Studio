@@ -1,10 +1,5 @@
 #pragma once
 
-// Shared ranges for the per-clip visual transform + composite properties. The
-// limits mirror the reference app's numeric fields (Zoom 0..10, Position/Anchor
-// -4096..4096 in pixels, Rotation -360..360 degrees, Opacity 0..1). Centralized
-// here (Qt-free) so the edit ops clamp to the same bounds the Inspector's spin
-// boxes expose — the UI never hardcodes a divergent set.
 namespace canvas::core::visual {
 
 inline constexpr float kScaleMin = 0.0f;
@@ -27,10 +22,6 @@ inline constexpr float kOpacityMin = 0.0f;
 inline constexpr float kOpacityMax = 1.0f;
 inline constexpr float kOpacityDefault = 1.0f;
 
-// Timeline blend-mode clamp bound: mirrors `blend::kBlendModeCount`
-// (= canvas::core::BlendMode 0..7). Kept in visual.hpp because edit_ops clamps
-// via this constant; the uint8 blend LAW itself lives in timeline/blend.hpp
-// (single source of truth, defined through the grade_graph float law).
-inline constexpr int kBlendModeCount = 8;  // Normal..Difference
+inline constexpr int kBlendModeCount = 8;
 
-}  // namespace canvas::core::visual
+}

@@ -1,8 +1,3 @@
-// Top status strip: format/edited/fps readouts, the big timecode, and the
-// Quick Export / Full Screen / Mixer / Metadata / Inspector cluster. The
-// page-switcher toolbar and the playback transport bar moved to their own
-// files (ShellPageBar.cpp / ShellTransportBar.cpp, splitplan refactor).
-
 #include "UX/MainWindow.hpp"
 #include "UX/theme.hpp"
 
@@ -61,9 +56,6 @@ QWidget* build_top_bar(MainWindow& mw) {
     inspector_top_btn->setText(MainWindow::tr("Inspector"));
     inspector_top_btn->setCheckable(true);
     mw.inspector_top_btn_ = inspector_top_btn;
-    // Wire the button back to the Inspector action + dock: both were built
-    // earlier (menu action / InspDock), so all three objects are alive here.
-    // (Connecting in build_inspector_dock used to hit a still-null button.)
     QObject::connect(mw.inspector_toggle_action_, &QAction::toggled, mw.inspector_top_btn_,
                      &QToolButton::setChecked);
     QObject::connect(mw.inspector_top_btn_, &QToolButton::toggled, &mw,
@@ -85,4 +77,4 @@ QWidget* build_top_bar(MainWindow& mw) {
     return top_bar;
 }
 
-}  // namespace canvas::gui
+}

@@ -22,8 +22,6 @@ namespace canvas::gui {
 
 namespace {
 
-// "HH:MM:SS" from a seconds count (the status field's formatting in both the
-// time-remaining and completed modes).
 QString format_duration(double secs) {
     int s = std::max(0, (int)std::llround(secs));
     const int h = s / 3600;
@@ -92,9 +90,6 @@ QString rq_row_action_style() {
         .arg(css(tokens().state_hover));
 }
 
-// Measured render fps for the status line ("475 fps"), empty until the first
-// 1-s window closes. `render_fps` is the peak 1-s rolling-window rate, so the
-// completed card shows the max speed the render actually sustained.
 QString fps_badge(const canvas::core::RenderJob& j) {
     if (j.render_fps <= 0.0) return {};
     char buf[32];
@@ -102,8 +97,6 @@ QString fps_badge(const canvas::core::RenderJob& j) {
     return QString::fromLatin1(buf);
 }
 
-// Single status field, reused per job state: a live time-remaining estimate
-// (plus render speed) while rendering, total elapsed time once settled.
 QString status_text(const canvas::core::RenderJob& j) {
     using S = canvas::core::RenderJob::Status;
     const QString speed = fps_badge(j);
@@ -130,8 +123,6 @@ QString status_text(const canvas::core::RenderJob& j) {
     return QStringLiteral("Queued");
 }
 
-// Resolution summary for the job's primary line, e.g. "2160p", "1440p",
-// "1080p", or the raw string ("Custom", "Timeline Resolution", ...).
 QString res_summary(const canvas::core::DeliverSettings& s) {
     const QString r = QString::fromStdString(s.video.resolution);
     if (r.startsWith("3840 x 2160")) return QStringLiteral("2160p");
@@ -141,11 +132,9 @@ QString res_summary(const canvas::core::DeliverSettings& s) {
     return r;
 }
 
-// "60", "29.97", ... — friendly frame-rate label; empty when unset.
 QString fps_label(const canvas::core::DeliverSettings& s) {
     const double fps = s.video.custom_fps;
     if (fps <= 0.0) return {};
-    // Drop a noisy trailing fraction (29.970... -> 29.97).
     const double rounded = std::round(fps * 100.0) / 100.0;
     QString text = QString::number(rounded, 'f', 2);
     while (text.endsWith(QStringLiteral("0"))) text.chop(1);
@@ -153,7 +142,6 @@ QString fps_label(const canvas::core::DeliverSettings& s) {
     return text;
 }
 
-// Grip-dots drag affordance (3x2 dot grid), row-reorder cue.
 QPixmap grip_pixmap() {
     QPixmap pm(14, 20);
     pm.fill(Qt::transparent);
@@ -166,7 +154,7 @@ QPixmap grip_pixmap() {
     return pm;
 }
 
-}  // namespace
+}
 
 RenderQueuePanel::RenderQueuePanel(QWidget* parent) : QWidget(parent) {
     build();
@@ -203,7 +191,6 @@ void RenderQueuePanel::build() {
     list_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     root->addWidget(list_, 1);
 
-    // Thin pill progress bar at the bottom of the box, just above the buttons.
     auto* progress_row = new QHBoxLayout;
     progress_row->setSpacing(8);
     overall_ = new QProgressBar(this);
@@ -225,22 +212,29 @@ void RenderQueuePanel::build() {
     buttons->setSpacing(6);
     render_all_ = new QPushButton(tr("Render"));
     apply_theme_style(render_all_, &rq_render_btn_style);
+    pause_ = new QPushButton(tr("Pause"));
+    apply_theme_style(pause_, &rq_clear_btn_style);
+    pause_->setToolTip(tr("Hold the queue between jobs; the current render finishes."));
     auto* cancel_all = new QPushButton(tr("Cancel All"));
     apply_theme_style(cancel_all, &rq_cancel_btn_style);
     auto* clear = new QPushButton(tr("Clear Queue"));
     clear->setToolTip(tr("Remove every job that isn't currently rendering."));
     apply_theme_style(clear, &rq_clear_btn_style);
-    // Keep the buttons at their natural size — without this they absorb all the
-    // slack when the dock is resized and stretch absurdly wide.
-    for (QPushButton* b : {render_all_, cancel_all, clear})
+    for (QPushButton* b : {render_all_, pause_, cancel_all, clear})
         b->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     buttons->addWidget(render_all_);
+    buttons->addWidget(pause_);
     buttons->addWidget(cancel_all);
     buttons->addWidget(clear);
     buttons->addStretch(1);
     root->addLayout(buttons);
 
     connect(render_all_, &QPushButton::clicked, this, &RenderQueuePanel::render_all_clicked);
+    connect(pause_, &QPushButton::clicked, this, [this] {
+        if (!queue_) return;
+        queue_->set_paused(!queue_->is_paused());
+        refresh();
+    });
     connect(cancel_all, &QPushButton::clicked, this, &RenderQueuePanel::cancel_all_clicked);
     connect(clear, &QPushButton::clicked, this, &RenderQueuePanel::clear_queued_clicked);
 }
@@ -266,7 +260,6 @@ void create_row(RenderQueuePanel::JobRow& r, const canvas::core::RenderJob& j,
     v->setContentsMargins(6, 6, 6, 6);
     v->setSpacing(3);
 
-    // Header row: drag grip · job label · status · edit/close actions.
     auto* header = new QHBoxLayout;
     header->setSpacing(8);
     auto* grip = new QLabel(widget);
@@ -287,7 +280,6 @@ void create_row(RenderQueuePanel::JobRow& r, const canvas::core::RenderJob& j,
     header->addWidget(close_btn);
     v->addLayout(header);
 
-    // Content row: film-strip thumbnail · settings summary / output path.
     auto* content = new QHBoxLayout;
     content->setSpacing(8);
     auto* thumb = new QLabel(widget);
@@ -318,7 +310,7 @@ void create_row(RenderQueuePanel::JobRow& r, const canvas::core::RenderJob& j,
     list->setItemWidget(r.item, widget);
 }
 
-}  // namespace
+}
 
 void RenderQueuePanel::set_queue(canvas::core::RenderQueue* queue) {
     queue_ = queue;
@@ -371,8 +363,6 @@ void RenderQueuePanel::refresh() {
         QString primary = res_summary(j.settings);
         const QString fps = fps_label(j.settings);
         if (!fps.isEmpty()) primary += QStringLiteral("  ·  %1fps").arg(fps);
-        // Timeline label: the owning project's name when it has one (opened from
-        // a file), else the Resolve-style default.
         const QString timeline_label = project_name_.isEmpty()
             ? QStringLiteral("Timeline 1")
             : project_name_;
@@ -390,7 +380,6 @@ void RenderQueuePanel::refresh() {
         else if (j.status == S::Completed) total_progress += 1.0;
     }
 
-    // Rows whose jobs vanished (cleared/cancelled) get dropped.
     for (auto it = rows_.begin(); it != rows_.end();) {
         delete it->item;
         it = rows_.erase(it);
@@ -405,8 +394,6 @@ void RenderQueuePanel::refresh() {
                               .arg(total).arg(queued).arg(running).arg(done));
         overall_->setValue((int)std::lround(pct * 1000.0));
         overall_pct_->setText(tr("%1%").arg((int)std::lround(pct * 100.0)));
-        // "Render" is the manual start trigger: enable it whenever there is
-        // staged (Queued) work and nothing is actively Rendering.
         render_all_->setEnabled(running == 0 && queued > 0);
     } else {
         summary_->setText(tr("No jobs in queue."));
@@ -414,6 +401,11 @@ void RenderQueuePanel::refresh() {
         overall_pct_->setText(QStringLiteral("0%"));
         render_all_->setEnabled(false);
     }
+
+    const bool paused = queue_->is_paused();
+    pause_->setText(paused ? tr("Resume") : tr("Pause"));
+    pause_->setEnabled(total > 0);
+    if (paused && total > 0) summary_->setText(summary_->text() + tr(" — paused"));
 }
 
-}  // namespace canvas::gui
+}

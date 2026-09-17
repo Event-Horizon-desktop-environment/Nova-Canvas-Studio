@@ -19,8 +19,6 @@ void WaveformScope::recompute_render() {
 }
 
 void WaveformScope::render_density() {
-    // One plot, not three thirds (wave spec §1: RGB reuses the exact parade
-    // buffers — switching Waveform/Parade never re-reads the frame).
     content_ = QImage(kScopeCols, kScopeLevels, QImage::Format_ARGB32_Premultiplied);
     content_.fill(QColor(3, 4, 7));
 
@@ -45,7 +43,7 @@ void WaveformScope::paint_body(QPainter& p, const QRectF& plot) {
         p.setRenderHint(QPainter::SmoothPixmapTransform, false);
         p.drawImage(plot, content_);
     }
-    paint_column_grid(p, plot, /*channel_split=*/false);
+    paint_column_grid(p, plot, false);
 }
 
-}  // namespace canvas::gui
+}

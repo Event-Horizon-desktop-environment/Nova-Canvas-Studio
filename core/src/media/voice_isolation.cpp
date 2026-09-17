@@ -19,25 +19,17 @@ const char* voice_isolation_mode_name(const VoiceIsolationMode mode) noexcept {
 }
 
 bool voice_isolation_supported(const VoiceIsolationMode mode) noexcept {
-    // Only RNNoise is compiled into this tree. DeepFilterNet is the reserved
-    // voice-from-music engine slot (onnxruntime + model, not yet shipped).
     return mode == VoiceIsolationMode::RnNoise;
 }
 
-// Fixed-size scratch for one network frame (480 floats) lives in State as
-// pre-sized vectors, avoiding per-call allocations in the realtime path
-// (AudioPipeline::write_mixed runs at device cadence).
-
 struct VoiceIsolation::State {
-    DenoiseState* left = nullptr;  // mono uses only `left`
-    DenoiseState* right = nullptr; // second channel when channels == 2
-    std::vector<float> lane_left;  // deinterleaved 480-frame input, L
-    std::vector<float> lane_right; // deinterleaved 480-frame input, R
+    DenoiseState* left = nullptr;
+    DenoiseState* right = nullptr;
+    std::vector<float> lane_left;
+    std::vector<float> lane_right;
     std::vector<float> denoised_left;
     std::vector<float> denoised_right;
-    // Pending (not yet consumed) input, interleaved, front-aligned.
     std::vector<float> in_fifo;
-    // Denoised output queued for the caller, interleaved, front-aligned.
     std::vector<float> out_fifo;
 };
 
@@ -56,8 +48,6 @@ VoiceIsolation& VoiceIsolation::operator=(VoiceIsolation&& other) noexcept {
     return *this;
 }
 
-// Ensures the per-channel network state exists. RNNoise's default model is
-// compiled in (rnn_data.c), so no model file is required.
 bool VoiceIsolation::ensure_networks(State& s, int channels) {
     if (!s.left) {
         s.left = rnnoise_create(nullptr);
@@ -81,13 +71,11 @@ int VoiceIsolation::process(const int sample_rate, const int channels, float* co
     const std::size_t ch = static_cast<std::size_t>(channels);
     const std::size_t new_floats = static_cast<std::size_t>(num_frames) * ch;
 
-    // 1. Append the new input to the pending FIFO.
     const std::size_t in_before = s.in_fifo.size();
     s.in_fifo.resize(in_before + new_floats);
     std::memcpy(s.in_fifo.data() + in_before, samples, new_floats * sizeof(float));
     const std::size_t in_frames = (in_before + new_floats) / ch;
 
-    // 2. Denoise every complete 480-frame block.
     std::size_t pending = in_frames;
     while (pending >= static_cast<std::size_t>(kFrameSize)) {
         const float* block = s.in_fifo.data();
@@ -114,7 +102,6 @@ int VoiceIsolation::process(const int sample_rate, const int channels, float* co
                 s.out_fifo.push_back(s.denoised_right[static_cast<std::size_t>(i)]);
             }
         }
-        // Consume the block.
         const std::size_t consumed_floats =
             static_cast<std::size_t>(kFrameSize) * ch;
         std::memmove(s.in_fifo.data(), s.in_fifo.data() + consumed_floats,
@@ -123,7 +110,6 @@ int VoiceIsolation::process(const int sample_rate, const int channels, float* co
         pending -= static_cast<std::size_t>(kFrameSize);
     }
 
-    // 3. Emit up to `num_frames` from the denoised backlog (in place).
     const std::size_t emit_floats =
         std::min(new_floats, s.out_fifo.size());
     if (emit_floats > 0) {
@@ -153,16 +139,11 @@ int VoiceIsolationBank::tick(const std::uint64_t clip_id, const VoiceIsolationMo
                              const int num_frames) {
     if (mode == VoiceIsolationMode::None || !voice_isolation_supported(mode) ||
         sample_rate != VoiceIsolation::kSampleRate || (channels != 1 && channels != 2)) {
-        // Pass through untouched — AND drop any stale per-clip network state:
-        // an engine toggle off/on must start the next run from a fresh GRU
-        // instead of resuming whatever the pre-toggle stream was doing.
         entries_.erase(clip_id);
         return num_frames;
     }
     Entry& entry = entries_[clip_id];
     if (entry.mode != mode) {
-        // Mode flipped for an existing clip: a fresh network is correct (the
-        // edit could also have changed the content under the same id).
         entry.engine.reset();
         entry.mode = mode;
     }
@@ -180,4 +161,4 @@ void VoiceIsolationBank::drop(const std::uint64_t clip_id) {
 
 void VoiceIsolationBank::clear() { entries_.clear(); }
 
-}  // namespace canvas::core
+}

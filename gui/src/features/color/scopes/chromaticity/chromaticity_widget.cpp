@@ -19,12 +19,6 @@
 namespace canvas::gui {
 
 namespace {
-// CIE 1931 2° xy spectral locus, 5 nm steps 380–700 nm (65 points). REGENERATED
-// 2026-09-08 from the official CIE 2° colour-matching-function data set (CIE 018/
-// ISO 11664-1, x̄ ȳ z̄ per nm) by x = X/Σ, y = Y/Σ at each wavelength — this is
-// exactly how the CIE defines the locus, and the rounded values match the
-// published CIE 018:2019 Table 6 / CVRL table to the printed precision. The
-// horseshoe is closed along the "purple line" from 700 nm straight back to 380 nm.
 constexpr double kLocus[][2] = {
     {0.1741, 0.0050}, {0.1740, 0.0050}, {0.1738, 0.0049}, {0.1736, 0.0049},
     {0.1733, 0.0048}, {0.1730, 0.0048}, {0.1726, 0.0048}, {0.1721, 0.0048},
@@ -45,8 +39,6 @@ constexpr double kLocus[][2] = {
     {0.7347, 0.2653},
 };
 
-// Labelled gamut triangles (spec §4 table: space name → the three primaries'
-// xy + white point). Easy to extend with ACES AP0/AP1 or DaVinci Wide Gamut.
 struct Gamut {
     const char* name;
     double r[2];
@@ -60,13 +52,6 @@ constexpr Gamut kGamuts[3] = {
     {"Rec.2020", {0.708, 0.292}, {0.170, 0.797}, {0.131, 0.046}, {0.3127, 0.3290}},
 };
 
-// Planckian (blackbody) chromaticities 1000–20000 K (19 points). REGENERATED
-// 2026-09-08 by integrating Planck's law B(λ,T) with c₂ = 1.4388e-2 m·K against
-// the official CIE 2° CMFs (360–830 nm) — same method the CIE published tables
-// were built with — then normalizing to xy. Values match the classic blackbody
-// locus tables (Lindbloom / Wikipedia) to ±0.0002. D65 is NOT on this curve (it
-// is a daylight illuminant, slightly above the locus near 6500 K) and is drawn
-// separately as the white-point dot.
 constexpr double kPlanck[][2] = {
     {0.6528, 0.3445}, {0.5857, 0.3931}, {0.5267, 0.4133}, {0.4770, 0.4137},
     {0.4369, 0.4041}, {0.4053, 0.3907}, {0.3804, 0.3767}, {0.3608, 0.3635},
@@ -75,10 +60,6 @@ constexpr double kPlanck[][2] = {
     {0.2806, 0.2883}, {0.2637, 0.2673}, {0.2565, 0.2576},
 };
 
-// Rec.709 (D65) → XYZ matrix (spec §4 step 1); input R'G'B' 0..1. Verified
-// against ITU-R BT.709-6 primary set (0.4124/0.3576/0.1805, 0.2126/0.7152/0.0722,
-// 0.0193/0.1192/0.9505). The two output values are set to NaN on a degenerate
-// (all-black) input so the accumulation can skip them.
 inline void rgb_to_xy(double r, double g, double b, double& x, double& y) {
     const double X = 0.4124 * r + 0.3576 * g + 0.1805 * b;
     const double Y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -87,7 +68,7 @@ inline void rgb_to_xy(double r, double g, double b, double& x, double& y) {
     x = X / s;
     y = Y / s;
 }
-}  // namespace
+}
 
 ChromaticityWidget::ChromaticityWidget(QWidget* parent) : QWidget(parent) {
     setMinimumSize(240, 160);
@@ -118,7 +99,6 @@ void ChromaticityWidget::paintEvent(QPaintEvent* event) {
         dirty_ = false;
     }
 
-    // Square-projected chart of the xy domain, centered in the plot.
     const double scale = std::min(plot.height() / (kYmax - kYmin), plot.width() / (kXmax - kXmin));
     const double chart_w = (kXmax - kXmin) * scale;
     const double chart_h = (kYmax - kYmin) * scale;
@@ -130,15 +110,12 @@ void ChromaticityWidget::paintEvent(QPaintEvent* event) {
 
     p.setClipRect(chart);
 
-    // The frame's pixel chromaticities, drawn beneath the overlays it must be
-    // compared against (out-of-gamut points poke visibly outside their triangle).
     if (!scatter_.isNull()) {
         p.setRenderHint(QPainter::SmoothPixmapTransform, false);
         p.drawImage(chart, scatter_);
         p.setRenderHint(QPainter::SmoothPixmapTransform, true);
     }
 
-    // Spectral locus, closed along the purple line (380 nm ↔ 700 nm).
     QPainterPath locus;
     const int n_locus = int(sizeof(kLocus) / sizeof(kLocus[0]));
     for (int i = 0; i < n_locus; ++i) {
@@ -153,7 +130,6 @@ void ChromaticityWidget::paintEvent(QPaintEvent* event) {
     p.setBrush(Qt::NoBrush);
     p.drawPath(locus);
 
-    // Gamut triangles for the delivery spaces.
     p.setFont(QFont(font().family(), 6));
     const QColor gamut_colors[3] = {QColor(0xE8, 0xE8, 0xE6),
                                     QColor(0x4C, 0xFF, 0x4C),
@@ -172,7 +148,6 @@ void ChromaticityWidget::paintEvent(QPaintEvent* event) {
         p.drawText(label, QString::fromLatin1(gm.name));
     }
 
-    // Planckian locus (blackbody curve, warm → cool) + reference white dot.
     QPainterPath planck;
     const int n_planck = int(sizeof(kPlanck) / sizeof(kPlanck[0]));
     for (int i = 0; i < n_planck; ++i) {
@@ -196,9 +171,6 @@ void ChromaticityWidget::recompute() {
     grid_.fill(0);
     scatter_ = QImage();
     if (!frame_) return;
-    // Stride-sample like the other scopes (spec §4 performance note: the 3×3
-    // matrix is the most expensive conversion per pixel, so a bounded sample
-    // count is essential).
     if (frame_->a && !frame_->a->rgba.empty()) {
         accumulate(*frame_->a);
     } else if (frame_->nv12 && !frame_->nv12->y.empty()) {
@@ -234,9 +206,6 @@ void ChromaticityWidget::accumulate(const canvas::core::VideoFrame& rgba) {
 }
 
 void ChromaticityWidget::accumulate(const canvas::core::Nv12Frame& nv12) {
-    // Color archive: [scope] spec-change line exactly once per source switch —
-    // this scope's XYZ conversion rides the frame->nv12 spec (matrix +
-    // probe-reconciled range), same as the viewer shader.
     if (!spec_seen_ || nv12.matrix != last_spec_matrix_ || nv12.range != last_spec_range_) {
         spec_seen_ = true;
         last_spec_matrix_ = nv12.matrix;
@@ -246,9 +215,6 @@ void ChromaticityWidget::accumulate(const canvas::core::Nv12Frame& nv12) {
             canvas::core::gpu::color_matrix_name(nv12.matrix),
             canvas::core::gpu::color_range_name(nv12.range));
     }
-    // Always-on (once): chromaticity scope NV12->RGB uses the frame's resolved
-    // per-file spec (matrix + probe-reconciled range) — matching the viewer
-    // shader on this frame, not a compile-time BT.709 limited assumption.
     static bool yuv2rgb_logged_ = false;
     if (!yuv2rgb_logged_) {
         yuv2rgb_logged_ = true;
@@ -291,7 +257,7 @@ void ChromaticityWidget::render_density() {
     std::uint32_t max_count = 1;
     for (std::uint32_t n : grid_) max_count = std::max(max_count, n);
     const double log_max = std::log1p(static_cast<double>(max_count));
-    const QColor dim(0x4C, 0xFF, 0x4C);  // long-wavelength-green trace, low-key
+    const QColor dim(0x4C, 0xFF, 0x4C);
 
     for (int gy = 0; gy < kScatterGrid; ++gy) {
         std::uint32_t* dst_row = reinterpret_cast<std::uint32_t*>(
@@ -308,4 +274,4 @@ void ChromaticityWidget::render_density() {
     }
 }
 
-}  // namespace canvas::gui
+}

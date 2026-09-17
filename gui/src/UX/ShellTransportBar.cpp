@@ -1,11 +1,3 @@
-// Playback transport bar: viewport/frame selector + time label flank the bar,
-// the in/out-navigation + centered transport cluster (Start/Prev/Stop/Play/
-// Next/End/Loop) sits dead-center between two equal-width flanks, and the
-// Snap/next-edit/edge-jump group rides on the right with the time label. Every
-// control is a boxed button (raised surface + hairline border), never the
-// invisible flat idiom, so the transport reads as real buttons.
-// Split out of ShellTopBar.cpp (splitplan refactor).
-
 #include "UX/MainWindow.hpp"
 #include "UX/theme.hpp"
 
@@ -41,8 +33,6 @@ QWidget* build_transport_bar(MainWindow& mw) {
     transport_layout->setContentsMargins(12, 6, 12, 6);
     transport_layout->setSpacing(8);
 
-    // Left flank: viewport/frame selector. Its width is pinned to the right
-    // flank's natural width (see below) so the cluster stays dead-center.
     auto* left_flank = new QWidget(transport);
     left_flank->setStyleSheet(QStringLiteral("background: transparent;"));
     auto* left_flank_layout = new QHBoxLayout(left_flank);
@@ -52,7 +42,6 @@ QWidget* build_transport_bar(MainWindow& mw) {
     left_flank_layout->addWidget(viewport_select);
     viewport_select->raise();
 
-    // In/out-point nav + centered transport cluster.
     auto* center = new QHBoxLayout;
     center->setSpacing(6);
     center->addWidget(btn(icon("chevron_left"), "Previous edit point", false));
@@ -64,8 +53,6 @@ QWidget* build_transport_bar(MainWindow& mw) {
     auto* to_start = btn(icon("to_start"), "Go to Start (Home)", false);
     auto* prev_frame = btn(icon("step_back"), "Previous Frame (Left)", false);
     auto* stop_btn = btn(icon("stop"), "Stop", false);
-    // Play/Pause is a standard transport button like every other control here:
-    // same boxed surface, same theme-tinted glyph, no hero disc.
     mw.play_button_ = btn(icon("play"), "Play/Pause (Space)", false);
     auto* next_frame = btn(icon("step_forward"), "Next Frame (Right)", false);
     auto* to_end = btn(icon("to_end"), "Go to End (End)", false);
@@ -77,15 +64,11 @@ QWidget* build_transport_bar(MainWindow& mw) {
         center->addWidget(w);
     }
 
-    // Right flank: snap / next-edit / edge-jump grouped tightly, then the time
-    // label. Its natural width pins the left flank so the cluster is centered.
     auto* right_flank = new QWidget(transport);
     right_flank->setStyleSheet(QStringLiteral("background: transparent;"));
     auto* right_flank_layout = new QHBoxLayout(right_flank);
     right_flank_layout->setContentsMargins(0, 0, 0, 0);
     right_flank_layout->setSpacing(6);
-    // Resolve-style timeline view-options dropdown sits LEFT of Snap. It owns
-    // its popup QMenu; the button itself is a standard boxed transport tool.
     auto* view_opts_btn = btn(icon("TimeLine-View-option"), "Timeline view options", false);
     attach_timeline_view_options_button(mw, view_opts_btn);
     right_flank_layout->addWidget(view_opts_btn);
@@ -100,8 +83,6 @@ QWidget* build_transport_bar(MainWindow& mw) {
     apply_theme_style(mw.time_label_, &time_label_style);
     right_flank_layout->addWidget(mw.time_label_);
 
-    // Equal flanks + equal stretch on both sides of the center layout = the
-    // transport cluster lands exactly in the middle of the bar.
     left_flank->setMinimumWidth(right_flank->sizeHint().width());
 
     transport_layout->addWidget(left_flank);
@@ -114,14 +95,9 @@ QWidget* build_transport_bar(MainWindow& mw) {
     mw.scrub_->setRange(0, 0);
     apply_theme_style(mw.scrub_, &slider_style);
 
-    // ---- Transport connects ----
-    // Snap toggle drives the timeline magnetism (clip drags, trim, playhead);
-    // it defaults ON and the button is pre-checked to match.
     QObject::connect(snap_btn, &QToolButton::clicked, &mw, [&mw](bool checked) {
         mw.timeline_->set_snap_enabled(checked);
     });
-    // Explicit playhead jumps re-enable playhead-follow (a user who scrolled
-    // away during playback wants the playhead centered again after a jump).
     QObject::connect(to_start, &QToolButton::clicked, &mw, [&mw] {
         mw.timeline_->set_follow_playhead(true);
         mw.controller_.seek(0);
@@ -132,7 +108,6 @@ QWidget* build_transport_bar(MainWindow& mw) {
     });
     QObject::connect(mw.play_button_, &QToolButton::clicked, &mw, [&mw] { mw.controller_.toggle_play_pause(); });
     QObject::connect(stop_btn, &QToolButton::clicked, &mw, [&mw] {
-        // Stop = pause with the playhead left in place (the standard transport stop).
         mw.controller_.pause();
     });
     QObject::connect(next_frame, &QToolButton::clicked, &mw, [&mw] {
@@ -144,16 +119,10 @@ QWidget* build_transport_bar(MainWindow& mw) {
         mw.controller_.seek(mw.total_frames_ - 1);
     });
 
-    // Scrubbing: re-position with a fast low-res preview while dragging; commit
-    // the crisp full-res frame on release. Playback keeps running throughout, but
-    // scrubbing marks the drag so previews don't rewind the live audio pipe per
-    // move (only once, on release via seek()).
     QObject::connect(mw.scrub_, &QSlider::sliderPressed, &mw, [&mw] {
         mw.timeline_->set_follow_playhead(true);
         mw.controller_.begin_scrub();
     });
-    // The overview slider snaps to the same cut points as the timeline ruler
-    // (clip edges / bookmarks within the magnet radius, then the grid).
     QObject::connect(mw.scrub_, &QSlider::sliderMoved, &mw, [&mw](int value) {
         mw.controller_.seek_preview(mw.timeline_->snap_frame(value));
     });
@@ -166,4 +135,4 @@ QWidget* build_transport_bar(MainWindow& mw) {
     return transport;
 }
 
-}  // namespace canvas::gui
+}

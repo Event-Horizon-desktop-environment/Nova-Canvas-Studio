@@ -1,18 +1,3 @@
-// Speed Change (clip_rate) unit test: the headless whole-clip retime law that
-// keeps playback video, playback audio, and export in lockstep, plus the
-// pitch-preserving WSOLA stretch (time_stretch.hpp) that replaces the old
-// varispeed resampler. Pins:
-//  - effective_rate gating/clamping, the scaled offset law, the media<->output
-//    span inverse round-trip, and monotonicity;
-//  - WSOLA preserves PITCH: a 440 Hz sine stretched to 2x tempo must come out
-//    at ~440 Hz (the old resampler would have output 880 Hz) and ~half the
-//    length; that is the regression guard for "Speed Change must not change
-//    my pitch";
-//  - streaming determinism: feeding input in chunks produces byte-identical
-//    output to one big feed (a gap-free short-returning stream over grains),
-//    which is what playback/export rely on;
-//  - 0.5x expansion length, stereo channel independence, and bank hygiene.
-
 #include "canvas/core/timeline/clip_rate.hpp"
 #include "canvas/core/timeline/time_stretch.hpp"
 
@@ -47,9 +32,6 @@ Clip make_clip(float factor, bool enabled) {
 
 bool near(double a, double b, double eps = 1e-6) { return std::fabs(a - b) <= eps; }
 
-// Average zero-crossing frequency of the interior of a mono signal. Robust to
-// the windowed ramps at grain heads (win[n] scales amplitude, never moves the
-// sign changes), which is exactly what we need to prove "same pitch, faster".
 double estimate_freq(const std::vector<float>& sig, int sr, int from) {
     int prev = -1;
     long long sum = 0;
@@ -82,10 +64,10 @@ bool is_finite(const std::vector<float>& v) {
     return true;
 }
 
-}  // namespace
+}
 
 int main() {
-    {   // effective_rate: gating + clamping.
+    {
         check(near(cliprate::effective_rate(make_clip(2.0f, false)), 1.0),
               "effective_rate: disabled -> 1.0");
         check(near(cliprate::effective_rate(make_clip(2.0f, true)), 2.0),
@@ -98,7 +80,7 @@ int main() {
               "effective_rate: 20 clamped to kSpeedMax");
     }
 
-    {   // scaled_frame_offset: tl offset -> source frame at rate.
+    {
         const Clip c = make_clip(2.0f, true);
         check(cliprate::scaled_frame_offset(c, 0) == 0, "offset: frame 0 -> 0");
         check(cliprate::scaled_frame_offset(c, 10) == 20, "offset: 10 frames at 2x -> 20 source");
@@ -109,7 +91,7 @@ int main() {
         check(cliprate::scaled_frame_offset(quiet, 10) == 10, "offset: disabled is identity");
     }
 
-    {   // media_span_for_output / output_frames_from_media: inverse round-trip.
+    {
         const Clip c = make_clip(2.0f, true);
         check(cliprate::media_span_for_output(c, 100) == 200, "span: 100 out at 2x -> 200 media");
         check(cliprate::output_frames_from_media(c, 200) == 100, "media: 200 in at 2x -> 100 out");
@@ -119,7 +101,6 @@ int main() {
         const Clip quiet = make_clip(3.0f, false);
         check(cliprate::media_span_for_output(quiet, 42) == 42, "span: disabled is identity");
         check(cliprate::output_frames_from_media(quiet, 42) == 42, "media: disabled is identity");
-        // Round-trip across a nominal 250-frame window.
         check(cliprate::media_span_for_output(c, 250) == 500 &&
                   cliprate::output_frames_from_media(c, 500) == 250,
               "round-trip: 2x 250 <-> 500");
@@ -128,7 +109,7 @@ int main() {
               "round-trip: 0.5x 250 <-> 125");
     }
 
-    {   // Whole media-spans are monotonic: bigger output window needs >= media.
+    {
         const Clip c = make_clip(2.0f, true);
         check(cliprate::media_span_for_output(c, 100) <= cliprate::media_span_for_output(c, 101),
               "span: monotonic in output frames");
@@ -140,8 +121,8 @@ int main() {
     constexpr int kSr = 48000;
     constexpr int kFreq = 440;
 
-    {   // WSOLA 2x: pitch preserved (440 stays 440, NOT 880) and length halves.
-        const int n = 24000;  // 0.5 s
+    {
+        const int n = 24000;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         TimeStretch stretch;
         std::vector<float> out;
@@ -153,12 +134,7 @@ int main() {
         check(near(f, kFreq, kFreq * 0.03), "2x: pitch preserved ~440 Hz (was 880 under varispeed)");
     }
 
-    {   // WSOLA 0.5x: length doubles; the lookahead feed lets every grain
-        // complete inside the call. The waveform-similarity search can walk a
-        // few hops of drift on perfectly periodic content (a real signal sits
-        // at d ~ 0), so the count is checked against a slack of one drift
-        // bound; the seam grain otherwise falls through to the next call,
-        // which is how the exporter streams.
+    {
         const int n = 12000;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         const int need = TimeStretch::lookahead_frames(kSr);
@@ -177,10 +153,7 @@ int main() {
         check(near(f2, kFreq, kFreq * 0.03), "0.5x: pitch preserved ~440 Hz");
     }
 
-    {   // Streaming determinism: chunk-feeding == whole-feeding, sample for
-        // sample. The engine defers seam grains across chunk boundaries but
-        // never changes the grain positions it picks, so the produced stream
-        // is identical up to the last produced frame.
+    {
         const int n = 24000;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         TimeStretch whole;
@@ -193,7 +166,7 @@ int main() {
         std::vector<float> tmp;
         for (int off = 0; off < n; off += kChunk) {
             const int take = std::min(kChunk, n - off);
-            const int asked = (take / 2) + 1;  // 2x: each fed chunk -> ~half out
+            const int asked = (take / 2) + 1;
             const int got = chunked.process(in.data() + off, take, 1, 2.0, 1.0, 0.0f, asked, kSr, tmp);
             if (got > 0)
                 out_chunked.insert(out_chunked.end(), tmp.begin(),
@@ -212,7 +185,7 @@ int main() {
         check(w_whole > 0 && is_finite(out_chunked), "chunked: finite output");
     }
 
-    {   // Stereo: both channels stretch independently, pitches preserved.
+    {
         const int n = 16000;
         const std::vector<float> l = make_sine(kSr, n, kFreq);
         const std::vector<float> r = make_sine(kSr, n, 880.0);
@@ -237,7 +210,7 @@ int main() {
         check(near(fr, 880.0, 880.0 * 0.04), "stereo: R pitch preserved ~880 Hz");
     }
 
-    {   // Bank: per-clip streams stay independent; drop() resets cleanly.
+    {
         const int n = 12000;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         TimeStretchBank bank;
@@ -254,14 +227,13 @@ int main() {
         const int wa2 = bank.tick(11, 2.0, 1.0, 0.0f, kSr, 1, in.data(), n, n / 2, out_a2);
         check(wa2 > 0 && near(estimate_freq(out_a2, kSr, 256), kFreq, kFreq * 0.03),
               "bank: drop(11) lets the clip restart clean");
-        // A ratio change resets the engine defensively (no stale analysis).
         std::vector<float> out_c;
         const int wc = bank.tick(11, 0.5, 1.0, 0.0f, kSr, 1, in.data(), n, 2 * n, out_c);
         check(wc > 0, "bank: ratio change restarts the stream");
         bank.clear();
     }
 
-    {   // pitch_factor: the shared pitch law.
+    {
         check(near(cliprate::pitch_factor(0.0f, 0.0f), 1.0),
               "pitch_factor: factory -> 1.0");
         check(near(cliprate::pitch_factor(12.0f, 0.0f), 2.0),
@@ -283,10 +255,7 @@ int main() {
               "pitch_factor: Clip overload reads project fields");
     }
 
-    {   // Pitch-only +2:0 (spd 1, pitch 2): length halves and the pitch LANDS
-        // on ~880 Hz — the SRC front-end doubles frequency while the WSOLA
-        // stage is bypassed (|spd - pitch| == 0), so the output is a clean
-        // resample, not a grain stitched stream.
+    {
         const int n = 24000;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         TimeStretch stretch;
@@ -304,11 +273,7 @@ int main() {
         check(is_finite(out), "pitch 2x: output is finite");
     }
 
-    {   // Pitch-only 0.5x (spd 1, pitch 0.5): with the WSOLA stage active
-        // (|spd - pitch| == 0.5) a single short call returns a priming-short
-        // count — the pitch lands at ~220 Hz regardless. The length law for
-        // a pitched-down clip is pinned on the spd == pitch bypass pair below,
-        // where the resampler completes the whole stream in one call.
+    {
         const int n = 16000;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         TimeStretch stretch;
@@ -319,9 +284,7 @@ int main() {
         check(near(f, kFreq / 2.0, kFreq * 0.06), "pitch 0.5x: 440 Hz shifts to ~220 Hz");
     }
 
-    {   // Speed 0.5x + pitch 0.5x (the spd == pitch bypass pair): the SRC does
-        // all the work so the resample completes in one call — output length
-        // obeys the speed law (2n) and pitch has dropped to 220 Hz.
+    {
         const int n = 16000;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         TimeStretch stretch;
@@ -334,10 +297,7 @@ int main() {
               "spd 0.5x + pitch 0.5x: pitch lands on ~220 Hz");
     }
 
-    {   // Speed + pitch together (spd 2, pitch 2): the WSOLA stage is bypassed
-        // (|spd - pitch| ~ 0) so the output is the clean resample: n/2 length
-        // at 880 Hz. This is the "chipmunk fast" pair — no grain stitching
-        // corrupts the resampled stream.
+    {
         const int n = 24000;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         TimeStretch stretch;
@@ -350,9 +310,7 @@ int main() {
               "spd 2x + pitch 2x: pitch lands on ~880 Hz (bypass stitched WSOLA)");
     }
 
-    {   // Speed 2x with pitch-preserving WSOLA active + a real pitch shift
-        // (spd 3, pitch 2): length obeys the SPEED law only (n/3 out), pitch
-        // lands at 2x — the two geometric rates cancel in the engine.
+    {
         const int n = 24000;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         TimeStretch stretch;
@@ -366,7 +324,7 @@ int main() {
         check(is_finite(out), "spd 3x + pitch 2x: output is finite");
     }
 
-    {   // Pan baked into the engine output: stereo balance hard left/right.
+    {
         const int n = 4000;
         const std::vector<float> mono = make_sine(kSr, n, kFreq);
         std::vector<float> in(static_cast<std::size_t>(n) * 2);
@@ -389,8 +347,7 @@ int main() {
         check(lsum == 0.0f && rsum > 0.0f, "pan +1: left channel silent, right carries signal");
     }
 
-    {   // Pan on mono: a non-center pan upmixes to the front pair with the
-        // balance applied; center keeps the mono stream untouched.
+    {
         const int n = 4000;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         TimeStretch right;
@@ -414,7 +371,7 @@ int main() {
         check(identical, "mono center: bit-identical passthrough (no round-trip loss)");
     }
 
-    {   // Identity: fully-unity engine is a plain copy.
+    {
         const int n = 4096;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         TimeStretch stretch;
@@ -426,7 +383,7 @@ int main() {
         check(same, "identity: bit-exact copy");
     }
 
-    {   // retime_lookahead: feeds a full window for every (ratio, pitch) pair.
+    {
         const int need = TimeStretch::lookahead_frames(kSr);
         check(TimeStretch::retime_lookahead(kSr, 1.0, 1.0) == 0,
               "retime_lookahead: identity -> 0");
@@ -443,8 +400,7 @@ int main() {
               "retime_lookahead: spd != pitch combines both stages");
     }
 
-    {   // Bank: a pitch change resets the engine defensively (no stale SRC or
-        // WSOLA state carried across the new law).
+    {
         const int n = 12000;
         const std::vector<float> in = make_sine(kSr, n, kFreq);
         TimeStretchBank bank;

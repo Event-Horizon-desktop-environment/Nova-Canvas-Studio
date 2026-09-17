@@ -11,12 +11,15 @@
 #include "features/color/mini_timeline_strip.hpp"
 #include "features/project/new_project_dialog.hpp"
 
+#include "canvas/core/project/autosave.hpp"
 #include "canvas/core/timeline/title.hpp"
 
 #include <QDialog>
 #include <QDir>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QMessageBox>
 #include <QMenu>
 #include <QSettings>
 #include <QFont>
@@ -89,9 +92,6 @@ void MainWindow::add_title_clip() {
     const int64_t dur = std::max<int64_t>(1, static_cast<int64_t>(std::llround(3.0 * fps)));
     const int64_t frame = std::max<int64_t>(0, current_frame_);
 
-    // Land on the topmost unlocked video track: a title composes over the
-    // picture beneath it, so placing it highest reads naturally. Fall back to
-    // the bottom lane (V1), ensured to exist below.
     std::size_t vindex = 0;
     for (std::size_t i = project_->sequence.video_tracks.size(); i-- > 0;) {
         if (!project_->sequence.video_tracks[i].locked) { vindex = i; break; }
@@ -99,7 +99,7 @@ void MainWindow::add_title_clip() {
     ensure_tracks_at(canvas::core::Track::Kind::Video, vindex);
 
     canvas::core::Clip clip;
-    clip.media = -1;  // media-less generator: the rasterised title is the picture
+    clip.media = -1;
     clip.tl_in = frame;
     clip.src_in = 0;
     clip.src_out = dur;
@@ -120,7 +120,6 @@ void MainWindow::add_title_clip() {
 
 namespace {
 
-// Preset lookup shared by the toolbox drop and the menu/Timeline-menu path.
 const ToolboxWidget::TitlePreset* find_title_preset(const QString& id) {
     for (const ToolboxWidget::TitlePreset& p : ToolboxWidget::title_presets())
         if (id == QLatin1String(p.id)) return &p;
@@ -139,12 +138,23 @@ canvas::core::TransitionType transition_from_toolbox_id(const QString& id) {
     return canvas::core::TransitionType::None;
 }
 
-}  // namespace
+std::vector<int> existing_autosave_slots(const QString& project_path) {
+    const QFileInfo fi(project_path);
+    const QString prefix = fi.completeBaseName() + QStringLiteral(".autosave-");
+    const QDir dir(fi.absolutePath());
+    std::vector<int> slot_ids;
+    const auto entries = dir.entryList(QDir::Files);
+    for (const QString& entry : entries) {
+        if (!entry.startsWith(prefix)) continue;
+        const int slot = canvas::core::autosave::slot_from_snapshot(
+            fi.filePath().toStdString(), dir.filePath(entry).toStdString());
+        if (slot > 0) slot_ids.push_back(slot);
+    }
+    return slot_ids;
+}
 
-// Toolbox-title drop: a BRAND-NEW top video track (the toolbox libraries never
-// overwrite footage) hosting a media-less generator clip with the preset's
-// text/size. The placed clip becomes the selection so the Inspector's Title
-// category surfaces immediately.
+}
+
 void MainWindow::place_title_at(const QString& preset_id, int64_t frame) {
     if (!project_) return;
     const ToolboxWidget::TitlePreset* preset = find_title_preset(preset_id);
@@ -160,7 +170,7 @@ void MainWindow::place_title_at(const QString& preset_id, int64_t frame) {
     ensure_tracks_at(canvas::core::Track::Kind::Video, vindex);
 
     canvas::core::Clip clip;
-    clip.media = -1;  // media-less generator: the rasterised title is the picture
+    clip.media = -1;
     clip.tl_in = frame;
     clip.src_in = 0;
     clip.src_out = dur;
@@ -191,10 +201,6 @@ void MainWindow::place_title_at(const QString& preset_id, int64_t frame) {
     }
 }
 
-// Toolbox-transition drop: resolves the video lane under the drop point, then
-// applies the named transition to the clip whose body contains the drop frame
-// — IN edge for "Video Fade In", the OUT boundary for everything else — at a
-// half-second default duration. Drops that miss every clip are a no-op.
 void MainWindow::apply_transition_from_toolbox(const QString& transition_id, int64_t frame,
                                                double scene_y) {
     if (!project_ || !timeline_) return;
@@ -234,11 +240,6 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
                                 canvas::core::Placement mode,
                                 std::optional<double> drop_scene_y) {
     if (!project_) return false;
-    // A drop over the track header (or anywhere left of the timeline's first
-    // frame) yields a negative frame from the widget's pixel→frame map; clamp
-    // it so the placed clip flushes against the timeline start instead of
-    // painting on top of the header strip. frame_at_x callers elsewhere floor
-    // ≥0 themselves; this funnel guards every placement path.
     frame = std::max<int64_t>(0, frame);
     const canvas::core::MediaEntry* found = nullptr;
     for (const auto& m : project_->media) {
@@ -253,19 +254,12 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
     const std::string base = QFileInfo(QString::fromStdString(found->path))
                                  .completeBaseName()
                                  .toStdString();
-    // The lane the drop targets: an existing channel of the media's kind under
-    // the drop point, or the per-kind index of a channel to CREATE there (drop
-    // into empty space). Without a drop point (pool double-click, menu) fall
-    // back to the first channel of the kind.
     const auto kind = audio_only ? canvas::core::Track::Kind::Audio : canvas::core::Track::Kind::Video;
     const int lane = drop_scene_y && timeline_
                          ? timeline_->resolve_drop_lane(*drop_scene_y, kind).index
                          : 0;
     ensure_tracks_at(kind, static_cast<std::size_t>(lane));
 
-    // Pure audio media (mp3/flac/wav/...): lands as a single audio clip on the
-    // dropped audio lane. Creating a linked video half would put a dead video
-    // clip (no decode) on a video channel, so audio-only media stays audio-only.
     if (audio_only) {
         canvas::core::Clip aclip;
         aclip.media = found->id;
@@ -301,8 +295,6 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
     aclip.src_out = clip.src_out;
     aclip.name = base + " Audio";
 
-    // The linked audio half still needs a home: ensure at least one audio
-    // channel exists (A1), created below the video section when there is none.
     ensure_tracks_at(canvas::core::Track::Kind::Audio, 0);
 
     auto cmd = canvas::core::place_linked_clip(project_->sequence, static_cast<std::size_t>(lane), 0,
@@ -320,9 +312,6 @@ bool MainWindow::place_media_at(canvas::core::MediaId media_id, int64_t frame,
 
 void MainWindow::refresh_media_pool() {
     if (!media_pool_) return;
-    // The Dual-Viewer source preview can point at a pooled entry that just got
-    // removed (or the whole pool rebuilt): drop the stale preview so it can't
-    // read an orphaned snapshot anymore.
     if (src_preview_.has_media() &&
         std::find_if(project_->media.begin(), project_->media.end(),
                      [&](const canvas::core::MediaEntry& m) {
@@ -368,11 +357,6 @@ void MainWindow::refresh_media_pool() {
         media_pool_->addItem(item);
 
         if (m.width <= 0 && m.height <= 0) {
-            // Audio-only media: paint its spectrum (waveform) as the pool
-            // preview so the pool shows the sound rather than a video frame.
-            // Video-bearing files request an actual frame below so the pool
-            // shows the picture, not a spectrum. Ids are namespaced (kPoolThumbNs)
-            // so the timeline's own filmstrip/waveform ids can't land here.
             qWarning().nospace() << "[thumb] pool waveform REQUEST idx=" << i
                                  << " path=" << QString::fromStdString(m.path)
                                  << " (audio-only 240x136)";
@@ -391,8 +375,6 @@ void MainWindow::refresh_media_pool() {
                              << " frame=" << req.frame << " (240x136)";
         thumbnails_.request(req);
         if (m.has_audio) {
-            // Video+audio media get a hybrid tile: the frame top + this
-            // audio-spectrum strip bottom, composed by the tile delegate.
             qWarning().nospace() << "[thumb] pool waveform REQUEST idx=" << i
                                  << " path=" << QString::fromStdString(m.path)
                                  << " (hybrid strip 116x24)";
@@ -429,9 +411,6 @@ void MainWindow::delete_selected_media() {
     }
     if (indices.empty()) return;
 
-    // Clips on the timeline referencing a removed media go with it, and any
-    // linked mate (the audio half of a video+audio pair on a partner track) is
-    // pulled along so no half is left stranded on the timeline.
     std::vector<canvas::core::ClipId> clips;
     const auto collect = [&](std::vector<canvas::core::Track>& tracks, bool linked_pass) {
         for (const auto& t : tracks) {
@@ -446,10 +425,10 @@ void MainWindow::delete_selected_media() {
             }
         }
     };
-    collect(project_->sequence.video_tracks, /*linked_pass=*/false);
-    collect(project_->sequence.audio_tracks, /*linked_pass=*/false);
-    collect(project_->sequence.video_tracks, /*linked_pass=*/true);
-    collect(project_->sequence.audio_tracks, /*linked_pass=*/true);
+    collect(project_->sequence.video_tracks, false);
+    collect(project_->sequence.audio_tracks, false);
+    collect(project_->sequence.video_tracks, true);
+    collect(project_->sequence.audio_tracks, true);
 
     const auto erase_clips = [&](std::vector<canvas::core::Track>& tracks) {
         for (auto& t : tracks) {
@@ -464,8 +443,6 @@ void MainWindow::delete_selected_media() {
     erase_clips(project_->sequence.video_tracks);
     erase_clips(project_->sequence.audio_tracks);
 
-    // Pool entries are indexed by list position; erase high-to-low so the
-    // earlier indices stay valid.
     std::sort(indices.begin(), indices.end());
     for (auto it = indices.rbegin(); it != indices.rend(); ++it)
         project_->media.erase(project_->media.begin() + *it);
@@ -481,7 +458,7 @@ void MainWindow::delete_selected_media() {
 void MainWindow::delete_selected_media_and_clips() {
     delete_selected_media();
     if (timeline_ && !timeline_->selected_clip_ids().empty()) {
-        delete_selected_clip(/*ripple=*/true);
+        delete_selected_clip(true);
     }
 }
 
@@ -490,9 +467,6 @@ void MainWindow::refresh_bin_tree() {
     bin_tree_->blockSignals(true);
     bin_tree_->clear();
     QIcon bin_icon = icon("folder");
-    // The Master bin's icon is the studio's VHS tape (the legacy Event-Horizon
-    // mascot kept in the redesign). It is raster art, so it loads raw rather
-    // than through the tinted SVG engine.
     QIcon master_icon(QStringLiteral(":/icons/vhs.svg"));
 
     auto count_in_bin = [this](const QString& bin) {
@@ -523,7 +497,6 @@ void MainWindow::refresh_bin_tree() {
         item->setFont(1, make_count_font());
     }
     bin_tree_->expandAll();
-    // Re-select the current bin, defaulting to Master.
     QTreeWidgetItem* to_select = master;
     for (int i = 0; i < bin_tree_->topLevelItemCount(); ++i) {
         if (bin_tree_->topLevelItem(i)->data(0, Qt::UserRole).toString() == current_bin_) {
@@ -537,7 +510,6 @@ void MainWindow::refresh_bin_tree() {
 
 void MainWindow::set_current_bin(const QString& bin_name) {
     if (project_ && current_bin_ != bin_name) {
-        // Rebuild the persisted bin list to match the visible tree (Master excluded).
         project_->bins.clear();
         for (int i = 1; i < bin_tree_->topLevelItemCount(); ++i)
             project_->bins.push_back(bin_tree_->topLevelItem(i)->data(0, Qt::UserRole).toString().toStdString());
@@ -548,7 +520,6 @@ void MainWindow::set_current_bin(const QString& bin_name) {
 
 void MainWindow::on_import_media() {
     if (!project_) return;
-    // Seed the browser from the project's media root when it's set and existent.
     QString start_dir;
     const QString media_root = QString::fromStdString(project_->media_root);
     if (!media_root.isEmpty() && QDir(media_root).exists())
@@ -571,9 +542,6 @@ int MainWindow::import_media_paths(const QStringList& paths) {
         std::string error;
         const auto probe_t0 = std::chrono::steady_clock::now();
         canvas::core::VideoDecoder probe;
-        // A stream that is only embedded artwork (mp3/m4a/ogg/flac cover
-        // art — a one-frame attached-picture or single-packet video stream) is
-        // NOT video: treat the file as audio-only so the pool shows a spectrum.
         const bool probe_opened = probe.open(path.toStdString(), &error);
         const bool probe_still = probe_opened && probe.is_still_picture();
         const bool probe_is_video = probe_opened && !probe_still;
@@ -590,13 +558,6 @@ int MainWindow::import_media_paths(const QStringList& paths) {
             entry.bin = current_bin_.toStdString();
             entry.has_audio = probe.has_audio();
 
-            // A fresh (untitled) project starts at the default 30fps; adopt the
-            // first video's own rate so a 60fps clip plays at 60fps cadence
-            // instead of a halved 30fps scrub/present. Guarded to the untouched
-            // sequence (default fps, no media, no placed clips). The default
-            // V1/A1 tracks always exist but are empty, so "untouched" must mean
-            // no clips anywhere — a project whose user picked a rate or already
-            // has media/placed content keeps it.
             const bool any_clips =
                 std::any_of(project_->sequence.video_tracks.begin(),
                             project_->sequence.video_tracks.end(),
@@ -613,8 +574,6 @@ int MainWindow::import_media_paths(const QStringList& paths) {
                                          << " from first media: " << path;
                     if (timeline_) timeline_->set_fps(first_fps);
                     update_fps_label();
-                    // Re-anchor the playback worker on the adopted fps (it caches
-                    // the last snapshot's rate for pacing).
                     push_snapshot(current_frame_);
                 }
             }
@@ -640,11 +599,6 @@ int MainWindow::import_media_paths(const QStringList& paths) {
             continue;
         }
 
-        // No video stream: the file may be a pure audio track (mp3/flac/wav/
-        // ogg/opus/m4a/...). Probe it as audio-only media so it can be placed
-        // directly on an audio lane. Audio has no natural frame rate, so it is
-        // measured at the sequence's frame rate (every consumer of MediaEntry.fps
-        // then agrees on where frames sit in time).
         canvas::core::AudioDecoder aprobe;
         if (aprobe.open(path.toStdString()) && aprobe.has_audio()) {
             const double probe_ms = std::chrono::duration<double, std::milli>(
@@ -687,14 +641,11 @@ int MainWindow::import_media_paths(const QStringList& paths) {
 }
 
 void MainWindow::on_new_project() {
-    // Ask for the project name + media location first; "New Project" is a
-    // real creation flow now, not an untitled placeholder.
     NewProjectDialog dlg(this);
-    if (dlg.exec() != QDialog::Accepted) return;  // stay on the manager
+    if (dlg.exec() != QDialog::Accepted) return;
     const QString name = sanitize_project_name(dlg.project_name());
     const QString media = dlg.media_location();
 
-    // Remember the media root for the next new project too.
     QSettings().setValue(QStringLiteral("mediaRootDir"), media);
 
     if (!ensure_project_roots()) {
@@ -702,7 +653,6 @@ void MainWindow::on_new_project() {
         return;
     }
 
-    // Every project gets its own folder: <root>/<Name>/<Name>.ncs.
     const QString folder = default_projects_root() + QLatin1Char('/') + name;
     QDir().mkpath(folder);
     const QString path = folder + QLatin1Char('/') + name + QStringLiteral(".ncs");
@@ -716,7 +666,6 @@ void MainWindow::on_new_project() {
     refresh_timeline();
     push_snapshot(0);
     setWindowTitle(tr("Nova Canvas Studio — %1").arg(name));
-    // Save immediately so the manager's grid and "recentProjects" see it.
     save_project_to(path);
 }
 
@@ -729,8 +678,6 @@ void MainWindow::on_open_project() {
 }
 
 bool MainWindow::save_project_to(const QString& path) {
-    // Persist the deliver context with the timeline: panel settings + a
-    // snapshot of the current queue (staged, finished cards, failures).
     if (deliver_settings_) project_->deliver_settings = deliver_settings_->settings();
     const auto jobs = render_queue_.jobs();
     project_->render_jobs.clear();
@@ -753,11 +700,37 @@ bool MainWindow::save_project_to(const QString& path) {
     return true;
 }
 
+void MainWindow::maybe_autosave() {
+    if (!project_) return;
+    if (project_path_.isEmpty()) return;
+    if (!has_unsaved_changes_) return;
+
+    const canvas::core::autosave::Policy policy;
+    const std::vector<int> slot_ids = existing_autosave_slots(project_path_);
+    const canvas::core::autosave::Turnover t =
+        canvas::core::autosave::plan_turnover(slot_ids, policy);
+
+    for (const int stale : t.remove_slots) {
+        const QString path =
+            QString::fromStdString(canvas::core::autosave::snapshot_path(
+                project_path_.toStdString(), stale));
+        QFile::remove(path);
+    }
+
+    const std::string snapshot =
+        canvas::core::autosave::snapshot_path(project_path_.toStdString(), t.write_slot);
+    std::string error;
+    if (!canvas::core::save_project(*project_, snapshot, &error)) {
+        qWarning().nospace() << "[proj] AUTOSAVE FAILED slot=" << t.write_slot
+                             << " error=" << QString::fromStdString(error);
+        return;
+    }
+    status_->showMessage(tr("Autosaved (slot %1)").arg(t.write_slot), 4000);
+}
+
 void MainWindow::on_save_project() {
     if (!project_) return;
     if (project_path_.isEmpty()) {
-        // Untitled project (or a project without a file yet): Save acts as
-        // Save As so there's something to write to.
         on_save_project_as();
         return;
     }
@@ -784,16 +757,43 @@ void MainWindow::open_file(const QString& path) {
     std::unique_ptr<canvas::core::Project> loaded = std::make_unique<canvas::core::Project>();
     std::string error;
     if (canvas::core::load_project(*loaded, path.toStdString(), &error)) {
+        const canvas::core::autosave::Policy policy;
+        const std::vector<int> slot_ids = existing_autosave_slots(path);
+        const int recover_slot = canvas::core::autosave::newest_slot(slot_ids, policy);
+        bool recovered = false;
+        if (recover_slot > 0) {
+            const QString snapshot = QString::fromStdString(
+                canvas::core::autosave::snapshot_path(path.toStdString(), recover_slot));
+            if (QMessageBox::question(
+                    this, tr("Recover autosave?"),
+                    tr("A crash-recovery snapshot exists for this project:\n%1\n\n"
+                       "Load it instead of the last saved version?")
+                        .arg(snapshot),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::No) == QMessageBox::Yes) {
+                std::unique_ptr<canvas::core::Project> recovered_project =
+                    std::make_unique<canvas::core::Project>();
+                std::string recover_error;
+                if (canvas::core::load_project(*recovered_project, snapshot.toStdString(),
+                                               &recover_error)) {
+                    loaded = std::move(recovered_project);
+                    recovered = true;
+                    status_->showMessage(tr("Recovered autosave %1").arg(snapshot), 8000);
+                } else {
+                    status_->showMessage(
+                        tr("Autosave could not be loaded (%1)")
+                            .arg(QString::fromStdString(recover_error)),
+                        8000);
+                }
+            }
+        }
         project_ = std::move(loaded);
         undo_.clear();
         has_unsaved_changes_ = false;
+        if (recovered) has_unsaved_changes_ = true;
         project_path_ = path;
         remember_recent_project(path);
         current_bin_.clear();
-        // The Color page's mini-strip caches a raw pointer into the project's
-        // sequence; re-point it now that the old Project (and its Sequence) is
-        // gone, so a repaint on an already-open Color page can't dereference
-        // the freed object.
         if (color_mini_strip_) color_mini_strip_->set_sequence(&project_->sequence);
         media_pool_->clear();
         for (const auto& m : project_->media) {
@@ -803,8 +803,6 @@ void MainWindow::open_file(const QString& path) {
         refresh_media_pool();
         refresh_timeline();
         push_snapshot(0);
-        // Reinstate deliver context: panel settings + the render queue exactly
-        // as it was saved (finished cards keep their completion time).
         if (deliver_settings_) deliver_settings_->set_settings(project_->deliver_settings);
         std::vector<canvas::core::RenderJob> restored;
         restored.reserve(project_->render_jobs.size());
@@ -866,7 +864,6 @@ void MainWindow::on_open_recent_file(QAction* action) {
     if (path.isEmpty()) return;
     if (!QFileInfo::exists(path)) {
         status_->showMessage(tr("Recent project no longer exists: %1").arg(path), 8000);
-        // Drop the stale entry from the list.
         QStringList recent = recent_projects();
         recent.removeAll(path);
         QSettings().setValue(QStringLiteral("recentProjects"), recent);
@@ -900,4 +897,4 @@ void MainWindow::on_redo() {
     push_snapshot();
 }
 
-}  // namespace canvas::gui
+}

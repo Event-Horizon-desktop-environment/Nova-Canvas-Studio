@@ -1,22 +1,3 @@
-// queue_matrix_test — per-queue-family codec operation matrix.
-//
-// Phase 0 reading that pins WHAT runs on WHICH family, per codec, on this
-// machine. The backend's queue plan (locked in docs/vulkan.md) hands each
-// operation a specific family: decode to a video-decode family, encode to a
-// video-encode family, composite to a graphics/compute family, and the whole
-// cross-queue picture shuffles frames between them via timeline semaphores. A
-// machine where e.g. AV1 decode has no family at all can't run Phase P-C's AV1
-// decode path — that test would SKIP and name P-C. This reading documents the
-// matrix those decisions are made from, and fails loudly if the probe's
-// family/operation reports ever contradict each other.
-//
-// PASS (0)  — every device reports at least one decode+encode+compute family
-//             and the per-codec operation bits are internally consistent with
-//             the family flags.
-// FAIL (1)  — probe coherence broke (an operation bit on a family that lacks
-//             the corresponding queue flag, or a codec bit on no family).
-// SKIP (2)  — no Vulkan implementation at all.
-
 #include "vk_probe.hpp"
 
 #include <vulkan/vulkan.h>
@@ -63,7 +44,7 @@ const char* encode_name(std::uint32_t op) {
     }
 }
 
-}  // namespace
+}
 
 int main() {
     const ProbeResult r = run_probe();
@@ -98,7 +79,6 @@ int main() {
             }
         }
 
-        // Coherence: video ops only on families with the video queue flags.
         bool coherent = true;
         for (const auto& q : d.queue_families) {
             const bool video_flag =

@@ -28,33 +28,15 @@ struct AudioDecoder::Impl {
     int channels = 0;
     AVRational tb{0, 1};
 
-    // Position (in *output* sample units = seconds * out_sample_rate) of the
-    // next sample the decoder will produce. Used to decide whether to re-seek.
     int64_t next_sample = 0;
     int current_out_rate = 48000;
 
-    // Persistent decode buffer: `decoded` holds interleaved float PCM produced but
-    // not yet handed to the caller; `decoded_at` is the absolute output-sample
-    // position of decoded[0]. Leftover samples carry between calls so sequential
-    // forward playback decodes continuously instead of re-clipping per call.
     std::vector<float> decoded;
     int64_t decoded_at = 0;
 
-    // True once a forward decode walk hit the physical end of the stream short
-    // of the requested target (`eof_sample` = output-sample position where that
-    // happened). Requests at/behind that position are served as silence instead
-    // of re-seeking from the stream start and re-walking the whole file on every
-    // call — the permanent-silence regression (write_mixed starves for *seconds*
-    // while the device pads).
     bool at_eof = false;
     int64_t eof_sample = 0;
 
-    // Physical end of the stream: av_read_frame reported EOF (or the codec
-    // drained after it). Distinct from `at_eof`, which is the *served* marker:
-    // `stream_eof` records the fact even when a real chunk (the stream's last
-    // frame(s)) is still handed out on the same walk, and never latches from a
-    // mid-stream packet/decoder error. `at_eof` is latched from it whenever a
-    // subsequent call has nothing real left to serve.
     bool stream_eof = false;
     std::uint64_t resync_count = 0;
 
@@ -188,11 +170,6 @@ void AudioDecoder::seek(const int64_t start_sample, const int out_sample_rate) {
         std::llround(start_sample / static_cast<double>(out_sample_rate) * AV_TIME_BASE));
     CANVAS_LOG("audio_decoder: seek sample=%lld us=%lld rate=%d",
            (long long)start_sample, (long long)us, out_sample_rate);
-    // Seek by file-wide timestamp (stream index = -1), matching how the video
-    // decoder seeks. Indexing the audio stream specifically on uncompressed PCM
-    // in Matroska lands at the wrong position and yields silence for far seeks
-    // (observed: 100s seek returned 800 silent frames), though sequential
-    // forward decode of the same region is correct.
     const int seek_ok = avformat_seek_file(impl_->fmt_ctx, -1, INT64_MIN, us, us, 0);
     if (seek_ok < 0 && us != 0) {
         CANVAS_LOG("audio_decoder: seek primary FAILED ret=%d, retrying to 0", seek_ok);
@@ -206,12 +183,7 @@ void AudioDecoder::seek(const int64_t start_sample, const int out_sample_rate) {
     impl_->next_sample = start_sample;
     impl_->current_out_rate = out_sample_rate;
     impl_->decoded.clear();
-    // Anchor the carry buffer at the new target: if decoded_at were left 0 the next
-    // sequential call would compute target >> decoded_end, re-seek to the same
-    // place and serve the same first slice forever (repeating audio instead of
-    // advancing).
     impl_->decoded_at = start_sample;
-    // A real seek re-enters the stream, so a past-EOF state no longer applies.
     impl_->at_eof = false;
     impl_->stream_eof = false;
     impl_->eof_sample = 0;
@@ -222,12 +194,6 @@ void AudioDecoder::reset() {
            (long long)impl_->next_sample,
            (long long)(impl_->decoded.size() / std::max<std::size_t>(1, impl_->channels)),
            (long long)impl_->decoded_at);
-    // FULL rewind to the stream start, not just a codec flush. reset() re-arms
-    // playback at a NEW playhead and the next decode() must serve whatever region
-    // is asked for. Flushing only the codec leaves the DEMUXER where the previous
-    // run ended, so an in-window decode right after the reset would silently
-    // return the previous run's tail while labeling it with the new position.
-    // seek(0) is the one container seek proven reliable for audio demuxing.
     seek(0, 48000);
 }
 
@@ -254,7 +220,7 @@ bool ensure_swr(SwrContext*& swr, const AVCodecContext* c, const int out_rate,
     swr = s;
     return true;
 }
-}  // namespace
+}
 
 AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_frames,
                                    const int out_sample_rate) {
@@ -267,9 +233,6 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
     const int64_t ch = impl_->channels;
     const auto dec_t0 = std::chrono::steady_clock::now();
 
-    // Resample rate / channel config changed -> rebuild the resampler and rewind
-    // to the stream start (the reliable container seek, see resync below) so the
-    // walk re-enters the stream.
     if (impl_->current_out_rate != out_sample_rate) {
         CANVAS_LOG("audio_decoder: decode rate CHANGE %d->%d, rewinding",
                impl_->current_out_rate, out_sample_rate);
@@ -278,26 +241,9 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
 
     const int64_t buffered =
         static_cast<int64_t>(impl_->decoded.size() / static_cast<std::size_t>(ch));
-    // Out-of-window request: the carried buffer plus one decode work unit can't
-    // serve it. Contiguous non-repeating slicing (playback forward, export) asks
-    // for positions inside, or one work unit past, decoded_at+buffered, so never
-    // reaches here. Two request shapes do, and both restart from the stream start
-    // and DECODE-AND-DISCARD forward to the target:
-    //   * backward jumps (real scrubs, a re-anchored playhead rewind)
-    //   * forward jumps to a region the walk hasn't reached (a trimmed head on a
-    //     reset decoder, or a far scrub grab)
-    // Arbitrary forward container seeks are deliberately NOT used: for audio
-    // demuxing avformat_seek_file mis-lands in practice (observed at the file
-    // START — PCM in Matroska — and past the file END — AAC in MP4), yielding
-    // the wrong region or silence. A sequential walk from the start is always
-    // the exact stream content; at ~100x realtime even a multi-minute head costs
-    // only a few hundred milliseconds.
     const bool should_resync =
         target < impl_->decoded_at - std::max<int64_t>(max_frames, buffered) ||
         target >= impl_->decoded_at + std::max<int64_t>(buffered, max_frames);
-    // A walk that already reached EOF at `eof_sample` makes a past-EOF target a
-    // replay of the same dead region: skip the seek(0)+walk entirely and serve
-    // silence from where the decode stands (the fill below can't advance either).
     const bool past_eof_request = impl_->at_eof && target >= impl_->eof_sample;
     if (should_resync) {
         if (past_eof_request) {
@@ -319,10 +265,6 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
         return nullptr;
     }
 
-    // Shared forward-decode driver: pull packets, decode, resample, append PCM to
-    // the buffer until at least `min_frames` are buffered (or the stream ends).
-    // The codec receive/send state machine lives across calls of this lambda so
-    // a resync walk and the final serve share one contiguous decode pass.
     bool flushed = false;
     bool eof = false;
     int ret = AVERROR(EAGAIN);
@@ -353,9 +295,7 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
                 continue;
             }
             if (ret == AVERROR_EOF) {
-                // The codec drained: no more decoded frames will come from it.
                 impl_->stream_eof = true;
-                // Drain any residual resampler delay once.
                 if (!flushed && impl_->swr_ctx) {
                     swr_convert(impl_->swr_ctx, nullptr, 0, nullptr, 0);
                     flushed = true;
@@ -365,7 +305,6 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
             }
             if (ret != AVERROR(EAGAIN)) return;
 
-            // Read the next audio packet.
             for (;;) {
                 const int r = av_read_frame(impl_->fmt_ctx, impl_->packet);
                 if (r < 0) {
@@ -390,8 +329,6 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
         }
     };
 
-    // After a resync, walk forward and DISCARD everything before the requested
-    // position, in bounded work units so no giant intermediate buffer is held.
     if (target > impl_->decoded_at) {
         while (impl_->decoded_at < target && !eof) {
             const int64_t still_need = target - impl_->decoded_at;
@@ -407,9 +344,6 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
                                  impl_->decoded.begin() + static_cast<std::ptrdiff_t>(drop * ch));
             impl_->decoded_at += drop;
             if (drop == 0) {
-                // Physical stream end reached short of the requested target:
-                // record it so later past-EOF requests skip the redundant
-                // seek(0)+walk and are served as silence.
                 impl_->at_eof = true;
                 impl_->eof_sample = impl_->decoded_at;
                 if (log::enabled())
@@ -420,9 +354,6 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
         }
     }
 
-    // Decode forward, appending to the persistent buffer until at least `max_frames`
-    // are ready to serve. Leftover carries to the next call so sequential
-    // playback never stops or re-seeks.
     fill_in(max_frames);
 
     const int64_t available =
@@ -451,19 +382,7 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
         return chunk;
     }
 
-    // Nothing decodeable at/after `decoded_at`: the stream physically ended
-    // short of the requested window (or a packet-level error left the codec
-    // stalled). Returning nullptr here strands the audio pipeline — write_mixed
-    // skips the source, the feed watermark freezes, and playback goes
-    // permanently silent (`wrote=0 ... audible by seconds in the field log')
-    // until a manual seek re-enters the stream. Serve SILENCE instead so the
-    // stream keeps flowing in lockstep with the playhead; real content resumes
-    // on the next seek/resync that lands before the end.
     if (impl_->at_eof || impl_->stream_eof || target > impl_->decoded_at) {
-        // Physical EOF (stream_eof) latches at_eof even on a contiguous
-        // request that reached the codec's end exactly at the frontier
-        // (target == decoded_at) — a whole-file drain chasing the served
-        // position would otherwise keep consuming fabricated silence forever.
         impl_->at_eof = true;
         impl_->eof_sample = impl_->decoded_at;
     }
@@ -484,4 +403,4 @@ AudioChunkPtr AudioDecoder::decode(const int64_t start_sample, const int max_fra
 
 std::uint64_t AudioDecoder::resync_count() const { return impl_->resync_count; }
 
-}  // namespace canvas::core
+}

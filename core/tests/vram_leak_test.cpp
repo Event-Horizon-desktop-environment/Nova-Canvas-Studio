@@ -1,21 +1,3 @@
-// Device-memory (VRAM) leak regression test.
-//
-// Playback holds ~30fps of NVDEC surfaces + host NV12 downloads in flight; a
-// slot or NVDEC pool that fails to return device memory grows VRAM
-// unboundedly until cudaMalloc starts failing with "out of memory" (observed
-// as 1/sec host-nv12-staging nulls that dropped the playhead to the CPU GOP
-// re-walk, and as the full 16GB card being consumed during a session).
-//
-// Reproduces the two allocation patterns playback actually runs, while
-// sampling cudaMemGetInfo between/during phases:
-//   Phase A  steady playback shape: 600 native-res NV12 decodes+downloads.
-//   Phase B  reopen churn: repeated slot close/open (project/jump resets).
-// A leak shows up as the free byte count draining monotonically across the
-// steady-state phase (the FFmpeg surface pool plateaus after warm-up).
-//
-// SKIP (exit 2) when no libx264 (no source) or no CUDA hw decode. Fail exit 1
-// when steady-state free VRAM drops more than kLeakToleranceMiB.
-
 #include "canvas/core/gpu/cuda_convert.hpp"
 #include "canvas/core/media/hw_device.hpp"
 #include "canvas/core/media/video_decoder.hpp"
@@ -48,8 +30,6 @@ static void report(bool ok, const char* what) {
     if (!ok) ++g_failures;
 }
 
-// Encodes `frames` of a moving gradient as h264 MP4 with a keyframe every
-// `gop_frames` frames. 2K1440p mirrors the real media this editor ships.
 static bool make_source(const std::string& path, int w, int h, int fps,
                         int frames, int gop_frames) {
     const AVCodec* codec = avcodec_find_encoder_by_name("libx264");
@@ -135,9 +115,6 @@ static const int kFrames = 700;
 static const int kGopFrames = 250;
 static const int kW = 2560;
 static const int kH = 1440;
-// Steady-state VRAM drain (warm baseline -> post-phase) above which we call
-// it a leak. The FFmpeg NVDEC surface pool plateaus during warm-up; a genuine
-// leak keeps draining every frame and clears this in <5s of playback.
 static constexpr long long kLeakToleranceMiB = 256;
 
 int main() {
@@ -165,19 +142,11 @@ int main() {
         })();
         std::printf("GPU decode active, VRAM total=%lld MiB\n", total);
 
-        // Warm: a few decodes so the NVDEC surface pool (and any one-time
-        // context/pool allocation) reaches its plateau before we measure.
         for (int i = 0; i < 40; ++i)
             dec.decode_to_hw_indexed(i, 0);
         const long long warm_free = vram_free_mib();
         std::printf("warm  free_vram=%lld MiB\n", warm_free);
 
-        // Phase A -- steady playback shape: 600 native-res NV12 decodes +
-        // host downloads, sampled every 40 frames. Leak is a steady-state
-        // SLOPE: the warm-phase baseline already absorbs the one-time context/
-        // pool/staging warm-up (~300MB on a cold CUDA context), so a genuine
-        // per-frame leak shows as the mid-phase baseline draining over the
-        // second half of the phase instead of as an absolute warm-vs-end diff.
         long long min_free = warm_free;
         long long mid_free = warm_free;
         const auto a_t0 = std::chrono::steady_clock::now();
@@ -218,8 +187,6 @@ int main() {
                     warm_free, mid_free, a_free, min_free,
                     a_ms / (600 - 41 + 1));
 
-        // Phase B -- reopen churn: close/reopen is what playhead re-anchors and
-        // project/lookahead resets do; a leaked device context shows here.
         const long long b0 = vram_free_mib();
         for (int r = 0; r < 10; ++r) {
             dec.close();

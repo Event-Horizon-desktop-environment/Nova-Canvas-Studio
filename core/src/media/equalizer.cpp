@@ -1,7 +1,3 @@
-// Equalizer implementation: RBJ Audio EQ Cookbook biquads, 6-band cascade per
-// channel (Direct Form 2 transposed), plus the shared cascade-response helper
-// and the per-clip EqualizerBank. See equalizer.hpp for the design notes.
-
 #include "canvas/core/media/equalizer.hpp"
 #include "canvas/core/util/log.hpp"
 
@@ -16,25 +12,13 @@ namespace canvas::core {
 
 namespace {
 
-// A Bell/Shelf band with |gain| at or below this is treated as an identity
-// filter (skipped), so a flat EQ is a bit-exact pass-through.
 constexpr float kIdentityGainEps = 1e-3f;
 
-// Band frequencies are read into a cascade clamped well below Nyquist so no
-// coefficient degenerates at 0.5*rate (a 20 kHz band on a low-rate export
-// stays a stable real filter).
 constexpr double kCascadeNyquistClamp = 0.45;
 constexpr double kEvaluateNyquistClamp = 0.499;
 
-// RBJ Cookbook amplitude parameter. The cookbook defines A = 10^(dBgain/40)
-// (NOT /20) for peaking/shelving: the center magnitude of a peaking EQ (and
-// the plateau of a shelf) is then A^2 = 10^(dBgain/20), so a band with
-// `gain` = +12 dB genuinely boosts its center by +12 dB — exactly what the
-// Inspector's gain field promises.
 double db_amp(const double gain_db) { return std::pow(10.0, gain_db / 40.0); }
 
-// One normalized RBJ biquad (a0 normalized to 1.0) for a band. `f0` must
-// already be clamped below Nyquist.
 ParametricEqualizer::Coeff build_one(const Clip::EqBand::Type type, const double f0,
                                      const double gain_db, const double q,
                                      const int sample_rate) {
@@ -103,10 +87,6 @@ ParametricEqualizer::Coeff build_one(const Clip::EqBand::Type type, const double
     return {b0 * inv, b1 * inv, b2 * inv, a1 * inv, a2 * inv};
 }
 
-// True iff this band shapes the signal (a Bell/Shelf with meaningful gain, or
-// any fixed-shape filter). A disabled band is always excluded. The cascade is
-// built from exactly these bands in order, so equalizer_response() and
-// configure() can never diverge.
 bool band_filters(const Clip::EqBand& b) {
     if (!b.enabled) return false;
     switch (b.type) {
@@ -140,11 +120,6 @@ std::vector<ParametricEqualizer::Coeff> build_cascade(
     return out;
 }
 
-// Linear interpolation of one biquad's coefficients, used by the mid-stream
-// coefficient glide: all five coefficients slide together, so the filter
-// smoothly morphs from the old curve to the new one over kGlideFrames rather
-// than snapping (a hard b0 step while the filter is fed by carried DF2T state
-// is exactly the residual click a state carry alone cannot remove).
 ParametricEqualizer::Coeff lerp_coeffs(const ParametricEqualizer::Coeff& from,
                                        const ParametricEqualizer::Coeff& to, const float t) {
     return {from.b0 + (to.b0 - from.b0) * t, from.b1 + (to.b1 - from.b1) * t,
@@ -152,18 +127,13 @@ ParametricEqualizer::Coeff lerp_coeffs(const ParametricEqualizer::Coeff& from,
             from.a2 + (to.a2 - from.a2) * t};
 }
 
-}  // namespace
+}
 
 bool ParametricEqualizer::configure(const int sample_rate, const int channels,
                                     const std::array<Clip::EqBand, 6>& bands) {
     const std::vector<Coeff> target = build_cascade(bands, sample_rate);
     channels_ = std::max(channels, 1);
     const std::size_t n = target.size() * static_cast<std::size_t>(channels_);
-    // Carry existing DF2T delay values where the new geometry overlaps (same
-    // cascade stage + same channel) and zero the rest, instead of hard-zeroing
-    // everything. A live band edit (Inspector drag while playback streams)
-    // reconfigures mid-stream: a cold zero initial state makes the first
-    // filtered sample jump to ~b0*x (a click / static per dragged commit).
     const std::size_t keep = std::min({z1_.size(), z2_.size(), n});
     std::vector<float> z1_new(n, 0.0f), z2_new(n, 0.0f);
     if (keep > 0) {
@@ -172,11 +142,6 @@ bool ParametricEqualizer::configure(const int sample_rate, const int channels,
     }
     z1_ = std::move(z1_new);
     z2_ = std::move(z2_new);
-    // Coefficient glide: coeffs_ keeps the cascade currently in effect (the
-    // "from" end, so the boundary sample is continuous), glide_to_ the target
-    // curve. process() interpolates stage-for-stage over kGlideFrames. Fresh
-    // configure (no prior cascade, or a stage-count change that can't slide) /
-    // geometry change snap straight to the target.
     if (!coeffs_.empty() && target.size() == coeffs_.size()) {
         glide_from_ = coeffs_;
         glide_to_ = target;
@@ -196,12 +161,7 @@ void ParametricEqualizer::process(float* const samples, const int num_frames) {
     if (coeffs_.empty() || samples == nullptr || num_frames <= 0 || channels_ <= 0) return;
     const int ch = channels_;
     const std::size_t stages = coeffs_.size();
-    if (stages != glide_to_.size() && glide_left_ > 0) glide_left_ = 0;  // safety
-    // Frame-major cascade: for each interleaved frame, run all stages in
-    // sequence over that frame's channels, then step the coefficient glide.
-    // Frame-major (rather than stage-major) is required once coefficients
-    // change mid-buffer — a stage-major pass would apply the glided b to the
-    // whole block at once instead of per frame.
+    if (stages != glide_to_.size() && glide_left_ > 0) glide_left_ = 0;
     int f = 0;
     while (f < num_frames) {
         if (glide_left_ > 0) {
@@ -238,9 +198,6 @@ void ParametricEqualizer::process(float* const samples, const int num_frames) {
 void ParametricEqualizer::reset() {
     std::fill(z1_.begin(), z1_.end(), 0.0f);
     std::fill(z2_.begin(), z2_.end(), 0.0f);
-    // A hard reset also cancels any in-flight coefficient glide — after a
-    // seek/rewind the curve should be the configured target, exactly like a
-    // fresh construct.
     glide_left_ = 0;
     glide_from_.clear();
     glide_to_.clear();
@@ -272,7 +229,7 @@ double equalizer_response(const std::array<Clip::EqBand, 6>& bands, const int sa
 double equalizer_band_response(const Clip::EqBand& band, const int sample_rate,
                                const double frequency) {
     if (sample_rate <= 0 || frequency <= 0.0) return 0.0;
-    if (!band_filters(band)) return 0.0;  // disabled / identity band
+    if (!band_filters(band)) return 0.0;
     const double w = 2.0 * M_PI *
                      std::clamp(frequency, 1.0,
                                 kEvaluateNyquistClamp * static_cast<double>(sample_rate)) /
@@ -296,25 +253,6 @@ int EqualizerBank::tick(const std::uint64_t clip_id, const std::array<Clip::EqBa
                         const bool enabled, const int sample_rate, const int channels,
                         float* const samples, const int num_frames) {
     if (!enabled) {
-        // Pass through untouched, but KEEP the per-clip filter entry — the
-        // DF2T delay state, the glide, and the configured cascade all survive
-        // a toggle-off/on. Resuming the filter from its carried state is
-        // sample-continuous; erasing here would cold-start a zero-state filter
-        // whose first post-toggle sample jumps to ~b0*x — a click/static per
-        // toggle (same reason configure() carries state across mid-stream band
-        // edits). This is the reference EQ-bank behavior: FreeEQ8's
-        // beginBlock()/process() early-return while a band is disabled and only
-        // reset()/prepareToPlay() clears state. A seek/rewind still calls
-        // drop() (the caller's contract) to clear state on genuinely
-        // discontinuous audio.
-        //
-        // The disable EDGE is still a hard one-sample switch of the MIX — the
-        // last shaped sample and the first raw sample handed downstream are
-        // ~b0*x+state apart, which the toggle probe measured as the audible
-        // "boom". So the settle-to-dry is GLIDED over kGlideFrames (blending
-        // shaped -> raw while feeding the filter so the carried state stays
-        // current); once wet_ hits 0 the clip is a byte-exact pass-through and
-        // the filter consumes nothing until the next enable.
         const auto it = entries_.find(clip_id);
         if (it != entries_.end() && it->second.enabled) {
             it->second.enabled = false;
@@ -323,19 +261,19 @@ int EqualizerBank::tick(const std::uint64_t clip_id, const std::array<Clip::EqBa
                                 it->second.channels);
         }
         if (it == entries_.end() || it->second.wet_ == 0.0f)
-            return num_frames;  // never-filtered or settled dry: byte-exact pass-through
+            return num_frames;
         if (!it->second.eq.active()) {
-            it->second.wet_ = 0.0f;  // flat EQ: blend is identity, settle instantly
+            it->second.wet_ = 0.0f;
             return num_frames;
         }
         if (samples == nullptr || num_frames <= 0) {
-            it->second.wet_ = 0.0f;  // no input to blend against; snap dry
+            it->second.wet_ = 0.0f;
             return num_frames;
         }
         Entry& entry = it->second;
         entry.scratch_.assign(samples,
                               samples + static_cast<std::size_t>(num_frames) * channels);
-        entry.eq.process(samples, num_frames);  // keep the carried state fed
+        entry.eq.process(samples, num_frames);
         glide_to(entry, 0.0f, samples, channels, num_frames);
         return num_frames;
     }
@@ -355,24 +293,16 @@ int EqualizerBank::tick(const std::uint64_t clip_id, const std::array<Clip::EqBa
         entry.channels = channels;
         (void)entry.eq.configure(sample_rate, channels, bands);
     } else if (!entry.enabled) {
-        // Re-enabled with the SAME config: a toggle-on that reuse()'s the kept
-        // entry. Log it separately from the fresh "enable" above so every
-        // on/off flip is visible in canvas-Audio.log at the exact mix-tick
-        // boundary where the filter actually resumed from its carried state.
         log::log_audio_info("[eq] enable clip=%llu rate=%d ch=%d bands=%d (resume from "
                             "carried DF2T state)",
                             static_cast<unsigned long long>(clip_id), sample_rate, channels, 6);
     }
     entry.enabled = true;
     if (samples == nullptr || num_frames <= 0 || !entry.eq.active()) {
-        entry.wet_ = 1.0f;  // flat EQ is a byte-exact pass-through; settle the mix
+        entry.wet_ = 1.0f;
         return num_frames;
     }
     if (entry.wet_ < 1.0f) {
-        // Dry->wet glide on a fresh enable or resume: snap the raw input, then
-        // blend wet*processed + (1-wet)*raw over the first kGlideFrames so the
-        // first shaped sample does not jump away from the raw PCM the mix was
-        // hearing (the other half of the toggle boom).
         entry.scratch_.assign(samples,
                               samples + static_cast<std::size_t>(num_frames) * channels);
         entry.eq.process(samples, num_frames);
@@ -380,9 +310,6 @@ int EqualizerBank::tick(const std::uint64_t clip_id, const std::array<Clip::EqBa
     } else {
         entry.eq.process(samples, num_frames);
     }
-    // Diagnostic: NaN/Inf or implausible output from the EQ is invisible to the
-    // mix-peak log (that one folds NaN away via std::max), so scan here, where
-    // the filter boundary is the only thing that can have produced it.
     float peak = 0.0f;
     bool nonfinite = false;
     int bad_at = -1;
@@ -434,23 +361,6 @@ void EqualizerBank::glide_to(Entry& entry, const float target, float* const samp
 void EqualizerBank::drop() {
     for (auto& kv : entries_) {
         kv.second.eq.reset();
-        // eq.reset() just cold-started the filter's IIR state (z1/z2 -> 0), so
-        // the entry's wet mix must go back to 0 REGARDLESS of its pre-seek
-        // enabled state. This used to snap wet_ straight to 1.0 for an already-
-        // enabled clip ("resume already-settled") — but that skipped the
-        // dry->wet glide entirely on the very next tick, handing the freshly-
-        // reset filter's own cold-start transient to the output at full
-        // strength with zero blending. A resonant/cutting band (HighPass,
-        // Notch, LowShelf, a high-Q Bell) can overshoot 10-40x its steady-state
-        // level for the first few ms out of a cold state, and a Bell/gentle
-        // curve only overshoots slightly — which is exactly the loud-vs-quiet
-        // "pop on random startup" bug: ANY seek+resume (including a plain
-        // press-Play from a fresh position, which re-anchors and calls this)
-        // cold-resets the filter, and the enabled branch then skipped the
-        // glide because wet_ was already pinned at 1.0. Leaving wet_ at 0
-        // makes the next enabled tick() retrace the exact same protected
-        // dry->wet path as a first-time enable, so the resumed audio is
-        // blended in instead of exposing the raw cold-start transient.
         kv.second.wet_ = 0.0f;
     }
 }
@@ -459,9 +369,9 @@ void EqualizerBank::drop(const std::uint64_t clip_id) {
     const auto it = entries_.find(clip_id);
     if (it == entries_.end()) return;
     it->second.eq.reset();
-    it->second.wet_ = 0.0f;  // see drop() above: always re-glide after a cold reset
+    it->second.wet_ = 0.0f;
 }
 
 void EqualizerBank::clear() { entries_.clear(); }
 
-}  // namespace canvas::core
+}

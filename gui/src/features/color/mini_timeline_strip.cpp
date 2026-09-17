@@ -25,9 +25,6 @@ constexpr int kMaxBoxHeight = 200;
 
 QPixmap scaled_fit(const QImage& img, int w, int h) {
     if (w <= 0 || h <= 0 || img.isNull()) return QPixmap();
-    // Show the whole frame, never a crop: scale inside the box (KeepAspectRatio)
-    // and center on a transparent canvas so the strip's box border reads, and no
-    // part of the picture is cut off.
     const QImage scaled =
         img.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     QPixmap canvas(w, h);
@@ -38,7 +35,7 @@ QPixmap scaled_fit(const QImage& img, int w, int h) {
     return canvas;
 }
 
-}  // namespace
+}
 
 MiniTimelineStrip::MiniTimelineStrip(QWidget* parent) : QWidget(parent) {
     setMinimumHeight(40);
@@ -82,11 +79,6 @@ void MiniTimelineStrip::set_media_paths(
 void MiniTimelineStrip::set_thumbnail_service(ThumbnailService* service) {
     thumbnail_service_ = service;
     if (service) {
-        // Queued always: the service emits from WORKER threads AND reentrantly
-        // from submit() (memory-cache hits on the caller's thread). A direct
-        // delivery into request_clip_thumbnails()' loop re-entered the strip
-        // mid-scan; queuing routes every delivery through the event loop so the
-        // handler always runs with the request loop unwound.
         connect(service, &ThumbnailService::thumbnail_ready, this,
                 &MiniTimelineStrip::on_thumbnail_ready, Qt::QueuedConnection);
     }
@@ -149,8 +141,6 @@ int64_t MiniTimelineStrip::total_frames() const {
 
 namespace {
 
-// Shared geometry helper: computes the box layout the strip uses for painting
-// and hit-testing. Returns false when there is nothing to draw.
 bool strip_box_layout(const canvas::core::Sequence* seq, int width, int height,
                       int& n, int& bw, int& bh, int& top, double& box_w,
                       int64_t& first_in, int64_t& last_out) {
@@ -186,7 +176,7 @@ bool strip_box_layout(const canvas::core::Sequence* seq, int width, int height,
     return true;
 }
 
-}  // namespace
+}
 
 bool MiniTimelineStrip::scrub_frame_at(const QPointF& pos, int64_t& clip_owner,
                                        int64_t& out_frame) const {
@@ -216,8 +206,6 @@ bool MiniTimelineStrip::scrub_frame_at(const QPointF& pos, int64_t& clip_owner,
         x += bw + kBoxGap;
     }
 
-    // A gap, or beyond the last box: scrub across the whole clip span so the
-    // playhead still tracks the pointer.
     const double span_w = static_cast<double>(width()) - kStripMargin * 2;
     const double t = std::clamp((xp - kStripMargin) / span_w, 0.0, 1.0);
     out_frame = first_in + static_cast<int64_t>(std::llround(t * (last_out - first_in)));
@@ -252,7 +240,6 @@ double MiniTimelineStrip::frame_to_strip_x(int64_t frame) const {
         return x + t * bw;
     }
 
-    // Outside any clip: proportional to the whole span.
     const double span_w = static_cast<double>(width()) - kStripMargin * 2;
     const double t = std::clamp(
         static_cast<double>(frame - first_in) / std::max<int64_t>(1, last_out - first_in),
@@ -262,10 +249,6 @@ double MiniTimelineStrip::frame_to_strip_x(int64_t frame) const {
 
 void MiniTimelineStrip::on_thumbnail_ready(uint64_t request_id, const QImage& image) {
     if (image.isNull()) return;
-    // Namespace gate: the timeline/pool/project/source-preview ids posted by
-    // other consumers ride the same service; only ids this strip assigned may
-    // populate its boxes. Without it a numerically-equal timeline cell id
-    // overwrote a clip's thumb here.
     if (!is_mini_strip_thumb_id(request_id)) return;
     const auto it = request_clip_.find(request_id);
     if (it == request_clip_.end()) return;
@@ -286,7 +269,6 @@ void MiniTimelineStrip::paintEvent(QPaintEvent* event) {
         return;
     }
 
-    // Last video track wins the strip (top-most on-screen clip content).
     const canvas::core::Track* strip_track = nullptr;
     for (const auto& track : sequence_->video_tracks) {
         if (!track.clips.empty()) strip_track = &track;
@@ -297,7 +279,6 @@ void MiniTimelineStrip::paintEvent(QPaintEvent* event) {
         return;
     }
 
-    // 16:9 boxes, sized to fit all clips.
     const int body_h = std::max(16, static_cast<int>(height()) - kStripMargin * 2);
     const int box_h = std::min(kMaxBoxHeight, body_h);
     const double box_w = box_h * 16.0 / 9.0;
@@ -346,17 +327,6 @@ void MiniTimelineStrip::paintEvent(QPaintEvent* event) {
         ++idx;
     }
 
-    // Playhead over the clip that currently owns the playhead frame.
-    int64_t ph_frame = playhead_;
-    const canvas::core::Clip* active = nullptr;
-    for (const auto& clip : strip_track->clips) {
-        if (ph_frame >= clip.tl_in && ph_frame < clip.tl_out) {
-            active = &clip;
-            break;
-        }
-    }
-
-    // Playhead line follows the actual playhead frame (drags when scrubbing).
     const double phx = frame_to_strip_x(playhead_);
     const QPointF ph(phx, top - 2.0);
     p.setPen(QPen(t.playhead, 1.8));
@@ -376,8 +346,6 @@ void MiniTimelineStrip::mousePressEvent(QMouseEvent* event) {
     scrub_owner_clip_ = owner;
     playhead_ = frame;
     update();
-    // Always-on scrub lifecycle trace: begin + the grabbed clip tell the page
-    // log reader that the strip asserted itself (vs a passive wheel drag).
     qWarning().nospace()
         << "[grade] ministrip scrub-begin frame=" << frame
         << " clip=" << owner;
@@ -423,4 +391,4 @@ void MiniTimelineStrip::mouseReleaseEvent(QMouseEvent* event) {
     QWidget::mouseReleaseEvent(event);
 }
 
-}  // namespace canvas::gui
+}

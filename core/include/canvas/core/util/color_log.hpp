@@ -1,28 +1,5 @@
 #pragma once
 
-// Always-on color/grade diagnostics sink for Nova Canvas Studio.
-//
-// A dedicated, SEPARATE log from canvas_debug.log: <home>/studio/color.log
-// (override the path with CANVAS_COLOR_LOG_FILE). It captures the COLOR
-// information the app gathers and the GRADING changes it applies, and unlike
-// CANVAS_LOG it is NOT gated on CANVAS_DEBUG/CANVAS_PLAYBACK_DEBUG — every
-// call writes unconditionally, so a default run already documents:
-//
-//   * per-media color spec resolution (declared tags vs the full-range probe
-//     verdict), the "gather color info before anything changes" baseline;
-//   * the pre-change color snapshot taken before a wheel/curve/tone-field
-//     grade is committed, so the before/after of every grading action is
-//     reconstructable;
-//   * the grade changes themselves (commit / live preview / reset-all) with
-//     the sequence token that ties them to the canvas_debug.log chain
-//     (commit -> bake -> upload -> draw);
-//   * the scope analysis path's matrix/range at every source-spec change.
-//
-// The file APPENDS across launches (unlike canvas_debug.log, which main.cpp
-// truncates): color.log is an archive of color-state history, so each run is
-// delimited by a [session start] line at the head. Qt-free (core/ invariant),
-// thread-safe, flushed per line.
-
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
@@ -64,7 +41,6 @@ inline const char* color_log_path() {
     return path;
 }
 
-// Unconditional color/grade line: `[HH:MM:SS.mmm] e=<epoch_ms> <msg>`.
 inline void color_log(const char* fmt, ...) {
     static std::mutex m;
     std::lock_guard<std::mutex> lk(m);
@@ -109,8 +85,6 @@ inline void color_log(const char* fmt, ...) {
     std::fflush(f);
 }
 
-}  // namespace canvas::core::log
+}
 
-// Format-and-write a color/grade archive line (always-on, no gate). Usage:
-//     CANVAS_COLOR_LOG("[media] open path=%s resolved matrix=%s range=%s", ...)
 #define CANVAS_COLOR_LOG(fmt, ...) ::canvas::core::log::color_log(fmt, ##__VA_ARGS__)

@@ -1,16 +1,5 @@
 #pragma once
 
-// CDL (ASC Color Decision List) math law. Header-only / Qt-free, same culture
-// as audio_mix.hpp. Secondary correction model used by the CDL wheel page and
-// the LGG<->CDL readout. See color-wheels-grading-math-spec.md (CDL page).
-//
-//   out = ( slope * in + offset ) ^ power     (per channel, base clamped >= 0)
-//   then Rec.709 luma-weighted saturation applied to the pow'd result.
-//
-// Closed-form LGG<->CDL conversion exists only for lift == 0 (see
-// cdl_from_lgg); a non-zero lift has no closed-form CDL equivalent, so the
-// conversion reports exact = false rather than approximating silently.
-
 #include <algorithm>
 #include <cmath>
 
@@ -27,7 +16,7 @@ struct Cdl {
 
 [[nodiscard]] inline float cdl_channel(float in, float slope, float offset, float power) noexcept {
     const float base = slope * in + offset;
-    if (base <= 0.0f) return 0.0f;  // clamp lower bound before the fractional power
+    if (base <= 0.0f) return 0.0f;
     return std::pow(base, std::clamp(power, 0.1f, 10.0f));
 }
 
@@ -41,19 +30,14 @@ struct Cdl {
 
 struct CdlConversion {
     Cdl cdl;
-    bool exact;  // false when the source LGG had a non-zero lift
+    bool exact;
 };
 
-// LGG -> CDL. With lift == 0 the algebra collapses exactly:
-//   LGG: (g * x)^(1/gamma)  ==  CDL: (s*x + o)^p  with s=g, o=0, p=1/gamma.
-// Any non-zero lift makes the forms incommensurate; we still emit the best
-// scale/shape match (same gain/gamma, lift dropped) but flag exact = false.
 [[nodiscard]] inline CdlConversion cdl_from_lgg(const LGG& p) noexcept {
     CdlConversion conv;
     conv.cdl.slope_r = p.gain_master * p.gain_r;
     conv.cdl.slope_g = p.gain_master * p.gain_g;
     conv.cdl.slope_b = p.gain_master * p.gain_b;
-    // CDL power is the raw exponent; LGG uses (1/gamma).
     conv.cdl.power_r = 1.0f / (p.gamma_master * p.gamma_r);
     conv.cdl.power_g = 1.0f / (p.gamma_master * p.gamma_g);
     conv.cdl.power_b = 1.0f / (p.gamma_master * p.gamma_b);
@@ -67,4 +51,4 @@ struct CdlConversion {
     return conv;
 }
 
-}  // namespace canvas::core::colorsci
+}

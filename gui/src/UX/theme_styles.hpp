@@ -1,10 +1,5 @@
 #pragma once
 
-// App-specific chrome: the per-widget stylesheets that layer token variants on
-// top of the global flat-controls sheet and HorizonStyle. Each helper reads
-// the active tokens at call time (see UX/theme_tokens.hpp) and is applied to
-// individual widgets via apply_theme_style.
-
 #include <QString>
 
 namespace canvas::gui {
@@ -37,4 +32,4 @@ QString outline_pill_style();
 QString slider_style();
 QString transport_play_style();
 
-}  // namespace canvas::gui
+}

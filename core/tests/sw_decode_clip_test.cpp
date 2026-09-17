@@ -1,22 +1,3 @@
-// Real-clip SOFTWARE decode test. Unlike the synthetic sw_decode_test (gray
-// YUV frames only), this drives the actual VideoDecoder in software mode
-// (open with null hw device ctx -> pure CPU) over genuine photo-real AV1
-// footage so the whole fetch pipeline — container open, stream probe,
-// sequential forward walk, I-frame index, indexed seeks, and the swscale RGBA
-// convert with its aligned-stride law — is exercised end to end on real media.
-//
-// Media requirement: the test source is the user's 1440p60 AV1 clip
-//   /home/matt/Videos/clips/2026-09-14 09-12-48.mkv  (2560x1440, 60 fps,
-//   ~40,920 frames over 682 s) — overridable via CANVAS_TEST_CLIP exactly like
-//   the vaapi encode tests do. When the clip is missing the test SKIPs (exit
-//   2, the suite-wide skip convention), it does not fail.
-//
-// Speed-vs-quality budget: the full 682 s reel is ~41k frames; decoding all of
-// it in software sells the "fast" half of the ask. So this walk is bounded —
-// a short head window plus scattered seeks to head/middle/tail tap points —
-// which still proves frame-accurate seeks, non-black content, dims/fps laws,
-// and per-path decode timing without becoming a 10-minute CI job.
-
 #include "canvas/core/media/video_decoder.hpp"
 
 #include "vaapi_test_common.hpp"
@@ -66,12 +47,11 @@ int64_t sample_lit_luma(const VideoFrame& fr, int step, int thresh) {
     return lit;
 }
 
-}  // namespace
+}
 
 int main() {
     const std::string path = default_clip_path();
 
-    // ---- 1. Probe the real clip: dims / fps / duration / frame count -------
     vaapi_test::TestClip pr = vaapi_test::probe_clip(path);
     check(pr.valid(), "real clip probes valid");
     if (!pr.valid()) {
@@ -85,10 +65,6 @@ int main() {
     std::printf("       clip: %dx%d @ %.2f fps, ~%" PRId64 " frames\n", pr.width,
                 pr.height, pr.fps, static_cast<int64_t>(pr.total_frames));
 
-    // ---- 2. Software decode: head window + metadata laws --------------------
-    // Open through the soft path (null device context -> software only) and
-    // walk a short head window, checking the output carries content (not
-    // black) and lands at the probe's dims.
     {
         VideoDecoder dec;
         std::string err;
@@ -103,16 +79,13 @@ int main() {
               "soft dims match probe (2560x1440)");
         check(std::fabs(dec.frame_rate() - 60.0) < 0.01, "soft fps ~= 60");
 
-        // Read a bounded head window via the sequential path.
         int64_t frames = 0;
-        int64_t lit_luma = 0;  // sampler across the window
+        int64_t lit_luma = 0;
         int nonblack = 0;
-        for (int64_t i = 0; i < 180; ++i) {  // 3 s head window @ 60 fps
+        for (int64_t i = 0; i < 180; ++i) {
             VideoFramePtr fr = dec.decode_next();
             if (!fr) break;
             ++frames;
-            // Luma content gauge on the RGBA output: real footage is genuine
-            // photo (never all-black frames).
             if (sample_lit_luma(*fr, 8, 16) > 0) ++nonblack;
             lit_luma += sample_lit_luma(*fr, 32, 16);
         }
@@ -125,28 +98,22 @@ int main() {
         dec.close();
     }
 
-    // ---- 3. Scattered indexed seeks across the reel --------------------------
-    // Build the I-frame index and anchor-seek to head / middle / tail taps,
-    // verifying each lands at a frame near the tap and decodes content.
     {
         VideoDecoder dec;
         std::string err;
         if (!dec.open(path, &err, nullptr)) return 2;
 
-        // Middle / tail taps are fractions of the decoded reel.
         const double total = static_cast<double>(pr.total_frames);
         const int64_t taps[3] = {
-            300,                                     // head
-            static_cast<int64_t>(total * 0.45),      // ~middle
-            static_cast<int64_t>(total * 0.85),      // ~tail
+            300,
+            static_cast<int64_t>(total * 0.45),
+            static_cast<int64_t>(total * 0.85),
         };
         dec.build_iframe_index();
         for (const int64_t tap : taps) {
             VideoFramePtr fr = dec.seek_to_frame_indexed(tap);
             check(fr != nullptr, "indexed seek to tap lands a frame");
             if (fr) {
-                // Taps are off-keyframe; the index seek should land at or
-                // slightly before, never far past.
                 const int64_t landed = fr->frame_number;
                 check(landed >= 0 && landed <= tap + 240,
                       "indexed seek lands at-or-before tap (+1 GOP tolerance)");
@@ -157,9 +124,6 @@ int main() {
         dec.close();
     }
 
-    // ---- 4. Seek-time budget (quality gate) ---------------------------------
-    // A software AV1 seek should land in well under 2 s even far across the
-    // reel; this is the "fast" half of the fast-but-quality ask.
     {
         VideoDecoder dec;
         std::string err;

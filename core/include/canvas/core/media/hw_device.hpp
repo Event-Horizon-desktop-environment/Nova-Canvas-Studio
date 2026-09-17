@@ -8,54 +8,22 @@ extern "C" {
 
 namespace canvas::core {
 
-// Result of probing/creating a hardware decode device. `device_ctx` may be
-// null when no usable hardware acceleration is available (e.g. no GPU/driver),
-// in which case the caller should fall back to software decoding.
-// A single instance should be shared app-wide so every decoder reuses the same
-// GPU device instead of creating one per decode session.
 class HwDeviceManager {
 public:
-    // `owner` names the subsystem that created this manager (e.g. "playback",
-    // "thumbs", "render", "main") so the probe/teardown census in the log can
-    // attribute which client created (and destroyed) a CUDA context. A fresh
-    // ~300ms "cuda: selected" probe spiking mid-session points at whatever owner
-    // is constructing new managers on that path. Default is empty (unknown).
     explicit HwDeviceManager(const char* owner = nullptr);
     ~HwDeviceManager();
     HwDeviceManager(const HwDeviceManager&) = delete;
     HwDeviceManager& operator=(const HwDeviceManager&) = delete;
 
-    // Lazily create a shared hardware device, probing the requested device
-    // types (in order) and returning the first one that initializes on this
-    // machine. Falls back to software (device_ctx == nullptr) if none work.
     const AVBufferRef* device_ctx() const;
 
-    // Human-readable device type string (e.g. "cuda", "vaapi", "qsv",
-    // "vulkan") or an empty string when software decoding. Useful for logging.
     [[nodiscard]] const std::string& device_name() const { return device_name_; }
-    // Physical GPU the selected device belongs to ("AMD Radeon (Granite
-    // Ridge)" / "NVIDIA GeForce RTX 5070 Ti"), or "" when software decode or
-    // the backend cannot be resolved to a known GPU name. Lets the decode
-    // logs name the actual hardware, not just the generic backend.
     [[nodiscard]] const std::string& device_label() const { return device_label_; }
     [[nodiscard]] bool is_hardware() const { return device_ctx_ != nullptr; }
 
-    // Preferred hardware decode backend, honored by every probe on this
-    // process. "" = the default order (cuda, vaapi, qsv, vulkan); one of
-    // "cuda"/"vaapi"/"qsv"/"vulkan" pins that type first (the rest stay as
-    // fallbacks); "software" disables hardware decode entirely. Set once at
-    // startup from the persisted preference (main.cpp); not thread-safe — call
-    // before any device_ctx() probe creates the device.
     static void set_preferred_backend(const std::string& backend);
     [[nodiscard]] static const std::string& preferred_backend();
 
-    // Optionally pin a specific GPU behind the backend: `device_arg` is the
-    // device string passed to av_hwdevice_ctx_create() for the pinned type —
-    // a DRM render node path ("/dev/dri/renderD128") for vaapi, a CUDA device
-    // ordinal ("0") for cuda. It only applies to the backend it was set with;
-    // all other probed types still fall through with the FFmpeg default device.
-    // Empty device_arg with a backend = backend-only pin (current behavior).
-    // `backend` must be one of "cuda"/"vaapi"/"qsv"/"vulkan" (not ""/"software").
     static void set_preferred_gpu(const std::string& backend,
                                   const std::string& device_arg);
     [[nodiscard]] static const std::string& preferred_device_arg();
@@ -71,4 +39,4 @@ private:
     std::string owner_;
 };
 
-}  // namespace canvas::core
+}

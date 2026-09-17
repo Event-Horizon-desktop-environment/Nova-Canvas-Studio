@@ -1,10 +1,3 @@
-// Phase 4 tests for the headless wheel-panel controller (colorsci/wheels_ui).
-// Verifies the pagination state machine, the wheel puck->offset + master-slider
-// mapping laws, the Log zero-overlap band partition, HDR zone weighting, the
-// CDL<->LGG interchange inverse, and a full panel->grade-graph params round-trip
-// (the same interaction the GUI panel performs, headlessly). Links only
-// canvas_core.
-
 #include "canvas/core/colorsci/wheels_ui.hpp"
 #include "canvas/core/grade_graph/graph.hpp"
 #include "canvas/core/grade_graph/serialize.hpp"
@@ -67,14 +60,12 @@ void test_pagination() {
 }
 
 void test_master_law() {
-    // Identity sits exactly at mid; bounds at 0/1.
     check(near(cs::master_to_value(0.5f, -1.0f, 1.0f, 0.0f), 0.0f), "master 0.5 -> mid (lift)");
     check(near(cs::master_to_value(0.0f, -1.0f, 1.0f, 0.0f), -1.0f), "master 0 -> lo");
     check(near(cs::master_to_value(1.0f, -1.0f, 1.0f, 0.0f), 1.0f), "master 1 -> hi");
     check(near(cs::master_to_value(0.5f, 0.25f, 4.0f, 1.0f), 1.0f), "master 0.5 -> gamma identity");
     check(near(cs::master_to_value(0.25f, 0.0f, 2.0f, 1.0f), 0.5f), "master .25 -> gain quarter");
 
-    // Inverse round-trips and clamps out-of-range values.
     check(near(cs::value_to_master(cs::master_to_value(0.3f, -1.0f, 1.0f, 0.0f), -1.0f, 1.0f, 0.0f),
                0.3f),
           "master_to_value then value_to_master round-trips");
@@ -94,42 +85,33 @@ void test_scaled_wheel_offset() {
 void test_primaries_wheel_apply() {
     cs::WheelPanelState s;
 
-    // Lift wheel: full-right puck, master at neutral -> the LGG lift terms take
-    // exactly the puck offsets (scaled to the wheel's colorist reach), master
-    // stays 0.
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kLift, 1.0f, 0.0f, 0.5f);
     check(near(s.lgg.lift_r, 0.20f) && near(s.lgg.lift_g, -0.10f),
           "lift wheel writes puck offsets");
     check(near(s.lgg.lift_master, 0.0f), "lift wheel keeps master neutral at 0.5");
     check(lgg_near(cs::LGG{}, s.lgg) == false, "lift wheel actually changed the LGG");
 
-    // Master-only: puck at center, slider to 25% -> master midpoint, offsets zeroed.
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kLift, 0.0f, 0.0f, 0.25f);
     check(near(s.lgg.lift_master, cs::master_to_value(0.25f, cs::kLiftLo, cs::kLiftHi, 0.0f)),
           "lift wheel master slider drives lift_master");
     check(near(s.lgg.lift_r, 0.0f), "center puck zeroes per-channel lift");
 
-    // Gamma wheel: offsets are 1-centered, master is multiplicative.
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kGamma, 0.5f, 0.0f, 0.5f);
     check(near(s.lgg.gamma_r, 1.0f + 1.0f), "gamma wheel puts puck offset above 1");
     check(near(s.lgg.gamma_master, 1.0f), "gamma wheel master neutral at 0.5");
 
-    // Gain wheel composed with the master: gain_* = 1 + offset.
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kGain, 1.0f, 0.0f, 0.5f);
     check(near(s.lgg.gain_r, 2.0f) && near(s.lgg.gain_b, 0.5f), "gain wheel writes 1+offsets");
 
-    // Offset wheel: flat additive channel terms (scaled reach) + master.
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kOffset, 1.0f, 0.0f, 0.5f);
     check(near(s.offset.r, 0.12f) && near(s.offset.master, 0.0f),
           "offset wheel writes additive terms");
 
-    // Out-of-range puck positions clamp into the shared ranges (never NaN/illegal).
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kLift, 9.0f, 9.0f, 2.0f);
     check(s.lgg.lift_r >= cs::kLiftLo && s.lgg.lift_r <= cs::kLiftHi, "lift puck clamps into range");
     check(s.lgg.lift_master >= cs::kLiftLo && s.lgg.lift_master <= cs::kLiftHi,
           "lift master clamps into range");
 
-    // Reset: wheel terms return to identity, other wheels untouched.
     const float lift_master_before = s.lgg.lift_master;
     const float lift_r_before = s.lgg.lift_r;
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kGain, 1.0f, 0.0f, 0.75f);
@@ -138,30 +120,17 @@ void test_primaries_wheel_apply() {
     check(near(s.lgg.lift_master, lift_master_before) && near(s.lgg.lift_r, lift_r_before),
           "gain reset leaves the lift wheel alone");
 
-    // Full reset -> fresh identity panel.
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kLift, 1.0f, 0.0f, 0.5f);
     cs::reset_panel(s);
     check(lgg_near(s.lgg, cs::LGG{}) && near(s.offset.master, 0.0f), "reset_panel is identity");
 }
 
 void test_law_semantics() {
-    // Pin the canon so a future "simplification" can't silently change the
-    // grading math. References: MLT movit.lift_gamma_gain's classic formula
-    //   out = (gain * (x + lift * (1-x)))^(1/gamma)
-    // and the Resolve primary-correctors convention (lift = black-point shift
-    // tapering to no effect at white; gamma = midtone reshape anchored on the
-    // endpoints; gain = scale; offset = uniform whole-image shift of black AND
-    // white), plus the ASC CDL `out = (slope*in + offset)^power` (Resolve
-    // manual "Output = (Input * Slope + Offset)Power").
-
-    // Identity: zero offset + untouched LGG is a no-op on any input.
     check(rgb_near(cs::apply_offset({0.2f, 0.5f, 0.9f}, cs::Offset{}), {0.2f, 0.5f, 0.9f}),
           "zero offset is a no-op");
     check(rgb_near(cs::apply_lgg({0.2f, 0.5f, 0.9f}, cs::LGG{}), {0.2f, 0.5f, 0.9f}),
           "identity LGG is a no-op");
 
-    // Lift: black becomes the lift value, white is preserved exactly (the
-    // (1-x) taper), negative lift clamps the base < 0 to 0.
     cs::LGG lift;
     lift.lift_master = 0.4f;
     check(rgb_near(cs::apply_lgg({0.0f, 0.0f, 0.0f}, lift), {0.4f, 0.4f, 0.4f}),
@@ -176,10 +145,8 @@ void test_law_semantics() {
               near(cs::apply_lgg({0.5f, 0.5f, 0.5f}, neg_lift).r, 0.3f),
           "negative lift clamps the base below 0, mid follows the law");
 
-    // Gamma: endpoints are fixed; gamma > 1 brightens midtones (exponent
-    // 1/gamma < 1), gamma < 1 darkens.
-    cs::LGG up_gamma;    up_gamma.gamma_master = 2.0f;    // exponent 0.5
-    cs::LGG down_gamma;  down_gamma.gamma_master = 0.5f;  // exponent 2.0
+    cs::LGG up_gamma;    up_gamma.gamma_master = 2.0f;
+    cs::LGG down_gamma;  down_gamma.gamma_master = 0.5f;
     check(rgb_near(cs::apply_lgg({0.0f, 0.0f, 0.0f}, up_gamma), {0.0f, 0.0f, 0.0f}) &&
               rgb_near(cs::apply_lgg({1.0f, 1.0f, 1.0f}, up_gamma), {1.0f, 1.0f, 1.0f}),
           "gamma keeps black and white fixed");
@@ -187,7 +154,6 @@ void test_law_semantics() {
               near(cs::apply_lgg({0.25f, 0.25f, 0.25f}, down_gamma).r, 0.0625f),
           "gamma rewrites mids by pow(x, 1/gamma)");
 
-    // Gain: black stays black, white and mids scale.
     cs::LGG gain;
     gain.gain_master = 2.0f;
     check(rgb_near(cs::apply_lgg({0.0f, 0.0f, 0.0f}, gain), {0.0f, 0.0f, 0.0f}),
@@ -196,20 +162,15 @@ void test_law_semantics() {
               near(cs::apply_lgg({1.0f, 1.0f, 1.0f}, gain).r, 2.0f),
           "gain scales mids and white linearly");
 
-    // Offset: unlike lift it moves black AND white together (uniform shift,
-    // no taper near 1) — the whole-signal behavior that distinguishes it.
     cs::Offset off;
     off.master = 0.1f;
     check(near(cs::apply_offset({0.0f, 0.0f, 0.0f}, off).r, 0.1f) &&
               near(cs::apply_offset({1.0f, 1.0f, 1.0f}, off).r, 1.1f),
           "offset moves black and white together (no taper)");
 
-    // Order: the corrector applies offset BEFORE the LGG stage (eval.cpp
-    // kLgg branch), so the offset feeds the power. Pin the composed value.
     check(near(cs::apply_lgg(cs::apply_offset({0.25f, 0.25f, 0.25f}, off), cs::LGG{}).r, 0.35f),
           "offset feeds the LGG stage (offset then LGG)");
 
-    // CDL: (slope*in + offset)^power, base clamped >= 0 before the power.
     cs::Cdl c;
     c.slope_r = 1.2f;
     c.offset_r = 0.1f;
@@ -225,10 +186,10 @@ void test_law_semantics() {
 
 void test_log_bands() {
     std::array<cs::WheelRange, 4> bands;
-    bands[0] = {0.4f, 0.6f};  // shadow
-    bands[1] = {0.1f, 0.2f};  // midtone (overlaps shadow, out of order)
-    bands[2] = {0.8f, 0.9f};  // highlight
-    bands[3] = {0.5f, 1.2f};  // offset (unsorted, hi out of range)
+    bands[0] = {0.4f, 0.6f};
+    bands[1] = {0.1f, 0.2f};
+    bands[2] = {0.8f, 0.9f};
+    bands[3] = {0.5f, 1.2f};
     cs::enforce_zero_overlap(bands);
 
     float running = 0.0f;
@@ -242,7 +203,6 @@ void test_log_bands() {
     check(near(bands.back().hi, 1.0f), "last band reaches 1.0");
     check(near(bands.front().lo, 0.0f), "first band starts at 0.0");
 
-    // Band weight: 1 deep inside, easing at edges, 0 outside; uniform = 1 everywhere.
     cs::WheelRange band{0.2f, 0.4f};
     check(near(cs::log_band_weight(0.3f, band, false), 1.0f), "band weight 1 at band center");
     check(near(cs::log_band_weight(0.1f, band, false), 0.0f), "band weight 0 before the band");
@@ -284,7 +244,6 @@ void test_cdl_interchange() {
     c.power_b = 1.2f;
     c.sat = 1.0f;
 
-    // CDL -> LGG -> cdl_from_lgg must be an exact round-trip for offset-free rows.
     const cs::LGG l = cs::lgg_from_cdl(c);
     check(near(l.gain_r, 1.4f) && near(l.gain_g, 1.1f) && near(l.gain_b, 0.8f),
           "lgg_from_cdl maps slope to gain");
@@ -303,9 +262,6 @@ void test_cdl_interchange() {
 }
 
 void test_panel_to_graph_roundtrip() {
-    // Simulate panel interaction: a primaries lift gain on the Lift wheel, a
-    // gamma reshape, and a gain lift, then commit the LGG into a grade graph
-    // exactly like the GUI panel's set_clip_grade path would.
     cs::WheelPanelState s;
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kLift, 0.6f, 0.1f, 0.5f);
     cs::apply_primaries_wheel(s, cs::PrimariesWheel::kGamma, 0.2f, -0.4f, 0.6f);
@@ -334,28 +290,22 @@ void test_panel_to_graph_roundtrip() {
 }
 
 void test_restore_primaries_wheel() {
-    // "Return to center is a cancel, not a commit": a wheel that was committed
-    // with a real offset must survive a release back at the disc center.
     cs::WheelPanelState state;
     cs::apply_primaries_wheel(state, cs::PrimariesWheel::kLift, 0.6f, -0.2f, 0.5f);
     cs::apply_primaries_wheel(state, cs::PrimariesWheel::kGain, 0.4f, 0.3f, 0.5f);
     const cs::LGG committed = state.lgg;
 
-    // The panel snapshots the committed state, then a center release writes the
-    // neutral puck values (as the old code did) BEFORE restoring them.
     cs::WheelPanelState live = state;
     cs::apply_primaries_wheel(live, cs::PrimariesWheel::kLift, 0.0f, 0.0f, 0.5f);
     check(near(live.lgg.lift_r, 0.0f), "center release zeroes the lift terms (pre-restore)");
     cs::restore_primaries_wheel(live, state, cs::PrimariesWheel::kLift);
     check(lgg_near(live.lgg, committed), "restore brings the committed LGG back intact");
 
-    // Non-target wheels are untouched by restore.
     live.lgg = cs::LGG{};
     cs::restore_primaries_wheel(live, state, cs::PrimariesWheel::kLift);
     check(near(live.lgg.lift_r, committed.lift_r), "lift restored into a reset state");
     check(near(live.lgg.gamma_master, 1.0f), "gamma left alone by a lift-only restore");
 
-    // Offset wheel restores its master + channels, not just the channels.
     cs::WheelPanelState off;
     cs::apply_primaries_wheel(off, cs::PrimariesWheel::kOffset, 0.7f, 0.1f, 0.6f);
     const cs::WheelPanelState off_committed = off;
@@ -368,7 +318,7 @@ void test_restore_primaries_wheel() {
           "offset restore brings back master + channels");
 }
 
-}  // namespace
+}
 
 int main() {
     test_pagination();

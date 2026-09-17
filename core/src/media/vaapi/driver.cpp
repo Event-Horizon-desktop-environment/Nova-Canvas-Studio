@@ -32,7 +32,7 @@ const ImportPolicy kNvidia{
     .modifiers_retry_linear = false,
 };
 
-}  // namespace
+}
 
 Vendor identify_vendor(const std::string& driver_name) noexcept {
     if (amd::matches(driver_name)) return Vendor::Amd;
@@ -50,4 +50,4 @@ const ImportPolicy& import_policy(const Vendor vendor) noexcept {
     }
 }
 
-}  // namespace canvas::core::vaapi
+}

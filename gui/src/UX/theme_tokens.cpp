@@ -18,15 +18,6 @@ namespace canvas::gui {
 
 namespace {
 
-// "Flat studio console" token sets. The interface is drawn to recede so the
-// footage is the hero: fully-opaque, warmth-neutral charcoal surfaces stepped
-// only by value (no translucency, no gradient, no glass); separation by 1px
-// hairlines rather than floating cards; and two chromatic signals that never
-// borrow each other's job — amber ("Nova gold", tungsten/film-telecine) for
-// interaction/selection, and ice-cyan for the playback readhead. Danger red
-// and warn amber stay functional reserve colors. Each mode is designed
-// independently per Apple's own guidance — light stays close-toned, dark
-// spreads its levels apart — rather than inverted from the other.
 ThemeTokens makeTokens(bool light) {
     ThemeTokens t;
     if (light) {
@@ -35,19 +26,19 @@ ThemeTokens makeTokens(bool light) {
         t.surface_raised = QColor(0xEC, 0xEC, 0xEF);
         t.surface_higher = QColor(0xE2, 0xE2, 0xE6);
         t.surface_highest = QColor(0xD8, 0xD8, 0xDC);
-        t.border         = QColor(0, 0, 0, 40);    // rgba(0,0,0,0.16)
-        t.border_soft    = QColor(0, 0, 0, 22);    // rgba(0,0,0,0.09)
-        t.border_hi      = QColor(0, 0, 0, 40);    // == border (flat, no catch-light)
+        t.border         = QColor(0, 0, 0, 40);
+        t.border_soft    = QColor(0, 0, 0, 22);
+        t.border_hi      = QColor(0, 0, 0, 40);
         t.ink            = QColor(0x1C, 0x1C, 0x1E);
         t.ink_muted      = QColor(0x6E, 0x6E, 0x73);
         t.ink_faint      = QColor(0xA8, 0xA8, 0xAC);
-        t.icon           = QColor(0x1C, 0x1C, 0x1E);  // same as ink by default
-        t.accent         = QColor(0xCC, 0x84, 0x18);  // Nova gold (deeper on light)
+        t.icon           = QColor(0x1C, 0x1C, 0x1E);
+        t.accent         = QColor(0xCC, 0x84, 0x18);
         t.accent_hover   = QColor(0xB6, 0x74, 0x13);
         t.accent_press   = QColor(0xA5, 0x67, 0x0D);
-        t.on_accent      = QColor(0x21, 0x16, 0x05);  // near-black, warm
-        t.accent_text    = QColor(0x9A, 0x5B, 0x00);  // burnt amber text
-        t.playhead       = QColor(0x2F, 0x8F, 0xB4);  // ice-cyan readhead
+        t.on_accent      = QColor(0x21, 0x16, 0x05);
+        t.accent_text    = QColor(0x9A, 0x5B, 0x00);
+        t.playhead       = QColor(0x2F, 0x8F, 0xB4);
         t.clip_video     = QColor(0xCB, 0xD4, 0xDF);
         t.clip_audio     = QColor(0xCF, 0xD6, 0xDA);
         t.clip_label     = QColor(0xA6, 0xB0, 0xBC);
@@ -61,23 +52,23 @@ ThemeTokens makeTokens(bool light) {
         t.font_mono      = QStringLiteral("Geist Mono");
     } else {
         t.surface        = QColor(0x16, 0x16, 0x18);
-        t.surface_low    = QColor(0x10, 0x10, 0x12);  // monitor well / input wells
+        t.surface_low    = QColor(0x10, 0x10, 0x12);
         t.surface_raised = QColor(0x1E, 0x1E, 0x21);
         t.surface_higher = QColor(0x28, 0x28, 0x2C);
         t.surface_highest = QColor(0x31, 0x31, 0x36);
-        t.border         = QColor(255, 255, 255, 32);  // rgba(255,255,255,0.13)
-        t.border_soft    = QColor(255, 255, 255, 20);  // rgba(255,255,255,0.08)
-        t.border_hi      = QColor(255, 255, 255, 32);  // == border (flat, no catch-light)
+        t.border         = QColor(255, 255, 255, 32);
+        t.border_soft    = QColor(255, 255, 255, 20);
+        t.border_hi      = QColor(255, 255, 255, 32);
         t.ink            = QColor(0xED, 0xED, 0xF0);
         t.ink_muted      = QColor(0x9A, 0x9A, 0xA0);
         t.ink_faint      = QColor(0x64, 0x64, 0x6A);
-        t.icon           = QColor(0xED, 0xED, 0xF0);  // same as ink by default
-        t.accent         = QColor(0xE8, 0xA1, 0x3C);  // Nova gold
+        t.icon           = QColor(0xED, 0xED, 0xF0);
+        t.accent         = QColor(0xE8, 0xA1, 0x3C);
         t.accent_hover   = QColor(0xF0, 0xAC, 0x4C);
         t.accent_press   = QColor(0xC8, 0x88, 0x29);
-        t.on_accent      = QColor(0x21, 0x16, 0x05);  // near-black, warm
-        t.accent_text    = QColor(0xFF, 0xC1, 0x66);  // bright amber text on dark
-        t.playhead       = QColor(0x5C, 0xC8, 0xE4);  // ice-cyan readhead
+        t.on_accent      = QColor(0x21, 0x16, 0x05);
+        t.accent_text    = QColor(0xFF, 0xC1, 0x66);
+        t.playhead       = QColor(0x5C, 0xC8, 0xE4);
         t.clip_video     = QColor(0x2B, 0x2F, 0x35);
         t.clip_audio     = QColor(0x4E, 0x56, 0x61);
         t.clip_label     = QColor(0x8C, 0x92, 0x9C);
@@ -100,12 +91,6 @@ ThemeTokens makeTokens(bool light) {
     return t;
 }
 
-// "HyprDark": the Dark palette pre-lifted to cancel Hyprland's native-Wayland
-// FP16 sRGB re-quantization. Hyprland runs every native surface (tagged or not)
-// through that pipeline while XWayland is blitted raw, which is what makes the
-// running app read ~2 steps darker with flattened blue. Lifting the base set by
-// the measured shift has the compositor's pass land exactly where Dark was
-// designed. Only ever active when main() detects the Hyprland Wayland backend.
 namespace {
 constexpr int kHyprLiftR = 2;
 constexpr int kHyprLiftG = 2;
@@ -156,7 +141,7 @@ ThemeTokens makeHyprDarkTokens(const ThemeTokens& dark) {
     t.focus_ring      = hypr_lift(t.focus_ring);
     return t;
 }
-}  // namespace
+}
 
 const ThemeTokens& builtTokens() {
     static const ThemeTokens dark = makeTokens(false);
@@ -167,12 +152,8 @@ const ThemeTokens& builtTokens() {
     return is_hypr_dark() ? hypr_dark : dark;
 }
 
-// User overrides (Settings > Theme). Invalid = designed value kept. Applied on
-// top of the mode's base token set, so they survive mode toggles (the user's
-// accent rides along into Light/Dark/HyprDark rather than being reset).
 std::array<std::optional<QColor>, kThemeTokenFieldCount> g_overrides;
 
-// Stable names shared by the QSettings keys and the shareable theme JSON.
 const char* kThemeFieldNames[] = {
     "surface", "surface_low", "surface_raised", "surface_higher",
     "surface_highest", "border", "border_soft", "ink", "ink_muted",
@@ -243,9 +224,6 @@ void set_field(ThemeTokens& t, ThemeTokenField f, const QColor& c) {
     }
 }
 
-// Derived-family law: recoloring a base field should recolor every member
-// derived from it, preserving the member's designed offset/alpha over the base
-// (see the accent-family note in the header).
 QColor offset(const QColor& base, const QColor& design, const QColor& override) {
     if (!design.isValid()) return override;
     const int dR = design.red() - base.red();
@@ -268,11 +246,6 @@ ThemeTokens apply_overrides(const ThemeTokens& base) {
         if (g_overrides[static_cast<size_t>(f)])
             set_field(t, f, *g_overrides[static_cast<size_t>(f)]);
     }
-    // Accent recolors its direct BUTTON states (hover/press/on-accent) so a
-    // command button always reads as one family. Everything wider — selection
-    // fills (state_selected), accent-tinted text, soft/line fills and the
-    // focus ring — stays on its designed color, so a custom accent never flushes
-    // the whole chrome into one tint.
     if (const auto& a = g_overrides[static_cast<size_t>(ThemeTokenField::Accent)]) {
         t.accent_hover = offset(base.accent, base.accent_hover, *a);
         t.accent_press = offset(base.accent, base.accent_press, *a);
@@ -283,7 +256,6 @@ ThemeTokens apply_overrides(const ThemeTokens& base) {
         t.playhead_soft = with_alpha(*p, base.playhead_soft.alpha());
     }
     if (const auto& i = g_overrides[static_cast<size_t>(ThemeTokenField::Ink)]) {
-        // Ink drives the M3 state layers.
         t.state_hover = with_alpha(*i, base.state_hover.alpha());
         t.state_press = with_alpha(*i, base.state_press.alpha());
     }
@@ -294,9 +266,6 @@ ThemeTokens apply_overrides(const ThemeTokens& base) {
     if (g_overrides[static_cast<size_t>(ThemeTokenField::Border)])
         t.border_hi = t.border;
 
-    // Audit: what the derived-family law recomputed this pass (only for fields
-    // with an active override). Lets a person see exactly how an accent/probe
-    // change ripples into the chrome, one line per effective family.
     if (g_overrides[static_cast<size_t>(ThemeTokenField::Accent)]) {
         qWarning().nospace()
             << "[theme] derived from accent: accent_hover="
@@ -329,7 +298,7 @@ ThemeTokens apply_overrides(const ThemeTokens& base) {
     return t;
 }
 
-}  // namespace
+}
 
 const char* theme_token_field_name(ThemeTokenField field) {
     const size_t i = static_cast<size_t>(field);
@@ -352,8 +321,6 @@ void set_token_override(ThemeTokenField field, const QColor& color) {
     g_overrides[i] = color.isValid()
         ? std::optional<QColor>(color)
         : std::nullopt;
-    // Audit trail: every override mutation passes through here (dialog pick /
-    // reset / reset-all / import / boot restore).
     if (color.isValid()) {
         qWarning().nospace()
             << "[theme] override " << theme_token_field_name(field)
@@ -376,10 +343,6 @@ QColor designed_token_value(ThemeTokenField field) {
 }
 
 const ThemeTokens& tokens() {
-    // Compose the active token set from the mode base + any user overrides on
-    // every cache build. Recompute when the mode's base object changes address
-    // (builtTokens returns one of three static sets) or when any override
-    // changes.
     static const ThemeTokens* cached_base = nullptr;
     static std::array<std::optional<QColor>, kThemeTokenFieldCount> cached_overrides;
     static ThemeTokens cached;
@@ -539,4 +502,4 @@ void log_theme_tokens() {
         << " focus_ring=" << hex(t.focus_ring);
 }
 
-}  // namespace canvas::gui
+}

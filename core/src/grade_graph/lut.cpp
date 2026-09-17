@@ -20,9 +20,6 @@ std::uint8_t clamp_unit(float v) {
     return static_cast<std::uint8_t>(std::lround(v * 255.0f));
 }
 
-// Trilinear sample of a baked LUT at a unit-scale input (r, g, b each in
-// [0,1]), mirroring the texel-center/spatial convention of apply_grade_lut so
-// a digest probe reports the exact same value a graded pixel would draw.
 [[nodiscard]] std::array<float, 3> sample_lut_pixel(const GradeLut3D& lut,
                                                     std::array<float, 3> in) noexcept {
     std::array<float, 3> out{0.0f, 0.0f, 0.0f};
@@ -47,12 +44,6 @@ std::uint8_t clamp_unit(float v) {
     const float fg = vg - static_cast<float>(g0);
     const float fb = wb - static_cast<float>(b0);
 
-    // Corner indices derive from the (r?,g?,b?) tuples directly. When an input
-    // sits exactly on the grid edge r1/r0==last the naive i100=i000+n*n would
-    // read one row past N-1 (a latent OOB the zero edge-weight masked); clamping
-    // the HIGH neighbor to the floor keeps every read in-bounds while keeping
-    // the interpolation bit-identical. This index law is mirrored 1:1 by the
-    // CUDA nv12GradeResize kernel — never change one without the other.
     const std::vector<float>& d = lut.data;
     const std::size_t nsz = static_cast<std::size_t>(n);
     const std::size_t i000 = (static_cast<std::size_t>(r0) * nsz + static_cast<std::size_t>(g0)) * nsz +
@@ -93,17 +84,11 @@ std::uint8_t clamp_unit(float v) {
     return out;
 }
 
-}  // namespace
+}
 
 GradeLutPtr bake_grade_lut(const GradeGraph& g, int size) {
     if (size < 2 || g.terminal() < 0) return nullptr;
 
-    // The graph is pointwise per-pixel (color-key mattes, no spatial operators
-    // yet), so every grid point evaluates independently. Bake the whole grid as
-    // ONE image: a w=size x h=size*size frame whose pixel p = y*size + x carries
-    // the grid coordinate (ri=x, gi=y/size, bi=y%size). One evaluate_graph call
-    // replaces size^3 separate 1x1 evaluations, keeping the bake sub-millisecond
-    // (the previous all-at-once-vs-loop difference matters: 33^3 = 35937).
     FrameF grid;
     grid.w = size;
     grid.h = size * size;
@@ -124,12 +109,10 @@ GradeLutPtr bake_grade_lut(const GradeGraph& g, int size) {
     }
 
     const EvalResult res = evaluate_graph(g, grid);
-    if (!res.frame || !res.error.empty()) return nullptr;  // no terminal / inactive
+    if (!res.frame || !res.error.empty()) return nullptr;
 
     auto lut = std::make_shared<GradeLut3D>();
     lut->size = size;
-    // Carries the graph's change-token so the decode-side [grade] LUT-baked
-    // line can correlate to the GUI commit (and the viewer upload) by seq.
     lut->change_seq = g.change_seq;
     lut->data.assign(static_cast<std::size_t>(size) * static_cast<std::size_t>(size) *
                          static_cast<std::size_t>(size) * 3u,
@@ -168,12 +151,9 @@ GradeLutDigest grade_lut_digest(const GradeLut3D& lut) noexcept {
     std::memcpy(d.white, &lut.data[(((n - 1) * n + (n - 1)) * n + (n - 1)) * 3],
                 sizeof(d.white));
 
-    // Skin-tone probe: output at input (0.54, 0.36, 0.31) (R,G,B grid scale),
-    // using the same texel-center trilinear coordinates as apply_grade_lut so
-    // the digest probe matches what actually renders on a face-toned pixel.
     {
         const auto probe_out = sample_lut_pixel(
-            lut, {0.54f, 0.36f, 0.31f});  // (r, g, b) in unit scale
+            lut, {0.54f, 0.36f, 0.31f});
         d.skin[0] = probe_out[0];
         d.skin[1] = probe_out[1];
         d.skin[2] = probe_out[2];
@@ -207,7 +187,6 @@ VideoFramePtr apply_grade_lut(const VideoFrame& src, const GradeLut3D& lut) {
 
     const int n = lut.size;
     const int last = n - 1;
-    const int stride = n * n * 3;
 
     auto graded = std::make_shared<VideoFrame>();
     graded->pts_ticks = src.pts_ticks;
@@ -223,9 +202,6 @@ VideoFramePtr apply_grade_lut(const VideoFrame& src, const GradeLut3D& lut) {
         const std::uint8_t* in = &src.rgba[p * 4u];
         std::uint8_t* out = &graded->rgba[p * 4u];
 
-        // Grid units following the GL texel-center convention: coordinate
-        // x*(N-1) centers texel i on input i/(N-1), matching a fragment
-        // shader sampling at coord = x*(N-1)/N + 0.5/N with LINEAR filtering.
         const float ur = static_cast<float>(in[0]) * kByteToUnit *
                          static_cast<float>(last);
         const float vg = static_cast<float>(in[1]) * kByteToUnit *
@@ -246,11 +222,6 @@ VideoFramePtr apply_grade_lut(const VideoFrame& src, const GradeLut3D& lut) {
         const float fg = vg - static_cast<float>(g0);
         const float fb = wb - static_cast<float>(b0);
 
-        // Trilinear over the 8 enclosing grid cells. Indices derive from the
-        // (r?,g?,b?) tuples directly (see sample_lut_pixel for why): when
-        // r0==last the high neighbor r1 is clamped to last so every read stays
-        // in-bounds, and the mirror CUDA kernel (nv12GradeResize) uses the same
-        // law bit-for-bit.
         const std::vector<float>& d = lut.data;
         const std::size_t nsz = static_cast<std::size_t>(n);
         const std::size_t i000 = (static_cast<std::size_t>(r0) * nsz + static_cast<std::size_t>(g0)) * nsz +
@@ -280,7 +251,6 @@ VideoFramePtr apply_grade_lut(const VideoFrame& src, const GradeLut3D& lut) {
             const std::size_t s011 = i011 * 3u + static_cast<std::size_t>(c);
             const std::size_t s111 = i111 * 3u + static_cast<std::size_t>(c);
 
-            // 8-way lerp, R then G then B.
             const float c00 = d[s000] + (d[s001] - d[s000]) * fb;
             const float c10 = d[s100] + (d[s101] - d[s100]) * fb;
             const float c01 = d[s010] + (d[s011] - d[s010]) * fb;
@@ -294,4 +264,4 @@ VideoFramePtr apply_grade_lut(const VideoFrame& src, const GradeLut3D& lut) {
     return graded;
 }
 
-}  // namespace canvas::core::grade_graph
+}

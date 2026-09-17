@@ -1,12 +1,5 @@
 #pragma once
 
-// Dual-Viewer Source pane (splitplan "own folder + own cpp/hpp" rule). Qt
-// widget chrome only: a slim transport header (clip name, position timecode,
-// play/pause, mini-scrub) above a Source-mode ViewerGL. All playback + decode
-// semantics live in SourcePreviewController; this panel just reflects it and
-// re-broadcasts user intent (play_clicked / scrub_fraction) so the shell can
-// wire it without reaching into the controller.
-
 #include <QWidget>
 
 #include <cstdint>
@@ -31,18 +24,14 @@ public:
 
     ViewerGL* viewer() const { return viewer_; }
 
-    // Reflect an opened/closed media entry (frame/time band + empty state).
     void set_media_info(const QString& name, bool is_video, bool is_audio, int64_t total_frames);
     void set_media_position(int64_t frame, double fps);
     void set_playing(bool playing);
     void clear_media();
-    // Full-file spectrum for audio-only media (painted by the embedded
-    // AudioSpectrumView page with a live scrub playhead).
     void set_audio_waveform(const QImage& image);
 
 signals:
     void play_clicked();
-    // Panel mini-scrub drag / click: fraction of the source (0..1).
     void scrub_fraction(double fraction);
 
 private:
@@ -62,4 +51,4 @@ private:
     bool audio_mode_ = false;
 };
 
-}  // namespace canvas::gui::source_preview
+}

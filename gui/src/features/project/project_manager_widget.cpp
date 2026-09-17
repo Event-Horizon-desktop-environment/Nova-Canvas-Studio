@@ -1,11 +1,3 @@
-// DaVinci Resolve-style Project Manager. The widget is pure view + grid
-// logic: it reads the recent-projects list, paints Resolve-style cards (including
-// the leading "+ New Project" tile), and asks MainWindow to decode card
-// thumbnails through the shared ThumbnailService (bridge wired in
-// MainWindow::enter_project_manager). ProjectManagerWindow wraps the page in a
-// floating top-level window; enter/leave is defined here too so the whole seam
-// lives with the widget instead of leaking into the action files.
-
 #include "features/project/project_manager_widget.hpp"
 
 #include "UX/MainWindow.hpp"
@@ -55,9 +47,6 @@ namespace canvas::gui {
 
 namespace {
 
-// One Resolve-style project card (or the dashed "+ New Project" tile). Paints
-// its own cover-fit thumbnail well, name + modified row, hover lift and the
-// accent selection ring, so the grid view needs no icon plumbing.
 class ProjectTileDelegate final : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
@@ -111,7 +100,6 @@ private:
         p->setPen(dash);
         p->drawRoundedRect(face, kRadius, kRadius);
 
-        // Plus glyph, round-capped, with a centered gap like Resolve's tile.
         constexpr qreal kGlyph = 40.0;
         constexpr qreal kGap = 16.0;
         constexpr qreal kArm = (kGlyph - kGap) / 2.0;
@@ -143,7 +131,6 @@ private:
 
     static void paint_card(QPainter* p, const QRectF& face, const QModelIndex& index,
                            const ThemeTokens& t, bool selected, bool hovered, bool missing) {
-        // Raised card face; missing files collapse to the lower surface.
         QLinearGradient g(face.topLeft(), face.bottomLeft());
         if (missing) {
             g.setColorAt(0, t.surface_low);
@@ -190,7 +177,6 @@ private:
         }
         p->setClipping(false);
 
-        // Name + modified rows below the well.
         QFont name_f = p->font();
         name_f.setPixelSize(12);
         name_f.setWeight(QFont::Medium);
@@ -214,7 +200,6 @@ private:
                     Qt::AlignLeft | Qt::AlignVCenter,
                     meta_fm.elidedText(meta, Qt::ElideRight, inner.width()));
 
-        // Card border: soft by default, brighter on hover.
         p->setBrush(Qt::NoBrush);
         QPen edge(hovered && !selected ? t.border_hi : t.border_soft);
         edge.setWidthF(1.0);
@@ -223,9 +208,7 @@ private:
     }
 };
 
-}  // namespace
-
-// --- Project-manager integration ----------------------------------------------
+}
 
 ProjectManagerWidget::ProjectManagerWidget(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("projectManagerPage"));
@@ -234,7 +217,6 @@ ProjectManagerWidget::ProjectManagerWidget(QWidget* parent) : QWidget(parent) {
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
-    // --- Top strip: Local tab + search / sort / user. ----------------------
     auto* strip = new QWidget(this);
     strip->setObjectName(QStringLiteral("pmStrip"));
     auto* strip_layout = new QHBoxLayout(strip);
@@ -272,7 +254,6 @@ ProjectManagerWidget::ProjectManagerWidget(QWidget* parent) : QWidget(parent) {
 
     root->addWidget(strip);
 
-    // --- Body: heading row + grid. -------------------------------------------
     auto* content = new QVBoxLayout();
     content->setContentsMargins(28, 16, 28, 16);
     content->setSpacing(0);
@@ -307,7 +288,6 @@ ProjectManagerWidget::ProjectManagerWidget(QWidget* parent) : QWidget(parent) {
     grid_->setItemDelegate(new ProjectTileDelegate(grid_));
     content->addWidget(grid_, 1);
 
-    // --- Footer: New / Import. -----------------------------------------------
     auto* footer = new QHBoxLayout();
     footer->setContentsMargins(28, 0, 28, 16);
     auto* new_btn = new QPushButton(tr("+  New Project"), this);
@@ -320,7 +300,6 @@ ProjectManagerWidget::ProjectManagerWidget(QWidget* parent) : QWidget(parent) {
     footer->addStretch(1);
     root->addLayout(footer);
 
-    // --- Styling (re-applied on theme switch via apply_theme_style). -------
     apply_theme_style(this, [this] {
         const ThemeTokens& t = tokens();
         return QStringLiteral(
@@ -347,7 +326,6 @@ ProjectManagerWidget::ProjectManagerWidget(QWidget* parent) : QWidget(parent) {
                  css(t.accent_hover), css(t.accent_text), css(t.accent_soft));
     });
 
-    // --- Wiring. --------------------------------------------------------------
     connect(search_, &QLineEdit::textChanged, this, [this](const QString& text) { filter_grid(text); });
     connect(sort_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this] { apply_sort(); });
@@ -361,9 +339,6 @@ ProjectManagerWidget::ProjectManagerWidget(QWidget* parent) : QWidget(parent) {
     new QShortcut(Qt::Key_Return, grid_, this, [this] { activate_current(); });
     new QShortcut(Qt::Key_Enter, grid_, this, [this] { activate_current(); });
 
-    // Let the first refresh happen on the event loop: enter_project_manager has
-    // already connected the thumbnail bridge, so a refresh here never drops a
-    // card thumbnail before MainWindow's thumbnail_ready route exists.
     QTimer::singleShot(0, this, [this] { refresh(); });
 }
 
@@ -498,8 +473,6 @@ void ProjectManagerWidget::set_card_thumbnail(int token, const QImage& image) {
     }
 }
 
-// --- Project-manager window ----------------------------------------------------
-
 ProjectManagerWindow::ProjectManagerWindow(QWidget* parent) : QDialog(parent) {
     setObjectName(QStringLiteral("projectManagerWindow"));
     setWindowTitle(tr("Nova Canvas Studio — Project Manager"));
@@ -507,13 +480,11 @@ ProjectManagerWindow::ProjectManagerWindow(QWidget* parent) : QDialog(parent) {
     setMinimumSize(760, 520);
     resize(1160, 700);
 
-    // Center over the primary screen on first creation.
     if (const QScreen* screen = QApplication::primaryScreen()) {
         const QRect area = screen->availableGeometry();
         move(area.center().x() - width() / 2, area.center().y() - height() / 2);
     }
 
-    // The page fills the whole window; the WM provides the title-bar chrome.
     widget_ = new ProjectManagerWidget(this);
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -526,21 +497,15 @@ ProjectManagerWindow::ProjectManagerWindow(QWidget* parent) : QDialog(parent) {
 }
 
 void ProjectManagerWindow::closeEvent(QCloseEvent* event) {
-    // Closing the manager returns to the editor instead of quitting: hide and
-    // hand over. Not delete-on-close — MainWindow keeps one for the session.
     event->ignore();
     emit window_closed();
 }
 
 void MainWindow::enter_project_manager() {
-    // Lazily build the manager window once; parented to the editor so it dies
-    // with the app and never leaks.
     if (!project_manager_window_) {
         project_manager_window_ = new ProjectManagerWindow(this);
         ProjectManagerWidget* pm = project_manager_window_->content();
 
-        // New/Open land on the real project actions; the dialog acceptance
-        // itself decides whether to leave the manager (cancel stays put).
         QObject::connect(pm, &ProjectManagerWidget::new_project_requested, this,
                          [this] { on_new_project(); });
         QObject::connect(pm, &ProjectManagerWidget::import_project_requested, this,
@@ -553,10 +518,6 @@ void MainWindow::enter_project_manager() {
         QObject::connect(project_manager_window_, &ProjectManagerWindow::window_closed,
                          this, [this] { leave_project_manager(); });
 
-        // Card-thumbnail bridge: load the .ncs, request a frame from its first
-        // video media under the project namespace (0xE… prefix). Pool ids keep
-        // bit-63 only, so they never collide with this route; the pool's ready
-        // filter below in MainWindow guards the reverse.
         QObject::connect(pm, &ProjectManagerWidget::thumbnail_requested, this,
                          [this](int token, const QString& project_path) {
                              canvas::core::Project project;
@@ -621,4 +582,4 @@ void MainWindow::leave_project_manager() {
     activateWindow();
 }
 
-}  // namespace canvas::gui
+}

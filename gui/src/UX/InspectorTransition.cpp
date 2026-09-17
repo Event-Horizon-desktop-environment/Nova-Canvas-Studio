@@ -1,11 +1,3 @@
-// Transition inspector page. Built once per MainWindow (registry keyed by
-// window), refreshed from the timeline's currently selected transition bubble:
-// Start edits the outgoing clip's OUT edge, End edits the incoming clip's IN
-// edge (or the same clip's IN edge for a single-clip edge bubble). Each side's
-// shaping (curve/ease/ratios) is stored per edge in the model so Start and End
-// keep independent values; alignment is UI-state only. Edits commit through the
-// normal edit_ops path so every change is undoable.
-
 #include "UX/InspectorTransition.hpp"
 
 #include <QButtonGroup>
@@ -98,7 +90,6 @@ QString align_button_style() {
              css(t.ink_muted), css(t.on_accent), css(t.accent), css(t.surface_higher));
 }
 
-// One half of the selected transition (Start = OUT edge, End = IN edge).
 struct SideControls {
     InspectorCategory* video_cat = nullptr;
     InspectorCategory* audio_cat = nullptr;
@@ -121,26 +112,26 @@ struct SideControls {
     QComboBox* audio_fade_in = nullptr;
     QDoubleSpinBox* audio_secs = nullptr;
     QSpinBox* audio_frames = nullptr;
-    bool in_edge = false;  // true targets the IN edge, false the OUT edge
+    bool in_edge = false;
 };
 
 struct Registry {
     QToolButton* start_btn = nullptr;
     QToolButton* end_btn = nullptr;
     QStackedWidget* stack = nullptr;
-    QToolButton* mode_btn = nullptr;          // the inspector's "Transition" pill
-    QStackedWidget* inspector_stack = nullptr;  // the page-level QStackedWidget
-    int transition_page_index = -1;           // this page's index within it
+    QToolButton* mode_btn = nullptr;
+    QStackedWidget* inspector_stack = nullptr;
+    int transition_page_index = -1;
     SideControls start;
     SideControls end;
-    bool updating = false;   // guards against committing while populating
-    bool attached = false;   // selection signals already connected
-    std::map<bool, int64_t> default_durations_frames;  // in_edge -> default frames
+    bool updating = false;
+    bool attached = false;
+    std::map<bool, int64_t> default_durations_frames;
 };
 
 Registry& registry(MainWindow& mw) {
     static std::map<MainWindow*, Registry> s_reg;
-    return s_reg[&mw];  // outlives any page swap as long as the window does
+    return s_reg[&mw];
 }
 
 struct Resolved {
@@ -149,7 +140,6 @@ struct Resolved {
     const Clip* clip = nullptr;
 };
 
-// Locates a clip by id across every track of the sequence.
 std::optional<Resolved> resolve_clip(const canvas::core::Project& proj, ClipId id) {
     if (id == 0) return std::nullopt;
     const auto& seq = proj.sequence;
@@ -165,8 +155,6 @@ std::optional<Resolved> resolve_clip(const canvas::core::Project& proj, ClipId i
     return std::nullopt;
 }
 
-// When a transition lives on a video clip with a linked audio mate, audio edits
-// land on the mate; otherwise the clip itself is the audio target.
 std::optional<Resolved> audio_target(const canvas::core::Project& proj, const Resolved& v) {
     if (v.kind == Track::Kind::Audio) return v;
     if (!v.clip->linked_id) return std::nullopt;
@@ -174,8 +162,6 @@ std::optional<Resolved> audio_target(const canvas::core::Project& proj, const Re
     return std::nullopt;
 }
 
-// The clip a given side edits: Start always targets the OUT clip A; End targets
-// the incoming clip B of a cut, or A's own IN edge for a single-clip bubble.
 std::optional<Resolved> side_video_target(const canvas::core::Project& proj,
                                           const TimelineWidget& timeline, const SideControls& sc) {
     if (!sc.in_edge) return resolve_clip(proj, timeline.selected_transition_a());
@@ -198,7 +184,7 @@ int video_index_for(canvas::core::TransitionType t) {
 }
 
 canvas::core::TransitionType video_type_from_index(int idx) {
-    switch (idx) {  // order matches the dropdown built below
+    switch (idx) {
         case 1: return canvas::core::TransitionType::CrossDissolve;
         case 2: return canvas::core::TransitionType::DipToBlack;
         case 3: return canvas::core::TransitionType::FadeOut;
@@ -221,7 +207,7 @@ int audio_index_for(canvas::core::TransitionType t) {
 }
 
 canvas::core::TransitionType audio_type_from_index(int idx) {
-    switch (idx) {  // matches the audio dropdown order
+    switch (idx) {
         case 1: return canvas::core::TransitionType::AudioFadeConstantGain;
         case 2: return canvas::core::TransitionType::AudioFadeConstantPower;
         case 3: return canvas::core::TransitionType::AudioFadeExponential;
@@ -230,7 +216,7 @@ canvas::core::TransitionType audio_type_from_index(int idx) {
 }
 
 float ease_amount_from_index(int idx) {
-    switch (idx) {  // matches the ease dropdown order
+    switch (idx) {
         case 1: return 1.0f / 3.0f;
         case 2: return 2.0f / 3.0f;
         case 3: return 1.0f;
@@ -261,7 +247,6 @@ QToolButton* make_pill_button(const QString& text) {
 QSlider* make_ratio_slider(QWidget* parent) {
     auto* s = new QSlider(Qt::Horizontal, parent);
     s->setRange(0, 100);
-    // Compressible so the row fits narrow inspector widths / high DPI.
     s->setMinimumWidth(0);
     apply_theme_style(s, &ratio_slider_style);
     return s;
@@ -274,9 +259,6 @@ QToolButton* make_ghost_button(const QString& text) {
     return b;
 }
 
-// Builds the command for a type+duration change to the given edge. Persisting
-// (undo/snapshot/repaint) is the caller's job so every control shares one commit
-// wrapper inside the friend build function.
 std::unique_ptr<canvas::core::ICommand> make_transition_cmd(
     canvas::core::Sequence& seq, const Resolved& r, bool in_edge,
     canvas::core::TransitionType type, int64_t duration) {
@@ -293,7 +275,6 @@ std::unique_ptr<canvas::core::ICommand> make_curve_cmd(canvas::core::Sequence& s
                                                    ease, curve_value, start_ratio, end_ratio);
 }
 
-// Populates one side (Start or End) from its target clip without committing.
 void populate_side(const canvas::core::Project& proj, const TimelineWidget& timeline,
                    Registry& reg, SideControls& sc) {
     auto target = side_video_target(proj, timeline, sc);
@@ -332,7 +313,6 @@ void populate_side(const canvas::core::Project& proj, const TimelineWidget& time
     sc.curve_spin->setValue(curve);
     sc.ease->setCurrentIndex(ease_index_for(ease));
 
-    // Audio half: the linked audio mate carries the fade; if none, disable audio.
     const auto audio = audio_target(proj, *target);
     if (!audio) {
         sc.audio_cat->setEnabled(false);
@@ -354,7 +334,7 @@ void populate_side(const canvas::core::Project& proj, const TimelineWidget& time
     reg.updating = false;
 }
 
-}  // namespace
+}
 
 void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
                                 QToolButton* transition_mode_btn) {
@@ -369,7 +349,6 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
     auto* host = transition_layout->parentWidget();
     const auto tr = [](const char* s) { return MainWindow::tr(s); };
 
-    // Single undo-commit path shared by every edit below.
     const auto commit = [&mw](std::unique_ptr<canvas::core::ICommand>&& cmd) {
         if (!cmd) return;
         mw.undo_.record(std::move(cmd));
@@ -378,7 +357,6 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
         mw.refresh_timeline();
     };
 
-    // Start / End sub-tab pills switch the stacked edge pages below.
     auto* pill_row = new QWidget(host);
     auto* pill_layout = new QHBoxLayout(pill_row);
     pill_layout->setContentsMargins(6, 8, 6, 0);
@@ -403,12 +381,11 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
         layout->setContentsMargins(0, 8, 0, 0);
         layout->setSpacing(10);
 
-        sc.video_cat = new InspectorCategory(tr("Video"), /*expanded=*/true, /*has_enable=*/true);
-        sc.audio_cat = new InspectorCategory(tr("Audio"), /*expanded=*/false, /*has_enable=*/true);
+        sc.video_cat = new InspectorCategory(tr("Video"), true, true);
+        sc.audio_cat = new InspectorCategory(tr("Audio"), false, true);
         layout->addWidget(sc.video_cat);
         layout->addWidget(sc.audio_cat);
 
-        // ---- Video category -------------------------------------------------
         auto* vbody = sc.video_cat->body_layout();
         sc.video_type = new QComboBox;
         set_dark_combo(sc.video_type,
@@ -442,8 +419,6 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
         auto* default_btn = make_ghost_button(tr("Set as Default Duration"));
         vbody->addWidget(default_btn);
 
-        // Alignment: Resolve-style Left/Center/Right of the transition centre.
-        // v1 stores the button state only (the model has no per-edge offset).
         auto* align_group = new QButtonGroup(page);
         align_group->setExclusive(true);
         const auto make_align = [&](const QString& glyph, const QString& tip) {
@@ -460,8 +435,6 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
         align_group->addButton(sc.align_left);
         align_group->addButton(sc.align_center);
         align_group->addButton(sc.align_right);
-        // Reference defaults: the Start (OUT) edge sits flush at the clip's
-        // tail (right-aligned), the End (IN) edge straddles its head (centered).
         (in_edge ? sc.align_center : sc.align_right)->setChecked(true);
         auto* align_row = new QHBoxLayout;
         align_row->setSpacing(4);
@@ -483,11 +456,6 @@ void build_inspector_transition(MainWindow& mw, QVBoxLayout* transition_layout,
                        {tr("Standard"), tr("Soft"), tr("Smooth"), tr("Sleek"), tr("Glossy")});
         add_property_row(vbody, tr("Style"), sc.style);
 
-        // Start/End ratio carve the fade profile out of the transition window
-        // (0 = bubble's left edge, 100 = its right edge, defaults spanning the
-        // whole window). They are independent of the Transition Curve control;
-        // all three commit together as one per-edge shaping edit. Ratio fields
-        // show whole percentages.
         const auto make_ratio_row = [&](SideControls& side, const char* title, QSlider* slider,
                                         QDoubleSpinBox* spin) {
             slider->setRange(0, 100);
@@ -560,11 +528,7 @@ apply_theme_style(lbl, &muted_label_style);
         curve_tools->addWidget(sc.curve_reset);
         vbody->addLayout(curve_tools);
 
-        // ---- Audio category -------------------------------------------------
         auto* abody = sc.audio_cat->body_layout();
-        // Resolve-style Fade Out / Fade In selectors. The page owns exactly one
-        // edge: Start owns Fade Out, End owns Fade In; the other is a read-only
-        // preview of that clip's opposite edge.
         sc.audio_fade_out = new QComboBox;
         set_dark_combo(sc.audio_fade_out,
                        {tr("None"), tr("Constant Gain"), tr("Constant Power"), tr("Exponential")});
@@ -596,7 +560,6 @@ apply_theme_style(lbl, &muted_label_style);
         adur_outer->addLayout(adur_row);
         abody->addLayout(adur_outer);
 
-        // ---- Wiring -----------------------------------------------------------
         const auto commit_edits = [&mw, &reg](const std::function<void()>& body) {
             if (reg.updating) return;
             body();
@@ -657,8 +620,6 @@ apply_theme_style(lbl, &muted_label_style);
                                   static_cast<float>(sc.curve->value()) / 100.0f,
                                   sc.start_ratio->value(), sc.end_ratio->value()));
         };
-        // Syncs the numeric fields from whichever slider moved (spins never
-        // commit mid-hand-off).
         const auto push_shaping_ui = [&sc]() {
             sc.start_ratio_spin->setValue(sc.start_ratio->value());
             sc.end_ratio_spin->setValue(sc.end_ratio->value());
@@ -698,13 +659,13 @@ apply_theme_style(lbl, &muted_label_style);
             int curve_pct = sc.curve->value();
             int ease_idx = sc.ease->currentIndex();
             switch (sc.style->currentIndex()) {
-                case 1: ease_idx = 2; curve_pct = 40; break;  // Soft
-                case 2: ease_idx = 3; curve_pct = 50; break;  // Smooth
-                case 3: ease_idx = 1; curve_pct = 35; break;  // Sleek
-                case 4: ease_idx = 2; curve_pct = 60; break;  // Glossy
-                default: break;                               // Standard
+                case 1: ease_idx = 2; curve_pct = 40; break;
+                case 2: ease_idx = 3; curve_pct = 50; break;
+                case 3: ease_idx = 1; curve_pct = 35; break;
+                case 4: ease_idx = 2; curve_pct = 60; break;
+                default: break;
             }
-            reg.updating = true;  // suppress the intermediate signal commits
+            reg.updating = true;
             sc.ease->setCurrentIndex(ease_idx);
             sc.curve->setValue(curve_pct);
             push_shaping_ui();
@@ -718,8 +679,6 @@ apply_theme_style(lbl, &muted_label_style);
             reg.updating = true;
             if (sc.style->currentIndex() != 0) sc.style->setCurrentIndex(0);
             if (sc.ease->currentIndex() != 0) sc.ease->setCurrentIndex(0);
-            // Restore this edge's reference defaults: curve 1.000 on the Start
-            // (OUT) view / 0.000 on the End (IN) view, ratios spanning the window.
             sc.curve->setValue(sc.in_edge ? 0 : 100);
             sc.start_ratio->setValue(0);
             sc.end_ratio->setValue(100);
@@ -732,7 +691,6 @@ apply_theme_style(lbl, &muted_label_style);
             const int64_t frames = sc.audio_frames->value();
             sc.audio_secs->setValue(fps > 0.0 ? static_cast<double>(frames) / fps : 0.0);
         };
-        // Which combo owns this page's edge.
         QComboBox* const owned_fade = in_edge ? sc.audio_fade_in : sc.audio_fade_out;
         QComboBox* const preview_fade = in_edge ? sc.audio_fade_out : sc.audio_fade_in;
         preview_fade->setEnabled(false);
@@ -766,8 +724,8 @@ apply_theme_style(lbl, &muted_label_style);
         return page;
     };
 
-    reg.stack->addWidget(build_side(/*in_edge=*/false));
-    reg.stack->addWidget(build_side(/*in_edge=*/true));
+    reg.stack->addWidget(build_side(false));
+    reg.stack->addWidget(build_side(true));
 
     QObject::connect(reg.start_btn, &QToolButton::toggled, &mw, [&reg](bool on) {
         if (on && reg.stack) reg.stack->setCurrentIndex(0);
@@ -781,16 +739,12 @@ void attach_inspector_transition(MainWindow& mw, TimelineWidget* timeline) {
     Registry& reg = registry(mw);
     if (!timeline || !reg.stack || reg.attached) return;
     reg.attached = true;
-    // Bubble selection drives the page on/off; clip selection clears it via the
-    // widget's own clear path (transition_selection_cleared).
     QObject::connect(timeline, &TimelineWidget::transition_selected, &mw,
                      [&mw](canvas::core::ClipId, canvas::core::ClipId, bool) {
                          update_inspector_transition(mw);
                      });
     QObject::connect(timeline, &TimelineWidget::transition_selection_cleared, &mw,
                      [&mw]() { update_inspector_transition(mw); });
-    // Initial state: with no bubble selected the Transition pill stays disabled
-    // until the user actually picks a transition.
     update_inspector_transition(mw);
 }
 
@@ -804,9 +758,6 @@ void update_inspector_transition(MainWindow& mw) {
     if (reg.end_btn) reg.end_btn->setEnabled(active);
     if (reg.mode_btn) reg.mode_btn->setEnabled(active);
     if (!active) {
-        // The tab is only usable while a transition bubble is selected; when the
-        // bubble goes away, hop back to the Video page rather than stranding a
-        // disabled page on screen.
         if (reg.inspector_stack && reg.inspector_stack->currentIndex() == reg.transition_page_index)
             reg.inspector_stack->setCurrentIndex(0);
         return;
@@ -817,13 +768,12 @@ void update_inspector_transition(MainWindow& mw) {
         populate_side(*mw.project_, *mw.timeline_, reg, reg.start);
     else
         populate_side(*mw.project_, *mw.timeline_, reg, reg.end);
-    // Keep the hidden side fresh too so a pill switch never shows stale values.
     populate_side(*mw.project_, *mw.timeline_, reg,
                   reg.stack->currentIndex() == 0 ? reg.end : reg.start);
 }
 
 void apply_inspector_transition(MainWindow& mw) {
-    (void)mw;  // commits are event-driven from the control signals
+    (void)mw;
 }
 
-}  // namespace canvas::gui
+}

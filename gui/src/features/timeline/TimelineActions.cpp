@@ -49,18 +49,12 @@ void MainWindow::connect_timeline() {
 
     connect(timeline_, &TimelineWidget::playhead_moved, this,
             [this](int64_t frame) {
-                // Scrubbing: this fires once on grab then on every move. Mark the
-                // drag active so seek_preview uses the fast, non-rewinding preview
-                // path even mid-playback (avoids per-move audio pipe churn).
                 controller_.begin_scrub();
-                // Playback keeps running; previews are cheap and never rewind audio.
                 controller_.seek_preview(frame);
             });
 
     connect(timeline_, &TimelineWidget::playhead_committed, this,
             [this](int64_t frame) {
-                // Scrub released: end the drag (single audio re-anchor + crisp
-                // full-res frame), superseding any buffered previews.
                 controller_.end_scrub();
                 controller_.seek(frame);
             });
@@ -68,10 +62,6 @@ void MainWindow::connect_timeline() {
     connect(timeline_, &TimelineWidget::clip_selected, this,
             [this](const canvas::core::Clip* clip) {
                 selected_clip_ = clip ? clip->id : 0;
-                // Read AFTER the widget's press handler resolved Ctrl/Shift/
-                // plain-click selection for this press (the widget emits this
-                // signal from the end of the press handler), so the mixer sees
-                // the full current set.
                 selected_clip_ids_ = timeline_->selected_clip_ids();
                 update_inspector_audio_full(*this);
                 update_inspector_file(*this);
@@ -93,9 +83,6 @@ void MainWindow::connect_timeline() {
                 update_inspector_file(*this);
             });
 
-    // Volume-line drag (Phase 5): the live preview (waveform re-scale + audible
-    // mix override) rides the Phase-4 preview path; on release the settled dB is
-    // committed to every selected audio target, keeping each clip's pan.
     connect(timeline_, &TimelineWidget::volume_line_preview, this,
             [this](float db) { preview_inspector_volume(db); });
     connect(timeline_, &TimelineWidget::volume_line_committed, this,
@@ -112,11 +99,6 @@ void MainWindow::connect_timeline() {
                     undo_.record(std::move(cmd));
                     any = true;
                 }
-                // ALWAYS drop the live drag override and repaint from the model,
-                // even when nothing changed (no selected targets / knob already at
-                // the value): otherwise the line stays at its last live-drag
-                // position while the model holds the pre-drag level and the next
-                // redraw "snaps back" — the reported volume-line reset.
                 controller_.clear_live_clip_gains();
                 refresh_timeline();
                 if (!any) return;
@@ -206,11 +188,6 @@ void MainWindow::connect_timeline() {
             [this](const std::vector<TimelineWidget::MovedClip>& clips) {
                 if (!project_ || clips.empty()) return;
 
-                // Resolve each moved clip's CURRENT source (kind, track) in the
-                // sequence, then commit as ONE atomic batch op. Linked A/V pairs
-                // are already expanded into the payload; the batch op auto-moves
-                // the mate, so keep only the numerically-lower id per linked pair
-                // (mirrors the delete path's de-dup).
                 std::vector<canvas::core::ClipId> reps;
                 bool any = false;
                 for (const auto& mv : clips) {
@@ -245,10 +222,6 @@ void MainWindow::connect_timeline() {
                         entry->id, entry->kind,
                         static_cast<std::size_t>(entry->track_index), entry->new_tl_in});
                 }
-                // Atomic batch commit: the whole dragged group is placed in one
-                // undo command, so the clips keep their exact preview size and
-                // relative spacing even when they pass over each other's old
-                // positions or station the destination.
                 if (!batch.empty()) {
                     auto cmd = canvas::core::move_clips_batch(project_->sequence, batch);
                     if (cmd) {
@@ -268,9 +241,6 @@ void MainWindow::connect_timeline() {
                    int64_t new_frame) {
                 if (!clip || !project_) return;
 
-                // The core trim op needs the clip's media duration to bound the
-                // source window. MediaRegistry lookup by MediaId; missing media
-                // (0) disables source extension entirely.
                 int64_t media_frames = 0;
                 for (const auto& m : project_->media) {
                     if (m.id == clip->media) {
@@ -286,8 +256,6 @@ void MainWindow::connect_timeline() {
                                                            clip->id, new_frame, media_frames)
                             : canvas::core::trim_clip_tail(project_->sequence, kind, track,
                                                            clip->id, new_frame, media_frames);
-                    // A clamped no-op (e.g. regrowing a head already at media
-                    // start) must still restore the widget preview to model truth.
                     if (!cmd) {
                         refresh_timeline();
                         return;
@@ -323,8 +291,6 @@ void MainWindow::connect_timeline() {
                     undo_.record(std::move(cmd));
                     qDebug() << "[edit] AUTO-TRACK clip=" << clip_id << "tl_in=" << tl_in;
                     has_unsaved_changes_ = true;
-                    // Synchronous rebuild; the widget re-acquires its clip items
-                    // by id right after this signal returns.
                     refresh_timeline();
                     push_snapshot();
                 }
@@ -527,12 +493,9 @@ void MainWindow::connect_timeline() {
                     }
                 };
                 if (b) {
-                    // Cut bubble: clear whichever edge actually carries the
-                    // transition (A's OUT and/or B's IN), plus linked mates.
                     if (a->has_transition_out()) clear_edge(a, false);
                     if (b->has_transition_in()) clear_edge(b, true);
                 } else {
-                    // Single-clip edge bubble on `a`.
                     if (in_edge) {
                         if (a->has_transition_in()) clear_edge(a, true);
                     } else {
@@ -552,9 +515,6 @@ void MainWindow::connect_timeline() {
                 if (!clip || !project_ || duration < 1) return;
                 qWarning() << "transition: resized clip" << clip->id << "dur" << duration
                            << "current_type" << static_cast<int>(clip->transition_out);
-                // Keep the clip's existing transition type; only the duration
-                // changed (via the hover editor). If the clip had none yet,
-                // default to a cross-dissolve.
                 canvas::core::TransitionType type = clip->transition_out;
                 if (type == canvas::core::TransitionType::None)
                     type = canvas::core::TransitionType::CrossDissolve;
@@ -592,9 +552,6 @@ void MainWindow::connect_timeline() {
                 if (!clip || !project_ || duration < 1) return;
                 qWarning() << "transition: in-resized clip" << clip->id << "dur" << duration
                        << "current_type" << static_cast<int>(clip->transition_in);
-                // Keep the clip's existing IN transition type; only the duration
-                // changed (via the hover editor). If the clip had none yet,
-                // default to a fade-in.
                 canvas::core::TransitionType type = clip->transition_in;
                 if (type == canvas::core::TransitionType::None)
                     type = canvas::core::TransitionType::FadeIn;
@@ -705,8 +662,6 @@ void MainWindow::connect_timeline() {
                 push_snapshot();
             });
 
-    // Track-header M/S/L toggles apply the inverse of the shown state as a
-    // single undoable edit, so Undo restores the previous mixing/lock flags.
     const auto toggle_track_flag =
         [this](canvas::core::Track::Kind kind, int track_index, bool on,
                auto make_cmd) {
@@ -870,8 +825,6 @@ void MainWindow::update_inspector_audio() {
     std::size_t index = 0;
     canvas::core::Clip clip;
     if (!find_audio_target(kind, index, clip)) return;
-    // A pending live-drag override belongs to the previous selection; drop it
-    // before rebinding so a released-unchanged knob can't keep re-mixing stale.
     controller_.clear_live_clip_gains();
     inspector_audio_volume_->setValue(clip.volume_db);
     inspector_audio_pan_->setValue(clip.pan);
@@ -881,11 +834,6 @@ void MainWindow::apply_inspector_audio() {
     if (!project_ || !inspector_audio_volume_ || !inspector_audio_pan_) return;
     const auto targets = resolve_audio_targets(project_->sequence, selected_clip_ids_);
     if (targets.empty()) return;
-    // Clamp the Inspector's wide (±100 dB) slider into the AUDIO LAW band on
-    // commit. The out-of-law tail (-100..-61, +25..+100) renders identically to
-    // the band edges anyway (db_to_gain floors/heels them), so storing nought
-    // outside the band removes the "dragged down to -100, no audio at all"
-    // surprise while the wide slider keeps 0 dB dead-center.
     const float vol = canvas::core::audio_mix::normalize_volume_db(
         static_cast<float>(inspector_audio_volume_->value()));
     const float pan = static_cast<float>(inspector_audio_pan_->value());
@@ -898,7 +846,6 @@ void MainWindow::apply_inspector_audio() {
         any = true;
     }
     if (!any) return;
-    // The committed edits supersede the live-drag override the mix was using.
     controller_.clear_live_clip_gains();
     has_unsaved_changes_ = true;
     refresh_timeline();
@@ -919,17 +866,11 @@ void MainWindow::preview_inspector_volume(float vol_db) {
     if (targets.empty()) return;
     for (const auto& t : targets) {
         if (std::abs(vol_db - t.clip.volume_db) < 0.05f) {
-            // Knob is at the model value: make sure no stale drag override
-            // lingers for this clip.
             controller_.clear_live_clip_gain(t.id);
             continue;
         }
-        // Re-mix the audible playback at the knob's gain (live volume override);
-        // the committed edit still arrives from apply_inspector_audio() on drag
-        // release. The timeline's waveform/spread is a CONTENT readout and is
-        // intentionally NOT rescaled with volume (that flattened it into a line).
         controller_.set_live_clip_gain(t.id, vol_db);
     }
 }
 
-}  // namespace canvas::gui
+}

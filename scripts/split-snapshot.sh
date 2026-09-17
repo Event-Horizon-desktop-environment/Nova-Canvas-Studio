@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# split-snapshot.sh <phase-number>
-#
-# Snapshot the current working tree (core/, gui/, CMakeLists.txt don't change for
-# pure doc phases) into /tmp/split/phase-NN/ BEFORE starting a phase, so any single
-# phase can be reverted independently. Phase 3+ snapshots are on-disk before the
-# phase's changes are made.
-#
-# Usage:
-#   ./scripts/split-snapshot.sh 7
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then

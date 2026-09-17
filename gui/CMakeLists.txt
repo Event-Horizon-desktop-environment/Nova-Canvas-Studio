@@ -7,10 +7,6 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
 pkg_check_modules(ALSA IMPORTED_TARGET alsa)
 
-# EGLImage dmabuf import for the zero-copy VAAPI playback path (vaapi_viewer).
-# Qt/widgets apps on X11/GLX or Wayland all drag EGL in via the compositor;
-# when the dev headers are absent the import path compiles out and the viewer
-# falls back to the CPU NV12 upload (as before).
 pkg_check_modules(EGL IMPORTED_TARGET egl)
 
 set(CMAKE_AUTOMOC ON)
@@ -41,6 +37,8 @@ qt_add_executable(canvas
     src/UX/InspectorFile.cpp
     src/UX/InspectorSubtitles.cpp
     src/UX/InspectorShared.hpp
+    src/UX/ActionSearch.cpp
+    src/UX/ActionSearch.hpp
     src/UX/InspectorVisual.hpp
     src/UX/InspectorAudio.hpp
     src/UX/InspectorTransition.hpp
@@ -137,9 +135,6 @@ if(EGL_FOUND)
     target_compile_definitions(canvas PRIVATE CANVAS_HAVE_EGL)
 endif()
 
-# ── System install ────────────────────────────────────────────────────────
-# `sudo just install` (or `sudo cmake --install build --prefix /usr`) copies
-# the binary, the hicolor app icon and the .desktop launcher into /usr.
 install(TARGETS canvas
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
@@ -153,5 +148,4 @@ install(FILES "${CANVAS_SOURCE_ROOT}/packaging/canvas.desktop"
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
 )
 
-# Headless (Qt-free) unit tests for the extracted playback modules.
 add_subdirectory(tests)

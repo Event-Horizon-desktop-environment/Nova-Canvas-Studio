@@ -38,6 +38,7 @@ class QKeyEvent;
 class QAction;
 class QMenu;
 class QToolButton;
+class QTimer;
 class QDoubleSpinBox;
 class QVBoxLayout;
 class MediaPoolWidget;
@@ -49,51 +50,25 @@ class MainWindow;
 
 namespace canvas::gui {
 
-// Namespace bit for ThumbnailService preview ids that belong to media-pool
-// tiles. The pool and the timeline share one id space, and the pool's ids are
-// media indices, so pool requests OR this bit in and the ready-routers mask it
-// out before touching a tile — a timeline filmstrip frame can no longer land on
-// a pool cell under the same numeric id.
 inline constexpr std::uint64_t kPoolThumbNs = 0x8000000000000000ULL;
 
-// Color-page chrome module (features/color/color_page.cpp) is a new-file
-// builder; the strip type is only pointer-held here, so a forward decl suffices.
 class MiniTimelineStrip;
 
-// Menu construction lives in ShellMenus.cpp (splitplan refactor) rather than the
-// wall-of-layout builder. Declared here and friended so it can touch the chrome
-// members it populates without widening MainWindow's public API.
 class MainWindow;
 void build_app_menus(MainWindow& main_window);
 
-// Top status strip, page-mode foundation bar, and transport bar construction
-// live in ShellTopBar.cpp / ShellPageBar.cpp / ShellTransportBar.cpp (splitplan
-// refactor). Declared here and friended so they can touch the chrome members
-// they populate without widening the public API.
 QWidget* build_top_bar(MainWindow& main_window);
 void build_page_bar(MainWindow& main_window);
 QWidget* build_transport_bar(MainWindow& main_window);
 
-// Left (bin tree + media pool) dock population lives in ShellMediaDock.cpp and
-// the Inspector dock shell in ShellInspectorDock.cpp (split of the old
-// ShellDocks.cpp, splitplan refactor). Declared here and friended so they can
-// touch the chrome members they populate with private-API access.
 void build_left_dock(MainWindow& main_window);
 void build_inspector_dock(MainWindow& main_window);
 
-// The Inspector's Transform/Composite property block lives in InspectorVisual.cpp
-// (splitplan refactor). build_inspector_visual() fills the Video tab's categories;
-// attach_inspector_visual() connects the timeline's selection signals after the
-// timeline exists; update_inspector_visual()/apply_inspector_visual() read and
-// commit the selected clip's transform/composite fields.
 void build_inspector_visual(MainWindow& main_window, QVBoxLayout* video_layout);
 void attach_inspector_visual(MainWindow& main_window, TimelineWidget* timeline);
 void update_inspector_visual(MainWindow& main_window);
 void apply_inspector_visual(MainWindow& main_window);
 
-// Audio, Transition, and File inspector pages (InspectorAudio.cpp /
-// InspectorTransition.cpp / InspectorFile.cpp, splitplan refactor). Friended so
-// the page builders can drive the chrome members and read the selection state.
 void build_inspector_audio(MainWindow& main_window, QVBoxLayout* audio_layout,
                            QToolButton* audio_mode_button);
 void attach_inspector_audio(MainWindow& main_window, TimelineWidget* timeline);
@@ -110,28 +85,14 @@ void attach_inspector_file(MainWindow& main_window, TimelineWidget* timeline);
 void update_inspector_file(MainWindow& main_window);
 void apply_inspector_file(MainWindow& main_window);
 
-// The Subtitles inspector page (InspectorSubtitles.cpp, splitplan refactor).
-// Caption styling for the selected title/caption clip: size slider, zoom
-// in/out, and the system-font dropdown. Friended so the page builder can drive
-// the chrome members and read the selection state.
 void build_inspector_subtitles(MainWindow& main_window, QVBoxLayout* subtitles_layout);
 void attach_inspector_subtitles(MainWindow& main_window, TimelineWidget* timeline);
 void update_inspector_subtitles(MainWindow& main_window);
 void apply_inspector_subtitles(MainWindow& main_window);
 
-// The center workspace (viewer column + contextual/toolbar chrome + the
-// timeline dock) lives in ShellCenter.cpp; the Deliver page docks (settings +
-// render queue, with all their render-queue signal plumbing) live in
-// ShellDeliverPage.cpp (split of ShellCenter.cpp, splitplan refactor).
-// Declared here and friended so they can touch the chrome members they
-// populate with private-API access.
 void build_center_workspace(MainWindow& main_window);
 void build_deliver_docks(MainWindow& main_window);
 
-// The Color page workspace + panels live in features/color/ (splitplan-style
-// builder, new module): build_color_page() creates the docks once the center
-// workspace exists; enter/leave_color_page() are the page-bar handoffs.
-// Declared here and friended so the module can own the Color chrome members.
 void build_color_page(MainWindow& main_window);
 void enter_color_page(MainWindow& main_window);
 void leave_color_page(MainWindow& main_window);
@@ -145,17 +106,9 @@ public:
 
     void open_file(const QString& path);
 
-    // Deliver-page integration: the page bar toggles between the Edit layout
-    // (media pool left + inspector right) and the Deliver layout (settings left,
-    // render queue right) while keeping the shared viewer + timeline visible.
     void enter_deliver_page();
     void enter_edit_page();
 
-    // Project Manager (features/project/project_manager_widget.cpp): the
-    // Resolve-style first screen, shown as its own FLOATING top-level window
-    // rather than a page inside the editor. enter_* is also the startup call
-    // that raises the manager window; leave_* hides it and returns to the
-    // editor. Closing the manager window routes here too (window_closed).
     void enter_project_manager();
     void leave_project_manager();
 
@@ -163,25 +116,16 @@ public:
     void render_all_from_queue();
     void reflect_render_queue();
 
-    // Dual-Viewer source preview: opens a pooled media entry in the source
-    // controller (set_project + first frame) and closes it again.
+    void export_edl();
+
     void open_source_preview(const canvas::core::MediaEntry& media);
     void clear_source_preview();
 
-    // Timeline view-options (transport bar > view-options dropdown, Resolve
-    // style): one lifecycle-owned struct, painted into the timeline + viewer
-    // whenever the menu's apply path runs.
     [[nodiscard]] TimelineViewOptions& view_options() { return view_options_; }
 
-    // Raw accessors for the split shell builders and view-options menu (the
-    // widgets are created late by build_center_workspace, so null before then).
     [[nodiscard]] TimelineWidget* timeline() const { return timeline_; }
     [[nodiscard]] ViewerGL* viewer() const { return viewer_; }
 
-    // AI subtitles (Timeline > AI Tools > Generate Subtitles From Audio): opens
-    // the dialog against the selected audio clip, runs whisper on a worker
-    // thread, then lands one caption bar per shaped phrase on a fresh top video
-    // track. subtitle_busy() gates re-entry while a job is in flight.
     [[nodiscard]] bool subtitle_busy() const { return subtitle_busy_.load(); }
     void open_subtitle_dialog();
 
@@ -191,11 +135,6 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
-    // NOTE: no `slots` on these. setupUi() calls QMetaObject::connectSlotsByName,
-    // which scans every moc-registered `on_*` slot against the .ui's designer
-    // widget names and warns per-launch for the ones that never match. All of
-    // them are wired via explicit function-pointer connects, so they're plain
-    // member functions.
     void on_import_media();
     void on_new_project();
     void on_open_project();
@@ -216,17 +155,9 @@ private:
     void update_fps_label();
     bool save_project_to(const QString& path);
     void push_snapshot(int64_t initial_frame = -1);
-    // Live audio-mix snapshot: pushes the project to the playback worker WITHOUT
-    // stopping playback or tearing down decoders, so volume/pan/pitch/EQ edits
-    // land in the next mixed buffer as video keeps playing.
+    void maybe_autosave();
     void push_audio_mix_snapshot();
-    // Grade-only snapshot (Color page): pushes the project via swap_project so
-    // wheel/curve previews re-present the current frame with the new 3D-LUT grade
-    // instead of paying set_project()'s decode-stack teardown each tick.
     void push_grade_snapshot();
-    // Live inspector-preview snapshot (Subtitles page slider drags): the same
-    // warm swap_project path — the current frame re-presents through the cached
-    // decoders with the edited title style at mouse-move cadence, no teardown.
     void push_live_snapshot();
     void delete_selected_clip(bool ripple);
     void delete_selected_media();
@@ -235,28 +166,14 @@ private:
     void toggle_transition_on_selected();
     void remove_all_transitions();
     void toggle_bookmark_at_playhead();
-    // Applies a clip colour (1-12) — or 0 for no colour — to the selected clip
-    // as one undoable edit, mirroring the Inspector's metadata commit path.
     void apply_clip_color(uint8_t color);
-    // Inserts a 3-second media-less title/generator clip on the topmost unlocked
-    // video track at the playhead (Overwrite), committed as one undoable edit.
     void add_title_clip();
-    // Grows the sequence's track list of the given kind until it covers
-    // `index` (inclusive), naming new channels Vn/An by their 1-based order.
     void ensure_tracks_at(canvas::core::Track::Kind kind, std::size_t index);
     bool place_selected_media(canvas::core::Placement mode);
     bool place_media_at(canvas::core::MediaId media_id, int64_t frame, canvas::core::Placement mode,
                         std::optional<double> drop_scene_y = std::nullopt);
-    // AI subtitles worker plumbing (worker half of open_subtitle_dialog; the
-    // queued finish landing is disabled once the window is destroyed).
     void finish_subtitle_transcription(canvas::core::transcribe::Report report);
-    // Toolbox-title drop seam: places the named title preset on a BRAND-NEW
-    // top video track at `frame` (Overwrite — the toolbox never clobbers
-    // footage), selects the placed clip and refreshes the Inspector.
     void place_title_at(const QString& preset_id, int64_t frame);
-    // Toolbox-transition drop seam: applies the named transition to the clip
-    // under the drop point — IN edge for "fade in", OUT otherwise — at the
-    // half-second default duration. No-op when the drop misses every clip.
     void apply_transition_from_toolbox(const QString& transition_id, int64_t frame,
                                        double scene_y);
     void refresh_media_pool();
@@ -268,26 +185,12 @@ private:
     void rebuild_recent_menu();
     void remember_recent_project(const QString& path);
     QStringList recent_projects() const;
-    // Inspector: refreshes the Audio category's Volume/Pan spins from the
-    // selected clip (no-op and keeps their values when nothing is selected),
-    // and commits the current spin values to the selected clip as one undoable
-    // edit (set_clip_audio), then refreshes the timeline.
     void update_inspector_audio();
     void apply_inspector_audio();
-    // Live-only waveform feedback for the volume knob: re-renders the selected
-    // clip's timeline spectrum at `vol_db` without committing an edit; the
-    // actual volume command still lands from apply_inspector_audio() on release.
     void preview_inspector_volume(float vol_db);
-    // Locates the selected clip in the sequence; returns its kind/index.
     bool find_selected_clip(canvas::core::Track::Kind& out_kind, std::size_t& out_index,
                             canvas::core::Clip& out_clip) const;
-    // Selects a clip by id (the color-page mini-strip activation seam). Mirrors
-    // the timeline selection setters so the grading panels can target a clip
-    // that lives outside the main timeline's current selection.
     void activate_color_clip(canvas::core::ClipId id);
-    // Locates the audio clip an audio edit should target: the selected audio
-    // clip itself, or the linked audio mate of a selected video clip. False when
-    // the selection has no audio to edit.
     bool find_audio_target(canvas::core::Track::Kind& out_kind, std::size_t& out_index,
                            canvas::core::Clip& out_clip) const;
 
@@ -301,7 +204,7 @@ private:
     ViewerGL* viewer_ = nullptr;
     source_preview::SourceViewerPanel* source_panel_ = nullptr;
     TimelineWidget* timeline_ = nullptr;
-    TimelineViewOptions view_options_;  // persisted view state; see view_options_menu.cpp
+    TimelineViewOptions view_options_;
     QSlider* scrub_ = nullptr;
     QToolButton* play_button_ = nullptr;
     QLabel* time_label_ = nullptr;
@@ -311,14 +214,13 @@ private:
     QElapsedTimer fps_clock_;
     double nominal_fps_ = 0.0;
     int fps_frames_ = 0;
-    double render_fps_ = 0.0;  // > 0 while a render job is running; the top-bar fps label shows this
+    double render_fps_ = 0.0;
     MediaPoolWidget* media_pool_ = nullptr;
     QTreeWidget* bin_tree_ = nullptr;
     QDockWidget* media_dock_ = nullptr;
     QDockWidget* inspector_dock_ = nullptr;
-    QString current_bin_;  // empty = Master bin
+    QString current_bin_;
 
-    // Deliver page.
     canvas::core::RenderQueue render_queue_;
     DeliverSettingsPanel* deliver_settings_ = nullptr;
     RenderQueuePanel* deliver_queue_panel_ = nullptr;
@@ -326,7 +228,6 @@ private:
     QDockWidget* deliver_queue_dock_ = nullptr;
     bool deliver_active_ = false;
 
-    // Color page (features/color/*, M0 UX scaffold).
     bool color_active_ = false;
     MiniTimelineStrip* color_mini_strip_ = nullptr;
     QDockWidget* color_dock_ = nullptr;
@@ -335,8 +236,6 @@ private:
     QDockWidget* color_effects_dock_ = nullptr;
     QDockWidget* color_lightbox_dock_ = nullptr;
 
-    // Project Manager window (floating, not a page): lazy-created on the
-    // first enter_project_manager() and kept for the session.
     ProjectManagerWindow* project_manager_window_ = nullptr;
     bool project_screen_active_ = false;
 
@@ -381,23 +280,15 @@ private:
     std::unique_ptr<canvas::core::Project> project_;
     canvas::core::UndoStack undo_;
     QString project_path_;
+    QTimer* autosave_timer_ = nullptr;
 
     double fps_ = 30.0;
     int64_t total_frames_ = -1;
     int64_t current_frame_ = 0;
     bool has_unsaved_changes_ = false;
-    // Audible media-pool hover session is active (between clipScrubbed and
-    // clipScrubEnded). Drives the source player's begin/end_hover_scrub pair.
     bool source_hovering_ = false;
     canvas::core::ClipId selected_clip_ = 0;
-    // The full visible selection (ids, incl. linked mates) from the timeline —
-    // PRIMARY clip drives the Visual inspector, the whole set drives mixer
-    // edits (Phase 4): Volume/Pan apply to every resolved audio target.
     std::vector<canvas::core::ClipId> selected_clip_ids_;
-    // AI subtitles worker state (Timeline > AI Tools > Generate Subtitles From
-    // Audio). The worker reads only the frozen media path + language code; the
-    // placement fields are captured before spawn and consumed by the queued
-    // finish callback. subtitle_busy_ gates re-entry while a job is in flight.
     std::thread subtitle_worker_;
     std::atomic_bool subtitle_busy_{false};
     QPointer<SubtitleDialog> subtitle_dialog_;
@@ -410,8 +301,6 @@ private:
     double subtitle_media_fps_ = 30.0;
     std::string subtitle_language_;
     canvas::core::captions::Options subtitle_opts_;
-    // Live progress channel for the running transcription (atomics only; the
-    // dialog's poll timer reads it, the worker thread writes it).
     std::shared_ptr<canvas::core::transcribe::Progress> subtitle_progress_;
     QElapsedTimer subtitle_elapsed_;
     std::string subtitle_model_name_;

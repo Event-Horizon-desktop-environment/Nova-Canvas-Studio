@@ -7,8 +7,6 @@ namespace canvas::core::transcript {
 
 namespace {
 
-// Shared cue-time law, also exposed as srt_timestamp() above. Round up never:
-// the engine hands us sub-ms boundaries, truncate to keep cues from bleeding.
 int64_t clamp_ms(int64_t ms) {
     if (ms < 0) return 0;
     if (ms >= 100 * 3600 * 1000) return 99 * 3600 * 1000 + 59 * 60 * 1000 + 59 * 1000 + 999;
@@ -28,7 +26,7 @@ void append_srt_time(std::string& out, int64_t ms) {
     out += buf;
 }
 
-}  // namespace
+}
 
 std::string srt_timestamp(int64_t ms) {
     std::string out;
@@ -81,4 +79,4 @@ bool write_srt(std::string_view path, const std::vector<Segment>& segments) {
     return file.good();
 }
 
-}  // namespace canvas::core::transcript
+}

@@ -25,12 +25,6 @@ extern "C" {
 
 namespace {
 
-// Graceful SIGINT/SIGTERM/SIGHUP -> QApplication::quit(). Audio on this system
-// routes through the PipeWire ALSA plugin (pcm.pipewire), so the DEFAULT signal
-// action (instant client death with no teardown) leaves the daemon playing the
-// client's queued PCM — the "I killed the app but the audio is still playing"
-// bug. Walking the normal quit path closes the stream, which stops the sound.
-// A second signal forces an immediate exit (in case teardown hangs).
 void signal_quit_thread() {
     sigset_t set;
     ::sigemptyset(&set);
@@ -42,7 +36,7 @@ void signal_quit_thread() {
     while (::sigwait(&set, &sig) == 0) {
         ++hits;
         if (hits >= 2) {
-            std::_Exit(1);  // second kill: force out instead of hanging in teardown
+            std::_Exit(1);
         }
         if (QCoreApplication::instance())
             QMetaObject::invokeMethod(QCoreApplication::instance(), "quit",
@@ -56,30 +50,18 @@ void install_signal_quit() {
     ::sigaddset(&set, SIGINT);
     ::sigaddset(&set, SIGTERM);
     ::sigaddset(&set, SIGHUP);
-    // Block in this thread BEFORE QApplication/Qt spawn threads so every thread
-    // inherits the mask; sigwait() then monopolizes these signals.
     ::pthread_sigmask(SIG_BLOCK, &set, nullptr);
     std::thread(signal_quit_thread).detach();
 }
 
-}  // namespace
+}
 
 int main(int argc, char* argv[]) {
-    // Install first: Qt threads inherit the signal mask, and a very early kill
-    // must still take the graceful path.
     install_signal_quit();
-    // Start every launch with a fresh log file (see log_file_path()/reset_log_file()).
     canvas::gui::reset_log_file();
     canvas::gui::install_logging();
-    // Always-on banner: records the exact build/run identity so a log capture
-    // can be matched to the binary that produced it and stale runs are obvious.
     qWarning() << "eh: boot" << QApplication::applicationVersion()
                << "built" << __DATE__ << __TIME__;
-    // Always-on compiled-in constants report: proves which law the running
-    // binary was built with. If this line ever disagrees with the source, the
-    // binary is stale (wrong build dir / ccache / un-rebuilt) and NOTHING else
-    // in the log can be trusted. Also anchors the YUV matrix so a BT.601 vs
-    // BT.709 mismatch — the purple-skin suspect — is decided by the log alone.
     qWarning().nospace()
         << "[build] wheel_scales lift="
         << canvas::core::colorsci::kWheelLiftScale
@@ -92,10 +74,6 @@ int main(int argc, char* argv[]) {
     QApplication::setApplicationDisplayName(QStringLiteral("Nova Canvas Studio"));
     QApplication::setOrganizationName(QStringLiteral("Nova Canvas"));
 
-    // Persisted hardware-decode preference (Settings dialog). Apply BEFORE the
-    // env-probe manager below (and every later one) so the probe order honors
-    // the user's pin. A specific GPU selection wins over the backend-only pin;
-    // "software" disables hardware probing entirely.
     {
         const QSettings settings;
         const std::string gpu = settings
@@ -103,7 +81,6 @@ int main(int argc, char* argv[]) {
             .toString()
             .toStdString();
         if (gpu == canvas::core::gpu_select::kCpuSentinel) {
-            // CPU row: pure software encode + decode, persisted like a GPU pin.
             canvas::core::HwDeviceManager::set_preferred_backend("software");
         } else if (!gpu.empty()) {
             for (const auto& g : canvas::core::gpu_select::detect_gpus()) {
@@ -123,14 +100,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Startup env report (always-on): the exact FFmpeg build and the hardware
-    // decode surface so playback/export failures can be blamed on a stale ABI
-    // or the absence of a GPU without digging. ALSA/PipeWire presence is
-    // handled by AudioOutput later, but avversion here anchors the whole stack.
     const char* fv = av_version_info();
     const int ffver = LIBAVUTIL_VERSION_INT;
-    // Feeding the manager triggers its own themed probe log ([hw] probing...),
-    // so we just surface the outcome here rather than re-probing.
     const auto env_t0 = std::chrono::steady_clock::now();
     canvas::core::HwDeviceManager hw{"main"};
     (void)hw.device_ctx();
@@ -147,8 +118,6 @@ int main(int argc, char* argv[]) {
         << " cpus=" << av_cpu_count()
         << " probe_ms=" << QString::number(env_probe_ms, 'f', 0);
 
-    // Register the bundled Geist variable fonts; the app falls back to the
-    // platform default family if either fails to load (missing/corrupt asset).
     if (QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/Geist-Variable.ttf")) == -1)
         qWarning() << "[font] Geist-Variable.ttf failed to load";
     if (QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/GeistMono-Variable.ttf")) == -1)
@@ -160,14 +129,6 @@ int main(int argc, char* argv[]) {
     const bool light_theme = QSettings()
         .value(QStringLiteral("appearance/theme"), QStringLiteral("dark"))
         .toString() == QStringLiteral("light");
-    // "HyprDark" auto-trigger: on Hyprland's native Wayland backend only,
-    // Hyprland re-quantizes surfaces through its FP16 sRGB color-management
-    // pipeline (XWayland is blitted raw), so the dark palette reads darker with
-    // flattened blue there. The hypr_dark token set pre-lifts the base palette
-    // by the measured shift so the on-screen result matches the design.
-    // Detected via Hyprland's per-client env var; inert on xcb (byte-accurate
-    // already) and under any other compositor. An explicit user choice in the
-    // Nova Canvas > Appearance menu (appearance/hypr_dark) overrides the rule.
     const bool on_hyprland =
         !qEnvironmentVariableIsEmpty("HYPRLAND_INSTANCE_SIGNATURE");
     QSettings appearance_settings;
@@ -177,12 +138,6 @@ int main(int argc, char* argv[]) {
             : (!light_theme && on_hyprland
                && app.platformName() == QLatin1String("wayland"));
 
-    // Persisted theme-token overrides (Settings > Theme). Applied on top of the
-    // base palette by tokens()/log_theme_tokens(), so setting them here makes
-    // every element (palette + stylesheet + log) reflect the user's colors from
-    // the first frame. Invalid/empty strings (cleared) are ignored -> designed
-    // value. Legacy pre-tab keys (settings/accent_color, settings/playhead_color)
-    // are honored as a fallback and migrated to the per-field keys.
     {
         const QSettings settings;
         int restored = 0;
@@ -245,9 +200,6 @@ int main(int argc, char* argv[]) {
     canvas::gui::MainWindow window;
     QApplication::setWindowIcon(canvas::gui::raw_icon("app_icon"));
     window.setWindowIcon(canvas::gui::raw_icon("app_icon"));
-    // The Project Manager is the app's gateway: only its floating window shows
-    // at startup (the editor stays hidden until a project actually opens).
-    // Launching with a project file argument jumps straight into the editor.
     if (argc > 1) {
         window.show();
         window.open_file(QString::fromLocal8Bit(argv[1]));

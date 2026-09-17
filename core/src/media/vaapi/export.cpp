@@ -30,9 +30,6 @@ VaapiSurfacePtr translate_descriptor(const VADRMPRIMESurfaceDescriptor& desc,
         return nullptr;
     }
 
-    // Composed-layers export produces exactly one NV12 layer with two planes.
-    // (SEPARATE_LAYERS would give one layer per plane — the decode worker
-    // always exports COMPOSED_LAYERS, so anything else here is unexpected.)
     const auto& layer = desc.layers[0];
     if (desc.num_layers != 1 || layer.num_planes < 2) {
         ::canvas::core::log::log_warning(
@@ -50,9 +47,6 @@ VaapiSurfacePtr translate_descriptor(const VADRMPRIMESurfaceDescriptor& desc,
     surf->range = spec.range;
     surf->vendor = vendor;
 
-    // Pin the source VA surface first: if any fd dup below fails we bail with
-    // nothing held (the caller falls back to CPU), and if it succeeds the pin
-    // keeps the surface reserved for as long as our dmabufs are alive.
     if (pin_ref) {
         AVBufferRef* const pin_copy = av_buffer_ref(pin_ref);
         if (pin_copy) {
@@ -69,22 +63,17 @@ VaapiSurfacePtr translate_descriptor(const VADRMPRIMESurfaceDescriptor& desc,
         }
     }
 
-    // Duplicate every object fd so the surface owns its own dmabufs. The
-    // descriptor's fds belong to the driver and close when vaExportSurfaceHandle
-    // returns / the driver unrefs; we must not reuse or close them.
     surf->objects.reserve(desc.num_objects);
     for (std::uint32_t i = 0; i < desc.num_objects; ++i) {
         const int dup_fd = ::dup(desc.objects[i].fd);
         if (dup_fd < 0) {
             ::canvas::core::log::log_warning("[vaapi] translate_descriptor: dup(fd=%d) FAILED (errno=%d)",
                                              desc.objects[i].fd, errno);
-            return nullptr;  // ~VaapiSurface closes the fds dup'd so far
+            return nullptr;
         }
         surf->objects.push_back(VaapiObject{dup_fd, desc.objects[i].drm_format_modifier});
     }
 
-    // Record the importer's per-plane geometry. object_index is kept as-is so
-    // it indexes surf->objects one-to-one with the descriptor's objects array.
     for (std::uint32_t p = 0; p < layer.num_planes; ++p) {
         if (layer.object_index[p] >= desc.num_objects) {
             ::canvas::core::log::log_warning(
@@ -108,9 +97,9 @@ VaapiSurfacePtr translate_descriptor(const VADRMPRIMESurfaceDescriptor& desc,
     return surf;
 }
 
-}  // namespace canvas::core::vaapi
+}
 
-#else  // !CANVAS_HAVE_VAAPI
+#else
 
 #include "canvas/core/util/log.hpp"
 
@@ -125,6 +114,6 @@ VaapiSurfacePtr translate_descriptor(const VADRMPRIMESurfaceDescriptor&,
     return nullptr;
 }
 
-}  // namespace canvas::core::vaapi
+}
 
-#endif  // CANVAS_HAVE_VAAPI
+#endif

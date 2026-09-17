@@ -1,17 +1,3 @@
-// Headless audio-target resolution tests (Phase 4). Compiles
-// audio_targets.cpp directly into the binary so the module is verified exactly
-// as shipped; the Qt-free seam is enforced by the build (a stray <Q...> include
-// breaks this target on purpose).
-//
-// Covers the mixer-target resolution the Inspector's Volume/Pan edits drive:
-//   * audio clip in the selection resolves to itself (kind/track/id copied);
-//   * video clip with a linked audio mate resolves to that mate;
-//   * video clip with no audio is skipped;
-//   * a linked A/V pair selected via either half yields ONE target (de-dup);
-//   * duplicate ids in the selection collapse;
-//   * order follows first occurrence in the selection;
-//   * the full Clip copy rides along (volume_db/pan readable for populate).
-
 #include "features/timeline/audio_targets.hpp"
 
 #include <cstdio>
@@ -36,20 +22,20 @@ canvas::core::Sequence make_seq() {
     canvas::core::Track v0;
     v0.kind = canvas::core::Track::Kind::Video;
     v0.clips = {
-        {.id = 1, .tl_in = 0, .tl_out = 100, .linked_id = 4},     // V+A pair (mate A0)
-        {.id = 2, .tl_in = 100, .tl_out = 160},                   // video, NO audio
-        {.id = 7, .tl_in = 400, .tl_out = 500, .linked_id = 8},   // V+A pair (mate A1)
+        {.id = 1, .tl_in = 0, .tl_out = 100, .linked_id = 4},
+        {.id = 2, .tl_in = 100, .tl_out = 160},
+        {.id = 7, .tl_in = 400, .tl_out = 500, .linked_id = 8},
     };
     canvas::core::Track v1;
     v1.kind = canvas::core::Track::Kind::Video;
     v1.clips = {
-        {.id = 3, .tl_in = 200, .tl_out = 300},                   // pure video
+        {.id = 3, .tl_in = 200, .tl_out = 300},
     };
     canvas::core::Track a0;
     a0.kind = canvas::core::Track::Kind::Audio;
     a0.clips = {
         {.id = 4, .tl_in = 0, .tl_out = 100, .linked_id = 1},
-        {.id = 5, .tl_in = 100, .tl_out = 200, .volume_db = -6.0f, .pan = 0.5f},  // audio only
+        {.id = 5, .tl_in = 100, .tl_out = 200, .volume_db = -6.0f, .pan = 0.5f},
     };
     canvas::core::Track a1;
     a1.kind = canvas::core::Track::Kind::Audio;
@@ -61,13 +47,6 @@ canvas::core::Sequence make_seq() {
     s.audio_tracks.push_back(a0);
     s.audio_tracks.push_back(a1);
     return s;
-}
-
-bool any_target(const std::vector<AudioTarget>& ts, canvas::core::ClipId id,
-                std::size_t track) {
-    for (const auto& t : ts)
-        if (t.id == id && t.track == track) return true;
-    return false;
 }
 
 void test_audio_clip_direct() {
@@ -112,13 +91,10 @@ void test_video_without_audio_skipped() {
 
 void test_linked_pair_selected_via_either_half() {
     const auto s = make_seq();
-    // Video half alone and audio half alone each resolve to the same single
-    // audio target...
     const auto tv = resolve_audio_targets(s, {1});
     const auto ta = resolve_audio_targets(s, {4});
     CHECK(tv.size() == 1 && tv[0].id == 4);
     CHECK(ta.size() == 1 && ta[0].id == 4);
-    // ...and selecting BOTH halves still yields ONE target (no double edit).
     const auto both = resolve_audio_targets(s, {1, 4});
     CHECK(both.size() == 1 && both[0].id == 4);
     const auto both_rev = resolve_audio_targets(s, {4, 1});
@@ -127,7 +103,6 @@ void test_linked_pair_selected_via_either_half() {
 
 void test_multi_selection_in_order_and_dedupe() {
     const auto s = make_seq();
-    // {video-with-mate, audio-only, pure-video, duplicate} -> {4, 5}, 3 skipped.
     const auto ts = resolve_audio_targets(s, {1, 5, 3, 5, 4});
     CHECK(ts.size() == 2);
     if (ts.size() == 2) {
@@ -151,7 +126,7 @@ void test_empty_selection() {
     CHECK(resolve_audio_targets(s, {2, 3}).empty());
 }
 
-}  // namespace
+}
 
 int main() {
     test_audio_clip_direct();

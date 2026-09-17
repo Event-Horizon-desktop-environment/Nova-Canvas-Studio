@@ -1,13 +1,3 @@
-// Export regression sweep. Verifies the exporter can render+encode a real
-// timeline into every *valid* codec/container combination that this machine's
-// FFmpeg build actually provides (using the CPU encoders that ship with the
-// build). Combinations that the container rejects by design (e.g. WebM+H.264,
-// MP4+ProRes) are skipped, not counted as failures. Invalid–but–expected combos
-// are the GUI restriction's job and are listed in the test as skipped.
-//
-// The source media is encoded programmatically at runtime (a tiny h264 MP4) so
-// the test has no dependency on external fixtures or a system ffmpeg binary.
-
 #include "canvas/core/export/deliver_preset.hpp"
 #include "canvas/core/export/exporter.hpp"
 #include "canvas/core/project/project.hpp"
@@ -37,7 +27,6 @@ static void report(bool ok, const char* what) {
     if (!ok) ++g_failures;
 }
 
-// Encodes `frames` of a moving gradient as h264 in an MP4 container at `path`.
 static bool make_source(const std::string& path, int w, int h, int fps, int frames) {
     const AVCodec* codec = avcodec_find_encoder_by_name("libx264");
     if (!codec) { std::printf("SKIP  no libx264 to synthesize source; cannot run export sweep\n"); return false; }
@@ -67,7 +56,6 @@ static bool make_source(const std::string& path, int w, int h, int fps, int fram
     f->format = AV_PIX_FMT_YUV420P; f->width = w; f->height = h;
     av_frame_get_buffer(f, 32);
 
-    int y_size = w * h, uv_size = (w / 2) * (h / 2);
     for (int n = 0; n < frames; ++n) {
         av_frame_make_writable(f);
         for (int y = 0; y < h; ++y)
@@ -118,11 +106,6 @@ static Project make_project(const std::string& src_path) {
     Track v; v.kind = Track::Kind::Video; v.name = "V1";
     p.sequence.video_tracks.push_back(std::move(v));
     Clip clip; clip.media = 0; clip.name = "A"; clip.tl_in = 0; clip.src_in = 0; clip.src_out = 12;
-    // Editorial content on the clip so the sweep exercises the title-rasterise
-    // + fade-envelope + composite path (frame_gpu bails on titles -> the CPU
-    // compositor), not just a straight codec blit. The subtitle-style title is
-    // nudged toward the bottom; the fades are short so the 12-frame source
-    // still has a full-opacity middle.
     clip.title.text = "SWEEP";
     clip.title.size = 0.14f;
     clip.title.a = 1.0f;
@@ -150,9 +133,6 @@ static bool file_ok(const std::string& path) {
     return sz > 64;
 }
 
-// Returns whether `codec` is a valid video codec for `fmt`. This is the set of
-// combinations the GUI exposes (and the muxer actually accepts); anything else
-// is container-invalid by construction and is skipped rather than failed.
 static bool is_valid_combo(const std::string& fmt, const std::string& codec) {
     const bool h264 = codec.find("264") != std::string::npos;
     const bool h265 = codec.find("265") != std::string::npos ||
@@ -161,7 +141,7 @@ static bool is_valid_combo(const std::string& fmt, const std::string& codec) {
     if (fmt == "mp4" || fmt == "matroska") return h264 || h265 || av1;
     if (fmt == "webm") return av1;
     if (fmt == "mxf_op1a" || fmt == "mxf") return h264 || h265;
-    if (fmt == "mpeg") return h264;  // MPEG-2 container can't be AV1/H.265
+    if (fmt == "mpeg") return h264;
     return false;
 }
 
@@ -171,13 +151,6 @@ int main() {
     if (!make_source(src, 128, 96, 30, 12)) return 2;
 
     const std::vector<std::string> formats{"mp4", "matroska", "mxf_op1a", "mpeg", "webm"};
-    // Derive the video codec set from the app's own query (list_video_codecs),
-    // the same list the Deliver page exposes, restricted to the broad CPU
-    // encoders of interest. A hardcoded list would sweep encoders the linked
-    // FFmpeg doesn't actually provide (distro builds ship codecs separately)
-    // and spuriously fail. Device-dependent encoders (v4l2m2m/vulkan/etc.) are
-    // filtered out: they report as software but still require a device node,
-    // so they'd spuriously fail here.
     std::vector<std::string> vcodecs;
     for (const CodecInfo& ci : list_video_codecs()) {
         if (ci.hw) continue;
@@ -209,7 +182,6 @@ int main() {
             report(ok, (label + " " + (ok ? "" : err)).c_str());
             if (ok) any = true;
         }
-        // Audio is only checked in containers that accept a common codec (AAC).
         if (fmt != "mp4" && fmt != "matroska") continue;
         if (!acodecs.empty() && !vcodecs.empty()) {
             const std::string& vc = vcodecs[0];

@@ -19,13 +19,9 @@ namespace canvas::gui {
 namespace {
 
 void apply_fixed_playhead(MainWindow& mw) {
-    // "Fixed Playhead": keep the playhead visually anchored — the timeline
-    // scrolls beneath it during playback instead of the needle traveling.
     mw.timeline()->set_follow_playhead(mw.view_options().fixed_playhead);
 }
 
-// One vertical slider row inside a submenu: label with the live value + a
-// horizontal slider. Emits on valueChanged so the view livens as you drag.
 QWidget* make_height_slider_row(MainWindow& mw, const QString& title,
                                 double initial, bool video) {
     auto* container = new QWidget;
@@ -39,9 +35,8 @@ QWidget* make_height_slider_row(MainWindow& mw, const QString& title,
     layout->addWidget(label);
     auto* slider = new QSlider(Qt::Horizontal, container);
     slider->setRange(24, 200);
-    slider->setValue(qRound(initial) /* clamped to range */);
+    slider->setValue(qRound(initial));
     layout->addWidget(slider);
-    // Live apply per tick; the value re-label keeps the number honest.
     QObject::connect(slider, &QSlider::valueChanged, container, [&mw, label, video](int v) {
         label->setText(QStringLiteral("%1 — %2").arg(
             label->text().section(QStringLiteral(" — "), 0, 0),
@@ -69,10 +64,10 @@ QAction* toggle(MainWindow& mw, QMenu* menu, const QString& text, bool* field,
     return act;
 }
 
-}  // namespace
+}
 
 void apply_view_options(MainWindow& mw) {
-    if (!mw.timeline() || !mw.viewer()) return;  // pre-widget construction guard
+    if (!mw.timeline() || !mw.viewer()) return;
     TimelineViewOptions& opts = mw.view_options();
     mw.timeline()->set_view_options(&opts);
     apply_fixed_playhead(mw);
@@ -81,9 +76,6 @@ void apply_view_options(MainWindow& mw) {
 }
 
 void attach_timeline_view_options_button(MainWindow& mw, QToolButton* button) {
-    // Baseline: any "Set as Default View" snapshot becomes this session's
-    // starting options. (apply_view_options runs lazily: first menu edit, or
-    // ShellCenter's post-timeline construction call, applies it.)
     {
         QSettings settings;
         load_view_options(settings, mw.view_options());
@@ -93,22 +85,19 @@ void attach_timeline_view_options_button(MainWindow& mw, QToolButton* button) {
     menu->setTitle(QObject::tr("Timeline View Options"));
 
     toggle(mw, menu, QObject::tr("Display Stacked Timelines"),
-           &mw.view_options().show_stacked_timelines, /*rethumb=*/false);
+           &mw.view_options().show_stacked_timelines, false);
     toggle(mw, menu, QObject::tr("Display Subtitle Tracks"),
-           &mw.view_options().show_subtitle_tracks, /*rethumb=*/false);
+           &mw.view_options().show_subtitle_tracks, false);
     menu->addSeparator();
 
     toggle(mw, menu, QObject::tr("Display Audio Waveforms"),
-           &mw.view_options().show_waveforms, /*rethumb=*/true);
+           &mw.view_options().show_waveforms, true);
     toggle(mw, menu, QObject::tr("Display Clip Names"),
-           &mw.view_options().show_clip_names, /*rethumb=*/false);
+           &mw.view_options().show_clip_names, false);
     toggle(mw, menu, QObject::tr("Display Clip Durations"),
-           &mw.view_options().show_clip_durations, /*rethumb=*/false);
+           &mw.view_options().show_clip_durations, false);
     menu->addSeparator();
 
-    // Thumbnail View — exclusive radio group (Off / Single Frame / Filmstrip).
-    // A real QActionGroup so checking one unchecks the others (and the active
-    // entry can't be toggled off into a stale model value).
     {
         auto* sub = menu->addMenu(QObject::tr("Thumbnail View"));
         auto* group = new QActionGroup(sub);
@@ -131,9 +120,6 @@ void attach_timeline_view_options_button(MainWindow& mw, QToolButton* button) {
         }
     }
 
-    // Viewer Background — exclusive radio group (Black / Checkerboard / White /
-    // Gray). Solid modes recolor the monitor letterbox; Checkerboard tiles it.
-    // Grouped so choosing a new background clears the previous one's check.
     {
         auto* sub = menu->addMenu(QObject::tr("Viewer Background"));
         auto* group = new QActionGroup(sub);
@@ -159,21 +145,19 @@ void attach_timeline_view_options_button(MainWindow& mw, QToolButton* button) {
     menu->addSeparator();
 
     toggle(mw, menu, QObject::tr("Display Non-Rectified Waveforms"),
-           &mw.view_options().non_rectified_waveforms, /*rethumb=*/true);
+           &mw.view_options().non_rectified_waveforms, true);
     toggle(mw, menu, QObject::tr("Display Full Waveforms"),
-           &mw.view_options().full_waveforms, /*rethumb=*/true);
+           &mw.view_options().full_waveforms, true);
     toggle(mw, menu, QObject::tr("Display Waveform Borders"),
-           &mw.view_options().waveform_borders, /*rethumb=*/true);
+           &mw.view_options().waveform_borders, true);
     toggle(mw, menu, QObject::tr("Display Scaled Waveforms"),
-           &mw.view_options().scaled_waveforms, /*rethumb=*/true);
+           &mw.view_options().scaled_waveforms, true);
     menu->addSeparator();
 
-    // Fixed Playhead: a latching toggle (playhead anchored, timeline scrolls).
     toggle(mw, menu, QObject::tr("Fixed Playhead"),
-           &mw.view_options().fixed_playhead, /*rethumb=*/false);
+           &mw.view_options().fixed_playhead, false);
     menu->addSeparator();
 
-    // Track Height sliders (global: every row of that kind).
     {
         auto* sub = menu->addMenu(QObject::tr("Track Height"));
         auto* video = new QWidgetAction(sub);
@@ -187,9 +171,6 @@ void attach_timeline_view_options_button(MainWindow& mw, QToolButton* button) {
     }
     menu->addSeparator();
 
-    // Collapse / Expand All: one click strips every video AND audio track down
-    // to its header chevron (and restores them). A single undoable command, so
-    // one Undo flips the whole stack back.
     {
         auto* act = menu->addAction(QObject::tr("Collapse All Tracks"));
         QObject::connect(act, &QAction::triggered, &mw, [&mw] {
@@ -214,8 +195,6 @@ void attach_timeline_view_options_button(MainWindow& mw, QToolButton* button) {
     }
     menu->addSeparator();
 
-    // "Set as Default View": persist the current combination to QSettings;
-    // every later session starts from it (Resolve's default-view contract).
     {
         auto* act = menu->addAction(QObject::tr("Set as Default View"));
         QObject::connect(act, &QAction::triggered, &mw, [&mw] {
@@ -228,4 +207,4 @@ void attach_timeline_view_options_button(MainWindow& mw, QToolButton* button) {
     button->setMenu(menu);
 }
 
-}  // namespace canvas::gui
+}

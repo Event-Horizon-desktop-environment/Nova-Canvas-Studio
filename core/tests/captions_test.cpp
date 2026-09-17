@@ -1,7 +1,3 @@
-// Unit tests for the Qt-free caption-shaping law (canvas::core::captions):
-// the wrap/chunk law, the char-weighted time split, the gap enforcement and
-// the preset catalogue. Pure math — no model, no devices → always runs.
-
 #include "canvas/core/timeline/captions.hpp"
 
 #include <cstdio>
@@ -19,7 +15,7 @@ void report(const bool ok, const char* name) {
     if (!ok) ++g_failures;
 }
 
-}  // namespace
+}
 
 int main() {
     using canvas::core::captions::Caption;
@@ -31,7 +27,6 @@ int main() {
     using canvas::core::captions::wrap_line;
     using canvas::core::transcript::Segment;
 
-    // --- preset catalogue ----------------------------------------------------
     report(!presets().empty(), "presets: catalogue is non-empty");
     report(preset_options("standard").max_chars_per_line == 42,
            "presets: standard -> 42 chars/line, 1 line");
@@ -46,14 +41,12 @@ int main() {
     report(preset_options("nonexistent").max_chars_per_line == 42,
            "presets: unknown name falls back to standard");
 
-    // --- clamp law -----------------------------------------------------------
     Options bad{0, 7, -3};
     const Options fixed = sanitize(bad);
     report(fixed.max_chars_per_line == 4, "clamp: chars floor at 4");
     report(fixed.max_lines == 3, "clamp: lines capped at 3");
     report(fixed.gap_frames == 0, "clamp: gap floored at 0");
 
-    // --- wrap law ------------------------------------------------------------
     report(wrap_line("hello world", 42) == "hello world", "wrap: short line unchanged");
     report(wrap_line("hello world", 5) == "hello\nworld", "wrap: breaks at column 5");
     report(wrap_line("one two three four five", 10) == "one two\nthree four\nfive",
@@ -61,7 +54,6 @@ int main() {
     report(wrap_line("supercalifragilistic", 4) == "supercalifragilistic",
            "wrap: unbreakable token keeps full width on its own line");
 
-    // --- shape: single short segment ----------------------------------------
     const std::vector<Segment> one{{{0, 2000, "Hello world"}}};
     const std::vector<Caption> out1 = shape_captions(one, {42, 1, 0}, 30.0);
     report(out1.size() == 1, "shape: single fitting segment -> one caption");
@@ -70,9 +62,6 @@ int main() {
     report(out1.size() == 1 && out1[0].start_ms == 0 && out1[0].end_ms == 2000,
            "shape: span kept as-authored");
 
-    // --- shape: one long segment splits with char-weighted time --------------
-    // 90 chars over 9000 ms under 42/1 -> three captions (~30 chars each) each
-    // getting ~1/3 of the span.
     const std::string long_word = [] {
         std::string s = "alpha ";
         while (static_cast<int>(s.size()) < 90) s += "word ";
@@ -95,7 +84,6 @@ int main() {
         (void)mid;
     }
 
-    // --- shape: multi-line policy merges --------------------------------
     const std::string eighty = [] {
         std::string s;
         while (static_cast<int>(s.size()) < 80) s += "word ";
@@ -107,9 +95,6 @@ int main() {
     report(out3.size() == 1 && out3[0].text.find('\n') != std::string::npos,
            "shape: 2-line caption carries a newline");
 
-    // --- shape: gap enforcement ---------------------------------------------
-    // Two 1-second cues with a 100 ms natural gap; requiring 6 frames @ 30 fps
-    // (200 ms) pushes the second cue's start forward to 1200 ms.
     const std::vector<Segment> gaps{{{0, 1000, "First"}, {1100, 2100, "Second"}}};
     const std::vector<Caption> out4 = shape_captions(gaps, {42, 1, 6}, 30.0);
     report(out4.size() == 2, "gap: both cues survive 6-frame enforcement");
@@ -118,7 +103,6 @@ int main() {
     report(out4.size() == 2 && out4[0].start_ms == 0 && out4[0].end_ms == 1000,
            "gap: first cue untouched");
 
-    // --- shape: empty / zero-length segments are skipped ---------------------
     const std::vector<Segment> junk{{{0, 0, ""},
                                      {100, 900, "   \t "},
                                      {1000, 3000, "Keep me"}}};

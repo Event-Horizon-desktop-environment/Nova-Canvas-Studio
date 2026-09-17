@@ -1,10 +1,5 @@
 #pragma once
 
-// Waveform scope — implements waveform-vectorscope-histogram-cie-implementation-
-// spec.md §1. The same column buckets as Parade (Luma adds a single Y' column
-// histogram), composited into ONE plot instead of three thirds: Luma = white
-// trace, RGB = the three parade channels overlaid additively, YRGB = both.
-
 #include <QImage>
 
 #include "features/color/scopes/common/scope_common.hpp"
@@ -34,4 +29,4 @@ private:
     QImage content_;
 };
 
-}  // namespace canvas::gui
+}

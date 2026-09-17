@@ -11,15 +11,12 @@ namespace {
 
 constexpr float kByteToUnit = 1.0f / 255.0f;
 
-// Clamps a unit-space float back to a byte. NaN/denormal-safe for the same
-// reason as the colorsci laws: the evaluator never emits them, but clamping
-// keeps a corrupt graph from producing garbage bytes.
 std::uint8_t clamp_unit(float v) {
     v = std::max(0.0f, std::min(1.0f, v));
     return static_cast<std::uint8_t>(std::lround(v * 255.0f));
 }
 
-}  // namespace
+}
 
 VideoFramePtr apply_grade_to_frame(const VideoFrame& src,
                                    const grade_graph::GradeGraph& grade) {
@@ -33,7 +30,7 @@ VideoFramePtr apply_grade_to_frame(const VideoFrame& src,
         in.rgba[i] = static_cast<float>(src.rgba[i]) * kByteToUnit;
 
     const grade_graph::EvalResult res = grade_graph::evaluate_graph(grade, in);
-    if (!res.frame) return nullptr;  // no terminal => passthrough
+    if (!res.frame) return nullptr;
     if (!res.error.empty()) return nullptr;
 
     const grade_graph::FrameF& out = *res.frame;
@@ -52,4 +49,4 @@ VideoFramePtr apply_grade_to_frame(const VideoFrame& src,
     return graded;
 }
 
-}  // namespace canvas::core
+}

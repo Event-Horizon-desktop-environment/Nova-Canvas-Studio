@@ -56,8 +56,6 @@ bool GradeGraph::remove_edge(PipeId from, PipeId to) {
 }
 
 bool GradeGraph::would_create_cycle(PipeId from, PipeId to) const {
-    // Adding from->to creates a cycle iff a path already runs to -> ... -> from.
-    // Walk every wire (all three pipe types) with an explicit DFS stack.
     std::vector<int> stack{to.node};
     std::set<int> seen;
     while (!stack.empty()) {
@@ -119,4 +117,4 @@ void GradeGraph::clear() {
     edges_.clear();
 }
 
-}  // namespace canvas::core::grade_graph
+}

@@ -25,24 +25,14 @@ namespace canvas::gui {
 
 namespace {
 
-// Item-data roles past the drag mime/payload (UserRole, UserRole + 1).
 constexpr int kToolboxMetaRole = Qt::UserRole + 2;
 constexpr int kToolboxKindRole = Qt::UserRole + 3;
 constexpr int kToolboxIconRole = Qt::UserRole + 4;
 
-// Tile card geometry. Cell size + between-cell spacing; Qt's IconMode grid
-// layout spreads the columns evenly across the full well width like the Media
-// Pool grid above.
 constexpr int kGridW = 112;
 constexpr int kGridH = 98;
 constexpr int kGridSpacing = 8;
 
-// Paints each catalogue entry as a tile card in the Media Pool's own idiom: a
-// compact raised card (r-8) with a flat face, a flat tinted well carrying the
-// centred kind icon, and a caption row (name + mono meta). Flat fills only —
-// gradients band on 8-bit panels. Hover lifts the tile and lights the border;
-// selection adds the amber focus ring + outer glow. Effect tiles ("SOON")
-// paint dimmed and skip the lift — catalogue only, never a drag source.
 class ToolboxTileDelegate final : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
@@ -68,21 +58,16 @@ public:
 
         p->setRenderHint(QPainter::Antialiasing);
 
-        // Hover lifts the tile onto a soft shadow-card (draggable kinds only).
         if (hovered && !soon) {
             QPainterPath halo;
             halo.addRoundedRect(card.translated(0, 2), kRadius, kRadius);
             p->fillPath(halo, with_alpha(QColor(0, 0, 0), 60));
         }
 
-        // Card face: flat surface fill — gradients band on 8-bit panels.
         QPainterPath cardPath;
         cardPath.addRoundedRect(card, kRadius, kRadius);
         p->fillPath(cardPath, t.surface_raised);
 
-        // Flat tinted well + centred kind icon. Slate for titles (footage-like
-        // payload, same placeholder the pool paints for video), deep teal for
-        // transitions, violet for the not-yet-shipped effects.
         QColor wellFill, iconTint;
         switch (kind) {
             case ToolboxKind::Title:
@@ -104,8 +89,6 @@ public:
         p->save();
         if (soon) p->setOpacity(0.55);
         p->fillPath(wellClip, wellFill);
-        // The well icon is re-tinted per kind from the bundled SVG name (the
-        // pool's own placeholder idiom) — QIcon carries no usable name here.
         const QByteArray icon_name = index.data(kToolboxIconRole).toByteArray();
         if (!icon_name.isEmpty()) {
             const QPixmap ph = icon(icon_name.constData(), iconTint).pixmap(QSize(20, 20));
@@ -114,7 +97,6 @@ public:
         }
         p->restore();
 
-        // Caption: name (10.5px medium) + mono meta line (9px), like the pool.
         const QString name = index.data(Qt::DisplayRole).toString();
         const QRectF cap(card.left() + 7, well.bottom() + 3, card.width() - 14,
                          card.height() - kWellH - 5);
@@ -138,8 +120,6 @@ public:
                         rfm.elidedText(meta, Qt::ElideRight, static_cast<int>(cap.width())));
         }
 
-        // Border: transparent idle, border_hi on hover, amber ring + outer
-        // glow when selected — the pool's focus language verbatim.
         QPen border(selected ? t.accent : (hovered ? t.border_hi : QColor(0, 0, 0, 0)), 1);
         p->setPen(border);
         p->setBrush(Qt::NoBrush);
@@ -152,15 +132,9 @@ public:
     }
 };
 
-}  // namespace
+}
 
-// --- ToolboxList ------------------------------------------------------------
 ToolboxList::ToolboxList(QWidget* parent) : QListWidget(parent) {
-    // Grid geometry mirrors the Media Pool (IconMode tile cards, static flow).
-    // The well background is the pool's own style function — same surface_low
-    // fill + 1px border, tracking theme switches identically. The delegate
-    // paints every tile including hover/selection. Mouse tracking is what lets
-    // the delegate's hover state fire at all.
     setViewMode(QListView::IconMode);
     setIconSize(QSize(0, 0));
     setGridSize(QSize(kGridW, kGridH));
@@ -197,9 +171,6 @@ QListWidgetItem* ToolboxList::add_item(const QString& text, ToolboxKind kind,
     item->setData(kToolboxKindRole, static_cast<int>(kind));
     if (icon_name && icon_name[0] != '\0')
         item->setData(kToolboxIconRole, QByteArray(icon_name));
-    // The drop behaviour lives in the hover tooltip (the meta line shows a
-    // content preview instead): titles land on a new video track, transitions
-    // apply to the clip under the drop point.
     switch (kind) {
         case ToolboxKind::Title:
             item->setToolTip(
@@ -227,9 +198,6 @@ void ToolboxList::startDrag(Qt::DropActions supported) {    QListWidgetItem* ite
     auto* drag = new QDrag(this);
     drag->setMimeData(md);
 
-// Mini card tile: the catalogue card shrunk to a drag chip (flat face,
-// border, well icon + DemiBold label) so the timeline reads the incoming
-// payload as "clip being placed".
     const ThemeTokens& t = tokens();
     QPixmap tile(160, 64);
     tile.fill(Qt::transparent);
@@ -258,7 +226,6 @@ void ToolboxList::startDrag(Qt::DropActions supported) {    QListWidgetItem* ite
     delete drag;
 }
 
-// --- ToolboxWidget ----------------------------------------------------------
 const std::vector<ToolboxWidget::TitlePreset>& ToolboxWidget::title_presets() {
     static const std::vector<TitlePreset> kPresets{
         {"text",       "Text",          "Text",               0.10f},
@@ -309,8 +276,6 @@ QWidget* ToolboxWidget::build_effects_tab() {
 QWidget* ToolboxWidget::build_titles_tab() {
     titles_ = new ToolboxList(this);
     for (const TitlePreset& p : title_presets())
-        // Meta line previews the preset's default on-screen text (content, so
-        // never translated) rather than labelling the drop behaviour.
         titles_->add_item(tr(p.label), ToolboxKind::Title, QString::fromUtf8(p.sample),
                           "application/x-eh-title", QByteArray(p.id), "text");
     return titles_;
@@ -344,4 +309,4 @@ QWidget* ToolboxWidget::build_more_tab() {
                                 "effect catalogue land in later releases."));
 }
 
-}  // namespace canvas::gui
+}

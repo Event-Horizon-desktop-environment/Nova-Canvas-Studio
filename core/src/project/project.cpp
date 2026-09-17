@@ -77,14 +77,10 @@ json clip_to_json(const Clip& c) {
         json title{{"text", c.title.text}, {"size", c.title.size},
                    {"r", c.title.r},       {"g", c.title.g},
                    {"b", c.title.b},       {"a", c.title.a}};
-        // Only written when set: older files (and older readers) never see it.
         if (!c.title.font_family.empty()) title["font"] = c.title.font_family;
-        // Style flags only when set: older files (and older readers) never see them.
         if (c.title.bold) title["bold"] = true;
         if (c.title.italic) title["italic"] = true;
         if (c.title.underline) title["underline"] = true;
-        // Effect blocks only when enabled: older files (and older readers)
-        // never see them.
         if (c.title.shadow) {
             title["shadow"] = {{"dx", c.title.shadow_dx},
                                {"dy", c.title.shadow_dy},
@@ -180,13 +176,10 @@ Clip clip_from_json(const json& j) {
             if (bj.contains("frequency")) bj.at("frequency").get_to(b.frequency);
             if (bj.contains("gain")) bj.at("gain").get_to(b.gain);
             if (bj.contains("q")) bj.at("q").get_to(b.q);
-            // Pre-enabled files omit `enabled`; treat the band as enabled.
             if (bj.contains("enabled")) bj.at("enabled").get_to(b.enabled);
             c.eq_bands[i] = b;
         }
     }
-    // A malformed grade must not kill the whole project load; drop the grade
-    // block and keep the clip (matches the deliver-settings tolerance below).
     if (j.contains("grade")) {
         try {
             c.grade = grade_graph::grade_graph_from_json(j.at("grade"));
@@ -195,8 +188,6 @@ Clip clip_from_json(const json& j) {
                        (long long)c.id, e.what());
         }
     }
-    // Title overlay block (text/size/colour); optional, so legacy clips load
-    // untouched. Fields are individually optional for forward tolerance.
     if (j.contains("title")) {
         const json& t = j.at("title");
         if (!t.is_object()) {
@@ -266,10 +257,6 @@ json tracks_to_json(const std::vector<Track>& tracks) {
     for (const auto& t : tracks) arr.push_back(track_to_json(t));
     return arr;
 }
-
-// --- Deliver / render-queue persistence -----------------------------------
-// The deliver settings + render-job snapshots ride along in the same project
-// document so a saved project reopens into its full export context.
 
 json deliver_video_to_json(const DeliverVideoSettings& v) {
     return json{{"export_video", v.export_video},
@@ -431,6 +418,7 @@ json job_to_json(const RenderJobSnapshot& j) {
                 {"output_path", j.output_path},
                 {"settings", deliver_to_json(j.settings)},
                 {"total_frames", j.total_frames},
+                {"priority", j.priority},
                 {"status", j.status},
                 {"progress", j.progress},
                 {"render_fps", j.render_fps},
@@ -447,6 +435,7 @@ RenderJobSnapshot job_from_json(const json& j) {
     out.output_path = j.value("output_path", out.output_path);
     if (j.contains("settings")) out.settings = deliver_from_json(j.at("settings"));
     out.total_frames = j.value("total_frames", out.total_frames);
+    out.priority = j.value("priority", out.priority);
     out.status = j.value("status", out.status);
     out.progress = j.value("progress", out.progress);
     out.render_fps = j.value("render_fps", out.render_fps);
@@ -457,15 +446,10 @@ RenderJobSnapshot job_from_json(const json& j) {
     return out;
 }
 
-}  // namespace
+}
 
 namespace {
 
-// Strict UTF-8 decoder for project strings. Returns a byte-strictly-validated
-// copy: every invalid sequence (truncated lead byte, missing continuation,
-// overlong/surrogate/codepoint-over-U+10FFFF) is replaced with U+FFFD so the
-// nlohmann strict dump (which throws type_error.316 on any invalid byte) can
-// never abort a save. A bad byte is logged once per field by the caller.
 std::string sanitize_utf8(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -487,18 +471,15 @@ std::string sanitize_utf8(const std::string& s) {
         if (ok) {
             for (int k = 1; k < len; ++k)
                 ok = ok && cont(s[i + static_cast<std::size_t>(k)]);
-            // Reject overlongs, surrogates and > U+10FFFF.
             if (ok) {
                 const unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
-                if (len == 3 && c0 == 0xE0 && c1 < 0xA0) ok = false;       // overlong
-                if (len == 3 && c0 == 0xED && c1 > 0x9F) ok = false;       // surrogate
-                if (len == 4 && c0 == 0xF0 && c1 < 0x90) ok = false;       // overlong
-                if (len == 4 && c0 == 0xF4 && c1 > 0x8F) ok = false;       // > U+10FFFF
+                if (len == 3 && c0 == 0xE0 && c1 < 0xA0) ok = false;
+                if (len == 3 && c0 == 0xED && c1 > 0x9F) ok = false;
+                if (len == 4 && c0 == 0xF0 && c1 < 0x90) ok = false;
+                if (len == 4 && c0 == 0xF4 && c1 > 0x8F) ok = false;
             }
         }
         if (!ok) {
-            // An isolated bad byte is logged at the string level, not here:
-            // replace this byte (or a mis-lead) with U+FFFD and resync.
             out.append("\xEF\xBF\xBD");
             ++i;
         } else {
@@ -509,11 +490,6 @@ std::string sanitize_utf8(const std::string& s) {
     return out;
 }
 
-// Recursively validate every string + float in the serialized project doc so a
-// strict nlohmann dump can never abort a save. Offending fields are logged via
-// [proj] → project.log with the first bad byte and its path, so a data-corrupt
-// source (a non-UTF-8 path from the filesystem, a pasted clip comment, an EQ
-// drag that produced a non-finite gain, ...) is identified immediately.
 void repair_project_doc(json& doc, const std::string& path = {}) {
     if (doc.is_string()) {
         const std::string& s = doc.get_ref<const std::string&>();
@@ -546,7 +522,7 @@ void repair_project_doc(json& doc, const std::string& path = {}) {
     }
 }
 
-}  // namespace
+}
 
 const MediaEntry* Project::media_by_id(const MediaId id) const noexcept {
     for (const auto& m : media)
@@ -577,9 +553,6 @@ bool save_project(const Project& project, const std::string& path, std::string* 
             {"bins", project.bins},
             {"video_tracks", tracks_to_json(project.sequence.video_tracks)},
             {"audio_tracks", tracks_to_json(project.sequence.audio_tracks)}};
-        // Markers + named ranges (point markers have tl_out == 0). Historically
-        // NOT serialized at all, so a save silently dropped every marker; the
-        // absent key on old files still loads (empty list).
         json bookmarks = json::array();
         for (const auto& b : project.sequence.bookmarks)
             bookmarks.push_back(json{{"id", b.id},
@@ -588,16 +561,11 @@ bool save_project(const Project& project, const std::string& path, std::string* 
                                      {"label", b.label}});
         doc["bookmarks"] = std::move(bookmarks);
         doc["next_bookmark_id"] = project.sequence.next_bookmark_id;
-        // Deliver settings + render queue ride along with the timeline.
         doc["deliver_settings"] = deliver_to_json(project.deliver_settings);
         json render_jobs = json::array();
         for (const auto& j : project.render_jobs) render_jobs.push_back(job_to_json(j));
         doc["render_jobs"] = std::move(render_jobs);
 
-        // Sanitize before opening the file: a strict dump() throws
-        // type_error.316 on non-UTF-8 strings / non-finite floats, and with the
-        // ofstream already open that leaves a 0-byte project file behind. Repair
-        // in place (fixed values ARE what gets persisted) and log each fix.
         repair_project_doc(doc);
 
         const auto t_ser0 = std::chrono::steady_clock::now();
@@ -643,10 +611,6 @@ bool load_project(Project& out, const std::string& path, std::string* error) {
         const std::string raw((std::istreambuf_iterator<char>(in)),
                               std::istreambuf_iterator<char>());
         json doc = json::parse(raw);
-        // Current format key is "canvas_project"; older files predating the
-        // Nova Canvas rename serialized the same document under
-        // "event_horizon_project", so keep reading that key for backwards
-        // compatibility.
         int version = doc.value("canvas_project", 0);
         if (version == 0) version = doc.value("event_horizon_project", 0);
         if (version > kProjectVersion) {
@@ -687,9 +651,6 @@ bool load_project(Project& out, const std::string& path, std::string* error) {
         }
         p.sequence.next_clip_id = std::max(p.sequence.next_clip_id, max_id + 1);
 
-        // Markers + named ranges. Tolerant of files saved before markers were
-        // persisted (no key → no markers); ids re-seed next_bookmark_id so a
-        // later marker cannot collide with a loaded one.
         for (const auto& bj : doc.value("bookmarks", json::array())) {
             Bookmark b;
             b.id = bj.value("id", uint64_t{0});
@@ -702,13 +663,10 @@ bool load_project(Project& out, const std::string& path, std::string* error) {
             p.sequence.bookmarks.push_back(std::move(b));
         }
 
-        // Deliver context: settings + saved render queue (tolerant of files
-        // saved before either existed).
         if (doc.contains("deliver_settings")) {
             try {
                 p.deliver_settings = deliver_from_json(doc.at("deliver_settings"));
             } catch (const std::exception&) {
-                // keep the defaults on a malformed block
             }
         }
         for (const auto& jj : doc.value("render_jobs", json::array()))

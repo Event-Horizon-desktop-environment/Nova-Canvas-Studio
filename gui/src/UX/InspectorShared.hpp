@@ -1,11 +1,5 @@
 #pragma once
 
-// Shared inspector scaffold reused by every property category (splitplan
-// refactor): the collapsible InspectorCategory group, one label|field|reset
-// row, and the bounded double-spin builder. Extracted from ShellDocks.cpp so
-// InspectorVisual.cpp builds its Transform/Composite categories with the exact
-// same look without duplicating the helpers.
-
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -18,12 +12,6 @@
 
 namespace canvas::gui {
 
-// One collapsible property group, matching the standard inspector convention:
-// enable dot | title | chevron | reset icon in the header, individual property
-// rows in the body. When `has_enable` is true, a small circular enable toggle
-// sits at the far left of the header (independent of the expand/collapse
-// chevron), so sections like Speed Change / Equalizer can be switched on/off
-// without opening or closing the group.
 class InspectorCategory : public QWidget {
     Q_OBJECT
 
@@ -33,9 +21,6 @@ public:
 
     InspectorCategory(const QString& title, bool expanded, bool has_enable, QWidget* parent = nullptr)
         : QWidget(parent) {
-        // Semi-rounded floating card: the whole category is one rounded surface,
-        // inset slightly from the page so cards read as separate panels. The
-        // header is the card's top band; the body (when open) its inset well.
         auto* outer = new QVBoxLayout(this);
         outer->setContentsMargins(8, 4, 8, 4);
         outer->setSpacing(0);
@@ -80,9 +65,6 @@ public:
         if (enable_) header_layout->addWidget(enable_);
         header_layout->addWidget(header_, 1);
         header_layout->addWidget(reset);
-        // Card top band: rounded top corners (or a full rounded card when the
-        // body is collapsed). Re-applied in the toggle handler and on theme
-        // changes (the lambda reflects the current open/collapsed state).
         body_ = new QWidget(this);
         body_->setObjectName(QStringLiteral("inspectorCardBody"));
         apply_theme_style(body_, &inspector_card_body_style);
@@ -109,11 +91,8 @@ public:
 
     QVBoxLayout* body_layout() { return body_layout_; }
 
-    // The category-header reset icon ("Reset to default"): callers wire it to
-    // restore every property of the category, or leave it a no-op.
     QToolButton* reset_button() { return reset_; }
 
-    // Enable-toggle state; always true when the category has no enable toggle.
     [[nodiscard]] bool feature_enabled() const { return !enable_ || enable_->isChecked(); }
     void set_feature_enabled(bool on) {
         if (enable_) enable_->setChecked(on);
@@ -133,9 +112,6 @@ private:
     QVBoxLayout* body_layout_ = nullptr;
 };
 
-// One property row: label | field | optional per-property reset icon.
-// `reset_out` (when non-null) receives the reset button so the caller can wire
-// "restore this field to its default" into it.
 inline void add_property_row(QVBoxLayout* body, const QString& label, QWidget* field,
                              bool with_reset = true, QToolButton** reset_out = nullptr) {
     auto* row = new QHBoxLayout;
@@ -160,7 +136,6 @@ inline void add_property_row(QVBoxLayout* body, const QString& label, QWidget* f
     body->addLayout(row);
 }
 
-// Bounded numeric property field, reference-style defaults.
 inline QDoubleSpinBox* make_numeric(double lo, double hi, double val, QWidget* parent) {
     auto* s = new QDoubleSpinBox(parent);
     s->setRange(lo, hi);
@@ -170,4 +145,4 @@ inline QDoubleSpinBox* make_numeric(double lo, double hi, double val, QWidget* p
     return s;
 }
 
-}  // namespace canvas::gui
+}

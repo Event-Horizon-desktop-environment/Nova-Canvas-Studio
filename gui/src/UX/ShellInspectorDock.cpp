@@ -27,10 +27,6 @@
 
 namespace canvas::gui {
 
-// The Inspector dock: mode pills + one page per tab in a QStackedWidget. Each
-// page's categories build in their own module (InspectorVisual/InspectorAudio/
-// InspectorTransition/InspectorFile); this file only owns the shell — the pill
-// row, the scroll region, and the stack that pages switch into.
 void build_inspector_dock(MainWindow& mw) {
     mw.inspector_dock_ = mw.ui->inspectorDock;
     mw.inspector_dock_->setObjectName(QStringLiteral("inspectorDock"));
@@ -78,9 +74,6 @@ void build_inspector_dock(MainWindow& mw) {
         b->setAutoRaise(true);
         apply_theme_style(b, &inspector_tab_style);
         b->setToolTip(MainWindow::tr(m.label));
-        // Allow the pill to shrink below its text width so six mode buttons
-        // fit comfortably at any DPI scale and dock width.  A tooltip makes
-        // the truncated label discoverable.
         b->setMinimumWidth(1);
         b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         mode_group->addButton(b);
@@ -93,34 +86,20 @@ void build_inspector_dock(MainWindow& mw) {
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
 
-    // One category stack per mode tab; the tabs switch which one is on top.
-    // "Audio" carries the working per-clip mix controls; the other modes keep
-    // their reference layouts until their properties are wired to the model.
     auto* stack = new QStackedWidget(scroll);
     const int video_tab_index = 0;
     const int audio_tab_index = 1;
     const int transition_tab_index = 3;
 
-    // --- Video page ---------------------------------------------------------
     auto* video_page = new QWidget(stack);
     auto* video_layout = new QVBoxLayout(video_page);
-    // Vertical gutters so the floating category cards sit off the page edges
-    // and each card has clear separation from the next.
     video_layout->setContentsMargins(0, 8, 0, 8);
     video_layout->setSpacing(0);
 
-    // Video tab's property categories (Transform/Composite + the reference
-    // placeholders) all build in InspectorVisual.cpp (splitplan refactor); the
-    // widget handles + selection wiring live there too.
     build_inspector_visual(mw, video_layout);
     video_layout->addStretch(1);
     stack->addWidget(video_page);
 
-    // --- Audio page ---------------------------------------------------------
-    // The full Audio tab (Volume/Pan, Pitch, Speed Change, Equalizer + the AI
-    // placeholder sections) builds in InspectorAudio.cpp (splitplan refactor).
-    // Its volume/pan spins subscribe to MainWindow::apply_inspector_audio and
-    // feed the legacy member pointers, so the pre-split commit path still works.
     auto* audio_page = new QWidget(stack);
     auto* audio_layout = new QVBoxLayout(audio_page);
     audio_layout->setContentsMargins(0, 8, 0, 8);
@@ -129,11 +108,6 @@ void build_inspector_dock(MainWindow& mw) {
     audio_layout->addStretch(1);
     stack->addWidget(audio_page);
 
-    // --- Effects / Image pages (placeholders for now) -----------------------
-    // Pages are added to the stack in the SAME order as the mode pills above
-    // (Video, Audio, Effects, Transition, Image, File, Subtitles); the toggled
-    // handler switches by pill index, so a misplaced page surfaces under the
-    // wrong tab.
     auto* effects_page = new QWidget(stack);
     {
         auto* page_layout = new QVBoxLayout(effects_page);
@@ -143,17 +117,14 @@ void build_inspector_dock(MainWindow& mw) {
             effects_page, "effects", MainWindow::tr("Effects"),
             MainWindow::tr("Apply effects to the selected clip — coming in a future update.")));
     }
-    stack->addWidget(effects_page);  // index 2
+    stack->addWidget(effects_page);
 
-    // --- Transition page ----------------------------------------------------
-    // Start/End sub-tabs + Video/Audio categories (InspectorTransition.cpp).
-    // Only active while a transition bubble is selected on the timeline.
     auto* transition_page = new QWidget(stack);
     auto* transition_layout = new QVBoxLayout(transition_page);
     transition_layout->setContentsMargins(0, 8, 0, 8);
     transition_layout->setSpacing(0);
     build_inspector_transition(mw, transition_layout, mode_buttons[transition_tab_index]);
-    stack->addWidget(transition_page);  // index 3
+    stack->addWidget(transition_page);
 
     auto* image_page = new QWidget(stack);
     {
@@ -164,28 +135,22 @@ void build_inspector_dock(MainWindow& mw) {
             image_page, "viewport", MainWindow::tr("Image"),
             MainWindow::tr("Image controls for the selected clip — coming in a future update.")));
     }
-    stack->addWidget(image_page);  // index 4
+    stack->addWidget(image_page);
 
-    // --- File page ----------------------------------------------------------
-    // Read-only source header info + fully-wired metadata (InspectorFile.cpp).
     auto* file_page = new QWidget(stack);
     auto* file_layout = new QVBoxLayout(file_page);
     file_layout->setContentsMargins(0, 8, 0, 8);
     file_layout->setSpacing(0);
     build_inspector_file(mw, file_layout);
-    stack->addWidget(file_page);  // index 5
+    stack->addWidget(file_page);
 
-    // --- Subtitles page -------------------------------------------------------
-    // Caption styling for the selected title/caption clip: size slider, zoom
-    // in/out, system-font dropdown (InspectorSubtitles.cpp). Enabled only
-    // while the selection carries a title overlay.
     auto* subtitles_page = new QWidget(stack);
     auto* subtitles_layout = new QVBoxLayout(subtitles_page);
     subtitles_layout->setContentsMargins(0, 8, 0, 8);
     subtitles_layout->setSpacing(0);
     build_inspector_subtitles(mw, subtitles_layout);
     subtitles_layout->addStretch(1);
-    stack->addWidget(subtitles_page);  // index 6
+    stack->addWidget(subtitles_page);
 
     for (std::size_t i = 0; i < mode_buttons.size(); ++i) {
         const int idx = static_cast<int>(i);
@@ -201,8 +166,6 @@ void build_inspector_dock(MainWindow& mw) {
     mw.inspector_dock_->setWidget(inspector_body);
     mw.inspector_dock_->hide();
     QObject::connect(mw.inspector_toggle_action_, &QAction::toggled, mw.inspector_dock_, &QDockWidget::setVisible);
-    // The top-bar Inspector button is created later (build_top_bar) — it connects
-    // back to this action/dock there, where all three objects are already alive.
 }
 
-}  // namespace canvas::gui
+}

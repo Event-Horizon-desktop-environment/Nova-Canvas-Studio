@@ -1,26 +1,3 @@
-// Shared helpers for the device-bound CUDA/NVENC encode tests (cuda_enc_test.cpp,
-// cuda_enc_bench.cpp). Mirrors vaapi_test_common.hpp so both families read
-// alike: same project generators (single-clip + editorial-content with burn-in
-// title and edge fades), same export-timing / decode-verify helpers, but the
-// device probe targets the CUDA/NVENC path instead of VAAPI.
-//
-// These tests are DEVICE-BOUND: they SKIP (exit 2) when the machine has no
-// working CUDA *encode* node (no NVIDIA GPU / no CUDA runtime / an FFmpeg build
-// without NVENC). The gate for CUDA here is TWO-fold, like VAAPI's:
-//   - canvas::core::gpu::cuda_available() — the app's own runtime probe (also
-//     the fallback's answer when canvas_core wasn't built with CUDA), and
-//   - a REAL NVENC encode through av_hwdevice_ctx_create(AV_HWDEVICE_TYPE_CUDA)
-//     + frames + h264_nvenc/hevc_nvenc — device-init success is NOT enough,
-//     a real encode is (an FFmpeg build can list the encoder while the driver
-//     refuses to actually create a session).
-//
-// The test SOURCE is the same real 1440p60 clip as the VAAPI family
-// (CANVAS_TEST_CLIP override; SKIP when absent) so the pipeline exercises
-// genuine high-rate footage. Target render is H.265 NVENC 1440p @ 80 Mbps @
-// 60 fps. The editorial-content projector (make_feature_project) forces the
-// CPU-compositor path via a burn-in title, exactly like the VAAPI tests, so
-// both device families gate the same full title->composite->encode chain.
-
 #pragma once
 
 #include "canvas/core/export/exporter.hpp"
@@ -52,26 +29,20 @@ extern "C" {
 
 namespace cuda_test {
 
-// Output/artifact root shared by the two CUDA tests (kept separate from the
-// VAAPI family's so a mixed run never overwrites the other family's outputs).
 inline std::string art_root() {
     return "/tmp/canvas_cuda_enc";
 }
 
-// Honors CANVAS_TEST_CLIP identically to the VAAPI family.
 inline std::string default_clip_path() {
     if (const char* p = std::getenv("CANVAS_TEST_CLIP")) return p;
     return "/home/matt/Videos/clips/2026-09-10 14-28-50.mkv";
 }
 
-// Render target shared by the tests: H.265 NVENC, 2560x1440, 60 fps,
-// 80 Mbps bitrate-driven.
 inline constexpr int kTargetWidth = 2560;
 inline constexpr int kTargetHeight = 1440;
 inline constexpr double kTargetFps = 60.0;
 inline constexpr int kTargetBitrateKbps = 80000;
 
-// A probed source clip the export pipeline can be pointed at.
 struct TestClip {
     std::string path;
     int width = 0;
@@ -84,8 +55,6 @@ struct TestClip {
     }
 };
 
-// Probes `path`'s first video stream for dims / fps / frame count. Returns an
-// invalid TestClip when the file is missing or has no video stream.
 inline TestClip probe_clip(const std::string& path) {
     TestClip out;
     out.path = path;
@@ -113,17 +82,10 @@ inline TestClip probe_clip(const std::string& path) {
     return out;
 }
 
-// True when the app's own CUDA runtime probe says an accelerator is usable.
-// This is ALSO the fallback path when canvas_core was built WITHOUT CUDA (the
-// no-cuda inline returns false), so the CUDA tests must always run this first.
 inline bool cuda_runtime_ok() {
     return canvas::core::gpu::cuda_available();
 }
 
-// True when `enc_name` can actually encode on CUDA device ordinal `ordinal`
-// ("" = FFmpeg-default device index 0). The gate is a real 2-frame encode +
-// flush producing packets — device-init success alone is NOT enough, exactly
-// like the VAAPI family's rule.
 inline bool encode_probe(const std::string& ordinal, const char* enc_name) {
     AVBufferRef* dev = nullptr;
     if (av_hwdevice_ctx_create(&dev, AV_HWDEVICE_TYPE_CUDA,
@@ -194,10 +156,6 @@ inline bool encode_probe(const std::string& ordinal, const char* enc_name) {
     return ok;
 }
 
-// Finds a working CUDA *encode* device. Returns its ordinal (e.g. "0"), or ""
-// (SKIP condition). Honors CANVAS_CUDA_DEVICE to force a specific ordinal on
-// multi-GPU boxes. Requires the app's CUDA runtime probe first; a machine with
-// no CUDA runtime (or a non-CUDA canvas_core build) always reports "".
 inline std::string pick_cuda_encode_device() {
     if (!cuda_runtime_ok()) return "";
     const char* over = std::getenv("CANVAS_CUDA_DEVICE");
@@ -211,23 +169,14 @@ inline std::string pick_cuda_encode_device() {
     return "";
 }
 
-// One-shot export timing through the real export_project() path.
 struct EncResult {
     bool ok = false;
     std::string err;
-    double fps = 0.0;  // steady-state frames/sec (see SteadyFps below)
-    double ms = 0.0;   // wall time across the whole export incl. session open
+    double fps = 0.0;
+    double ms = 0.0;
     int64_t bytes = 0;
 };
 
-// Steady-state fps from the exporter's per-frame progress samples. Short
-// head windows (90 frames) are dominated by the fixed per-export session cost
-// — the NVDEC device open alone is ~120 ms on this box (canvas_debug.log
-// "[dec] open ... ms=119"), plus NVENC session setup and mux init — so the
-// naive frames/wall reads ~3x under the sustained rate (the app's real long
-// exports log ~550-935 fps from the very same encode loop). Drop the trailing
-// mux-flush plateau (identical progress), then measure over the BACK HALF of
-// the remaining samples' wall span, which carries none of the session-open cost.
 struct SteadyFps {
     std::vector<std::pair<double, std::chrono::steady_clock::time_point>> s;
     std::int64_t total = 1;
@@ -238,7 +187,7 @@ struct SteadyFps {
     double fps() const {
         if (s.size() < 4) return 0.0;
         std::size_t hi = s.size();
-        while (hi >= 2 && s[hi - 1].first == s[hi - 2].first) --hi;  // flush plateau
+        while (hi >= 2 && s[hi - 1].first == s[hi - 2].first) --hi;
         if (hi < 2) hi = s.size();
         const std::size_t lo = hi / 2;
         const double dt = std::chrono::duration<double>(s[hi - 1].second - s[lo].second).count();
@@ -274,10 +223,6 @@ inline EncResult run_export(const canvas::core::Project& proj, const std::string
     if (bitrate_kbps > 0) es.video_max_bitrate_kbps = bitrate_kbps * 3 / 2;
     es.extra = extra;
 
-    // Watch the exporter's own progress ticks; one callback per encoded frame.
-    // The steady-state fps it derives excludes session open / mux flush, so a
-    // short bench window reports the sustained encode rate, not a startup-diluted
-    // wall-clock average (docs/nvenc.md numbers are the same steady-state kind).
     SteadyFps watch;
     watch.total = frames;
     canvas::core::ExportControl ctl;
@@ -298,15 +243,12 @@ inline EncResult run_export(const canvas::core::Project& proj, const std::string
     return r;
 }
 
-// Decodes an encoded output back with the software decoder. band_frac_h, when
-// > 0, ALSO samples the bottom `band_frac_h` of the frame (the classic subtitle
-// band) so a burned-in title's arrival at the encoder is verifiable.
 struct DecodeResult {
     bool ok = false;
     int frames = 0;
-    int64_t lit_luma = 0;      // sampled luma pixels > 16 (not black), whole frame
-    int64_t lit_luma_band = 0; // same count, sampled only in the bottom band
-    int64_t band_samples = 0;  // pixels sampled inside the band (0 = band skipped)
+    int64_t lit_luma = 0;
+    int64_t lit_luma_band = 0;
+    int64_t band_samples = 0;
 };
 
 inline DecodeResult verify_decode(const std::string& path, double band_frac_h = 0.0) {
@@ -364,15 +306,12 @@ inline DecodeResult verify_decode(const std::string& path, double band_frac_h = 
     return out;
 }
 
-// Fraction of the subtitle band's sampled pixels that are lit (subtitle-like
-// content present). Needs a band_sampled decode (band_frac_h > 0).
 inline double band_lit_fraction(const DecodeResult& d) {
     return d.band_samples > 0
                ? static_cast<double>(d.lit_luma_band) / static_cast<double>(d.band_samples)
                : 0.0;
 }
 
-// Minimal project carrying the source clip's first `frames` timeline frames.
 inline canvas::core::Project make_single_clip_project(const TestClip& clip,
                                                       int64_t frames) {
     canvas::core::Project p;
@@ -401,11 +340,6 @@ inline canvas::core::Project make_single_clip_project(const TestClip& clip,
     return p;
 }
 
-// Same project but with editorial CONTENT: a burned-in subtitle (pushed to the
-// subtitle band) and edge fades. Exports of it take the CPU-compositor path
-// (frame_gpu bails on titles), so a CUDA export of this project exercises the
-// full title-rasterise + fade + composite + NVENC chain — the same gate as the
-// VAAPI family's feature project.
 inline canvas::core::Project make_feature_project(const TestClip& clip,
                                                   int64_t frames) {
     canvas::core::Project p = make_single_clip_project(clip, frames);
@@ -432,4 +366,4 @@ inline canvas::core::Project make_feature_project(const TestClip& clip,
     return p;
 }
 
-}  // namespace cuda_test
+}

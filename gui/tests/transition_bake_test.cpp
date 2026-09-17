@@ -1,21 +1,3 @@
-// Qt-free unit test for TimelineDecoder's off-thread transition pre-render
-// DISCOVERY (next_transition_bake_candidate). Links ONLY canvas_core +
-// timeline_decoder.cpp (no Qt) — the same "unbreakable seam" guarantee as
-// timeline_decoder_test.
-//
-// Deliberately pure: the candidate scan is the single unit that can be
-// exercised headlessly (the thread/GPU/decode half of the bake needs a CUDA
-// device and a running timeline). The shape under test is the exact reported
-// freeze: a 1-frame cross-dissolve between two hits of the SAME 60fps media on
-// a 30fps timeline, where the incoming clip's source starts 90 media frames
-// ahead of A's tail.
-//
-// Covers: the eligible same-media cut (lead within kTransitionBakeLead), lead
-// beyond the cap, window longer than kTransitionBakeMaxFrames, distinct-media
-// cut, missing incoming clip, single-clip fade only, audio-only transition,
-// window overflowing clip A's own extent, a higher track covering the window
-// head, and a disabled candidate clip.
-
 #include "features/playback/timeline_decoder.hpp"
 
 #include "canvas/core/project/project.hpp"
@@ -37,10 +19,6 @@ static void report(bool ok, const char* what) {
 
 namespace {
 
-// The reported freeze: 1-frame cross-dissolve at tl 1678 between A (tl
-// [0,1679), src [0,3358]) and B (tl [1679,24145), src [3448,48380]) — B's head
-// sits 90 media frames past A's tail on the SAME file, so a live walk costs two
-// far keyframe climbs.
 Project make_crossfade_project() {
     Project p;
     p.sequence.fps = 30.0;
@@ -75,7 +53,6 @@ Project make_crossfade_project() {
     return p;
 }
 
-// Extracts just the win bounds for readable asserts.
 std::optional<std::pair<int64_t, int64_t>> win_at(const Project& p, int64_t seq) {
     auto c = TimelineDecoder{}.next_transition_bake_candidate(p, seq);
     if (!c) return std::nullopt;
@@ -84,29 +61,24 @@ std::optional<std::pair<int64_t, int64_t>> win_at(const Project& p, int64_t seq)
 
 void test_eligible_same_media_cut() {
     const Project p = make_crossfade_project();
-    // 90 TL frames ahead of the window head = inside the 96-frame lead.
     auto w = win_at(p, 1588);
     report(w.has_value() && w->first == 1678 && w->second == 1679,
            "eligible same-media cut found at 90-frame lead");
-    // Playhead already AT the window head still qualifies (lead 0).
     w = win_at(p, 1678);
     report(w.has_value() && w->first == 1678 && w->second == 1679,
            "candidate valid at the window head itself");
-    // Far outside the lead cap: no bake, live path handles it.
     w = win_at(p, 500);
     report(!w.has_value(), "lead beyond kTransitionBakeLead -> no candidate");
 }
 
 void test_lead_cap_blocked() {
     Project p = make_crossfade_project();
-    // 100-frame lead is past the 96-frame cap.
     const bool blocked = !win_at(p, 1500).has_value();
     report(blocked, "lead of 100 frames exceeds the cap -> blocked");
 }
 
 void test_window_longer_than_max() {
     Project p = make_crossfade_project();
-    // 20-frame window > kTransitionBakeMaxFrames (16): keep the live path.
     p.sequence.video_tracks[0].clips[0].transition_out_duration = 20;
     report(!win_at(p, 1500).has_value(),
            "window longer than kTransitionBakeMaxFrames -> no candidate");
@@ -114,7 +86,6 @@ void test_window_longer_than_max() {
 
 void test_distinct_media_skip() {
     Project p = make_crossfade_project();
-    // B references a second media entry: the far double-walk no longer applies.
     MediaEntry m2;
     m2.id = 1;
     m2.path = "/tmp/canvas_bake_test_other.mkv";
@@ -147,7 +118,6 @@ void test_audio_only_transition_skip() {
 
 void test_window_overflowing_clip() {
     Project p = make_crossfade_project();
-    // Make the window reach before A's own tl_in: no valid window exists.
     p.sequence.video_tracks[0].clips[0].transition_out_duration = 2000;
     report(!win_at(p, 0).has_value(),
            "window overflowing A's own extent -> no candidate");
@@ -155,9 +125,6 @@ void test_window_overflowing_clip() {
 
 void test_covered_at_window_head() {
     Project p = make_crossfade_project();
-    // A higher track paints over win_start=1678: at present time it wins the
-    // composite, so baking A would be wasted (and worse — the overlay would
-    // disappear mid-window).
     Track top;
     Clip c;
     c.id = 3;
@@ -177,7 +144,7 @@ void test_disabled_candidate() {
     report(!win_at(p, 1588).has_value(), "disabled candidate clip -> no candidate");
 }
 
-}  // namespace
+}
 
 int main() {
     test_eligible_same_media_cut();

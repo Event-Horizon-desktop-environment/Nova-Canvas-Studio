@@ -1,23 +1,3 @@
-// export_sweep_vulkan_test — Vulkan encoder sweep coverage.
-//
-// Phase 0 reading for core's export_sweep (which covers every valid
-// codec x container combo the Deliver panel can offer). The Vulkan encoders the
-// backend will route its encode path through (Phases P-C/P-E) are also FFmpeg
-// encoders, so they must come from the SAME codec list the Deliver panel and
-// export_sweep use — this reading proves the exporter's own codec discovery
-// reports the Vulkan encoders FFmpeg exposes, exactly the way export_sweep
-// proves every other codec combo works.
-//
-// It does NOT run a full encode: the FFmpeg Vulkan encode path first needs the
-// backend's device/queue plumbing (an owning P-E phase). What Phase 0 pins is
-// the codec-discovery half of the law, here and now, against the encoder table.
-//
-// PASS (0)  — every Vulkan encoder FFmpeg registers is reported by the
-//             exporter's codec list with hw=true / hw_device="vulkan".
-// FAIL (1)  — a registered Vulkan encoder is missing from the exporter list
-//             (would silently strand the Deliver panel on it later).
-// SKIP (2)  — linked FFmpeg has no Vulkan encoder at all; owning phase P-E.
-
 #include "canvas/core/export/exporter.hpp"
 
 #include <algorithm>
@@ -42,7 +22,7 @@ void check(bool ok, const char* what) {
     if (!ok) ++g_failures;
 }
 
-}  // namespace
+}
 
 int main() {
     const std::array<const char*, 5> kVulkanEncoders = {
@@ -64,7 +44,6 @@ int main() {
     for (const std::string& name : registered)
         std::printf("info: FFmpeg registers vulkan encoder %s\n", name.c_str());
 
-    // The exporter's own codec list must see each registered Vulkan encoder.
     const std::vector<CodecInfo> all = list_video_codecs("vulkan");
     bool all_seen = true;
     for (const std::string& name : registered) {
@@ -80,7 +59,6 @@ int main() {
         }
     }
 
-    // No stray hits: list_video_codecs("vulkan") must not return software encoders.
     bool only_vulkan = true;
     for (const CodecInfo& c : all) {
         if (!c.hw || c.hw_device != "vulkan") only_vulkan = false;

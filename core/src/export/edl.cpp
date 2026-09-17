@@ -14,8 +14,6 @@ std::string basename_of(const std::string& path) {
     return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
-// CMX reels are up to 8 alphanumeric/underscore chars, conventionally upper
-// case. Strip the extension, keep [A-Z0-9_], uppercase, truncate.
 std::string reel_of(const std::string& path) {
     std::string base = basename_of(path);
     const std::size_t dot = base.find_last_of('.');
@@ -42,7 +40,7 @@ struct Event {
     bool video = true;
 };
 
-}  // namespace
+}
 
 std::string timecode(const int64_t frame, const int fps) {
     const int rate = fps > 0 ? fps : 30;
@@ -51,7 +49,7 @@ std::string timecode(const int64_t frame, const int fps) {
     const int64_t ff = total % rate;
     const int64_t ss = (total / rate) % 60;
     const int64_t mm = (total / (rate * 60)) % 60;
-    const int64_t hh = total / (rate * 3600);
+    const int64_t hh = std::min<int64_t>(total / (rate * 3600), 99);
     char buf[24];
     std::snprintf(buf, sizeof(buf), "%02lld:%02lld:%02lld:%02lld", static_cast<long long>(hh),
                   static_cast<long long>(mm), static_cast<long long>(ss),
@@ -61,8 +59,6 @@ std::string timecode(const int64_t frame, const int fps) {
 
 std::string write_cmx3600(const Sequence& seq, const std::string& title,
                           const std::vector<MediaEntry>& media) {
-    // Collect every clip (video then audio, each track in order), then sort by
-    // timeline in-point with a stable sort so same-frame events keep track order.
     std::vector<Event> events;
     for (const auto& t : seq.video_tracks)
         for (const auto& c : t.clips) events.push_back(Event{c.tl_in, &c, true});
@@ -97,4 +93,4 @@ std::string write_cmx3600(const Sequence& seq, const std::string& title,
     return out;
 }
 
-}  // namespace canvas::core::edl
+}

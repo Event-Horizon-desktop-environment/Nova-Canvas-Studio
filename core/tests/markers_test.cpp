@@ -1,12 +1,3 @@
-// Phase 1 (E4) marker / named-range tests. Pins:
-//  - point markers (tl_out == 0) and the new named RANGES (tl_out > frame);
-//  - sorted-by-start-frame invariants across point/range mixes;
-//  - Sequence::bookmarks_in (the export-from-range query);
-//  - markers::chapters_from (the D3 chapter table law);
-//  - project JSON round-trip of markers + next_bookmark_id (historically NOT
-//    serialized at all, so a save silently dropped every marker).
-// Headless — links only canvas_core.
-
 #include "canvas/core/project/project.hpp"
 #include "canvas/core/timeline/markers.hpp"
 #include "canvas/core/timeline/model.hpp"
@@ -43,22 +34,18 @@ void test_points_and_ranges() {
     const uint64_t r = s.add_range(30, 60, "Intro");
     check(r != 0 && r != p, "range got a distinct id");
     check(s.bookmarks.size() == 2, "point + range counted");
-    // Sorted by start frame: 30 then 90.
     check(s.bookmarks[0].frame == 30 && s.bookmarks[0].is_range(), "range sorts first");
     check(s.bookmarks[0].tl_out == 60, "range end stored");
     check(s.bookmarks[1].frame == 90, "point sorts after range");
 
-    // Degenerate range (out <= in) becomes a point marker.
     const uint64_t d = s.add_range(45, 45, "deg");
     check(d != 0, "degenerate range id");
     for (const auto& b : s.bookmarks)
         if (b.id == d) check(!b.is_range() && b.tl_out == 0, "degenerate range = point");
-    // Sorted: 30, 45, 90.
     check(s.bookmarks[0].frame == 30 && s.bookmarks[1].frame == 45 &&
               s.bookmarks[2].frame == 90,
           "bookmarks stay sorted by start frame");
 
-    // toggle at an existing point frame REMOVES it.
     check(s.toggle_bookmark(90, "x") == 0, "toggle removes existing point");
     check(!s.has_bookmark(90), "point gone after toggle");
     check(s.remove_bookmark(r), "remove range by id");
@@ -72,9 +59,9 @@ void test_points_and_ranges() {
 void test_bookmarks_in() {
     Sequence s;
     s.fps = 30.0;
-    (void)s.toggle_bookmark(0, "a");      // start in [0,100)
-    (void)s.add_range(50, 70, "b");       // start in [0,100)
-    (void)s.toggle_bookmark(100, "c");    // start NOT in [0,100)
+    (void)s.toggle_bookmark(0, "a");
+    (void)s.add_range(50, 70, "b");
+    (void)s.toggle_bookmark(100, "c");
     const auto in = s.bookmarks_in(0, 100);
     check(in.size() == 2, "bookmarks_in captures starts inside the window");
     check(in[0].frame == 0 && in[1].frame == 50, "in-range starts, sorted");
@@ -93,7 +80,7 @@ void test_chapters() {
 
     (void)s.toggle_bookmark(90, "Scene 1");
     (void)s.add_range(300, 450, "Scene 2");
-    (void)s.toggle_bookmark(600, "");  // empty label -> fallback
+    (void)s.toggle_bookmark(600, "");
 
     const auto ch = markers::chapters_from(s);
     check(ch.size() == 3, "one chapter per bookmark");
@@ -133,7 +120,6 @@ void test_json_roundtrip() {
           "range marker fields round-trip");
     check(q.sequence.next_bookmark_id == next_before, "next_bookmark_id round-trips");
 
-    // A new marker must not collide with a loaded id.
     const uint64_t fresh = q.sequence.toggle_bookmark(1000, "new");
     bool collision = false;
     for (const auto& m : q.sequence.bookmarks)
@@ -141,7 +127,7 @@ void test_json_roundtrip() {
     check(fresh != 0 && !collision, "new marker gets a fresh id after load");
 }
 
-}  // namespace
+}
 
 int main() {
     test_points_and_ranges();

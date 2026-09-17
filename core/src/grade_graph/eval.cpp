@@ -42,10 +42,6 @@ GrayF GrayF::filled(int w, int h, float value) {
 
 namespace {
 
-// ---- per-node correction (the spec's "corrected" operand) -----------------
-// The op's pointwise law lives in the op registry (op.hpp/.cpp) so Phase 7
-// effect ops register without touching the evaluator topology.
-
 std::shared_ptr<FrameF> corrected_image(const FrameF& in, const Node& node) {
     auto out = std::make_shared<FrameF>(FrameF::filled(in.w, in.h, 0.0f, 0.0f, 0.0f));
     for (int y = 0; y < in.h; ++y) {
@@ -66,8 +62,6 @@ std::shared_ptr<GrayF> ones_like(const FrameF& in) {
     return std::make_shared<GrayF>(GrayF::filled(in.w, in.h, 1.0f));
 }
 
-// mix(in, corrected, key * opacity) written into out. Key and frame sizes
-// always match (uniform keys are widened to the frame size at the seam).
 void blend_by_key(const FrameF& in, const FrameF& corrected, const GrayF& key,
                   float opacity, FrameF& out) {
     const std::size_t pixels = static_cast<std::size_t>(in.w) * in.h;
@@ -82,8 +76,6 @@ void blend_by_key(const FrameF& in, const FrameF& corrected, const GrayF& key,
         o[3] = a[3];
     }
 }
-
-// ---- graph plumbing --------------------------------------------------------
 
 std::vector<std::pair<int, int>> key_sources_of(const GradeGraph& g, int node) {
     std::vector<std::pair<int, int>> out;
@@ -117,8 +109,6 @@ struct EvalState {
         return &source;
     }
 
-    // The effective key input of a node: the frame-sized key_out of whatever
-    // provides its port-0 key edge, or a uniform 1.0 when unconnected.
     std::shared_ptr<const GrayF> key_for(int node) const {
         const std::vector<std::pair<int, int>> ks = key_sources_of(graph, node);
         for (const auto& [port, src] : ks) {
@@ -130,17 +120,8 @@ struct EvalState {
     }
 };
 
-}  // namespace
+}
 
-// Step-composite `layer` over `acc` with the given blend family. This is the
-// Porter–Duff Over-with-blend law from composite.hpp with the source's OWN
-// alpha as its coverage (no key/opacity — the caller in the mixer folds those
-// in separately). For opaque inputs it reduces to the classic blend-family
-// "replace" law, so legacy callers and blend vectors keep their numbers; the
-// alpha channel is now genuinely recomputed instead of copied from `acc`:
-//
-//   as = layer[3], ab = acc[3]; ao = as + ab(1-as)
-//   out = W3C over-with-blend(...);  out[3] = ao
 void blend_into(const float* acc, const float* layer, float* out, std::size_t n,
                 BlendMode blend) {
     for (std::size_t i = 0; i < n; ++i) {
@@ -159,8 +140,6 @@ void blend_into(const float* acc, const float* layer, float* out, std::size_t n,
 namespace {
 
 std::shared_ptr<GrayF> outside_key_of(const EvalState& st, const Node& n) {
-    // key_out = 1 - partner.key_out (live, auto-updating). A missing partner
-    // defaults to ones -> the outside gets a zero key and stays silent.
     std::shared_ptr<GrayF> pk =
         (n.partner >= 0 && static_cast<std::size_t>(n.partner) < st.key.size() &&
          st.key[n.partner])
@@ -170,8 +149,6 @@ std::shared_ptr<GrayF> outside_key_of(const EvalState& st, const Node& n) {
     return pk;
 }
 
-// The key that gates a node's own correction. Outside nodes ignore their key
-// input entirely — their partition IS the inverted partner key, per spec.
 std::shared_ptr<const GrayF> blend_key_for(EvalState& st, const Node& n) {
     if (n.kind == NodeKind::kOutside) return outside_key_of(st, n);
     return st.key_for(n.id);
@@ -181,8 +158,6 @@ std::shared_ptr<const FrameF> eval_corrector(EvalState& st, const Node& n) {
     const FrameF* in = st.input_rgb(n.id);
     if (n.bypass) return std::make_shared<FrameF>(*in);
     const std::shared_ptr<FrameF> corrected = corrected_image(*in, n);
-    // Layer nodes hand the full correction to their Layer Mixer, which owns
-    // the single key*opacity gate. Pre-blending here would square the effect.
     if (n.kind == NodeKind::kLayer) return corrected;
     const std::shared_ptr<const GrayF> k = blend_key_for(st, n);
     auto out = std::make_shared<FrameF>(FrameF::filled(st.source.w, st.source.h, 0.0f, 0.0f, 0.0f));
@@ -193,8 +168,6 @@ std::shared_ptr<const FrameF> eval_corrector(EvalState& st, const Node& n) {
 std::shared_ptr<const GrayF> eval_key(EvalState& st, const Node& n) {
     switch (n.kind) {
         case NodeKind::kCorrector:
-            // Serial nodes pass their key through (feathered upstream mattes
-            // keep propagating downstream).
             return st.key_for(n.id);
         case NodeKind::kOutside:
             return outside_key_of(st, n);
@@ -231,7 +204,6 @@ std::shared_ptr<const GrayF> eval_key(EvalState& st, const Node& n) {
             return out;
         }
         default:
-            // Parallel/Layer nodes use their own key only; they don't propagate.
             return ones_like(st.source);
     }
 }
@@ -267,10 +239,6 @@ std::shared_ptr<const FrameF> eval_node(EvalState& st, const Node& n) {
             if (!base) return nullptr;
             auto acc = std::make_shared<FrameF>(*base);
             const std::size_t npx = static_cast<std::size_t>(st.source.w) * st.source.h;
-            // Remaining inputs, in port order, composite bottom-to-top. Each
-            // layer's coverage folds key * opacity * its OWN alpha together, so
-            // the Porter–Duff law sees true premultiplied sources; serial
-            // correctors before the stack keep their keyed-veil law intact.
             std::vector<std::pair<int, int>> layers(ins.begin() + 1, ins.end());
             std::stable_sort(layers.begin(), layers.end(),
                              [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
@@ -305,7 +273,7 @@ std::shared_ptr<const FrameF> eval_node(EvalState& st, const Node& n) {
                 for (std::size_t i = 0; i < g->v.size(); ++i) g->v[i] = in->rgba[i * 4 + p];
                 st.channel[n.id][p] = g;
             }
-            return nullptr;  // no rgb out; channel outs only
+            return nullptr;
         }
         case NodeKind::kCombiner: {
             auto out = std::make_shared<FrameF>(FrameF::filled(st.source.w, st.source.h, 0.0f, 0.0f, 0.0f));
@@ -324,18 +292,17 @@ std::shared_ptr<const FrameF> eval_node(EvalState& st, const Node& n) {
             return in ? std::make_shared<FrameF>(*in) : nullptr;
         }
         case NodeKind::kKeyMixer:
-            return nullptr;  // key-only node
+            return nullptr;
     }
     return nullptr;
 }
 
-}  // namespace
+}
 
 EvalResult evaluate_graph(const GradeGraph& g, const FrameF& source) {
     EvalResult result;
     const int terminal = g.terminal();
     if (terminal < 0) {
-        // No output terminal wired -> the whole tree is inactive; passthrough.
         result.frame = nullptr;
         return result;
     }
@@ -365,7 +332,6 @@ EvalResult evaluate_graph(const GradeGraph& g, const FrameF& source) {
         if (nd.kind == NodeKind::kParallelMixer) add_dep(nd.shared_source, nd.id);
     }
 
-    // Reachability from the terminal (reverse edges) decides the active set.
     std::vector<int> stack{terminal};
     while (!stack.empty()) {
         const int cur = stack.back();
@@ -375,7 +341,6 @@ EvalResult evaluate_graph(const GradeGraph& g, const FrameF& source) {
         for (const int p : rev[static_cast<std::size_t>(cur)]) stack.push_back(p);
     }
 
-    // Kahn topological order over the active subgraph (both pipes + implicits).
     std::vector<int> indeg(n, 0);
     for (std::size_t u = 0; u < n; ++u) {
         if (!st.active[u]) continue;
@@ -421,4 +386,4 @@ EvalResult evaluate_graph(const GradeGraph& g, const FrameF& source) {
     return result;
 }
 
-}  // namespace canvas::core::grade_graph
+}

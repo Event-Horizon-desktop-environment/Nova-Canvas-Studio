@@ -1,22 +1,3 @@
-// gpu_grade_vulkan_test — host-mirror law pin for the Vulkan composite kernel.
-//
-// Phase 0 reading for core's gpu_grade_test (which pins the CUDA export kernel
-// nv12GradeResize's law in host C++). The Vulkan composite kernel P-D will
-// implement is documented to be law-identical to that fused kernel: same
-// bilinear Y/block-chroma sampling, same decode/grade/fade/encode math, same
-// BT.709-limited encode clamps. THIS test is the byte-for-byte contract that
-// kernel must reproduce, so the kernel ships proven against its law instead of
-// against a guess.
-//
-// Runs headless (no VkDevice needed): it pins the LAW, exactly the way
-// gpu_grade_test pins the CUDA kernel's law. When P-D lands the kernel, extend
-// this test with a device leg comparing the real kernel output against this
-// mirror — the mirror never drifts, the kernel must match it.
-//
-// PASS (0)  — mirror law holds on every invariant.
-// FAIL (1)  — law drifted (a regression in either direction is caught here).
-// SKIP (2)  — never; the law is host-only.
-
 #include "canvas/core/grade_graph/graph.hpp"
 #include "canvas/core/grade_graph/lut.hpp"
 #include "canvas/core/gpu/colorspace.hpp"
@@ -45,9 +26,6 @@ std::uint8_t encode_byte(float v) {
     return static_cast<std::uint8_t>(v + 0.5f);
 }
 
-// Host mirror of nv12GradeResize — the LAW the Vulkan composite kernel (P-D)
-// must reproduce byte-for-byte. Same geometry, same sampling, same
-// decode/grade/fade/encode chain as gpu_grade_test's copy; keep in sync.
 void grade_resize_mirror(const std::vector<std::uint8_t>& srcY, std::size_t sYP,
                          const std::vector<std::uint8_t>& srcUV, std::size_t sUVP,
                          int sw, int sh, int outW, int outH, int dstW, int dstH,
@@ -164,7 +142,7 @@ void grade_resize_mirror(const std::vector<std::uint8_t>& srcY, std::size_t sYP,
     }
 }
 
-}  // namespace
+}
 
 int main() {
     const int W = 32, H = 16;

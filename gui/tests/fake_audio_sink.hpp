@@ -1,10 +1,3 @@
-// In-memory AudioSink for the headless AudioPipeline tests. No Qt, no ALSA.
-// Records every accepted batch so tests can assert exact sample content and
-// framing. Mirrors AudioOutput's semantics: write_float appends to the device
-// queue AND advances the cumulative written-frame counter; flush() drains the
-// queue but NOT the cumulative counter; reposition_enqueue() replaces the
-// queue without touching the cumulative counter.
-
 #ifndef CANVAS_TESTS_FAKE_AUDIO_SINK_HPP
 #define CANVAS_TESTS_FAKE_AUDIO_SINK_HPP
 
@@ -20,11 +13,8 @@ struct FakeAudioSink : AudioSink {
     int channels = 0;
     bool open_ = false;
     bool hold_ = false;
-    // Cumulative interleaved history of everything ever accepted.
     std::vector<float> all_;
-    // Per-call frame counts, in call order.
     std::vector<int> writes_;
-    // Currently pending (not yet consumed) frames, interleaved.
     std::vector<float> queue_;
     uint64_t written_total_ = 0;
     uint64_t latency_ = 0;
@@ -67,6 +57,6 @@ struct FakeAudioSink : AudioSink {
     void log_pipeline_stats(const char*) const override {}
 };
 
-}  // namespace canvas::gui::test
+}
 
 #endif

@@ -10,16 +10,8 @@ namespace canvas::gui {
 
 namespace {
 
-// Button corner radius for everything drawn by this style. There is no capsule
-// in the flat-studio language: command/accent buttons are a plain accent fill,
-// never a pill (buttons.md — keep the prominent style to one action per view,
-// and pills everywhere read as decoration).
 constexpr qreal kButtonRadius = 8.0;
 
-// Paint a flat surface: a plain fill with a single hairline rim. No sheen
-// gradient — that top-lit highlight and its specular catch-light were the
-// Liquid-Glass idiom and are gone. All colours come from the active
-// ThemeTokens so the style follows a mode switch.
 void paintFlatSurface(QPainter* p, const QRectF& r, qreal radius, const QColor& fill,
                       bool hovered, bool pressed, bool accent, bool checked) {
     const ThemeTokens& t = tokens();
@@ -46,7 +38,7 @@ void paintFlatSurface(QPainter* p, const QRectF& r, qreal radius, const QColor& 
     p->drawPath(clip);
 }
 
-}  // namespace
+}
 
 HorizonStyle::HorizonStyle(QStyle* base) : QProxyStyle(base) {}
 
@@ -55,9 +47,6 @@ void HorizonStyle::drawPrimitive(PrimitiveElement pe, const QStyleOption* opt, Q
     switch (pe) {
         case PE_PanelButtonCommand:
         case PE_PanelButtonTool: {
-            // Command (push) buttons render as a flat amber accent fill; tool
-            // buttons keep the plain raised surface. Both share the same modest
-            // radius — no capsules anywhere.
             const bool is_cmd = (pe == PE_PanelButtonCommand);
             bool hover = opt->state & State_MouseOver;
             bool down = opt->state & State_Sunken && opt->state & State_Enabled;
@@ -69,7 +58,6 @@ void HorizonStyle::drawPrimitive(PrimitiveElement pe, const QStyleOption* opt, Q
         case PE_PanelMenuBar:
         case PE_PanelToolBar:
         case PE_PanelTipLabel: {
-            // Full-bleed chrome strips — flush, straight ends, no card.
             paintFlatSurface(p, QRectF(opt->rect), 0, tokens().surface_raised,
                              false, false, false, false);
             return;
@@ -95,7 +83,6 @@ void HorizonStyle::drawControl(ControlElement ce, const QStyleOption* opt, QPain
             const auto* o = qstyleoption_cast<const QStyleOptionToolBar*>(opt);
             QColor fill = tokens().surface_raised;
             if (o && (o->toolBarArea == Qt::BottomToolBarArea)) {
-                // Bottom page bar reads as a recessed full-width well: square ends.
                 fill = tokens().surface;
             }
             paintFlatSurface(p, QRectF(opt->rect), 0, fill, false, false, false, false);
@@ -103,8 +90,6 @@ void HorizonStyle::drawControl(ControlElement ce, const QStyleOption* opt, QPain
         }
         case CE_PushButton:
         case CE_PushButtonBevel: {
-            // Flat bevel drawn in drawPrimitive(PE_PanelButtonCommand); let
-            // Fusion handle label + icon on top of it.
             break;
         }
         default:
@@ -119,4 +104,4 @@ int HorizonStyle::pixelMetric(PixelMetric pm, const QStyleOption* option, const 
     return QProxyStyle::pixelMetric(pm, option, widget);
 }
 
-}  // namespace canvas::gui
+}
