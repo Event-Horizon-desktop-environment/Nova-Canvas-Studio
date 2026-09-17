@@ -224,6 +224,84 @@ add_test(NAME waveform_placement_qt_test COMMAND waveform_placement_qt_test)
 set_tests_properties(waveform_placement_qt_test PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# thumbs_id_namespace_test: Qt regression test for the filmstrip wrong-frame /
+# "never fully populated" bug (2026-09-16). Verifies the thumbnail request-id
+# namespace constants are distinct, outside every existing consumer's region, and
+# that both counters never collide over a realistic workload. Also exercises the
+# O(1) gate predicates (is_timeline_thumb_id / is_mini_strip_thumb_id) that
+# reject foreign deliveries before scanning any cells. Qt-linked on purpose.
+qt_add_executable(thumbs_id_namespace_test
+    qt/thumbs_id_namespace_test.cpp
+    ../resources.qrc
+    ../src/Widgets/timeline_widget.cpp
+    ../src/Widgets/timeline_view.cpp
+    ../src/Widgets/timeline_interaction.cpp
+    ../src/Widgets/timeline_thumbnails.cpp
+    ../src/Widgets/timeline_snap.cpp
+    ../src/Widgets/timeline_selection.cpp
+    ../src/Widgets/timeline_drag.cpp
+    ../src/Widgets/transition_handle_editor.cpp
+    ../src/Widgets/timeline_volume_line.cpp
+    ../src/features/timeline/audio_targets.cpp
+    ../src/UX/theme_clip_colors.cpp
+    ../src/UX/theme_icons.cpp
+    ../src/UX/theme_menu.cpp
+    ../src/UX/theme_state.cpp
+    ../src/UX/theme_styles.cpp
+    ../src/UX/theme_tokens.cpp
+    ../src/UX/horizon_style.cpp
+    ../src/features/thumbnails/thumbnail_service.cpp
+    ../src/features/color/mini_timeline_strip.cpp
+)
+target_include_directories(thumbs_id_namespace_test PRIVATE
+    ${CANVAS_GUI_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../core/include
+)
+target_link_libraries(thumbs_id_namespace_test PRIVATE
+    Qt6::Widgets
+    Qt6::Svg
+    Qt6::Test
+    canvas_core
+)
+set_target_properties(thumbs_id_namespace_test PROPERTIES AUTOMOC ON AUTORCC ON AUTOUIC OFF)
+add_test(NAME thumbs_id_namespace_test COMMAND thumbs_id_namespace_test)
+set_tests_properties(thumbs_id_namespace_test PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# thumbs_disk_serve_test: Qt regression test for the filmstrip "never fully
+# populates" bug family (2026-09-16). Pins the thumbnail service's worker-side
+# contract: (A) the on-disk cache fallback serves from the WORKER thread — not
+# from submit() on the caller's thread, the GUI-thread PNG-decode jank; (B) a
+# disk hit warms the in-memory LRU so the same key re-serves synchronously; (C)
+# a total decode failure drains parked dedupe waiters with a null QImage and
+# ERASES the pending key so the next request is re-enqueued instead of parking
+# forever (the "blank cells never backfill until a rebuild" bug). The on-disk
+# filename contract (t2| seed, FNV-1a hex) is pinned here too.
+qt_add_executable(thumbs_disk_serve_test
+    qt/thumbs_disk_serve_test.cpp
+    ../src/features/thumbnails/thumbnail_service.cpp
+    ../src/UX/theme_clip_colors.cpp
+    ../src/UX/theme_icons.cpp
+    ../src/UX/theme_menu.cpp
+    ../src/UX/theme_state.cpp
+    ../src/UX/theme_styles.cpp
+    ../src/UX/theme_tokens.cpp
+    ../src/UX/horizon_style.cpp
+)
+target_include_directories(thumbs_disk_serve_test PRIVATE
+    ${CANVAS_GUI_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../core/include
+)
+target_link_libraries(thumbs_disk_serve_test PRIVATE
+    Qt6::Widgets
+    Qt6::Svg
+    canvas_core
+)
+set_target_properties(thumbs_disk_serve_test PROPERTIES AUTOMOC ON AUTORCC ON AUTOUIC OFF)
+add_test(NAME thumbs_disk_serve_test COMMAND thumbs_disk_serve_test)
+set_tests_properties(thumbs_disk_serve_test PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # wheel_panel_roundtrip_qt_test: Qt regression test for the color wheel panel
 # (color-grading-phases.md Phase 4). Drives the REAL ColorWheelsPanel handlers
 # offscreen (Lift-wheel press/move/release + tone-row spin boxes) and proves the

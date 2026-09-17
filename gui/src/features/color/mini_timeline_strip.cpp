@@ -82,8 +82,13 @@ void MiniTimelineStrip::set_media_paths(
 void MiniTimelineStrip::set_thumbnail_service(ThumbnailService* service) {
     thumbnail_service_ = service;
     if (service) {
+        // Queued always: the service emits from WORKER threads AND reentrantly
+        // from submit() (memory-cache hits on the caller's thread). A direct
+        // delivery into request_clip_thumbnails()' loop re-entered the strip
+        // mid-scan; queuing routes every delivery through the event loop so the
+        // handler always runs with the request loop unwound.
         connect(service, &ThumbnailService::thumbnail_ready, this,
-                &MiniTimelineStrip::on_thumbnail_ready);
+                &MiniTimelineStrip::on_thumbnail_ready, Qt::QueuedConnection);
     }
     request_clip_thumbnails();
 }
@@ -115,7 +120,6 @@ void MiniTimelineStrip::request_clip_thumbnails() {
         if (mit == media_paths_.end()) continue;
         const int64_t dur = std::max<int64_t>(1, clip.src_out - clip.src_in);
         const uint64_t req_id = next_request_id_++;
-        if (request_clip_.count(req_id) != 0) continue;
         request_clip_[req_id] = clip.id;
         ThumbRequest req;
         req.id = req_id;
@@ -258,6 +262,11 @@ double MiniTimelineStrip::frame_to_strip_x(int64_t frame) const {
 
 void MiniTimelineStrip::on_thumbnail_ready(uint64_t request_id, const QImage& image) {
     if (image.isNull()) return;
+    // Namespace gate: the timeline/pool/project/source-preview ids posted by
+    // other consumers ride the same service; only ids this strip assigned may
+    // populate its boxes. Without it a numerically-equal timeline cell id
+    // overwrote a clip's thumb here.
+    if (!is_mini_strip_thumb_id(request_id)) return;
     const auto it = request_clip_.find(request_id);
     if (it == request_clip_.end()) return;
     thumbs_[it->second] = image;

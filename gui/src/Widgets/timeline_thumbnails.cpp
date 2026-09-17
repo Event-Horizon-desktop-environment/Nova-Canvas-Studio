@@ -37,8 +37,16 @@ QPixmap scaled_fit(const QImage& img, int w, int h) {
 void TimelineWidget::set_thumbnail_service(ThumbnailService* service) {
     thumbnail_service_ = service;
     if (service) {
-        connect(service, &ThumbnailService::thumbnail_ready, this, &TimelineWidget::on_thumbnail_ready);
-        connect(service, &ThumbnailService::waveform_ready, this, &TimelineWidget::on_waveform_ready);
+        // Queued always: the service emits from WORKER threads AND reentrantly
+        // from submit() (memory-cache hits on the caller's thread). A direct
+        // delivery back into request_clip_thumbnails()' loop re-entered the
+        // handler mid-scan with the strip's geometry/items mid-flight; queuing
+        // routes every delivery through the event loop so placement always runs
+        // with the request loop fully unwound.
+        connect(service, &ThumbnailService::thumbnail_ready, this,
+                &TimelineWidget::on_thumbnail_ready, Qt::QueuedConnection);
+        connect(service, &ThumbnailService::waveform_ready, this,
+                &TimelineWidget::on_waveform_ready, Qt::QueuedConnection);
     }
 }
 
@@ -110,15 +118,16 @@ void TimelineWidget::request_clip_thumbnails() {
         // created a different count and the served pixmaps cannot tile the clip.
         const int64_t last_frame =
             src_in + static_cast<int64_t>((num_cells - 0.5) * dur / num_cells);
-        qWarning().nospace()
-            << "[filmstrip] REQ clip=" << item.clip->id
-            << " cells=" << num_cells
-            << " cw=" << QString::number(cw, 'f', 1)
-            << " cell_w=" << QString::number(cell_w, 'f', 2)
-            << " fpp=" << QString::number(frames_per_pixel(), 'g', 4)
-            << " dur=" << dur << " src_in=" << src_in
-            << " frames=[" << src_in << "," << last_frame << "]"
-            << " track=" << item.track_index;
+        if (debug_enabled())
+            qWarning().nospace()
+                << "[filmstrip] REQ clip=" << item.clip->id
+                << " cells=" << num_cells
+                << " cw=" << QString::number(cw, 'f', 1)
+                << " cell_w=" << QString::number(cell_w, 'f', 2)
+                << " fpp=" << QString::number(frames_per_pixel(), 'g', 4)
+                << " dur=" << dur << " src_in=" << src_in
+                << " frames=[" << src_in << "," << last_frame << "]"
+                << " track=" << item.track_index;
         // Decode at ~2-3x the on-screen cell width so deep-zoom cells stay sharp;
         // the min keeps narrow cells from falling below a useful decode size.
         const int target_w = std::max(24, std::min(192, static_cast<int>(cell_w * 2.5)));
@@ -132,11 +141,12 @@ void TimelineWidget::request_clip_thumbnails() {
             // draw/request/place divergence (strip ending short of the clip end,
             // overlapping cells, cells skipped) is visible in the log directly.
             const double cell_x = item.rect->pos().x() + c * cell_w;
-            qWarning().nospace()
-                << "[filmstrip] CELL id=" << id
-                << " cell=" << c << "/" << num_cells
-                << " scene_x=" << QString::number(cell_x, 'f', 2)
-                << " frame=" << src_frame;
+            if (debug_enabled())
+                qWarning().nospace()
+                    << "[filmstrip] CELL id=" << id
+                    << " cell=" << c << "/" << num_cells
+                    << " scene_x=" << QString::number(cell_x, 'f', 2)
+                    << " frame=" << src_frame;
             ThumbRequest req;
             req.id = id;
             req.path = it->second.path;
@@ -157,6 +167,10 @@ void TimelineWidget::request_clip_thumbnails() {
 
 void TimelineWidget::on_thumbnail_ready(uint64_t id, const QImage& image) {
     if (image.isNull()) return;
+    // O(1) namespace gate: only ids this widget assigned may place cells. Without
+    // it, pool/ministrip/project ids with a numerically-equal id landed in (or
+    // forced a fruitless scan over) these cells — the wrong-frame filmstrip bug.
+    if (!is_timeline_thumb_id(id)) return;
     for (auto& item : clip_items_) {
         if (item.track_kind != canvas::core::Track::Kind::Video) continue;
         if (item.cells.empty()) continue;
@@ -177,14 +191,15 @@ void TimelineWidget::on_thumbnail_ready(uint64_t id, const QImage& image) {
             const QPixmap placed = scaled_fit(image, pw, cell_h);
             // Cells are children of the clip's ClipClipGroup (scene origin), so
             // item pos == scene pos.
-            qWarning().nospace()
-                << "[filmstrip] PLACE id=" << id
-                << " clip=" << item.clip->id
-                << " src_dims=" << image.width() << "x" << image.height()
-                << " cell_box=" << pw << "x" << cell_h
-                << " placed_pixmap=" << placed.width() << "x" << placed.height()
-                << " cell_scene_x=" << QString::number(cell.item->pos().x(), 'f', 2)
-                << " clip_w=" << QString::number(item.rect->rect().width(), 'f', 1);
+            if (debug_enabled())
+                qWarning().nospace()
+                    << "[filmstrip] PLACE id=" << id
+                    << " clip=" << item.clip->id
+                    << " src_dims=" << image.width() << "x" << image.height()
+                    << " cell_box=" << pw << "x" << cell_h
+                    << " placed_pixmap=" << placed.width() << "x" << placed.height()
+                    << " cell_scene_x=" << QString::number(cell.item->pos().x(), 'f', 2)
+                    << " clip_w=" << QString::number(item.rect->rect().width(), 'f', 1);
             cell.item->setPixmap(placed);
             // Completeness audit: how many of this clip's cells now hold a
             // pixmap. A clip whose PLACE lines never reach filled=totals has
@@ -195,10 +210,11 @@ void TimelineWidget::on_thumbnail_ready(uint64_t id, const QImage& image) {
             for (const auto& other : item.cells)
                 if (other.request_id != 0 && other.item && !other.item->pixmap().isNull()) filled++;
             const int total = static_cast<int>(item.cells.size());
-            qWarning().nospace()
-                << "[filmstrip] STRIP clip=" << item.clip->id
-                << " filled=" << filled << "/" << total
-                << (filled >= total ? " COMPLETE" : " HOLES");
+            if (debug_enabled())
+                qWarning().nospace()
+                    << "[filmstrip] STRIP clip=" << item.clip->id
+                    << " filled=" << filled << "/" << total
+                    << (filled >= total ? " COMPLETE" : " HOLES");
             return;
         }
     }
@@ -206,6 +222,9 @@ void TimelineWidget::on_thumbnail_ready(uint64_t id, const QImage& image) {
 
 void TimelineWidget::on_waveform_ready(uint64_t id, const QImage& image) {
     if (image.isNull()) return;
+    // Namespace gate (mirrors on_thumbnail_ready): only this widget's waveform
+    // ids may place a spectrum.
+    if (!is_timeline_thumb_id(id)) return;
     for (auto& item : clip_items_) {
         if (item.track_kind != canvas::core::Track::Kind::Audio) continue;
         if (item.cells.empty() || item.cells[0].request_id != id || !item.cells[0].item) continue;

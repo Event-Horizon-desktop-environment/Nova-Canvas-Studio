@@ -68,6 +68,7 @@ void TimelineWidget::rebuild_timeline() {
     hover_flat_ = -1;
     drop_lane_highlight_ = nullptr;
     drop_lane_flat_ = -1;
+    drop_overlay_ = nullptr;
 
     // scene_.clear() above already deleted live transition-cut-handle items.
     // Drop the dangling pointers WITHOUT deleting again, and reset the editor

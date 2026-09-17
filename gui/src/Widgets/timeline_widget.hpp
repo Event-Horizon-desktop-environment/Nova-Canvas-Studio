@@ -9,6 +9,7 @@
 #include <QPixmap>
 #include <QStyleOptionGraphicsItem>
 #include <QObject>
+#include <QTimer>
 #include <QWheelEvent>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -55,11 +56,17 @@ inline QPainterPath rounded_rect_path(const QRectF& r, qreal radius) {
 }
 
 // Per-media metadata the timeline carries alongside each path so it can map a
-// clip's src_in..src_out window to a fraction of the media for the waveform.
+// clip's src_in..src_out window to a fraction of the media for the waveform,
+// and (for drag-from-pool previews) know how long a dropped clip will be and
+// which lane-kind it belongs to.
 struct MediaMeta {
     std::string path;
     int64_t total_frames = 0;
     double fps = 0.0;
+    // True when the media carries a video stream; the drag preview resolves the
+    // target lane-kind with canvas::core::Track::Kind, mirroring
+    // place_media_at (audio_only == !(width>0 || height>0)).
+    bool is_video = false;
 };
 
 // Transparent clip container used purely as a paint clip: children (filmstrip
@@ -92,6 +99,24 @@ inline constexpr int kFilmstripCellWidth = 24;
 // enough that a 16:9 whole-frame picture (limit ~56px at a 32px cell height)
 // still spans the full cell width, so consecutive pictures butt edge to edge.
 inline constexpr int kFilmstripMaxCells = 4096;
+
+// Thumbnail request-id namespace for the timeline filmstrip/waveforms. Every
+// consumer of the shared ThumbnailService must route its completion signals by
+// id, so each widget owns a disjoint high bit: the pool (kPoolThumbNs = bit63),
+// project manager (kProjectThumbNs = bits61-63) and source preview
+// (kSourcePreviewWaveformId) already namespace their ids. The timeline and the
+// color-page mini strip used to start their counters at 1 and 0 instead, so over
+// time both posted the SAME integers into the same service and each widget's
+// completion handler matched the other widget's decode (wrong frames / strips
+// that never filled). Bit 60 sits below every existing namespace region.
+inline constexpr std::uint64_t kTimelineThumbNs = 0x1000000000000000ULL;
+// True for ids this widget's requests assign, false for every other consumer's
+// ids — the O(1) gate on_thumbnail_ready/on_waveform_ready use to reject foreign
+// deliveries before scanning any cells. id 0 is the unassigned sentinel the
+// placement unit tests drive through the slots directly.
+inline bool is_timeline_thumb_id(std::uint64_t id) noexcept {
+    return id == 0 || (id & kTimelineThumbNs) != 0;
+}
 
 // Scales `img` to fit inside w x h (KeepAspectRatio), centered on a
 // transparent w x h canvas. The whole frame stays visible; the letterbox bars
@@ -540,7 +565,9 @@ private:
     Tool current_tool_ = Tool::Select;
     bool snap_enabled_ = true;
     ThumbnailService* thumbnail_service_ = nullptr;
-    uint64_t next_thumb_id_ = 1;
+    // Starts in the timeline namespace (see kTimelineThumbNs) so ids can never
+    // collide with the mini strip / pool / project manager on the shared service.
+    uint64_t next_thumb_id_ = kTimelineThumbNs + 1;
     std::unordered_map<canvas::core::MediaId, MediaMeta> media_paths_;
 
     QGraphicsScene scene_;
@@ -657,6 +684,15 @@ private:
     void clear_row_highlight(QGraphicsRectItem*& slot, int& flat);
     void update_hover_row(const QPointF& scene_pos);
     void update_drop_lane(const QPointF& scene_pos);
+    // Drop overlay for pool-media drags: a full track-stack preview rendered above
+    // the timeline while the drag crosses it — faint row bands when the lanes
+    // aren't drawn yet (empty timeline), the target lane tint, the clip ghost
+    // (+ its linked A1 audio mate) at the drop frame sized to the media
+    // duration, a drop-frame vertical guide and a timecode/lane tag. The left
+    // edge is clamped to the content edge (header drops land at frame 0).
+    void update_drop_preview(const QPoint& widget_pos, int media_id);
+    void clear_drop_preview();
+    QGraphicsItemGroup* drop_overlay_ = nullptr;
     QGraphicsRectItem* hover_highlight_ = nullptr;
     int hover_flat_ = -1;
     QGraphicsRectItem* drop_lane_highlight_ = nullptr;
@@ -739,6 +775,12 @@ private:
     double resize_above_start_ = 0.0; // above row height / bottom pad at press
     double resize_below_start_ = 0.0; // below row height / top pad at press
     bool track_resize_cursor_shown_ = false;
+    // Coalesces the per-move rebuild_timeline() during a track-row resize: a
+    // whole-scene teardown (thousands of items + a full thumbnail re-request
+    // pass) used to run on EVERY MouseMove — the "dragging the divider is
+    // sticky" jank at 1-2k item scenes. Moves now mark the timer; the rebuild
+    // runs at most 16ms after the LAST move, and the release flushes it.
+    QTimer* track_resize_timer_ = nullptr;
 
     // Video/Audio section-divider PAN state: the wide divider is a
     // grab-and-scroll handle that moves the ENTIRE timeline (rows + headers) up

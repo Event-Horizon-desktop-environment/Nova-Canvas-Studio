@@ -201,10 +201,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 // pool-namespaced ids may touch pool tiles (kPoolThumbNs).
                 // Project-manager card frames carry their own high-bit prefix
                 // (kProjectThumbNs) and are routed by the manager's bridge.
-                if (!(id & kPoolThumbNs) || (id & kProjectThumbNs)) return;
+                // kPoolThumbNs (bit 63) is a strict SUBSET of kProjectThumbNs
+                // (bits 61-63), so "the pool bit is set" can't separate them —
+                // every pool id also matches kProjectThumbNs. Compare the exact
+                // namespace tag instead: the top three bits must read exactly
+                // 100 (pool), anything else (111 = project, 000 = timeline/
+                // ministrip, 111 = source preview) is a foreign id.
+                if ((id & kProjectThumbNs) != kPoolThumbNs) return;
                 const int idx = static_cast<int>(id & ~kPoolThumbNs);
-                qWarning().nospace() << "[thumb] pool thumbnail ready idx=" << idx
-                                     << " sz=" << image.width() << "x" << image.height();
+                if (debug_enabled())
+                    qWarning().nospace() << "[thumb] pool thumbnail ready idx=" << idx
+                                         << " sz=" << image.width() << "x" << image.height();
                 if (media_pool_ && idx >= 0 && idx < media_pool_->count())
                     media_pool_->item(idx)->setIcon(QIcon(QPixmap::fromImage(image)));
             });
@@ -213,19 +220,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 // Source-preview spectrum (audio-only media) comes back on its
                 // own sentinel id — never a pool cell or timeline clip.
                 if (id == kSourcePreviewWaveformId) {
-                    qWarning().nospace() << "[thumb] source-preview waveform ready"
-                                         << " sz=" << image.width() << "x" << image.height()
-                                         << " null=" << image.isNull();
+                    if (debug_enabled())
+                        qWarning().nospace() << "[thumb] source-preview waveform ready"
+                                             << " sz=" << image.width() << "x" << image.height()
+                                             << " null=" << image.isNull();
                     if (source_panel_) source_panel_->set_audio_waveform(image);
                     return;
                 }
                 // Timeline waveforms are handled by TimelineWidget's own
                 // connection; only pool-namespaced ids route to pool tiles.
-                if (!(id & kPoolThumbNs)) return;
+                if ((id & kProjectThumbNs) != kPoolThumbNs) return;
                 const int idx = static_cast<int>(id & ~kPoolThumbNs);
-                qWarning().nospace() << "[thumb] pool waveform ready idx=" << idx
-                                     << " sz=" << image.width() << "x" << image.height()
-                                     << " null=" << image.isNull();
+                if (debug_enabled())
+                    qWarning().nospace() << "[thumb] pool waveform ready idx=" << idx
+                                         << " sz=" << image.width() << "x" << image.height()
+                                         << " null=" << image.isNull();
                 if (media_pool_ && idx >= 0 && idx < media_pool_->count()) {
                     QListWidgetItem* item = media_pool_->item(idx);
                     // Hybrid video+audio tiles keep the frame as the icon (top)

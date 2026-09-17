@@ -3,6 +3,7 @@
 #include "features/timeline/audio_targets.hpp"
 #include "Logging.hpp"
 #include "UX/theme.hpp"
+#include "core/timecode.hpp"
 
 #include <QApplication>
 #include <QCursor>
@@ -14,7 +15,9 @@
 #include <QPointF>
 #include <QRectF>
 #include <QGraphicsItem>
+#include <QGraphicsItemGroup>
 #include <QGraphicsRectItem>
+#include <QGraphicsSimpleTextItem>
 #include <QString>
 #include <QToolTip>
 
@@ -30,6 +33,7 @@
 #include <QSvgRenderer>
 #include <QPixmap>
 #include <QFont>
+#include <QFontMetricsF>
 #include <QLineF>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
@@ -212,14 +216,225 @@ void TimelineWidget::update_drop_lane(const QPointF& scene_pos) {
     }
 }
 
+void TimelineWidget::clear_drop_preview() {
+    // The group owns every overlay item; removing + deleting it releases them
+    // all at once (children are destroyed together with the group).
+    if (drop_overlay_) {
+        scene_.removeItem(drop_overlay_);
+        delete drop_overlay_;
+        drop_overlay_ = nullptr;
+    }
+}
+
+void TimelineWidget::update_drop_preview(const QPoint& widget_pos, int media_id) {
+    // Full track-stack drop preview for pool-media drags, painted above the
+    // lane/panel tint from update_drop_lane:
+    //   * empty timeline -> faint V/A row bands + section divider, so the track
+    //     structure the clip is about to fill reads before any clip exists;
+    //   * always         -> target-lane accent tint, the clip ghost at the drop
+    //     frame sized to the media duration (video media also ghosts its linked
+    //     A1 audio mate), a vertical drop-frame guide across the whole stack,
+    //     and a timecode + lane tag on the ghost.
+    // Lane + frame mirror the placement funnel exactly (resolve_drop_lane /
+    // place_media_at); the left edge clamps to frame 0, so a drag over the
+    // track header never previews into the header column.
+    if (!sequence_) {
+        clear_drop_preview();
+        return;
+    }
+    const auto it = media_paths_.find(static_cast<canvas::core::MediaId>(media_id));
+    if (it == media_paths_.end() || it->second.total_frames <= 0) {
+        clear_drop_preview();
+        return;
+    }
+    const MediaMeta& meta = it->second;
+    const int v_count = static_cast<int>(sequence_->video_tracks.size());
+    const int a_count = static_cast<int>(sequence_->audio_tracks.size());
+    const bool has_content = has_timeline_content();
+
+    const auto lane =
+        resolve_drop_lane(mapToScene(widget_pos).y(),
+                          meta.is_video ? canvas::core::Track::Kind::Video
+                                        : canvas::core::Track::Kind::Audio);
+    // A drop that would open a NEW track (empty spacer with content) has no row
+    // to preview; fall back to the lane tint alone. On an empty timeline the
+    // placed clip always clamps to lane 0 of its kind, so the overlay shows.
+    const bool opens_new_track =
+        has_content && (meta.is_video ? lane.index >= v_count : lane.index >= a_count);
+    if (opens_new_track) {
+        clear_drop_preview();
+        return;
+    }
+
+    const ThemeTokens& t = tokens();
+    const double content_w = scene_.sceneRect().right() - kSceneMargin;
+
+    // Row geometry: with content the real lanes are already on-screen at their
+    // parked position (that is exactly where the dropped clip lands). On an
+    // empty timeline the parked lane geometry is below the scene rect, so the
+    // track map is laid out INSIDE the compact empty-state panel instead — the
+    // rows are the true V/A stack, proportionally scaled to fit the panel.
+    struct PanelRow {
+        int flat;
+        double top;
+        double h;
+    };
+    std::vector<PanelRow> rows;
+    rows.reserve(v_count + a_count);
+    double stack_top = tracks_origin_y();
+    double stack_bot = tracks_stack_bottom(v_count, a_count);
+    if (has_content) {
+        for (int f = 0; f < v_count + a_count; ++f)
+            rows.push_back({f, track_top(f, v_count), track_height(f, v_count)});
+    } else {
+        stack_top = empty_state_top();
+        // Screen-order elements: Vn..V1 (desc), the V/A divider, then A1..An.
+        std::vector<double> heights;
+        for (int s = v_count - 1; s >= 0; --s) heights.push_back(track_height(s, v_count));
+        if (v_count > 0 && a_count > 0) heights.push_back(kSectionDividerHeight);
+        for (int s = 0; s < a_count; ++s) heights.push_back(track_height(v_count + s, v_count));
+        double total = 0.0;
+        for (double h : heights) total += h;
+        total += kTrackGap * static_cast<double>(std::max(0, static_cast<int>(heights.size()) - 1));
+        const double scale = total > kEmptyStateHeight ? kEmptyStateHeight / total : 1.0;
+        std::vector<int> flats;
+        flats.reserve(heights.size());
+        for (int s = v_count - 1; s >= 0; --s) flats.push_back(s);
+        if (v_count > 0 && a_count > 0) flats.push_back(-1);  // divider slot
+        for (int s = 0; s < a_count; ++s) flats.push_back(v_count + s);
+        double y = stack_top;
+        for (size_t i = 0; i < flats.size(); ++i) {
+            const double h = heights[i] * scale;
+            if (flats[i] >= 0) rows.push_back({flats[i], y, h});
+            y += h;
+            if (i + 1 < flats.size()) y += kTrackGap * scale;
+        }
+        stack_bot = y;
+    }
+
+    const int target_flat = meta.is_video ? lane.index : v_count + lane.index;
+    const auto target_row =
+        std::find_if(rows.begin(), rows.end(),
+                     [target_flat](const PanelRow& r) { return r.flat == target_flat; });
+    if (target_row == rows.end()) {
+        clear_drop_preview();
+        return;
+    }
+    const double lane_top = target_row->top;
+    const double lane_h = target_row->h;
+
+    // Match the placement funnel: frame_at_x floors, and place_media_at clamps
+    // negative drops (over the header strip) to frame 0.
+    const int64_t frame = std::max<int64_t>(0, frame_at_x(widget_pos.x()));
+    const double x = kSceneMargin + kTrackHeaderWidth + frame / frames_per_pixel_;
+    const double w = std::max(2.0, static_cast<double>(meta.total_frames) / frames_per_pixel_);
+
+    // (Re)build the overlay group for this move.
+    if (!drop_overlay_) {
+        drop_overlay_ = new QGraphicsItemGroup;
+        drop_overlay_->setAcceptedMouseButtons(Qt::NoButton);
+        // Above the lane tint (z 35) and clips, below the playhead + snap
+        // indicator so playback feedback still reads on top.
+        drop_overlay_->setZValue(38);
+        scene_.addItem(drop_overlay_);
+    }
+    const QList<QGraphicsItem*> kids = drop_overlay_->childItems();
+    for (QGraphicsItem* kid : kids) {
+        drop_overlay_->removeFromGroup(kid);
+        delete kid;
+    }
+
+    // 1. Track map: only when the real lanes aren't drawn yet (empty timeline),
+    //    with the V/A divider band between the two sections.
+    if (!has_content) {
+        for (const PanelRow& r : rows)
+            drop_overlay_->addToGroup(scene_.addRect(
+                QRectF(kSceneMargin, r.top, content_w, r.h),
+                QPen(t.border_soft, 1.0), QBrush(t.surface_low)));
+        if (v_count > 0 && a_count > 0) {
+            const auto v1 = std::find_if(rows.begin(), rows.end(),
+                                         [](const PanelRow& r) { return r.flat == 0; });
+            const auto a1 = std::find_if(rows.begin(), rows.end(),
+                                         [v_count](const PanelRow& r) { return r.flat == v_count; });
+            if (v1 != rows.end() && a1 != rows.end()) {
+                const double v_bottom = v1->top + v1->h;
+                drop_overlay_->addToGroup(
+                    scene_.addRect(QRectF(kSceneMargin, v_bottom, content_w, a1->top - v_bottom),
+                                   QPen(Qt::NoPen), QBrush(t.surface_highest)));
+            }
+        }
+    }
+
+    // 2. Target lane across its full width.
+    QColor lane_fill = t.accent;
+    lane_fill.setAlpha(26);
+    drop_overlay_->addToGroup(scene_.addRect(
+        QRectF(kSceneMargin, lane_top, content_w, lane_h),
+        QPen(t.accent, 1.5), QBrush(lane_fill)));
+
+    // 3. The clip ghost at the drop frame, sized to the media's duration.
+    QColor ghost_fill = t.accent;
+    ghost_fill.setAlpha(42);
+    drop_overlay_->addToGroup(scene_.addRect(QRectF(x, lane_top, w, lane_h),
+                                             QPen(t.accent, 2.0), QBrush(ghost_fill)));
+
+    // 3b. Linked audio mate: video media always lands one on A1 (track 0).
+    if (meta.is_video && a_count > 0) {
+        const auto mate = rows.empty() ? rows.end()
+                                       : std::find_if(rows.begin(), rows.end(),
+                                                      [v_count](const PanelRow& r) {
+                                                          return r.flat == v_count;
+                                                      });
+        if (mate != rows.end())
+            drop_overlay_->addToGroup(
+                scene_.addRect(QRectF(x, mate->top, w, mate->h),
+                               QPen(t.accent, 1.5), QBrush(ghost_fill)));
+    }
+
+    // 4. Vertical drop-frame guide spanning the whole track stack.
+    QColor guide_c = t.accent;
+    guide_c.setAlpha(150);
+    drop_overlay_->addToGroup(scene_.addLine(QLineF(x, stack_top, x, stack_bot),
+                                             QPen(guide_c, 1.5)));
+
+    // 5. Timecode + lane tag pill inside the ghost (only when there is room).
+    if (w >= 64.0) {
+        const QString lane_name =
+            meta.is_video ? QStringLiteral("V%1").arg(lane.index + 1)
+                          : QStringLiteral("A%1").arg(lane.index + 1);
+        QString tag = lane_name + QStringLiteral(" · ")
+                      + timecode(frame, fps_ > 0.0 ? fps_ : meta.fps);
+        QFont tag_font;
+        tag_font.setPointSizeF(8.0);
+        tag_font.setBold(true);
+        QFontMetricsF fm(tag_font);
+        if (fm.horizontalAdvance(tag) > w - 20.0)
+            tag = fm.elidedText(tag, Qt::ElideRight, static_cast<int>(w - 20.0));
+        const double tw = fm.horizontalAdvance(tag);
+        const double th = fm.height();
+        const QRectF tag_rect(x + 4.0, lane_top + 4.0, tw + 12.0, th + 6.0);
+        auto* pill = new QGraphicsPathItem(rounded_rect_path(tag_rect, 5.0));
+        pill->setBrush(QColor(0, 0, 0, 175));
+        pill->setPen(QPen(t.accent, 1.0));
+        drop_overlay_->addToGroup(pill);
+        auto* tag_text = new QGraphicsSimpleTextItem(tag);
+        tag_text->setFont(tag_font);
+        tag_text->setBrush(t.ink);
+        tag_text->setPos(tag_rect.left() + 6.0, tag_rect.top() + 3.0);
+        drop_overlay_->addToGroup(tag_text);
+    }
+}
+
 void TimelineWidget::leaveEvent(QEvent* event) {
     if (hover_flat_ != -1) clear_row_highlight(hover_highlight_, hover_flat_);
     if (drop_lane_flat_ != -1) clear_row_highlight(drop_lane_highlight_, drop_lane_flat_);
+    clear_drop_preview();
     QGraphicsView::leaveEvent(event);
 }
 
 void TimelineWidget::dragLeaveEvent(QDragLeaveEvent* event) {
     if (drop_lane_flat_ != -1) clear_row_highlight(drop_lane_highlight_, drop_lane_flat_);
+    clear_drop_preview();
     QGraphicsView::dragLeaveEvent(event);
 }
 
@@ -1711,11 +1926,16 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
             if (dn_flat >= 0 && !flat_collapsed(dn_flat))
                 set_track_height(dn_flat, v_count, resize_below_start_ - dy);
         }
-        rebuild_timeline();
-        // Per-move cost of a track-row drag. Each move teardowns the whole
-        // scene (this path intentionally rebuilds — row geometry changed), so a
-        // sustained ms_avg >> frame budget here is exactly "dragging the track
-        // divider is sticky" and is the number to watch if resizing feels slow.
+        // Defer the whole-scene rebuild to the coalescing timer so a fast drag
+        // (60-1000 moves/s) doesn't teardown+rebuild the scene per pixel of
+        // cursor travel — the "dragging the divider is sticky" jank. The row
+        // heights are already updated live above; the timer fires once, 16ms
+        // after the last move, and the release flushes the final state.
+        track_resize_timer_->start();
+        // Per-move cost of a track-row drag (height bookkeeping + hit-tests; the
+        // scene teardown itself was moved off the move path into the coalesced
+        // rebuild). Sustained ms_avg >> frame budget here is "resizing is slow"
+        // even after the debounce — the number to watch if it regresses.
         const double tr_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - tr_t0).count();
         static auto s_tr_at = std::chrono::steady_clock::now();
@@ -2071,6 +2291,13 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
         resizing_track_ = false;
         resize_edge_ = -1;
         resize_total_ = 0;
+        // Flush the coalesced rebuild at once so the settled geometry (and its
+        // re-served thumbnails) land at the resolved height instead of on the
+        // next 16ms tick.
+        if (track_resize_timer_->isActive()) {
+            track_resize_timer_->stop();
+            rebuild_timeline();
+        }
         event->accept();
         return;
     }
@@ -2294,8 +2521,16 @@ void TimelineWidget::dragMoveEvent(QDragMoveEvent* event) {
         event->mimeData()->hasFormat("application/x-eh-transition") ||
         event->mimeData()->hasUrls()) {
         // Highlight the lane the drop would land on (the resolved target for
-        // Media-Pool placements; URL drops land the same way via media_files_dropped).
+        // Media-Pool placements; URL drops land the same way via media_files_dropped),
+        // plus a clip-shaped ghost at the exact drop frame + duration for pool
+        // media drags.
         update_drop_lane(mapToScene(event->position().toPoint()));
+        if (event->mimeData()->hasFormat("application/x-eh-media-id")) {
+            const int media_id = event->mimeData()->data("application/x-eh-media-id").toInt();
+            update_drop_preview(event->position().toPoint(), media_id);
+        } else {
+            clear_drop_preview();
+        }
         event->acceptProposedAction();
     } else {
         event->ignore();
@@ -2303,8 +2538,9 @@ void TimelineWidget::dragMoveEvent(QDragMoveEvent* event) {
 }
 
 void TimelineWidget::dropEvent(QDropEvent* event) {
-    // Any landing — accepted or not — clears the drop-lane highlight.
+    // Any landing — accepted or not — clears the drop-lane highlight and ghost.
     if (drop_lane_flat_ != -1) clear_row_highlight(drop_lane_highlight_, drop_lane_flat_);
+    clear_drop_preview();
     const int64_t frame = frame_at_x(event->position().toPoint().x());
     const double scene_y = mapToScene(event->position().toPoint()).y();
 

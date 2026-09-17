@@ -51,6 +51,13 @@ TimelineWidget::TimelineWidget(QWidget* parent) : QGraphicsView(parent) {
     setAlignment(Qt::AlignLeft | Qt::AlignTop);
     setAcceptDrops(true);
     scene_.setBackgroundBrush(tokens().surface);
+    // Track-row resize rebuilds are coalesced to 16ms (see track_resize_timer_):
+    // a rebuild per MouseMove tore down + rebuilt the whole scene (and re-issued
+    // every thumbnail request) for each pixel of height drag.
+    track_resize_timer_ = new QTimer(this);
+    track_resize_timer_->setSingleShot(true);
+    track_resize_timer_->setInterval(16);
+    connect(track_resize_timer_, &QTimer::timeout, this, [this] { rebuild_timeline(); });
     // Manual scrollbar interaction must not be defeated by playhead-follow:
     // QGraphicsView delivers wheel/press events to the scrollbar (not the view),
     // so watch both directly and treat any such gesture as "user navigated away".

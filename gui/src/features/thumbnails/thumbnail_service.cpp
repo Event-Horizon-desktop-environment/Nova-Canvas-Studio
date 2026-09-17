@@ -47,6 +47,13 @@ std::string fnv1a_hex(const std::string& s) {
     }
     return out;
 }
+
+// Quantized gain component of the on-disk/memory cache keys. Waveforms are
+// content displays — NEVER scaled by clip volume — so the component is a fixed
+// 100 for every request (see submit()); the worker's disk-path and cache-key
+// math must use the same constant or a generated waveform's keys never match a
+// later load.
+constexpr int kCacheGainPct = 100;
 }  // namespace
 
 void ThumbnailService::set_cache_dir(QString dir) {
@@ -223,34 +230,23 @@ void ThumbnailService::submit(ThumbRequest req) {
                          << (audio ? "waveform" : "thumb")
                          << "path=" << QString::fromStdString(req.path)
                          << "frame=" << req.frame << "w=" << req.target_width;
+            // A hit must refresh LRU recency too, or a hot cell evicted mid-zoom
+            // by cold inserts costs a re-decode on the very next frame.
+            auto lru_it = std::find(lru_.begin(), lru_.end(), key);
+            if (lru_it != lru_.end()) {
+                lru_.erase(lru_it);
+                lru_.push_back(key);
+            }
             if (audio) emit waveform_ready(req.id, img);
             else emit thumbnail_ready(req.id, img);
             return;
         }
 
-        // On-disk fallback: if this entry was generated in a previous session
-        // (or a previous zoom pass evicted it from the in-memory LRU) just load
-        // the tiny PNG/binary instead of re-decoding the source video/audio.
-        if (audio) {
-            const QString file = disk_path_waveform(req.path, req.target_width, req.max_height,
-                                                    req.src_lo, req.src_hi, gain_pct);
-            QImage img = load_from_disk(file);
-            if (!img.isNull()) {
-                cache_[key] = img;
-                lru_.push_back(key);
-                emit waveform_ready(req.id, img);
-                return;
-            }
-        } else {
-            const QString file = disk_path_thumbnail(req.path, req.frame, req.target_width);
-            QImage img = load_from_disk(file);
-            if (!img.isNull()) {
-                cache_[key] = img;
-                lru_.push_back(key);
-                emit thumbnail_ready(req.id, img);
-                return;
-            }
-        }
+        // (On-disk fallback deliberately NOT here: a PNG decode per cell runs on
+        // the CALLER's thread — the GUI thread — whenever this hit after the
+        // memory cache was cleared (zoom-out filmstrips, fresh sessions), which
+        // is the submit() jank. The worker loads the disk file instead, see
+        // worker_loop, where the decode happens on a worker thread.)
 
         // In-flight dedupe: a rebuild re-issues every cell while the previous
         // pass is still decoding (each ~500ms), so the same (path, frame, width)
@@ -273,16 +269,16 @@ void ThumbnailService::submit(ThumbRequest req) {
         }
         pending_ids_[pending_key].push_back(req.id);
 
-        // Always-on (miss): the pool/timeline asked for a generation. Keeping
-        // this ungated means Canvas-Thumbs.log always records every request that
-        // actually had to do work — a dead pool tile with no line here is a
-        // request that never arrived.
-        qWarning().nospace()
-            << "thumb: enqueue id=" << req.id
-            << (audio ? "waveform" : "thumb")
-            << "path=" << QString::fromStdString(req.path)
-            << "frame=" << req.frame << "w=" << req.target_width
-            << "h=" << req.max_height << "qlen=" << (queue_.size() + 1);
+        // Per-request enqueue audit. Gated: it fires once per filmstrip cell on
+        // every cold rebuild, and that string formatting runs on the GUI thread
+        // at the populate pass's request rate — real cost while the strip fills.
+        if (debug_enabled())
+            qWarning().nospace()
+                << "thumb: enqueue id=" << req.id
+                << (audio ? "waveform" : "thumb")
+                << "path=" << QString::fromStdString(req.path)
+                << "frame=" << req.frame << "w=" << req.target_width
+                << "h=" << req.max_height << "qlen=" << (queue_.size() + 1);
         // Audio waveform requests are cheap (one full-file decode, then cached)
         // but the first one can take ~1s. Put them at the front of the queue so
         // they're handled immediately and don't wait behind a long video
@@ -311,10 +307,34 @@ void ThumbnailService::clear_cache() {
     }
 }
 
+void ThumbnailService::store_cached(const CacheKey& key, const QImage& img) {
+    if (img.isNull()) return;
+    QMutexLocker lock(&mutex_);
+    // Refresh LRU recency instead of blindly appending: a re-store of a cell
+    // that is already hot (disk reload, probe re-serving a neighbour) used to
+    // append a SECOND lru_ entry for the same key, so the cap counted it twice
+    // and a cold pass could evict a resident cell that was just touched.
+    auto lru_it = std::find(lru_.begin(), lru_.end(), key);
+    if (lru_it != lru_.end()) lru_.erase(lru_it);
+    cache_[key] = img;
+    lru_.push_back(key);
+    while (lru_.size() > kCacheMax) {
+        const CacheKey oldest = lru_.front();
+        lru_.pop_front();
+        cache_.erase(oldest);
+    }
+}
+
 void ThumbnailService::worker_loop() {
     // Each worker owns its own hardware-decode device to avoid racing on the
     // lazy init and sharing a single GPU context across threads.
     canvas::core::HwDeviceManager hw{"thumbs"};
+    // Persistent per-worker VideoDecoder: every cell AND every retry probe of
+    // the same media path used to reopen the file/demux/hw device — the
+    // per-request open() dominated thumbnail latency for a clip's whole
+    // filmstrip. Reused while the queue serves one path; reopened on change.
+    canvas::core::VideoDecoder decoder;
+    std::string decoder_path;
     while (true) {
         ThumbRequest req;
         {
@@ -333,105 +353,168 @@ void ThumbnailService::worker_loop() {
             queue_.pop_front();
         }
 
+        // The persistent decoder only ever holds ONE media path: retire it the
+        // moment the queue head names a different file so the next generate()
+        // reopens cleanly instead of decoding the wrong media. (Audio requests
+        // never touch the decoder.)
+        if (!req.is_audio && decoder.is_open() && decoder_path != req.path) {
+            decoder.close();
+            decoder_path.clear();
+        }
+
+        const auto t0 = std::chrono::steady_clock::now();
+        // Disk fallback lives on the WORKER thread, not in submit() (Bug F): a
+        // PNG load per cell used to run on the CALLER's thread — the GUI thread —
+        // whenever the memory cache ran cold (fresh sessions, zoom-out
+        // filmstrips), which was the submit() jank. A disk hit also warms the
+        // memory cache so the same pass never reloads a cell twice.
         QImage img;
-        {
-            const auto t0 = std::chrono::steady_clock::now();
+        bool served_from_disk = false;
+        if (req.is_audio) {
+            img = load_from_disk(disk_path_waveform(req.path, req.target_width, req.max_height,
+                                                    req.src_lo, req.src_hi, kCacheGainPct));
+        } else {
+            img = load_from_disk(disk_path_thumbnail(req.path, req.frame, req.target_width));
+        }
+        if (!img.isNull()) {
+            served_from_disk = true;
+            // Disk file for a frame only exists because a real decode served it
+            // before, so its content IS that frame — safe to warm the memory
+            // cache under the requested key.
+            const CacheKey key{req.path, req.frame, req.target_width, req.is_audio,
+                               req.src_lo, req.src_hi, kCacheGainPct};
+            store_cached(key, img);
+        } else if (req.is_audio) {
+            // Audio render (full-file waveform decode + bucket + paint). Never
+            // touches the persistent video decoder; generate() saves its own PNG.
             img = generate(req, hw);
-            const auto t1 = std::chrono::steady_clock::now();
-            const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            if (debug_enabled())
+            if (!img.isNull()) {
+                const CacheKey key{req.path, req.frame, req.target_width, true,
+                                   req.src_lo, req.src_hi, kCacheGainPct};
+                store_cached(key, img);
+            }
+        } else {
+            // Video decode, reusing the worker's persistent decoder (Bug D/E).
+            // A single-frame decode hiccup used to leave that cell permanently
+            // blank ("thumbnails every now and again", never backfilled until a
+            // rebuild). Retry a small window of adjacent frames so every cell
+            // still fills; the retries are cheap because neighbours share the
+            // decoder's sequential-seek window.
+            int64_t served_frame = req.frame;
+            img = generate(req, hw, &decoder, &served_frame);
+            static constexpr std::int64_t kProbeOffsets[] = {-1, 1, -2, 2, -3, 3};
+            for (const std::int64_t off : kProbeOffsets) {
+                if (!img.isNull()) break;
+                ThumbRequest probe = req;
+                probe.frame = std::max<int64_t>(0, req.frame + off);
+                img = generate(probe, hw, &decoder, &served_frame);
+                if (debug_enabled())
+                    qDebug() << "thumb: retry-miss id=" << req.id
+                             << "frame=" << req.frame << "probe=" << probe.frame;
+            }
+            if (!img.isNull()) {
+                // Store under the ACTUAL source frame the image encodes, NEVER
+                // req.frame (Bug C): a probe that landed a neighbour frame must
+                // not poison the true frame's key, or the next request for it
+                // serves a wrong-frame cell forever.
+                const CacheKey served{req.path, served_frame, req.target_width,
+                                      false, req.src_lo, req.src_hi, kCacheGainPct};
+                store_cached(served, img);
+            }
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        if (debug_enabled()) {
+            if (served_from_disk) {
+                qDebug() << "thumb: disk-serve id=" << req.id
+                         << (req.is_audio ? "waveform" : "thumb")
+                         << "path=" << QString::fromStdString(req.path)
+                         << "frame=" << req.frame << "w=" << req.target_width;
+            } else {
                 qDebug() << "thumb: generate id=" << req.id
                          << (req.is_audio ? "waveform" : "thumb")
                          << "path=" << QString::fromStdString(req.path)
                          << "frame=" << req.frame << "w=" << req.target_width
                          << "ok=" << (img.isNull() ? "NO" : "yes")
                          << "took_ms=" << ms;
-            // Always-on throttle (~1/s): team-wide generate throughput and backlog.
-            // A queue that keeps growing past kWorkers with slow took_ms means
-            // imports/scrubs are feeding faster than the decode workers drain.
-            static auto agg_t0 = t0;
-            static int agg_n = 0;
-            static double agg_ms = 0.0;
-            ++agg_n;
-            agg_ms += ms;
-            const double since_s = std::chrono::duration<double>(t1 - agg_t0).count();
-            if (since_s >= 1.0) {
-                const double avg_ms = agg_ms / static_cast<double>(agg_n);
-                size_t ql = 0, cs = 0;
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    ql = queue_.size();
-                    cs = cache_.size();
-                }
-                std::size_t wc = 0;
-                {
-                    std::lock_guard<std::mutex> lock(waveform_mutex_);
-                    wc = waveform_cache_.size();
-                }
-                // Always-on (~1/s): team-wide generate throughput and backlog.
-                // A queue that keeps growing past kWorkers with slow took_ms means
-                // imports/scrubs are feeding faster than the decode workers drain.
-                qWarning().nospace()
-                    << "[thumb] generated=" << agg_n
-                    << " avg_ms=" << QString::number(avg_ms, 'f', 0)
-                    << " last_ms=" << QString::number(ms, 'f', 0)
-                    << " queue=" << ql
-                    << " lru=" << cs
-                    << " wf_cache=" << wc;
-                agg_t0 = t1;
-                agg_n = 0;
-                agg_ms = 0.0;
             }
         }
-        if (img.isNull() && !req.is_audio) {
-            // A single-frame decode hiccup used to leave that cell permanently
-            // blank ("thumbnails every now and again", never backfilled until a
-            // rebuild). Retry a small window of adjacent frames so every cell
-            // still fills; the retries are cheap because neighbours share the
-            // decoder's sequential-seek window and land in the LRU cache. Any
-            // cell left blank shows through to the clip shell, so the strip
-            // reads as non-edge-to-edge — probe a few offsets before giving up.
-            static constexpr std::int64_t kProbeOffsets[] = {-1, 1, -2, 2, -3, 3};
-            for (const std::int64_t off : kProbeOffsets) {
-                ThumbRequest retry = req;
-                retry.frame = std::max<int64_t>(0, req.frame + off);
-                img = generate(retry, hw);
-                if (!img.isNull()) break;
-                if (debug_enabled())
-                    qDebug() << "thumb: retry-miss id=" << req.id
-                             << "frame=" << req.frame << "probe=" << (req.frame + off);
+        // Always-on throttle (~1/s): team-wide generate throughput and backlog.
+        // A queue that keeps growing past kWorkers with slow took_ms means
+        // imports/scrubs are feeding faster than the decode workers drain.
+        static auto agg_t0 = t0;
+        static int agg_n = 0;
+        static double agg_ms = 0.0;
+        ++agg_n;
+        agg_ms += ms;
+        const double since_s = std::chrono::duration<double>(t1 - agg_t0).count();
+        if (since_s >= 1.0) {
+            const double avg_ms = agg_ms / static_cast<double>(agg_n);
+            size_t ql = 0, cs = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ql = queue_.size();
+                cs = cache_.size();
             }
+            std::size_t wc = 0;
+            {
+                std::lock_guard<std::mutex> lock(waveform_mutex_);
+                wc = waveform_cache_.size();
+            }
+            qWarning().nospace()
+                << "[thumb] generated=" << agg_n
+                << " avg_ms=" << QString::number(avg_ms, 'f', 0)
+                << " last_ms=" << QString::number(ms, 'f', 0)
+                << " queue=" << ql
+                << " lru=" << cs
+                << " wf_cache=" << wc;
+            agg_t0 = t1;
+            agg_n = 0;
+            agg_ms = 0.0;
         }
+
         if (img.isNull()) {
-            // Generation failed (retry included): abandon every waiter that
-            // dedupe-parked on this key so their next rebuild re-enqueues
-            // instead of waiting on a pending entry no decoder will ever serve.
-            std::lock_guard<std::mutex> lock(mutex_);
-            const CacheKey key{req.path, req.frame, req.target_width, req.is_audio, req.src_lo, req.src_hi};
-            pending_ids_.erase(key);
+            // Generation failed (disk miss + decode/probe miss + audio render
+            // fail): abandon every waiter that dedupe-parked on this key so
+            // their next rebuild re-enqueues instead of waiting on a pending
+            // entry no decoder will ever serve, and retire the persistent
+            // decoder (a failed HW session can wedge subsequent decode attempts
+            // on the same path).
+            if (!req.is_audio && decoder.is_open()) {
+                decoder.close();
+                decoder_path.clear();
+            }
+            std::vector<uint64_t> waiters;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const CacheKey key{req.path, req.frame, req.target_width, req.is_audio,
+                                   req.src_lo, req.src_hi, kCacheGainPct};
+                auto it = pending_ids_.find(key);
+                if (it != pending_ids_.end()) {
+                    waiters = std::move(it->second);
+                    pending_ids_.erase(it);
+                }
+            }
+            // A null serve is the drain signal: the handlers no-op on null, and
+            // the erased pending key lets a later rebuild retry the cell.
+            for (const uint64_t waiter : waiters) {
+                if (req.is_audio) emit waveform_ready(waiter, QImage());
+                else emit thumbnail_ready(waiter, QImage());
+            }
             continue;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            const CacheKey key{req.path, req.frame, req.target_width, req.is_audio, req.src_lo, req.src_hi};
-            cache_[key] = img;
-            lru_.push_back(key);
-            while (lru_.size() > kCacheMax) {
-                const CacheKey oldest = lru_.front();
-                lru_.pop_front();
-                cache_.erase(oldest);
-            }
-        }
         // Serve every request id parked on this key with the single QImage just
-        // generated (cache insert above happens BEFORE this erase, so a submit
-        // racing between generate-finish and here still hits cache_ instead of
-        // re-enqueueing — no served-waiter is ever left waiting).
+        // produced (generated, probe-served, or disk-loaded). The cache insert
+        // above happens BEFORE this erase, so a submit racing between finish and
+        // here still hits cache_ instead of re-enqueueing — no served-waiter is
+        // ever left waiting.
         {
             std::vector<uint64_t> waiters;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                const CacheKey key{req.path, req.frame, req.target_width, req.is_audio, req.src_lo, req.src_hi};
+                const CacheKey key{req.path, req.frame, req.target_width, req.is_audio,
+                                   req.src_lo, req.src_hi, kCacheGainPct};
                 auto it = pending_ids_.find(key);
                 if (it != pending_ids_.end()) {
                     waiters = std::move(it->second);
@@ -446,7 +529,9 @@ void ThumbnailService::worker_loop() {
     }
 }
 
-QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDeviceManager& hw) {
+QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDeviceManager& hw,
+                                  canvas::core::VideoDecoder* reuse_decoder,
+                                  int64_t* served_frame) {
     if (req.is_audio) {
         // Decode the full audio file at most once per path, then re-bucket the
         // cached high-resolution peaks to the clip's pixel width. This avoids
@@ -612,10 +697,17 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
         return img;
     }
 
-    canvas::core::VideoDecoder decoder;
+    // Bug D/E: reuse the caller's persistent decoder when it is already open;
+    // otherwise open into `local` so generate() stays callable standalone. A
+    // closed-but-provided reuse_decoder is opened here, leaving it warm for the
+    // NEXT request on the same path (worker_loop keeps one per worker).
+    canvas::core::VideoDecoder local;
+    canvas::core::VideoDecoder* decoder = reuse_decoder != nullptr ? reuse_decoder : &local;
     std::string error;
     const auto t_open0 = std::chrono::steady_clock::now();
-    const bool opened = decoder.open(req.path, &error, hw.device_ctx());
+    const bool opened =
+        decoder->is_open() ||
+        decoder->open(req.path, &error, hw.device_ctx(), hw.device_label().c_str());
     const auto t_open1 = std::chrono::steady_clock::now();
     if (!opened) {
         // Always-on: a thumbnail that can't even open its source media is how a
@@ -633,7 +725,7 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
     // handful of pixels (<=192 wide), and zoom-out films trip over HUNDREDS of
     // clip cells at once — a full-res frame per request swamps the 4 workers and
     // the strip stays blank for ages. 640px max-dim decodes land in ms.
-    auto frame = decoder.decode_to_frame(source_frame, kPreviewMaxDim);
+    auto frame = decoder->decode_to_frame(source_frame, kPreviewMaxDim);
     const auto t_dec1 = std::chrono::steady_clock::now();
     if (!frame || frame->rgba.empty()) {
         // Always-on: decode succeeded but produced nothing — a HW-decode/import
@@ -649,7 +741,7 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
                  << std::chrono::duration<double, std::milli>(t_open1 - t_open0).count()
                  << "decode_ms="
                  << std::chrono::duration<double, std::milli>(t_dec1 - t_dec0).count()
-                 << "hw=" << (decoder.is_hardware() ? 1 : 0);
+                 << "hw=" << (decoder->is_hardware() ? 1 : 0);
 
     QImage source(frame->rgba.data(), frame->width, frame->height,
                   static_cast<qsizetype>(frame->stride), QImage::Format_RGBA8888);
@@ -673,7 +765,12 @@ QImage ThumbnailService::generate(const ThumbRequest& req, canvas::core::HwDevic
                                std::max(1, static_cast<int>(source.height() * fit)),
                                Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     }
-    save_to_disk(disk_path_thumbnail(req.path, req.frame, req.target_width), result);
+    // Disk: persist under the ACTUAL decoded source frame (a probe caller
+    // passes req.frame = the neighbour it probed, so req.frame == source_frame
+    // here; the caller's req.frame may differ and must NOT be used). Report the
+    // served source frame out so the caller caches under it, never req.frame.
+    if (served_frame) *served_frame = source_frame;
+    save_to_disk(disk_path_thumbnail(req.path, source_frame, req.target_width), result);
     return result;
 }
 

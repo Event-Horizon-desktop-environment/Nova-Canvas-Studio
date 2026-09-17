@@ -23,6 +23,20 @@ namespace canvas::gui {
 
 class ThumbnailService;
 
+// Thumbnail request-id namespace for the color-page mini strip. Shares the one
+// app-wide ThumbnailService with the timeline filmstrip, media pool, project
+// manager and source preview; each consumer owns a disjoint high bit so
+// completion handlers can never match another consumer's decode. The strip and
+// the timeline used to both count from ~0/1, guaranteeing a collision over time
+// ("filmstrip never fully populated" / wrong frames). Bit 59 is below every
+// existing namespace region (pool = bit63, project = bits61-63,
+// source-preview = bits60-63 + bit0, timeline = bit60).
+inline constexpr std::uint64_t kMiniStripThumbNs = 0x0800000000000000ULL;
+// O(1) gate on_thumbnail_ready uses to reject ids posted by other consumers.
+inline bool is_mini_strip_thumb_id(std::uint64_t id) noexcept {
+    return (id & kMiniStripThumbNs) != 0;
+}
+
 // Lightweight media metadata for looking up the source path behind a clip's
 // media id so the strip can request a thumbnail frame.
 struct MiniMediaMeta {
@@ -78,7 +92,7 @@ private:
     std::chrono::steady_clock::time_point last_scrub_log_{};
     std::unordered_map<canvas::core::MediaId, MiniMediaMeta> media_paths_;
     ThumbnailService* thumbnail_service_ = nullptr;
-    uint64_t next_request_id_ = 0;
+    uint64_t next_request_id_ = kMiniStripThumbNs;
     std::unordered_map<uint64_t, canvas::core::ClipId> request_clip_;
     std::unordered_map<canvas::core::ClipId, QImage> thumbs_;
 };

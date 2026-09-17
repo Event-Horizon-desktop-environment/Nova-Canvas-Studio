@@ -17,6 +17,13 @@
 #include "canvas/core/media/hw_device.hpp"
 #include "canvas/core/media/audio_waveform.hpp"
 
+namespace canvas::core {
+// Forward decl only: `generate` may reuse the CALLER's persistent decoder, but
+// the service never owns one itself, so no need for the full decode machinery
+// in a header that is moc'd by every widget TU that links the service.
+class VideoDecoder;
+}
+
 namespace canvas::gui {
 
 struct ThumbRequest {
@@ -107,7 +114,21 @@ private:
     void create_workers();
     void worker_loop();
     void submit(ThumbRequest req);
-    QImage generate(const ThumbRequest& req, canvas::core::HwDeviceManager& hw);
+    // Generates the image for `req`. When `reuse_decoder` is non-null AND already
+    // open, it is reused instead of opening a fresh VideoDecoder (the worker's
+    // persistent per-path decoder, see worker_loop) — without this, every cell
+    // and every retry probe reopened the file/demux/hw device. `served_frame`
+    // (optional) receives the SOURCE frame the returned image actually encodes:
+    // normally req.frame, but on a retry probe that lands a neighbour frame the
+    // caller must cache/disk-write under THAT frame, never req.frame, or the next
+    // request for the true frame gets a poisoned neighbour image forever.
+    QImage generate(const ThumbRequest& req, canvas::core::HwDeviceManager& hw,
+                    canvas::core::VideoDecoder* reuse_decoder = nullptr,
+                    int64_t* served_frame = nullptr);
+    // Inserts `img` under `key` inside cache_/lru_ (mutex_ held), touching LRU
+    // recency and enforcing the kCacheMax cap — the ONE place disk loads and
+    // worker generations may write the cache, so the cap can never be bypassed.
+    void store_cached(const CacheKey& key, const QImage& img);
 
     // Disk-cache helpers. Keyed files are written/read under cache_dir_.
     QString disk_path_thumbnail(const std::string& path, int64_t frame, int width) const;

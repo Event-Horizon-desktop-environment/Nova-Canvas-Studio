@@ -1,6 +1,7 @@
 #include "Widgets/media_pool_widget.hpp"
 
 #include <QAbstractItemModel>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QPainter>
 #include <QPainterPath>
@@ -23,6 +24,31 @@ using canvas::gui::tokens;
 using canvas::gui::with_alpha;
 
 namespace {
+
+// Painted drag ghost for a pool tile whose decoded thumbnail hasn't landed yet
+// (or an audio-only entry whose waveform is still queued): a compact rounded
+// card with the media-type glyph + elided name, so a media drag never carries
+// an invisible empty cursor pixmap.
+QPixmap pool_drag_ghost(const QListWidgetItem* item) {
+    const ThemeTokens& t = tokens();
+    constexpr double kW = 96.0;
+    constexpr double kH = 54.0;
+    QPixmap pm(static_cast<int>(kW), static_cast<int>(kH));
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(t.accent, 1.2));
+    p.setBrush(t.surface_higher);
+    p.drawRoundedRect(QRectF(0.5, 0.5, kW - 1.0, kH - 1.0), 6.0, 6.0);
+    const bool is_video = item->data(kPoolIsVideoRole).toBool();
+    const QPixmap glyph = raw_icon(is_video ? "film-strip" : "waveform").pixmap(24, 24);
+    p.drawPixmap(QPointF((kW - 24.0) / 2.0, (kH - 24.0) / 2.0 - 3.0), glyph);
+    p.setPen(t.ink_muted);
+    const QString name =
+        p.fontMetrics().elidedText(item->text(), Qt::ElideRight, static_cast<int>(kW - 12.0));
+    p.drawText(QRectF(3.0, kH - 13.0, kW - 6.0, 11.0), Qt::AlignHCenter | Qt::AlignVCenter, name);
+    return pm;
+}
 
 // Paints each pool entry as a tile card matching the Alt-html reference:
 // a compact raised card (r-md), a 16:9 thumbnail well (tinted placeholder with
@@ -453,7 +479,13 @@ void MediaPoolWidget::startDrag(Qt::DropActions supported) {
     md->setData("application/x-eh-media-id", QByteArray::number(v.toLongLong()));
     auto* drag = new QDrag(this);
     drag->setMimeData(md);
-    if (!item->icon().isNull()) drag->setPixmap(item->icon().pixmap(96, 54));
+    // Ghost every drag with SOMETHING: the tile's decoded frame when it has
+    // landed, otherwise a painted card. Without this the drag cursor used to be
+    // a blank rectangle until Bug-1's thumbnail delivery was fixed — and still
+    // would be for audio-only tiles whose waveform is queued.
+    QPixmap ghost = item->icon().pixmap(96, 54);
+    if (ghost.isNull()) ghost = pool_drag_ghost(item);
+    drag->setPixmap(ghost);
     drag->exec(Qt::CopyAction, Qt::CopyAction);
 }
 
